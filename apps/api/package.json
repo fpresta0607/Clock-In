@@ -12,14 +12,16 @@
     }
   },
   "scripts": {
-    "build": "pnpm --filter @clock-in/shared build && tsc --project tsconfig.json",
-    "test": "pnpm --filter @clock-in/shared build && vitest run",
-    "typecheck": "pnpm --filter @clock-in/shared build && tsc --noEmit"
+    "build": "pnpm --filter @clock-in/shared build && pnpm --filter @clock-in/database build && tsc --project tsconfig.json",
+    "test": "pnpm --filter @clock-in/shared build && pnpm --filter @clock-in/database build && vitest run",
+    "typecheck": "pnpm --filter @clock-in/shared build && pnpm --filter @clock-in/database build && tsc --noEmit"
   },
   "dependencies": {
+    "@clock-in/database": "workspace:*",
     "@clock-in/shared": "workspace:*",
     "@hono/node-server": "^2.1.0",
     "argon2": "^0.44.0",
+    "drizzle-orm": "^0.45.2",
     "hono": "^4.9.3",
     "jose": "^6.0.12",
     "zod": "^3.24.4"

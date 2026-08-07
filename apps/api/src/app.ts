@@ -11,13 +11,17 @@ import {
 } from "./auth.js";
 import type { AppConfig } from "./env.js";
 import { AppError, handleAppError, jsonError } from "./errors.js";
+import type { ProjectRepository, SessionRepository } from "./repositories.js";
+import { createProjectRoutes } from "./routes/projects.js";
+import { createSessionRoutes } from "./routes/sessions.js";
+import { createSessionService } from "./services/sessions.js";
 
-interface AppVariables {
+export interface AppVariables {
   authenticatedSubject: AuthenticatedSubject;
   requestId: string;
 }
 
-type ApiEnvironment = { Variables: AppVariables };
+export type ApiEnvironment = { Variables: AppVariables };
 
 export interface RateLimitDecision {
   allowed: boolean;
@@ -87,6 +91,8 @@ export interface CreateAppDependencies {
   bodyLimitBytes?: number;
   loginRateLimitStore?: LoginRateLimitStore;
   clientKeyResolver?: ClientKeyResolver;
+  projectRepository?: ProjectRepository;
+  sessionRepository?: SessionRepository;
 }
 
 function addSecurityHeaders(context: Context): void {
@@ -226,6 +232,25 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
     }
     return context.json(loginResponseSchema.parse(await auth.login(input.data)));
   });
+
+  if (dependencies.projectRepository !== undefined) {
+    app.use("/projects", createAuthenticationMiddleware(dependencies.config, clock));
+    app.use("/projects/*", createAuthenticationMiddleware(dependencies.config, clock));
+    app.route("/projects", createProjectRoutes(dependencies.projectRepository));
+  }
+  if (dependencies.sessionRepository !== undefined) {
+    if (dependencies.projectRepository === undefined) {
+      throw new Error("A project repository is required for session routes.");
+    }
+    const sessionService = createSessionService({
+      projects: dependencies.projectRepository,
+      sessions: dependencies.sessionRepository,
+      clock,
+    });
+    app.use("/sessions", createAuthenticationMiddleware(dependencies.config, clock));
+    app.use("/sessions/*", createAuthenticationMiddleware(dependencies.config, clock));
+    app.route("/sessions", createSessionRoutes(sessionService));
+  }
 
   return app;
 }
