@@ -22,12 +22,12 @@
     "seed": "tsx src/seed.ts"
   },
   "dependencies": {
-    "drizzle-orm": "^0.44.5",
+    "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.7"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
-    "drizzle-kit": "^0.31.4",
+    "drizzle-kit": "^0.31.10",
     "tsx": "^4.20.3"
   }
 }
