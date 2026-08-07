@@ -27,6 +27,25 @@ const start = {
 
 const running = { ...start, sessionId: "00000000-0000-4000-8000-000000000200" };
 
+const accountB = {
+  id: "00000000-0000-4000-8000-000000000002",
+  email: "timer-b@example.com",
+  name: "Timer User B",
+};
+
+const projectB = {
+  id: "00000000-0000-4000-8000-000000000011",
+  name: "Account B work",
+  color: "#8b9d76",
+};
+
+const startB = {
+  clientId: "00000000-0000-4000-8000-000000000101",
+  projectId: projectB.id,
+  description: "Account B recovery",
+  startedAt: "2026-08-06T15:01:00.000Z",
+};
+
 const deferred = <Value,>() => {
   let resolve: (value: Value) => void = () => undefined;
   let reject: (reason: unknown) => void = () => undefined;
@@ -360,5 +379,29 @@ describe("App", () => {
     request.reject({ kind: "transient", message: "Unable to sign out right now" });
     await Promise.resolve();
     expect(view.container).toBeEmptyDOMElement();
+  });
+
+  it("does not let an account A start completion confirm account B recovery on the same bridge", async () => {
+    const accountAStart = deferred<typeof running>();
+    const accountBRecovery = deferred<Awaited<ReturnType<TimerBridge["retryLocalStart"]>>>();
+    const bridge = bridgeFor({
+      start: vi.fn().mockReturnValue(accountAStart.promise),
+      login: vi.fn().mockResolvedValue({ kind: "retry-local-start", user: accountB, projects: [projectB], start: startB }),
+      retryLocalStart: vi.fn().mockImplementation((intent) => intent.clientId === startB.clientId ? accountBRecovery.promise : Promise.resolve({ kind: "running", user, projects: [project], running, source: "local-server-match" })),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+    await person.selectOptions(await screen.findByLabelText("Project"), project.id);
+    await person.click(screen.getByRole("button", { name: "Start timer" }));
+    await person.click(screen.getByRole("button", { name: "Log out" }));
+    expect(await screen.findByRole("heading", { name: "Clock in" })).toBeVisible();
+    await person.type(screen.getByLabelText("Email"), accountB.email);
+    await person.type(screen.getByLabelText("Password"), "not-stored-here");
+    await person.click(screen.getByRole("button", { name: "Sign in" }));
+    await waitFor(() => expect(bridge.retryLocalStart).toHaveBeenCalledWith(startB));
+    accountAStart.resolve(running);
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+    expect(screen.getByRole("button", { name: "Starting…" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Stop timer" })).not.toBeInTheDocument();
   });
 });

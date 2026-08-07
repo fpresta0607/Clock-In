@@ -29,21 +29,46 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const recoveryRequests = useRef(new WeakMap<TimerBridge, Map<string, Promise<BootstrapSnapshot>>>());
   const mounted = useRef(true);
   const bridgeGeneration = useRef(0);
+  const accountEpoch = useRef(0);
 
   if (latestBridge.current !== bridge) bridgeGeneration.current += 1;
   latestBridge.current = bridge;
 
-  const isCurrent = (service: TimerBridge, generation: number): boolean =>
-    mounted.current && latestBridge.current === service && bridgeGeneration.current === generation;
+  const isCurrent = (service: TimerBridge, generation: number, epoch?: number): boolean =>
+    mounted.current
+    && latestBridge.current === service
+    && bridgeGeneration.current === generation
+    && (epoch === undefined || accountEpoch.current === epoch);
+
+  const invalidateAccount = (): number => {
+    accountEpoch.current += 1;
+    return accountEpoch.current;
+  };
+
+  const resetToSignIn = (message: string, invalidate = true): void => {
+    if (invalidate) invalidateAccount();
+    dispatch({ type: "auth-failed", message });
+  };
 
   const applySnapshot = async (
     snapshot: BootstrapSnapshot,
     service: TimerBridge,
-    isRequestCurrent: () => boolean,
-  ): Promise<void> => {
-    if (!isRequestCurrent()) return;
+    isServiceCurrent: () => boolean,
+    expectedEpoch?: number,
+    establishAccount = false,
+  ): Promise<number | undefined> => {
+    if (!isServiceCurrent() || (expectedEpoch !== undefined && accountEpoch.current !== expectedEpoch)) return undefined;
+    if (snapshot.kind === "signed-out") {
+      const snapshotEpoch = invalidateAccount();
+      dispatch({ type: "bootstrapped", snapshot });
+      return snapshotEpoch;
+    }
+
+    const snapshotEpoch = establishAccount ? invalidateAccount() : accountEpoch.current;
+    const isSnapshotCurrent = (): boolean => isServiceCurrent() && accountEpoch.current === snapshotEpoch;
+    if (!isSnapshotCurrent()) return undefined;
     dispatch({ type: "bootstrapped", snapshot });
-    if (snapshot.kind !== "retry-local-start") return;
+    if (snapshot.kind !== "retry-local-start") return snapshotEpoch;
 
     try {
       let requests = recoveryRequests.current.get(service);
@@ -57,12 +82,24 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         requests.set(snapshot.start.clientId, request);
       }
       const retriedSnapshot = await request;
-      if (isRequestCurrent()) dispatch({ type: "bootstrapped", snapshot: retriedSnapshot });
+      if (isSnapshotCurrent()) {
+        if (retriedSnapshot.kind === "signed-out") {
+          const signedOutEpoch = invalidateAccount();
+          dispatch({ type: "bootstrapped", snapshot: retriedSnapshot });
+          return signedOutEpoch;
+        }
+        dispatch({ type: "bootstrapped", snapshot: retriedSnapshot });
+      }
     } catch (error: unknown) {
-      if (!isRequestCurrent()) return;
+      if (!isSnapshotCurrent()) return undefined;
       const problem = bridgeError(error);
-      dispatch(problem.kind === "auth" ? { type: "auth-failed", message: problem.message } : { type: "start-failed", message: problem.message });
+      if (problem.kind === "auth") {
+        resetToSignIn(problem.message);
+        return accountEpoch.current;
+      }
+      dispatch({ type: "start-failed", message: problem.message });
     }
+    return isSnapshotCurrent() ? snapshotEpoch : undefined;
   };
 
   useEffect(() => {
@@ -73,6 +110,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   useEffect(() => {
     let active = true;
     const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
     let request = bootstrapRequests.current.get(bridge);
     if (request === undefined) {
       request = bridge.bootstrap();
@@ -81,11 +119,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     const isRequestCurrent = (): boolean => active && isCurrent(bridge, generation);
 
     void request.then(
-      (snapshot) => applySnapshot(snapshot, bridge, isRequestCurrent),
+      (snapshot) => applySnapshot(snapshot, bridge, isRequestCurrent, epoch, true),
       (error: unknown) => {
-        if (!isRequestCurrent()) return;
+        if (!isRequestCurrent() || accountEpoch.current !== epoch) return;
         const problem = bridgeError(error);
-        dispatch({ type: "auth-failed", message: problem.message });
+        resetToSignIn(problem.message);
       },
     );
     return () => { active = false; };
@@ -111,14 +149,16 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setAuthError(undefined);
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation);
+    const requestEpoch = invalidateAccount();
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, requestEpoch);
+    let snapshotEpoch: number | undefined;
     try {
-      await applySnapshot(await service.login({ email, password }), service, isRequestCurrent);
-      if (isRequestCurrent()) setPassword("");
+      snapshotEpoch = await applySnapshot(await service.login({ email, password }), service, () => isCurrent(service, generation), requestEpoch, true);
+      if (snapshotEpoch !== undefined && isCurrent(service, generation, snapshotEpoch)) setPassword("");
     } catch (error: unknown) {
       if (isRequestCurrent()) setAuthError(bridgeError(error).message);
     } finally {
-      if (isRequestCurrent()) setAuthBusy(false);
+      if ((snapshotEpoch !== undefined && isCurrent(service, generation, snapshotEpoch)) || isRequestCurrent()) setAuthBusy(false);
     }
   };
 
@@ -133,14 +173,16 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     dispatch({ type: "start-requested", start });
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation);
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
     try {
       const running = await service.start(start);
       if (isRequestCurrent()) dispatch({ type: "start-confirmed", running });
     } catch (error: unknown) {
       if (!isRequestCurrent()) return;
       const problem = bridgeError(error);
-      dispatch(problem.kind === "auth" ? { type: "auth-failed", message: problem.message } : { type: "start-failed", message: problem.message });
+      if (problem.kind === "auth") resetToSignIn(problem.message);
+      else dispatch({ type: "start-failed", message: problem.message });
     }
   };
 
@@ -150,14 +192,15 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     dispatch({ type: "stop-requested", stoppedAt: input.stoppedAt });
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation);
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
     try {
       await service.stop(input);
       if (isRequestCurrent()) dispatch({ type: "stop-confirmed" });
     } catch (error: unknown) {
       if (!isRequestCurrent()) return;
       const problem = bridgeError(error);
-      if (problem.kind === "auth") dispatch({ type: "auth-failed", message: problem.message });
+      if (problem.kind === "auth") resetToSignIn(problem.message);
       else if (problem.kind === "transient") dispatch({ type: "stop-pending", message: problem.message });
       else dispatch({ type: "stop-failed", message: problem.message });
     }
@@ -167,14 +210,15 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     if (state.kind !== "pending-sync" || retryPendingBusy) return;
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation);
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
     setRetryPendingBusy(true);
     try {
       const result = await service.retryPending();
       if (isRequestCurrent()) dispatch({ type: "pending-retried", ...result });
     } catch (error: unknown) {
       const problem = bridgeError(error);
-      if (isRequestCurrent() && problem.kind === "auth") dispatch({ type: "auth-failed", message: problem.message });
+      if (isRequestCurrent() && problem.kind === "auth") resetToSignIn(problem.message);
     } finally {
       if (isRequestCurrent()) setRetryPendingBusy(false);
     }
@@ -184,14 +228,18 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     if (state.kind !== "conflict" || conflictBusy) return;
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation);
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
     setConflictBusy(true);
     try {
       const snapshot = choice === "server" ? await service.useServerTimer() : await service.retryLocalStart(state.localStart);
-      if (isRequestCurrent()) await applySnapshot(snapshot, service, isRequestCurrent);
+      if (isRequestCurrent()) await applySnapshot(snapshot, service, () => isCurrent(service, generation), epoch);
     } catch (error: unknown) {
       const problem = bridgeError(error);
-      if (isRequestCurrent()) dispatch(problem.kind === "auth" ? { type: "auth-failed", message: problem.message } : { type: "conflict-retry-failed", message: problem.message });
+      if (isRequestCurrent()) {
+        if (problem.kind === "auth") resetToSignIn(problem.message);
+        else dispatch({ type: "conflict-retry-failed", message: problem.message });
+      }
     } finally {
       if (isRequestCurrent()) setConflictBusy(false);
     }
@@ -201,12 +249,13 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     if (logoutBusy) return;
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation);
+    const epoch = invalidateAccount();
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
     setLogoutBusy(true);
     setAccountError(undefined);
     try {
       await service.logout();
-      if (isRequestCurrent()) dispatch({ type: "auth-failed", message: "You have signed out." });
+      if (isRequestCurrent()) resetToSignIn("You have signed out.", false);
     } catch (error: unknown) {
       if (isRequestCurrent()) setAccountError(bridgeError(error).message);
     } finally {
