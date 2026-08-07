@@ -92,7 +92,7 @@ export const sessionStartRequestSchema = z
   })
   .strict();
 
-export const sessionStartResponseSchema = z.object({ session: sessionSchema }).strict();
+export const sessionStartResponseSchema = z.object({ session: runningSessionSchema }).strict();
 
 export const sessionStopRequestSchema = z
   .object({
@@ -101,7 +101,7 @@ export const sessionStopRequestSchema = z
   })
   .strict();
 
-export const sessionStopResponseSchema = z.object({ session: sessionSchema }).strict();
+export const sessionStopResponseSchema = z.object({ session: z.union([stoppedSessionSchema, needsReviewSessionSchema]) }).strict();
 export const currentSessionResponseSchema = z.object({ session: runningSessionSchema.nullable() }).strict();
 
 export const reportFiltersSchema = z

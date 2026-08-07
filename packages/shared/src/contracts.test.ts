@@ -95,6 +95,22 @@ describe("session contracts", () => {
     ).toMatchObject({ session: { id: ids.session, status: "running" } });
   });
 
+  it("rejects completed sessions from a start response", () => {
+    const completedSession = {
+      id: ids.session,
+      clientId: ids.client,
+      projectId: ids.project,
+      description: null,
+      startedAt,
+      stoppedAt,
+      idleSeconds: 0,
+      durationSeconds: 3_784,
+    };
+
+    expect(() => sessionStartResponseSchema.parse({ session: { ...completedSession, status: "stopped" } })).toThrow();
+    expect(() => sessionStartResponseSchema.parse({ session: { ...completedSession, status: "needs_review" } })).toThrow();
+  });
+
   it("accepts a stop request and the stopped session response", () => {
     expect(sessionStopRequestSchema.parse({ stoppedAt, idleSeconds: 120 })).toEqual({ stoppedAt, idleSeconds: 120 });
     expect(
@@ -112,6 +128,22 @@ describe("session contracts", () => {
         },
       }),
     ).toMatchObject({ session: { status: "stopped", durationSeconds: 3664 } });
+  });
+
+  it("rejects a running session from a stop response", () => {
+    expect(() => sessionStopResponseSchema.parse({
+      session: {
+        id: ids.session,
+        clientId: ids.client,
+        projectId: ids.project,
+        status: "running",
+        description: null,
+        startedAt,
+        stoppedAt: null,
+        idleSeconds: 0,
+        durationSeconds: null,
+      },
+    })).toThrow();
   });
 
   it("represents an absent or running current session", () => {
