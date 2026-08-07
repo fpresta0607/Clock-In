@@ -12,6 +12,10 @@ export type LoginInput = {
   password: string;
 };
 
+export type SignupInput = LoginInput & {
+  name: string;
+};
+
 export type StopInput = {
   sessionId: string;
   stoppedAt: string;
@@ -25,6 +29,7 @@ export type PendingRetryResult = {
 export interface TimerBridge {
   bootstrap(): Promise<BootstrapSnapshot>;
   login(input: LoginInput): Promise<BootstrapSnapshot>;
+  signup(input: SignupInput): Promise<BootstrapSnapshot>;
   logout(): Promise<void>;
   start(input: StartIntent): Promise<RunningTimer>;
   stop(input: StopInput): Promise<void>;
@@ -152,6 +157,7 @@ const invokeDecoded = <Result>(command: string, decoder: Decoder<Result>, args?:
 export const defaultBridge: TimerBridge = {
   bootstrap: () => invokeDecoded("timer_bootstrap", decodeBootstrapSnapshot),
   login: (input) => invokeDecoded("auth_login", decodeBootstrapSnapshot, { input }),
+  signup: (input) => invokeDecoded("auth_signup", decodeBootstrapSnapshot, { input }),
   logout: () => invokeDecoded("auth_logout", decodeVoid),
   start: (input) => invokeDecoded("timer_start", decodeRunningTimer, { input }),
   stop: (input) => invokeDecoded("timer_stop", decodeVoid, { input }),

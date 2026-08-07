@@ -67,6 +67,26 @@ pub fn classify(status: u16) -> BridgeError {
     }
 }
 
+/// Sign-up failures are worth naming precisely: "already registered" and "too
+/// short" are both things the user can act on, unlike a generic rejection. The
+/// code is matched from a known set rather than echoing the server's own text.
+pub fn classify_signup(status: u16, code: Option<&str>) -> BridgeError {
+    match code {
+        Some("USER_ALREADY_EXISTS") => BridgeError::new(
+            ErrorKind::Validation,
+            "That email already has an account. Sign in instead.",
+        ),
+        Some("PASSWORD_TOO_SHORT") => BridgeError::new(
+            ErrorKind::Validation,
+            "Choose a password of at least 8 characters.",
+        ),
+        Some("INVALID_EMAIL") => {
+            BridgeError::new(ErrorKind::Validation, "Enter a valid email address.")
+        }
+        _ => classify(status),
+    }
+}
+
 /// A network-level failure is always transient: nothing reached the server, so
 /// retrying the identical idempotent payload is safe.
 pub fn classify_transport(error: &reqwest::Error) -> BridgeError {
@@ -155,6 +175,12 @@ struct SignInResponse {
 }
 
 #[derive(Deserialize)]
+struct AuthErrorBody {
+    #[serde(default)]
+    code: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct TokenResponse {
     token: String,
 }
@@ -164,6 +190,9 @@ struct TokenResponse {
 pub struct ApiClient {
     http: reqwest::Client,
     auth_base_url: String,
+    /// Scheme and host only. Neon Auth rejects a state-changing call that has no
+    /// Origin, and an origin is never a path.
+    auth_origin: String,
     api_base_url: String,
 }
 
@@ -173,11 +202,44 @@ impl ApiClient {
             .timeout(std::time::Duration::from_secs(20))
             .build()
             .map_err(|_| BridgeError::unknown("Could not start the network client."))?;
+        let auth_origin = reqwest::Url::parse(&auth_base_url)
+            .map_err(|_| BridgeError::unknown("The configured auth URL is not valid."))?
+            .origin()
+            .ascii_serialization();
         Ok(Self {
             http,
             auth_base_url: auth_base_url.trim_end_matches('/').to_string(),
+            auth_origin,
             api_base_url: api_base_url.trim_end_matches('/').to_string(),
         })
+    }
+
+    /// Creates a Neon Auth account and returns the session token it signs in with.
+    pub async fn sign_up(&self, email: &str, password: &str, name: &str) -> ApiResult<String> {
+        let response = self
+            .http
+            .post(format!("{}/sign-up/email", self.auth_base_url))
+            .header("origin", &self.auth_origin)
+            .json(&serde_json::json!({ "email": email, "password": password, "name": name }))
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let code = response
+                .json::<AuthErrorBody>()
+                .await
+                .ok()
+                .and_then(|body| body.code);
+            return Err(classify_signup(status, code.as_deref()));
+        }
+
+        let body: SignInResponse = response
+            .json()
+            .await
+            .map_err(|_| BridgeError::unknown("The sign-up response could not be read."))?;
+        Ok(body.token)
     }
 
     /// Exchanges email and password for a long-lived Neon Auth session token.
@@ -185,7 +247,7 @@ impl ApiClient {
         let response = self
             .http
             .post(format!("{}/sign-in/email", self.auth_base_url))
-            .header("origin", &self.auth_base_url)
+            .header("origin", &self.auth_origin)
             .json(&serde_json::json!({ "email": email, "password": password }))
             .send()
             .await
@@ -211,7 +273,7 @@ impl ApiClient {
         let response = self
             .http
             .get(format!("{}/token", self.auth_base_url))
-            .header("origin", &self.auth_base_url)
+            .header("origin", &self.auth_origin)
             .header(
                 "cookie",
                 format!("__Secure-neon-auth.session_token={session_token}"),
@@ -427,5 +489,33 @@ mod tests {
 
         assert_eq!(client.auth_base_url, "https://auth.test/neondb/auth");
         assert_eq!(client.api_base_url, "https://api.test");
+        // The Origin header must be scheme and host only, never the base path.
+        assert_eq!(client.auth_origin, "https://auth.test");
+    }
+
+    #[test]
+    fn names_the_sign_up_failures_a_user_can_act_on() {
+        assert!(classify_signup(422, Some("USER_ALREADY_EXISTS"))
+            .message
+            .contains("Sign in instead"));
+        assert!(classify_signup(400, Some("PASSWORD_TOO_SHORT"))
+            .message
+            .contains("8 characters"));
+        assert!(classify_signup(400, Some("INVALID_EMAIL"))
+            .message
+            .contains("valid email"));
+        for error in [
+            classify_signup(422, Some("USER_ALREADY_EXISTS")),
+            classify_signup(400, Some("PASSWORD_TOO_SHORT")),
+            classify_signup(400, Some("INVALID_EMAIL")),
+        ] {
+            assert_eq!(error.kind, ErrorKind::Validation);
+        }
+        // An unrecognized code falls back to the status mapping.
+        assert_eq!(
+            classify_signup(503, Some("SOMETHING_NEW")).kind,
+            ErrorKind::Transient
+        );
+        assert_eq!(classify_signup(500, None).kind, ErrorKind::Transient);
     }
 }

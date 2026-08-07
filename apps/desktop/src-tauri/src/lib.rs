@@ -189,6 +189,27 @@ pub struct LoginInput {
     password: String,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignupInput {
+    email: String,
+    password: String,
+    name: String,
+}
+
+#[tauri::command]
+async fn auth_signup(state: State<'_, AppState>, input: SignupInput) -> ApiResult<Snapshot> {
+    let session = state
+        .client
+        .sign_up(&input.email, &input.password, &input.name)
+        .await?;
+    state.store_session_token(&session)?;
+    state.write_recovery(RecoveryState::default()).await?;
+    let access_token = state.client.fetch_access_token(&session).await?;
+    // The first authenticated call provisions the organization and starter project.
+    state.snapshot(&access_token).await
+}
+
 #[tauri::command]
 async fn auth_logout(state: State<'_, AppState>) -> ApiResult<()> {
     state.clear_session_token();
@@ -342,6 +363,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             timer_bootstrap,
             auth_login,
+            auth_signup,
             auth_logout,
             timer_start,
             timer_stop,

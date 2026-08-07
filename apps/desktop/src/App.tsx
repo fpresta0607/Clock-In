@@ -15,6 +15,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [state, dispatch] = useReducer(timerReducer, initialTimerState);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
+  const [authMode, setAuthMode] = useState<"sign-in" | "sign-up">("sign-in");
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | undefined>();
   const [accountError, setAccountError] = useState<string | undefined>();
@@ -50,6 +52,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setProjectId("");
     setDescription("");
     setPassword("");
+    setName("");
     if (clearEmail) setEmail("");
   };
 
@@ -174,7 +177,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     return () => window.clearInterval(timer);
   }, [state.kind]);
 
-  const signIn = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+  const submitAuth = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     setAuthBusy(true);
     setAuthError(undefined);
@@ -184,8 +187,14 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     const isRequestCurrent = (): boolean => isCurrent(service, generation, requestEpoch);
     let snapshotEpoch: number | undefined;
     try {
-      snapshotEpoch = await applySnapshot(await service.login({ email, password }), service, () => isCurrent(service, generation), requestEpoch, true);
-      if (snapshotEpoch !== undefined && isCurrent(service, generation, snapshotEpoch)) setPassword("");
+      const snapshot = authMode === "sign-up"
+        ? await service.signup({ email, password, name: name.trim() })
+        : await service.login({ email, password });
+      snapshotEpoch = await applySnapshot(snapshot, service, () => isCurrent(service, generation), requestEpoch, true);
+      if (snapshotEpoch !== undefined && isCurrent(service, generation, snapshotEpoch)) {
+        setPassword("");
+        setName("");
+      }
     } catch (error: unknown) {
       if (isRequestCurrent()) setAuthError(bridgeError(error).message);
     } finally {
@@ -302,18 +311,33 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
 
   if (state.kind === "sign-in") {
     const error = authError ?? state.error;
+    const isSignUp = authMode === "sign-up";
     return (
       <main className="chronometer sign-in-shell">
         <section className="sign-in-panel" aria-labelledby="sign-in-title">
           <p className="eyebrow">Manual time terminal</p>
-          <h1 id="sign-in-title">Clock in</h1>
-          <p className="subtle">Connect to your secure workstation session.</p>
+          <h1 id="sign-in-title">{isSignUp ? "Create your account" : "Clock in"}</h1>
+          <p className="subtle">
+            {isSignUp
+              ? "Your workspace and first project are set up automatically."
+              : "Connect to your secure workstation session."}
+          </p>
           {error && <p className="form-error" role="alert">{error}</p>}
-          <form onSubmit={signIn}>
+          <form onSubmit={submitAuth}>
+            {isSignUp && <label>Name<input value={name} onChange={(event) => setName(event.target.value)} type="text" autoComplete="name" required /></label>}
             <label>Email<input value={email} onChange={(event) => setEmail(event.target.value)} type="email" autoComplete="email" required /></label>
-            <label>Password<input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" required /></label>
-            <button className="signal-button" type="submit" disabled={authBusy}>{authBusy ? "Signing in…" : "Sign in"}</button>
+            <label>Password<input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete={isSignUp ? "new-password" : "current-password"} minLength={isSignUp ? 8 : undefined} required /></label>
+            <button className="signal-button" type="submit" disabled={authBusy}>
+              {authBusy ? (isSignUp ? "Creating account…" : "Signing in…") : (isSignUp ? "Create account" : "Sign in")}
+            </button>
           </form>
+          <button
+            className="link-button"
+            type="button"
+            onClick={() => { setAuthMode(isSignUp ? "sign-in" : "sign-up"); setAuthError(undefined); setPassword(""); }}
+          >
+            {isSignUp ? "Already have an account? Sign in" : "New here? Create an account"}
+          </button>
         </section>
       </main>
     );

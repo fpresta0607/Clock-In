@@ -59,6 +59,7 @@ const deferred = <Value,>() => {
 const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   bootstrap: vi.fn().mockResolvedValue({ kind: "idle", user, projects: [project] }),
   login: vi.fn().mockResolvedValue({ kind: "idle", user, projects: [project] }),
+  signup: vi.fn().mockResolvedValue({ kind: "idle", user, projects: [project] }),
   logout: vi.fn().mockResolvedValue(undefined),
   start: vi.fn().mockResolvedValue(running),
   stop: vi.fn().mockResolvedValue(undefined),
@@ -485,5 +486,57 @@ describe("App", () => {
     await person.type(screen.getByLabelText("Password"), "not-stored-here");
     await person.keyboard("{Enter}");
     await waitFor(() => expect(login).toHaveBeenCalledWith({ email: user.email, password: "not-stored-here" }));
+  });
+
+  it("creates an account from the sign-up form and lands on the timer", async () => {
+    const signup = vi.fn().mockResolvedValue({ kind: "idle", user, projects: [project] });
+    const bridge = bridgeFor({ bootstrap: vi.fn().mockResolvedValue({ kind: "signed-out" }), signup });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "New here? Create an account" }));
+    await person.type(screen.getByLabelText("Name"), "Alex Morgan");
+    await person.type(screen.getByLabelText("Email"), user.email);
+    await person.type(screen.getByLabelText("Password"), "long-enough-password");
+    await person.click(screen.getByRole("button", { name: "Create account" }));
+
+    await waitFor(() => expect(signup).toHaveBeenCalledWith({
+      email: user.email,
+      password: "long-enough-password",
+      name: "Alex Morgan",
+    }));
+    expect(await screen.findByRole("heading", { name: "Start a timer" })).toBeInTheDocument();
+  });
+
+  it("shows an actionable error when the email is already registered", async () => {
+    const signup = vi.fn().mockRejectedValue({
+      kind: "validation",
+      message: "That email already has an account. Sign in instead.",
+    });
+    const bridge = bridgeFor({ bootstrap: vi.fn().mockResolvedValue({ kind: "signed-out" }), signup });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "New here? Create an account" }));
+    await person.type(screen.getByLabelText("Name"), "Alex Morgan");
+    await person.type(screen.getByLabelText("Email"), user.email);
+    await person.type(screen.getByLabelText("Password"), "long-enough-password");
+    await person.click(screen.getByRole("button", { name: "Create account" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Sign in instead");
+  });
+
+  it("switches back to sign-in without carrying the typed password over", async () => {
+    const bridge = bridgeFor({ bootstrap: vi.fn().mockResolvedValue({ kind: "signed-out" }) });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "New here? Create an account" }));
+    await person.type(screen.getByLabelText("Password"), "typed-while-signing-up");
+    await person.click(screen.getByRole("button", { name: "Already have an account? Sign in" }));
+
+    expect(screen.getByLabelText("Password")).toHaveValue("");
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
   });
 });

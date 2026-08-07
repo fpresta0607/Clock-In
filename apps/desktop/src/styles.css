@@ -68,6 +68,8 @@ select { appearance: auto; }
 .signal-button { border: 1px solid #ffc65a; background: var(--amber); color: #1c160b; }
 .outline-button { border: 1px solid #697067; background: transparent; color: var(--ivory); }
 .stop-button { width: min(100%, 250px); border: 1px solid #f07568; background: var(--red); color: #24100d; }
+.link-button { width: 100%; margin-top: 15px; border: 0; background: transparent; color: var(--muted); font-family: inherit; font-size: .81rem; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.link-button:hover, .link-button:focus-visible { color: var(--ivory); }
 .form-error { margin: 13px 0 0; border-left: 3px solid var(--red); padding: 8px 10px; background: rgba(221, 93, 79, .11); color: #ffb4aa; font-size: .83rem; }
 
 .running-panel { display: grid; justify-items: center; padding-top: 25px; text-align: center; }
