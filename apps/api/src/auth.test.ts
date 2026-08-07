@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { SignJWT } from "jose";
 
 import {
   createAuthService,
@@ -70,5 +71,19 @@ describe("authentication service", () => {
     await expect(verifyAccessToken(expired, config, new Date("2026-08-06T14:15:01.000Z"))).rejects.toMatchObject({ code: "unauthorized" });
     await expect(verifyAccessToken(expired, otherConfig, issuedAt)).rejects.toMatchObject({ code: "unauthorized" });
     await expect(verifyAccessToken("not.a.jwt", config, issuedAt)).rejects.toMatchObject({ code: "unauthorized" });
+  });
+
+  it("rejects a valid-claims token signed with HS384", async () => {
+    const issuedAt = new Date("2026-08-06T14:00:00.000Z");
+    const token = await new SignJWT({ organizationId: user.organizationId })
+      .setProtectedHeader({ alg: "HS384", typ: "JWT" })
+      .setIssuer("clock-in-api")
+      .setAudience("clock-in-desktop")
+      .setSubject(user.id)
+      .setIssuedAt(Math.floor(issuedAt.getTime() / 1_000))
+      .setExpirationTime(Math.floor(issuedAt.getTime() / 1_000) + config.jwtTtlSeconds)
+      .sign(new TextEncoder().encode(config.jwtSecret));
+
+    await expect(verifyAccessToken(token, config, issuedAt)).rejects.toMatchObject({ code: "unauthorized" });
   });
 });

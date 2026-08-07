@@ -5,7 +5,7 @@ import type { Hono } from "hono";
 import type { AppConfig } from "./env.js";
 
 export { createApp, createAuthenticationMiddleware, getAuthenticatedSubject, MemoryLoginRateLimitStore } from "./app.js";
-export type { CreateAppDependencies, LoginRateLimitStore, RateLimitDecision } from "./app.js";
+export type { ClientKeyResolver, CreateAppDependencies, LoginRateLimitStore, RateLimitDecision } from "./app.js";
 export { createAuthService, hashPassword, normalizeEmail, signAccessToken, verifyAccessToken } from "./auth.js";
 export type {
   AuthenticatedSubject,

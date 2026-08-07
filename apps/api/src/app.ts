@@ -28,6 +28,8 @@ export interface LoginRateLimitStore {
   take(key: string, limit: number, windowMs: number, now: number): RateLimitDecision;
 }
 
+export type ClientKeyResolver = (context: Context) => string | Promise<string>;
+
 interface RateLimitEntry {
   count: number;
   resetAt: number;
@@ -35,20 +37,44 @@ interface RateLimitEntry {
 
 export class MemoryLoginRateLimitStore implements LoginRateLimitStore {
   private readonly entries = new Map<string, RateLimitEntry>();
+  private readonly capacity: number;
+
+  public constructor(capacity = 10_000) {
+    if (!Number.isSafeInteger(capacity) || capacity < 1) {
+      throw new RangeError("Rate-limit capacity must be a positive integer.");
+    }
+    this.capacity = capacity;
+  }
+
+  public get size(): number {
+    return this.entries.size;
+  }
 
   public take(key: string, limit: number, windowMs: number, now: number): RateLimitDecision {
-    for (const [entryKey, entry] of this.entries) {
-      if (entry.resetAt <= now) {
-        this.entries.delete(entryKey);
-      }
-    }
-    const entry = this.entries.get(key) ?? { count: 0, resetAt: now + windowMs };
+    const existing = this.entries.get(key);
+    const entry = existing !== undefined && existing.resetAt > now
+      ? existing
+      : this.createEntry(key, windowMs, now);
     entry.count += 1;
-    this.entries.set(key, entry);
     return {
       allowed: entry.count <= limit,
       retryAfterSeconds: Math.max(1, Math.ceil((entry.resetAt - now) / 1_000)),
     };
+  }
+
+  private createEntry(key: string, windowMs: number, now: number): RateLimitEntry {
+    if (this.entries.has(key)) {
+      this.entries.delete(key);
+    }
+    if (this.entries.size === this.capacity) {
+      const oldestKey = this.entries.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.entries.delete(oldestKey);
+      }
+    }
+    const entry = { count: 0, resetAt: now + windowMs };
+    this.entries.set(key, entry);
+    return entry;
   }
 }
 
@@ -58,6 +84,7 @@ export interface CreateAppDependencies {
   clock?: () => Date;
   bodyLimitBytes?: number;
   loginRateLimitStore?: LoginRateLimitStore;
+  clientKeyResolver?: ClientKeyResolver;
 }
 
 function addSecurityHeaders(context: Context): void {
@@ -130,11 +157,22 @@ function normalizeLoginRequestBody(body: unknown): unknown {
   };
 }
 
+function loginRateLimitKey(clientKey: string, email: string): string {
+  return `${clientKey.length}:${clientKey}${email}`;
+}
+
 export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironment> {
+  if (dependencies.config.nodeEnv === "production" && dependencies.loginRateLimitStore === undefined) {
+    throw new Error("A rate limit store is required in production.");
+  }
+  if (dependencies.config.nodeEnv === "production" && dependencies.clientKeyResolver === undefined) {
+    throw new Error("A trusted client key resolver is required in production.");
+  }
   const app = new Hono<ApiEnvironment>();
   const clock = dependencies.clock ?? (() => new Date());
   const auth = createAuthService({ config: dependencies.config, credentials: dependencies.credentials, clock });
   const rateLimitStore = dependencies.loginRateLimitStore ?? new MemoryLoginRateLimitStore();
+  const clientKeyResolver = dependencies.clientKeyResolver ?? (() => "local");
   const bodyLimitBytes = dependencies.bodyLimitBytes ?? 1_048_576;
 
   app.onError(handleAppError);
@@ -166,7 +204,7 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
     }
     const now = clock().getTime();
     const rateLimit = rateLimitStore.take(
-      input.data.email,
+      loginRateLimitKey(await clientKeyResolver(context), input.data.email),
       dependencies.config.loginRateLimitMax,
       dependencies.config.loginRateLimitWindowSeconds * 1_000,
       now,

@@ -11,10 +11,58 @@ const rawEnvironmentSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
 }).strict();
 
-const originSchema = z.string().url().refine((value) => {
+function invalidEnvironment(message: string, path: string): never {
+  throw new z.ZodError([{
+    code: z.ZodIssueCode.custom,
+    message,
+    path: [path],
+  }]);
+}
+
+function parseDatabaseUrl(value: string): string {
   const protocol = new URL(value).protocol;
-  return protocol === "http:" || protocol === "https:";
-}, "CORS origins must use http or https.");
+  if (protocol !== "postgres:" && protocol !== "postgresql:") {
+    return invalidEnvironment("DATABASE_URL must use postgres or postgresql.", "DATABASE_URL");
+  }
+  return value;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+}
+
+function parseCorsOrigins(value: string, nodeEnv: AppConfig["nodeEnv"]): string[] {
+  const origins = new Set<string>();
+  for (const entry of value.split(",").map((origin) => origin.trim()).filter((origin) => origin.length > 0)) {
+    if (entry === "*") {
+      invalidEnvironment("CORS_ORIGINS cannot include a wildcard when credentials are enabled.", "CORS_ORIGINS");
+    }
+    let url: URL;
+    try {
+      url = new URL(entry);
+    } catch {
+      invalidEnvironment("CORS_ORIGINS must contain valid origins.", "CORS_ORIGINS");
+    }
+    if (
+      (url.protocol !== "http:" && url.protocol !== "https:")
+      || url.username.length > 0
+      || url.password.length > 0
+      || url.pathname !== "/"
+      || url.search.length > 0
+      || url.hash.length > 0
+    ) {
+      invalidEnvironment("CORS_ORIGINS must contain origins without credentials, paths, queries, or fragments.", "CORS_ORIGINS");
+    }
+    if (nodeEnv === "production" && url.protocol !== "https:") {
+      invalidEnvironment("Production CORS origins must use HTTPS.", "CORS_ORIGINS");
+    }
+    if (nodeEnv !== "production" && url.protocol === "http:" && !isLoopbackHost(url.hostname)) {
+      invalidEnvironment("HTTP CORS origins must use a loopback host outside production.", "CORS_ORIGINS");
+    }
+    origins.add(url.origin);
+  }
+  return [...origins];
+}
 
 export interface AppConfig {
   databaseUrl: string;
@@ -38,22 +86,13 @@ export function parseEnv(input: Record<string, string | undefined>): AppConfig {
     LOGIN_RATE_LIMIT_WINDOW_SECONDS: input.LOGIN_RATE_LIMIT_WINDOW_SECONDS,
     NODE_ENV: input.NODE_ENV,
   });
-  const origins = raw.CORS_ORIGINS.split(",").map((origin) => origin.trim()).filter((origin) => origin.length > 0);
-
-  if (origins.includes("*")) {
-    throw new z.ZodError([{
-      code: z.ZodIssueCode.custom,
-      message: "CORS_ORIGINS cannot include a wildcard when credentials are enabled.",
-      path: ["CORS_ORIGINS"],
-    }]);
-  }
-
-  const parsedOrigins = z.array(originSchema).parse(origins);
+  const databaseUrl = parseDatabaseUrl(raw.DATABASE_URL);
+  const corsOrigins = parseCorsOrigins(raw.CORS_ORIGINS, raw.NODE_ENV);
   return {
-    databaseUrl: raw.DATABASE_URL,
+    databaseUrl,
     jwtSecret: raw.JWT_SECRET,
     port: raw.PORT,
-    corsOrigins: parsedOrigins,
+    corsOrigins,
     jwtTtlSeconds: raw.JWT_TTL_SECONDS,
     loginRateLimitMax: raw.LOGIN_RATE_LIMIT_MAX,
     loginRateLimitWindowSeconds: raw.LOGIN_RATE_LIMIT_WINDOW_SECONDS,

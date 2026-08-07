@@ -72,6 +72,7 @@ export async function signAccessToken(user: AuthenticatedUser, config: AppConfig
 export async function verifyAccessToken(token: string, config: AppConfig, now = new Date()): Promise<AuthenticatedSubject> {
   try {
     const { payload } = await jwtVerify(token, new TextEncoder().encode(config.jwtSecret), {
+      algorithms: ["HS256"],
       issuer: jwtIssuer,
       audience: jwtAudience,
       currentDate: now,

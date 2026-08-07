@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { hashPassword, type UserCredential } from "./auth.js";
-import { createApp } from "./app.js";
+import { createApp, MemoryLoginRateLimitStore } from "./app.js";
 import { parseEnv, type AppConfig } from "./env.js";
 
 const ids = {
@@ -34,17 +34,24 @@ beforeAll(async () => {
   };
 });
 
-function createTestApp(options: { now?: number; bodyLimitBytes?: number; credential?: UserCredential } = {}) {
+function createTestApp(options: {
+  now?: number;
+  bodyLimitBytes?: number;
+  credential?: UserCredential;
+  config?: AppConfig;
+  clientKeyResolver?: (request: Request) => string;
+  loginRateLimitStore?: MemoryLoginRateLimitStore;
+} = {}) {
   let now = options.now ?? Date.parse("2026-08-06T14:00:00.000Z");
   const entries = new Map<string, { count: number; resetAt: number }>();
   const app = createApp({
-    config,
+    config: options.config ?? config,
     ...(options.bodyLimitBytes === undefined ? {} : { bodyLimitBytes: options.bodyLimitBytes }),
     credentials: {
       findByEmail: async (email) => (email === (options.credential ?? credential).email ? options.credential ?? credential : null),
     },
     clock: () => new Date(now),
-    loginRateLimitStore: {
+    loginRateLimitStore: options.loginRateLimitStore ?? {
       take: (key, limit, windowMs, at) => {
         const current = entries.get(key);
         const record = current !== undefined && current.resetAt > at
@@ -55,12 +62,56 @@ function createTestApp(options: { now?: number; bodyLimitBytes?: number; credent
         return { allowed: record.count <= limit, retryAfterSeconds: Math.ceil((record.resetAt - at) / 1_000) };
       },
     },
+    clientKeyResolver: (context) => options.clientKeyResolver?.(context.req.raw) ?? "test-local-client",
   });
 
   return { app, advance: (milliseconds: number) => { now += milliseconds; } };
 }
 
 describe("API composition", () => {
+  it("bounds the default memory limiter and evicts the oldest key deterministically", () => {
+    const store = new MemoryLoginRateLimitStore(2);
+
+    expect(store.take("first", 1, 60_000, 0).allowed).toBe(true);
+    expect(store.take("second", 1, 60_000, 0).allowed).toBe(true);
+    expect(store.take("third", 1, 60_000, 0).allowed).toBe(true);
+
+    expect(store.size).toBe(2);
+    expect(store.take("second", 1, 60_000, 0).allowed).toBe(false);
+    expect(store.take("first", 1, 60_000, 0).allowed).toBe(true);
+  });
+
+  it("isolates login limits for the same account across trusted client keys", async () => {
+    const { app } = createTestApp({ clientKeyResolver: (request) => request.headers.get("x-test-client") ?? "missing" });
+    const request = (client: string) => app.request("http://api.test/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-test-client": client },
+      body: JSON.stringify({ email: "alex@example.com", password: "wrong password" }),
+    });
+
+    expect((await request("client-a")).status).toBe(401);
+    expect((await request("client-a")).status).toBe(401);
+    expect((await request("client-a")).status).toBe(429);
+    expect((await request("client-b")).status).toBe(401);
+  });
+
+  it("fails closed in production without injected rate-limit wiring", () => {
+    const productionConfig = parseEnv({
+      DATABASE_URL: "postgres://clock_in:password@localhost:5432/clock_in",
+      JWT_SECRET: "this-is-a-long-test-secret-with-enough-entropy-123",
+      CORS_ORIGINS: "https://desktop.clock-in.test",
+      NODE_ENV: "production",
+    });
+    const credentials = { findByEmail: async () => null };
+
+    expect(() => createApp({ config: productionConfig, credentials })).toThrow("rate limit store");
+    expect(() => createApp({
+      config: productionConfig,
+      credentials,
+      loginRateLimitStore: new MemoryLoginRateLimitStore(2),
+    })).toThrow("client key resolver");
+  });
+
   it("returns a JSON health response and request id", async () => {
     const { app } = createTestApp();
 
