@@ -1,0 +1,47 @@
+name: Release desktop
+
+# Tag a release to publish installers:  git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  installers:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows
+          - os: macos-latest
+            target: macos
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: pnpm install --frozen-lockfile
+
+      # These are read at compile time, so they must be set before the build.
+      # Without them the installer ships pointing at localhost.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          CLOCK_IN_AUTH_URL: ${{ vars.CLOCK_IN_AUTH_URL }}
+          CLOCK_IN_API_URL: ${{ vars.CLOCK_IN_API_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: Clock-In ${{ github.ref_name }}
+          releaseDraft: true
+          prerelease: false

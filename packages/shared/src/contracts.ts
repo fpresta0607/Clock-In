@@ -42,6 +42,11 @@ export const provisionAccountRequestSchema = z
   .object({ inviteCode: z.string().min(1).optional() })
   .strict();
 
+/** Sent by an existing account that wants to move into a teammate's workspace. */
+export const joinOrganizationRequestSchema = z
+  .object({ inviteCode: z.string().min(1) })
+  .strict();
+
 export const leaderboardFiltersSchema = z
   .object({
     from: dateSchema.optional(),
@@ -204,6 +209,7 @@ export const apiErrorSchema = z
 export type ApiError = z.infer<typeof apiErrorSchema>;
 export type ApiErrorCode = z.infer<typeof apiErrorCodeSchema>;
 export type CurrentSessionResponse = z.infer<typeof currentSessionResponseSchema>;
+export type JoinOrganizationRequest = z.infer<typeof joinOrganizationRequestSchema>;
 export type LeaderboardEntry = z.infer<typeof leaderboardEntrySchema>;
 export type LeaderboardFilters = z.infer<typeof leaderboardFiltersSchema>;
 export type LeaderboardResponse = z.infer<typeof leaderboardResponseSchema>;

@@ -35,6 +35,9 @@ h2 { margin: 0; font-size: 1rem; letter-spacing: .01em; }
 .card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .total { color: var(--amber); font-variant-numeric: tabular-nums; font-size: .87rem; }
 
+.join-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.join-form { display: flex; align-items: center; gap: 8px; margin: 0; }
+.join-form input { width: 168px; font-family: "Cascadia Mono", Consolas, monospace; letter-spacing: .08em; text-transform: uppercase; }
 .invite-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .invite-actions { display: flex; align-items: center; gap: 8px; }
 .invite-code { border: 1px solid var(--line); border-radius: 3px; padding: 7px 12px; background: var(--ink); color: var(--amber); font-family: "Cascadia Mono", Consolas, monospace; font-size: 1rem; letter-spacing: .12em; }

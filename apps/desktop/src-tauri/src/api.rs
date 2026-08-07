@@ -364,6 +364,33 @@ impl ApiClient {
         })
     }
 
+    /// Moves an existing account into a teammate's workspace.
+    pub async fn join_organization(&self, access_token: &str, invite_code: &str) -> ApiResult<()> {
+        let response = self
+            .http
+            .post(format!("{}/organization/join", self.api_base_url))
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({ "inviteCode": invite_code }))
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+
+        if response.status().is_success() {
+            return Ok(());
+        }
+        Err(match response.status().as_u16() {
+            404 => BridgeError::new(
+                ErrorKind::Validation,
+                "That invite code does not match a workspace.",
+            ),
+            409 => BridgeError::new(
+                ErrorKind::Validation,
+                "This account already recorded time here, so it cannot move.",
+            ),
+            status => classify(status),
+        })
+    }
+
     pub async fn organization(&self, access_token: &str) -> ApiResult<Organization> {
         let body: OrganizationResponse = self.get_json(access_token, "/organization").await?;
         Ok(body.organization)

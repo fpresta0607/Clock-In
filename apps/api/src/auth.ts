@@ -31,6 +31,11 @@ export interface AccountStore {
    */
   resolve(identity: AuthIdentity, inviteCode?: string): Promise<AuthenticatedUser>;
   findOrganization(organizationId: string): Promise<OrganizationRecord | null>;
+  /**
+   * Moves an existing account into the organization an invite code names, for
+   * someone who signed up before they were given one.
+   */
+  joinOrganization(subject: AuthenticatedSubject, inviteCode: string): Promise<AuthenticatedUser>;
 }
 
 export interface OrganizationRecord {

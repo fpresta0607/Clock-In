@@ -36,6 +36,7 @@ function clientFor(overrides: Partial<Client> = {}): Client {
     leaderboard: vi.fn().mockResolvedValue({ entries, totalDurationSeconds: 10_800, filters: {} }),
     report: vi.fn().mockResolvedValue({ rows, totalDurationSeconds: 7_200, filters: {}, pagination: {} }),
     exportCsv: vi.fn().mockResolvedValue(new Blob(["a,b"], { type: "text/csv" })),
+    joinOrganization: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   } as unknown as Client;
 }
@@ -161,5 +162,46 @@ describe("dashboard", () => {
     const sessions = within(await screen.findByRole("region", { name: "Recent sessions" }));
     expect(sessions.getByText("Wiring the relay")).toBeInTheDocument();
     expect(sessions.getByText("General")).toBeInTheDocument();
+  });
+
+  it("lets a stranded account join a teammate's workspace and reloads", async () => {
+    const joinOrganization = vi.fn().mockResolvedValue(undefined);
+    const organizationCall = vi.fn().mockResolvedValue({ organization });
+    const person = await signIn(clientFor({
+      joinOrganization,
+      organization: organizationCall,
+      leaderboard: vi.fn().mockResolvedValue({ entries: [entries[1]], totalDurationSeconds: 3_600, filters: {} }),
+    }));
+    await screen.findByRole("heading", { name: "Joining a teammate?" });
+
+    await person.type(screen.getByLabelText("Invite code to join"), "acdef-ghjkm");
+    await person.click(screen.getByRole("button", { name: "Join" }));
+
+    await waitFor(() => expect(joinOrganization).toHaveBeenCalledWith("acdef-ghjkm"));
+    // The dashboard reloads so the new workspace replaces the old one on screen.
+    await waitFor(() => expect(organizationCall.mock.calls.length).toBeGreaterThan(1));
+  });
+
+  it("explains why an account with recorded time cannot move", async () => {
+    const joinOrganization = vi.fn().mockRejectedValue(
+      new ClientError("validation", "This account already recorded time here, so it cannot move."),
+    );
+    const person = await signIn(clientFor({
+      joinOrganization,
+      leaderboard: vi.fn().mockResolvedValue({ entries: [entries[1]], totalDurationSeconds: 3_600, filters: {} }),
+    }));
+    await screen.findByRole("heading", { name: "Joining a teammate?" });
+
+    await person.type(screen.getByLabelText("Invite code to join"), "ACDEF-GHJKM");
+    await person.click(screen.getByRole("button", { name: "Join" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("cannot move");
+  });
+
+  it("hides the join prompt once the workspace has more than one member", async () => {
+    await signIn(clientFor());
+
+    await screen.findByRole("heading", { name: "Leaderboard" });
+    expect(screen.queryByRole("heading", { name: "Joining a teammate?" })).not.toBeInTheDocument();
   });
 });

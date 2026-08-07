@@ -26,16 +26,25 @@ use recovery::{reconcile, PendingStop, Reconciliation, RecoveryState, RunningTim
 const KEYRING_SERVICE: &str = "clock-in";
 const KEYRING_ACCOUNT: &str = "neon-auth-session";
 
+/// Compiled in, not read at runtime. An empty value counts as unset so a CI
+/// variable that was never defined falls back rather than yielding a bad URL;
+/// build.rs refuses a release build that reaches that fallback.
+fn compiled_url(value: Option<&str>, fallback: &str) -> String {
+    match value {
+        Some(url) if !url.trim().is_empty() => url.trim().to_string(),
+        _ => fallback.to_string(),
+    }
+}
+
 fn auth_base_url() -> String {
-    option_env!("CLOCK_IN_AUTH_URL")
-        .unwrap_or("http://localhost:4000/auth")
-        .to_string()
+    compiled_url(
+        option_env!("CLOCK_IN_AUTH_URL"),
+        "http://localhost:4000/auth",
+    )
 }
 
 fn api_base_url() -> String {
-    option_env!("CLOCK_IN_API_URL")
-        .unwrap_or("http://localhost:3000")
-        .to_string()
+    compiled_url(option_env!("CLOCK_IN_API_URL"), "http://localhost:3977")
 }
 
 /// The `BootstrapSnapshot` union the React bridge decodes. Signed-out carries no
@@ -232,6 +241,30 @@ struct OrganizationOverview {
 }
 
 #[tauri::command]
+async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<OrganizationOverview> {
+    let access_token = state.access_token().await?;
+    state
+        .client
+        .join_organization(&access_token, input.invite_code.trim())
+        .await?;
+    // Return the new workspace so the window updates without a reload.
+    let (organization, entries) = tokio::try_join!(
+        state.client.organization(&access_token),
+        state.client.leaderboard(&access_token)
+    )?;
+    Ok(OrganizationOverview {
+        organization,
+        entries,
+    })
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JoinInput {
+    invite_code: String,
+}
+
+#[tauri::command]
 async fn org_overview(state: State<'_, AppState>) -> ApiResult<OrganizationOverview> {
     let access_token = state.access_token().await?;
     let (organization, entries) = tokio::try_join!(
@@ -400,6 +433,7 @@ pub fn run() {
             auth_signup,
             auth_logout,
             org_overview,
+            org_join,
             timer_start,
             timer_stop,
             timer_retry_pending,
@@ -512,5 +546,28 @@ mod tests {
         let missing = PathBuf::from("definitely-not-a-real-recovery-file.json");
 
         assert_eq!(load_recovery_from_disk(&missing), RecoveryState::default());
+    }
+
+    #[test]
+    fn an_unset_or_empty_compiled_url_falls_back_instead_of_yielding_a_bad_one() {
+        assert_eq!(
+            compiled_url(None, "http://localhost:3977"),
+            "http://localhost:3977"
+        );
+        assert_eq!(
+            compiled_url(Some(""), "http://localhost:3977"),
+            "http://localhost:3977"
+        );
+        assert_eq!(
+            compiled_url(Some("   "), "http://localhost:3977"),
+            "http://localhost:3977"
+        );
+        assert_eq!(
+            compiled_url(
+                Some(" https://api.clock-in.example "),
+                "http://localhost:3977"
+            ),
+            "https://api.clock-in.example"
+        );
     }
 }

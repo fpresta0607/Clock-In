@@ -194,6 +194,76 @@ export class DrizzleAccountStore implements AccountStore {
     }
   }
 
+  public async joinOrganization(
+    subject: AuthenticatedSubject,
+    inviteCode: string,
+  ): Promise<AuthenticatedUser> {
+    return this.db.transaction(async (tx) => {
+      const [target] = await tx
+        .select({ id: organizations.id })
+        .from(organizations)
+        .where(eq(organizations.inviteCode, inviteCode))
+        .limit(1);
+      if (target === undefined) {
+        throw new AppError("not_found", "That invite code does not match an organization.");
+      }
+
+      const [current] = await tx
+        .select({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId })
+        .from(users)
+        .where(eq(users.id, subject.userId))
+        .limit(1);
+      if (current === undefined) throw new AppError("not_found", "Account not found.");
+      // Re-entering the same workspace is a no-op rather than an error.
+      if (current.organizationId === target.id) return current;
+
+      // A recorded session points at a project in the workspace being left, and
+      // that project does not exist in the new one. Rather than invent a mapping
+      // or silently drop the time, refuse and say why.
+      const [recorded] = await tx
+        .select({ total: count(timeSessions.id) })
+        .from(timeSessions)
+        .where(eq(timeSessions.userId, subject.userId));
+      if (Number(recorded?.total ?? 0) > 0) {
+        throw new AppError(
+          "conflict",
+          "This account has already recorded time in its current workspace, so it cannot be moved.",
+        );
+      }
+
+      const previousOrganizationId = current.organizationId;
+      await tx.delete(projectMemberships).where(eq(projectMemberships.userId, subject.userId));
+      const [moved] = await tx
+        .update(users)
+        .set({ organizationId: target.id, updatedAt: new Date() })
+        .where(eq(users.id, subject.userId))
+        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
+      if (moved === undefined) throw new Error("Failed to move the account into its new organization.");
+
+      const active = await tx
+        .select({ id: projects.id })
+        .from(projects)
+        .where(and(eq(projects.organizationId, target.id), eq(projects.archived, false)));
+      if (active.length > 0) {
+        await tx.insert(projectMemberships).values(
+          active.map((project) => ({ organizationId: target.id, projectId: project.id, userId: moved.id })),
+        );
+      }
+
+      // Drop the workspace left behind once nobody remains in it, so abandoned
+      // personal organizations do not accumulate.
+      const [remaining] = await tx
+        .select({ total: count(users.id) })
+        .from(users)
+        .where(eq(users.organizationId, previousOrganizationId));
+      if (Number(remaining?.total ?? 0) === 0) {
+        await tx.delete(organizations).where(eq(organizations.id, previousOrganizationId));
+      }
+
+      return moved;
+    });
+  }
+
   public async findOrganization(organizationId: string): Promise<OrganizationRecord | null> {
     const rows = await this.db
       .select({ id: organizations.id, name: organizations.name, inviteCode: organizations.inviteCode })

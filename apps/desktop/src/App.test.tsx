@@ -73,6 +73,10 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
       { rank: 2, user: { id: user.id, name: user.name }, durationSeconds: 3_600, sessionCount: 1 },
     ],
   }),
+  orgJoin: vi.fn().mockResolvedValue({
+    organization: { id: "00000000-0000-4000-8000-000000000901", name: "Joined Team", inviteCode: "PQRTU-VWXY3" },
+    entries: [{ rank: 1, user: { id: user.id, name: user.name }, durationSeconds: 0, sessionCount: 0 }],
+  }),
   ...overrides,
 });
 
@@ -632,5 +636,45 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Start a timer" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "SIQstack" })).not.toBeInTheDocument();
+  });
+
+  it("joins a teammate's workspace from the timer window", async () => {
+    const orgJoin = vi.fn().mockResolvedValue({
+      organization: { id: "00000000-0000-4000-8000-000000000901", name: "Joined Team", inviteCode: "PQRTU-VWXY3" },
+      entries: [{ rank: 1, user: { id: user.id, name: user.name }, durationSeconds: 0, sessionCount: 0 }],
+    });
+    const bridge = bridgeFor({
+      orgJoin,
+      orgOverview: vi.fn().mockResolvedValue({
+        organization: { id: "00000000-0000-4000-8000-000000000900", name: "Solo", inviteCode: "ACDEF-GHJKM" },
+        entries: [],
+      }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.type(await screen.findByLabelText(/Invite code to join/), "acdef-ghjkm");
+    await person.click(screen.getByRole("button", { name: "Join" }));
+
+    await waitFor(() => expect(orgJoin).toHaveBeenCalledWith("acdef-ghjkm"));
+    expect(await screen.findByRole("heading", { name: "Joined Team" })).toBeInTheDocument();
+  });
+
+  it("keeps the timer usable when a join is refused", async () => {
+    const bridge = bridgeFor({
+      orgJoin: vi.fn().mockRejectedValue({ kind: "validation", message: "That invite code does not match a workspace." }),
+      orgOverview: vi.fn().mockResolvedValue({
+        organization: { id: "00000000-0000-4000-8000-000000000900", name: "Solo", inviteCode: "ACDEF-GHJKM" },
+        entries: [],
+      }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.type(await screen.findByLabelText(/Invite code to join/), "ACDEF-GHJKM");
+    await person.click(screen.getByRole("button", { name: "Join" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("does not match a workspace");
+    expect(screen.getByRole("heading", { name: "Start a timer" })).toBeInTheDocument();
   });
 });

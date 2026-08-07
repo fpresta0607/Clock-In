@@ -36,6 +36,12 @@ export interface SignUpInput extends Credentials {
 function classify(status: number): ClientError {
   if (status === 401 || status === 403) return new ClientError("auth", "Your session expired. Sign in again.");
   if (status === 404) return new ClientError("validation", "That invite code does not match a workspace.");
+  if (status === 409) {
+    return new ClientError(
+      "validation",
+      "This account already recorded time here, so it cannot move. Ask an admin, or use a fresh account.",
+    );
+  }
   if (status === 400 || status === 422) return new ClientError("validation", "The server rejected that request.");
   if (status >= 500) return new ClientError("transient", "The server is unavailable. Try again shortly.");
   return new ClientError("unknown", "That request did not complete.");
@@ -163,6 +169,16 @@ export function createClient(config: ClientConfig) {
     },
 
     organization: () => json<OrganizationResponse>("/organization"),
+
+    /** Moves this account into a teammate's workspace after the fact. */
+    async joinOrganization(inviteCode: string): Promise<void> {
+      await apiRequest("/organization/join", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ inviteCode }),
+      });
+    },
+
     leaderboard: (query = "") => json<LeaderboardResponse>(`/reports/leaderboard${query}`),
     report: (query = "") => json<ReportResponse>(`/reports${query}`),
 
