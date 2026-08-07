@@ -23,7 +23,8 @@ The Railway CLI deploys straight from this repo (`railway.json` builds
 ```bash
 railway login
 railway init --name clock-in        # once, creates the project
-railway up                          # builds the Docker image and deploys
+railway add --service api           # once, creates the service
+railway up --detach                 # builds the Docker image and deploys
 ```
 
 Leave `PORT` alone; Railway injects it and the API reads it.
@@ -41,17 +42,22 @@ railway variables \
 `NODE_ENV=production` makes the API reject any non-HTTPS CORS origin, so a
 typo here fails loudly at boot rather than silently allowing plaintext.
 
-**Add the domain.** Railway → Settings → Networking → Custom Domain →
-`api.clock.siqstack.com`. Railway shows a CNAME target.
+**Add the domain:**
 
-**In Azure DNS** (portal → `siqstack.com` zone → Record sets), add:
+```bash
+railway domain api.clock.siqstack.com
+```
+
+It prints the DNS records to create. **In Azure DNS** (portal → `siqstack.com`
+zone → Record sets), add:
 
 ```
-Type: CNAME   Name: api.clock   Value: <the target Railway shows>
+Type: CNAME  Name: api.clock                  Value: nnv28u39.up.railway.app
+Type: TXT    Name: _railway-verify.api.clock  Value: railway-verify=460f44864d5f397c1c0c3f0d919d94280060ff7f9ef41435b7c98d5cb9c98863
 ```
 
 Azure DNS does not proxy records, so Railway can issue its TLS certificate as
-soon as the CNAME resolves.
+soon as the CNAME resolves. `railway domain status` shows progress.
 
 **Run the migrations once**, from your machine, against production:
 
