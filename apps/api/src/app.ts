@@ -25,6 +25,7 @@ export interface RateLimitDecision {
 }
 
 export interface LoginRateLimitStore {
+  readonly scope: "local" | "distributed";
   take(key: string, limit: number, windowMs: number, now: number): RateLimitDecision;
 }
 
@@ -36,6 +37,7 @@ interface RateLimitEntry {
 }
 
 export class MemoryLoginRateLimitStore implements LoginRateLimitStore {
+  public readonly scope = "local" as const;
   private readonly entries = new Map<string, RateLimitEntry>();
   private readonly capacity: number;
 
@@ -162,16 +164,25 @@ function loginRateLimitKey(clientKey: string, email: string): string {
 }
 
 export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironment> {
-  if (dependencies.config.nodeEnv === "production" && dependencies.loginRateLimitStore === undefined) {
-    throw new Error("A rate limit store is required in production.");
-  }
-  if (dependencies.config.nodeEnv === "production" && dependencies.clientKeyResolver === undefined) {
-    throw new Error("A trusted client key resolver is required in production.");
+  const configuredRateLimitStore = dependencies.loginRateLimitStore;
+  let rateLimitStore: LoginRateLimitStore;
+  if (dependencies.config.nodeEnv === "production") {
+    if (configuredRateLimitStore === undefined) {
+      throw new Error("A rate limit store is required in production.");
+    }
+    if (dependencies.clientKeyResolver === undefined) {
+      throw new Error("A trusted client key resolver is required in production.");
+    }
+    if (configuredRateLimitStore.scope !== "distributed") {
+      throw new Error("A distributed rate limit store is required in production.");
+    }
+    rateLimitStore = configuredRateLimitStore;
+  } else {
+    rateLimitStore = configuredRateLimitStore ?? new MemoryLoginRateLimitStore();
   }
   const app = new Hono<ApiEnvironment>();
   const clock = dependencies.clock ?? (() => new Date());
   const auth = createAuthService({ config: dependencies.config, credentials: dependencies.credentials, clock });
-  const rateLimitStore = dependencies.loginRateLimitStore ?? new MemoryLoginRateLimitStore();
   const clientKeyResolver = dependencies.clientKeyResolver ?? (() => "local");
   const bodyLimitBytes = dependencies.bodyLimitBytes ?? 1_048_576;
 

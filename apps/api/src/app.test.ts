@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { hashPassword, type UserCredential } from "./auth.js";
-import { createApp, MemoryLoginRateLimitStore } from "./app.js";
+import { createApp, MemoryLoginRateLimitStore, type LoginRateLimitStore } from "./app.js";
 import { parseEnv, type AppConfig } from "./env.js";
 
 const ids = {
@@ -52,6 +52,7 @@ function createTestApp(options: {
     },
     clock: () => new Date(now),
     loginRateLimitStore: options.loginRateLimitStore ?? {
+      scope: "distributed",
       take: (key, limit, windowMs, at) => {
         const current = entries.get(key);
         const record = current !== undefined && current.resetAt > at
@@ -95,7 +96,7 @@ describe("API composition", () => {
     expect((await request("client-b")).status).toBe(401);
   });
 
-  it("fails closed in production without injected rate-limit wiring", () => {
+  it("requires a distributed rate-limit store and trusted resolver in production", () => {
     const productionConfig = parseEnv({
       DATABASE_URL: "postgres://clock_in:password@localhost:5432/clock_in",
       JWT_SECRET: "this-is-a-long-test-secret-with-enough-entropy-123",
@@ -110,6 +111,23 @@ describe("API composition", () => {
       credentials,
       loginRateLimitStore: new MemoryLoginRateLimitStore(2),
     })).toThrow("client key resolver");
+    expect(() => createApp({
+      config: productionConfig,
+      credentials,
+      loginRateLimitStore: new MemoryLoginRateLimitStore(2),
+      clientKeyResolver: () => "trusted-client",
+    })).toThrow("distributed rate limit store");
+
+    const distributedStore: LoginRateLimitStore = {
+      scope: "distributed",
+      take: () => ({ allowed: true, retryAfterSeconds: 1 }),
+    };
+    expect(() => createApp({
+      config: productionConfig,
+      credentials,
+      loginRateLimitStore: distributedStore,
+      clientKeyResolver: () => "trusted-client",
+    })).not.toThrow();
   });
 
   it("returns a JSON health response and request id", async () => {
