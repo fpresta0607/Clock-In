@@ -19,8 +19,8 @@ integration(integrationDescription, () => {
     if (!database) return;
     await database.client.unsafe(`create schema \"${schemaName}\"`);
     await database.client.unsafe(`set search_path to \"${schemaName}\"`);
-    await runMigrations(database);
-    await runMigrations(database);
+    await runMigrations(database, { migrationsSchema: schemaName });
+    await runMigrations(database, { migrationsSchema: schemaName });
   });
 
   afterAll(async () => {

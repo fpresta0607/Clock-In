@@ -14,7 +14,9 @@
   "scripts": {
     "build": "pnpm --filter @clock-in/shared build && pnpm --filter @clock-in/database build && tsc --project tsconfig.json",
     "test": "pnpm --filter @clock-in/shared build && pnpm --filter @clock-in/database build && vitest run",
-    "typecheck": "pnpm --filter @clock-in/shared build && pnpm --filter @clock-in/database build && tsc --noEmit"
+    "typecheck": "pnpm --filter @clock-in/shared build && pnpm --filter @clock-in/database build && tsc --noEmit",
+    "start": "node dist/server.js",
+    "dev": "tsx watch src/server.ts"
   },
   "dependencies": {
     "@clock-in/database": "workspace:*",
@@ -27,6 +29,7 @@
     "zod": "^3.24.4"
   },
   "devDependencies": {
-    "@types/node": "^24.3.0"
+    "@types/node": "^24.3.0",
+    "tsx": "^4.20.3"
   }
 }

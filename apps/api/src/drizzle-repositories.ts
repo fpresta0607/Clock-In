@@ -7,7 +7,7 @@ import {
   type DatabaseConnection,
 } from "@clock-in/database";
 
-import type { AuthenticatedSubject } from "./auth.js";
+import type { AuthenticatedSubject, UserCredential, UserCredentialStore } from "./auth.js";
 import {
   SessionRepositoryError,
   type CreateRunningSession,
@@ -156,6 +156,33 @@ export class DrizzleSessionRepository implements SessionRepository {
       ))
       .returning());
     return rows[0] === undefined ? null : asSessionRecord(rows[0]);
+  }
+}
+
+export class DrizzleUserCredentialStore implements UserCredentialStore {
+  public constructor(private readonly db: DatabaseConnection["db"]) {}
+
+  public async findByEmail(email: string): Promise<UserCredential | null> {
+    // ponytail: email is only unique per organization, so an email shared across
+    // organizations is ambiguous at login and is rejected rather than guessed.
+    const rows = await this.db
+      .select({
+        id: users.id,
+        email: users.email,
+        name: users.name,
+        organizationId: users.organizationId,
+        passwordHash: users.passwordHash,
+      })
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(2);
+    const row = rows.length === 1 ? rows[0] : undefined;
+    if (row === undefined) return null;
+    return {
+      email: row.email,
+      passwordHash: row.passwordHash,
+      user: { id: row.id, email: row.email, name: row.name, organizationId: row.organizationId },
+    };
   }
 }
 

@@ -1,6 +1,6 @@
 import { serve } from "@hono/node-server";
 import type { ServerType } from "@hono/node-server";
-import type { Hono } from "hono";
+import type { Env, Hono } from "hono";
 
 import type { AppConfig } from "./env.js";
 
@@ -45,6 +45,6 @@ export type {
 export type { SessionService, SessionServiceDependencies, StartSessionInput, StopSessionInput } from "./services/sessions.js";
 export type { ReportService, ReportServiceDependencies } from "./services/reports.js";
 
-export function serveApp(app: Hono, config: Pick<AppConfig, "port">): ServerType {
+export function serveApp<E extends Env>(app: Hono<E>, config: Pick<AppConfig, "port">): ServerType {
   return serve({ fetch: app.fetch, port: config.port });
 }

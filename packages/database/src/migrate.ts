@@ -8,8 +8,13 @@ import { createDatabase, type DatabaseConnection } from "./client.js";
 
 const migrationsFolder = fileURLToPath(new URL("../migrations", import.meta.url));
 
-export async function runMigrations(database: DatabaseConnection): Promise<void> {
-  await migrate(database.db, { migrationsFolder });
+export async function runMigrations(
+  database: DatabaseConnection,
+  options?: { migrationsSchema?: string },
+): Promise<void> {
+  // ponytail: migrationsSchema keeps the journal inside a disposable test schema
+  // so it is dropped with it; production leaves it at drizzle's default.
+  await migrate(database.db, { migrationsFolder, ...options });
 }
 
 async function main(): Promise<void> {
