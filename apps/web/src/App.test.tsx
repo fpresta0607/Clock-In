@@ -5,6 +5,9 @@ import { describe, expect, it, vi } from "vitest";
 import { App } from "./App.js";
 import { ClientError, type Client } from "./client.js";
 
+// jsdom has no WebGL context; the shader is decorative.
+vi.mock("./WebGLShader.js", () => ({ WebGLShader: () => null }));
+
 const organization = { id: "00000000-0000-4000-8000-000000000001", name: "SIQstack", inviteCode: "ACDEF-GHJKM" };
 
 const entries = [

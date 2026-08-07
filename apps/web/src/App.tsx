@@ -4,6 +4,7 @@ import { formatDuration, type LeaderboardEntry, type Organization, type ReportRo
 
 import { ClientError, type Client } from "./client.js";
 import { DownloadApp } from "./DownloadApp.js";
+import { WebGLShader } from "./WebGLShader.js";
 
 type AppProps = { client: Client };
 
@@ -154,7 +155,8 @@ export const App = ({ client }: AppProps) => {
     const isSignUp = mode === "sign-up";
     return (
       <main className="shell auth-shell">
-        <section className="card" aria-labelledby="auth-title">
+        <WebGLShader />
+        <section className="card glass" aria-labelledby="auth-title">
           <p className="eyebrow">Clock-In</p>
           <h1 id="auth-title">{isSignUp ? "Create your account" : "Sign in"}</h1>
           <p className="subtle">
@@ -198,6 +200,7 @@ export const App = ({ client }: AppProps) => {
 
   return (
     <main className="shell">
+      <WebGLShader />
       <header className="masthead">
         <div>
           <p className="eyebrow">Clock-In</p>
