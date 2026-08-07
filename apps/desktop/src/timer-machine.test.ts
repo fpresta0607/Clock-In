@@ -159,4 +159,12 @@ describe("timerReducer", () => {
       message: "1 stop waiting to sync",
     });
   });
+
+  it("keeps pending sync active while surfacing a retry failure", () => {
+    const pending = { kind: "pending-sync", user, projects: [project], pendingCount: 1, message: "Queued" } as const;
+    expect(timerReducer(pending, { type: "pending-retry-failed", message: "Still offline" })).toEqual({
+      ...pending,
+      error: "Still offline",
+    });
+  });
 });

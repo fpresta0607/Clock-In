@@ -369,6 +369,24 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Start a timer" })).toBeVisible();
   });
 
+  it("allows a pending start to settle when logout fails", async () => {
+    const startRequest = deferred<typeof running>();
+    const logoutRequest = deferred<void>();
+    const bridge = bridgeFor({
+      start: vi.fn().mockReturnValue(startRequest.promise),
+      logout: vi.fn().mockReturnValue(logoutRequest.promise),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+    await person.selectOptions(await screen.findByLabelText("Project"), project.id);
+    await person.click(screen.getByRole("button", { name: "Start timer" }));
+    await person.click(screen.getByRole("button", { name: "Log out" }));
+    logoutRequest.reject({ kind: "transient", message: "Unable to sign out right now" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Unable to sign out right now");
+    startRequest.resolve(running);
+    expect(await screen.findByRole("button", { name: "Stop timer" })).toBeVisible();
+  });
+
   it("ignores a logout failure after unmount", async () => {
     const request = deferred<void>();
     const bridge = bridgeFor({ logout: vi.fn().mockReturnValue(request.promise) });
@@ -403,5 +421,69 @@ describe("App", () => {
     await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
     expect(screen.getByRole("button", { name: "Starting…" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Stop timer" })).not.toBeInTheDocument();
+  });
+
+  it("clears account-bound form values before account B can start account A's project", async () => {
+    const bridge = bridgeFor({
+      login: vi.fn().mockResolvedValue({ kind: "idle", user: accountB, projects: [projectB] }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+    await person.selectOptions(await screen.findByLabelText("Project"), project.id);
+    await person.type(screen.getByLabelText("Description"), "Account A work");
+    await person.click(screen.getByRole("button", { name: "Log out" }));
+    expect(await screen.findByRole("heading", { name: "Clock in" })).toBeVisible();
+    expect(screen.getByLabelText("Email")).toHaveValue("");
+    await person.type(screen.getByLabelText("Email"), accountB.email);
+    await person.type(screen.getByLabelText("Password"), "not-stored-here");
+    await person.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(await screen.findByRole("option", { name: "Account B work" })).toBeVisible();
+    expect(screen.getByLabelText("Project")).toHaveValue("");
+    expect(screen.getByLabelText("Description")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Start timer" })).toBeDisabled();
+    await person.click(screen.getByRole("button", { name: "Start timer" }));
+    expect(bridge.start).not.toHaveBeenCalled();
+  });
+
+  it("retries a persisted local start after its prior recovery request fails", async () => {
+    const firstBridge = bridgeFor({
+      bootstrap: vi.fn().mockResolvedValue({ kind: "retry-local-start", user, projects: [project], start }),
+      retryLocalStart: vi.fn()
+        .mockRejectedValueOnce({ kind: "transient", message: "Service unavailable" })
+        .mockResolvedValueOnce({ kind: "running", user, projects: [project], running, source: "local-server-match" }),
+    });
+    const signedOutBridge = bridgeFor({ bootstrap: vi.fn().mockResolvedValue({ kind: "signed-out" }) });
+    const view = render(<App bridge={firstBridge} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Service unavailable");
+    expect(firstBridge.retryLocalStart).toHaveBeenCalledTimes(1);
+    view.rerender(<App bridge={signedOutBridge} />);
+    await screen.findByRole("heading", { name: "Clock in" });
+    view.rerender(<App bridge={firstBridge} />);
+    expect(await screen.findByTestId("elapsed-time")).toBeVisible();
+    expect(firstBridge.retryLocalStart).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps pending sync visible and announces a non-auth retry failure", async () => {
+    const bridge = bridgeFor({
+      bootstrap: vi.fn().mockResolvedValue({ kind: "pending-sync", user, projects: [project], pendingCount: 1 }),
+      retryPending: vi.fn().mockRejectedValue({ kind: "transient", message: "Still offline" }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+    await person.click(await screen.findByRole("button", { name: "Retry sync" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Still offline");
+    expect(screen.getByRole("status")).toHaveTextContent("1 stop waiting to sync");
+  });
+
+  it("submits the sign-in form with Tab and Enter", async () => {
+    const login = vi.fn().mockResolvedValue({ kind: "idle", user, projects: [project] });
+    const bridge = bridgeFor({ bootstrap: vi.fn().mockResolvedValue({ kind: "signed-out" }), login });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+    await person.type(await screen.findByLabelText("Email"), user.email);
+    await person.tab();
+    await person.type(screen.getByLabelText("Password"), "not-stored-here");
+    await person.keyboard("{Enter}");
+    await waitFor(() => expect(login).toHaveBeenCalledWith({ email: user.email, password: "not-stored-here" }));
   });
 });

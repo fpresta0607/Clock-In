@@ -30,6 +30,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const mounted = useRef(true);
   const bridgeGeneration = useRef(0);
   const accountEpoch = useRef(0);
+  const currentAccountId = useRef<string | undefined>(undefined);
 
   if (latestBridge.current !== bridge) bridgeGeneration.current += 1;
   latestBridge.current = bridge;
@@ -45,8 +46,26 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     return accountEpoch.current;
   };
 
+  const clearAccountFields = (clearEmail = false): void => {
+    setProjectId("");
+    setDescription("");
+    setPassword("");
+    if (clearEmail) setEmail("");
+  };
+
+  const applyAccountFields = (snapshot: Exclude<BootstrapSnapshot, { kind: "signed-out" }>): void => {
+    if (currentAccountId.current !== snapshot.user.id) clearAccountFields();
+    currentAccountId.current = snapshot.user.id;
+  };
+
+  const clearSignedOutAccount = (): void => {
+    currentAccountId.current = undefined;
+    clearAccountFields(true);
+  };
+
   const resetToSignIn = (message: string, invalidate = true): void => {
     if (invalidate) invalidateAccount();
+    clearSignedOutAccount();
     dispatch({ type: "auth-failed", message });
   };
 
@@ -60,6 +79,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     if (!isServiceCurrent() || (expectedEpoch !== undefined && accountEpoch.current !== expectedEpoch)) return undefined;
     if (snapshot.kind === "signed-out") {
       const snapshotEpoch = invalidateAccount();
+      clearSignedOutAccount();
       dispatch({ type: "bootstrapped", snapshot });
       return snapshotEpoch;
     }
@@ -67,27 +87,32 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     const snapshotEpoch = establishAccount ? invalidateAccount() : accountEpoch.current;
     const isSnapshotCurrent = (): boolean => isServiceCurrent() && accountEpoch.current === snapshotEpoch;
     if (!isSnapshotCurrent()) return undefined;
+    applyAccountFields(snapshot);
     dispatch({ type: "bootstrapped", snapshot });
     if (snapshot.kind !== "retry-local-start") return snapshotEpoch;
 
+    let recoveryRequest: Promise<BootstrapSnapshot> | undefined;
     try {
       let requests = recoveryRequests.current.get(service);
       if (requests === undefined) {
         requests = new Map();
         recoveryRequests.current.set(service, requests);
       }
-      let request = requests.get(snapshot.start.clientId);
-      if (request === undefined) {
-        request = service.retryLocalStart(snapshot.start);
-        requests.set(snapshot.start.clientId, request);
+      recoveryRequest = requests.get(snapshot.start.clientId);
+      if (recoveryRequest === undefined) {
+        recoveryRequest = service.retryLocalStart(snapshot.start);
+        requests.set(snapshot.start.clientId, recoveryRequest);
       }
-      const retriedSnapshot = await request;
+      const retriedSnapshot = await recoveryRequest;
       if (isSnapshotCurrent()) {
         if (retriedSnapshot.kind === "signed-out") {
           const signedOutEpoch = invalidateAccount();
+          clearSignedOutAccount();
           dispatch({ type: "bootstrapped", snapshot: retriedSnapshot });
           return signedOutEpoch;
         }
+        bootstrapRequests.current.set(service, Promise.resolve(retriedSnapshot));
+        applyAccountFields(retriedSnapshot);
         dispatch({ type: "bootstrapped", snapshot: retriedSnapshot });
       }
     } catch (error: unknown) {
@@ -98,6 +123,12 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         return accountEpoch.current;
       }
       dispatch({ type: "start-failed", message: problem.message });
+    } finally {
+      const requests = recoveryRequests.current.get(service);
+      if (requests !== undefined && requests.get(snapshot.start.clientId) === recoveryRequest) {
+        requests.delete(snapshot.start.clientId);
+        if (requests.size === 0) recoveryRequests.current.delete(service);
+      }
     }
     return isSnapshotCurrent() ? snapshotEpoch : undefined;
   };
@@ -163,7 +194,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   };
 
   const startTimer = async (): Promise<void> => {
-    if (state.kind !== "idle" || projectId === "") return;
+    if (state.kind !== "idle" || projectId === "" || !state.projects.some((project) => project.id === projectId)) return;
     const start: StartIntent = {
       clientId: crypto.randomUUID(),
       projectId,
@@ -218,7 +249,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       if (isRequestCurrent()) dispatch({ type: "pending-retried", ...result });
     } catch (error: unknown) {
       const problem = bridgeError(error);
-      if (isRequestCurrent() && problem.kind === "auth") resetToSignIn(problem.message);
+      if (!isRequestCurrent()) return;
+      if (problem.kind === "auth") resetToSignIn(problem.message);
+      else dispatch({ type: "pending-retry-failed", message: problem.message });
     } finally {
       if (isRequestCurrent()) setRetryPendingBusy(false);
     }
@@ -249,13 +282,13 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     if (logoutBusy) return;
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const epoch = invalidateAccount();
+    const epoch = accountEpoch.current;
     const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
     setLogoutBusy(true);
     setAccountError(undefined);
     try {
       await service.logout();
-      if (isRequestCurrent()) resetToSignIn("You have signed out.", false);
+      if (isRequestCurrent()) resetToSignIn("You have signed out.");
     } catch (error: unknown) {
       if (isRequestCurrent()) setAccountError(bridgeError(error).message);
     } finally {
@@ -287,6 +320,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   }
 
   const account = state;
+  const hasSelectedProject = account.projects.some((project) => project.id === projectId);
   const activeRunning = state.kind === "running" || state.kind === "stopping" ? state.running : undefined;
   const project = activeRunning ? account.projects.find((item) => item.id === activeRunning.projectId) : undefined;
   const elapsedAt = state.kind === "stopping" ? Date.parse(state.stoppedAt) : now;
@@ -323,10 +357,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         <section className="idle-panel" aria-labelledby="timer-title">
           <p className="eyebrow">Ready for a new entry</p><h2 id="timer-title">Start a timer</h2>
           {state.kind === "idle" && state.error && <p className="form-error" role="alert">{state.error}</p>}
-          {state.kind === "pending-sync" && <div className="sync-banner" role="status"><span>{state.message}</span><button type="button" disabled={retryPendingBusy} onClick={() => void retryPending()}>{retryPendingBusy ? "Retrying…" : "Retry sync"}</button></div>}
+          {state.kind === "pending-sync" && <><div className="sync-banner" role="status"><span>{state.message}</span><button type="button" disabled={retryPendingBusy} onClick={() => void retryPending()}>{retryPendingBusy ? "Retrying…" : "Retry sync"}</button></div>{state.error && <p className="form-error" role="alert">{state.error}</p>}</>}
           <label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Select active project</option>{account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
           <label>Description<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={1000} rows={3} placeholder="What are you working on?" /></label>
-          <div className="entry-foot"><span>{description.length}/1000</span><button className="signal-button" type="button" disabled={state.kind === "starting" || state.kind === "pending-sync" || projectId === ""} onClick={() => void startTimer()}>{state.kind === "starting" ? "Starting…" : "Start timer"}</button></div>
+          <div className="entry-foot"><span>{description.length}/1000</span><button className="signal-button" type="button" disabled={state.kind === "starting" || state.kind === "pending-sync" || !hasSelectedProject} onClick={() => void startTimer()}>{state.kind === "starting" ? "Starting…" : "Start timer"}</button></div>
         </section>
       )}
     </main>

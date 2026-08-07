@@ -38,7 +38,7 @@ export type TimerState =
   | ({ kind: "starting"; start: StartIntent } & Account)
   | ({ kind: "running"; running: RunningTimer; error?: string } & Account)
   | ({ kind: "stopping"; running: RunningTimer; stoppedAt: string } & Account)
-  | ({ kind: "pending-sync"; pendingCount: number; message: string } & Account)
+  | ({ kind: "pending-sync"; pendingCount: number; message: string; error?: string | undefined } & Account)
   | ({
       kind: "conflict";
       localStart: StartIntent;
@@ -56,6 +56,7 @@ export type TimerEvent =
   | { type: "stop-pending"; message: string }
   | { type: "stop-failed"; message: string }
   | { type: "pending-retried"; remaining: number }
+  | { type: "pending-retry-failed"; message: string }
   | { type: "auth-failed"; message: string }
   | { type: "conflict-retry-failed"; message: string };
 
@@ -134,8 +135,10 @@ export const timerReducer = (state: TimerState, event: TimerEvent): TimerState =
               ...account(state),
               pendingCount: event.remaining,
               message: `${event.remaining} stop${event.remaining === 1 ? "" : "s"} waiting to sync`,
+              error: undefined,
             };
       }
+      if (event.type === "pending-retry-failed") return { ...state, error: event.message };
       return state;
     case "conflict":
       if (event.type === "conflict-retry-failed") return { ...state, error: event.message };
