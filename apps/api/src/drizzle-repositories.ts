@@ -1,0 +1,316 @@
+import { and, asc, count, desc, eq, gte, lt, or, sum } from "drizzle-orm";
+import {
+  projectMemberships,
+  projects,
+  timeSessions,
+  users,
+  type DatabaseConnection,
+} from "@clock-in/database";
+
+import type { AuthenticatedSubject, UserCredential, UserCredentialStore } from "./auth.js";
+import {
+  SessionRepositoryError,
+  type CreateRunningSession,
+  type ProjectRecord,
+  type ProjectRepository,
+  type ReportExportRead,
+  type ReportLookupRecord,
+  type ReportPageOptions,
+  type ReportPageRead,
+  type ReportQuery,
+  type ReportRepository,
+  type ReportRowRecord,
+  type ReportSummaryRecord,
+  type SessionRecord,
+  type SessionRepository,
+  type StopRunningSession,
+} from "./repositories.js";
+
+function asSessionRecord(row: typeof timeSessions.$inferSelect): SessionRecord {
+  return {
+    id: row.id,
+    organizationId: row.organizationId,
+    userId: row.userId,
+    clientId: row.clientId,
+    projectId: row.projectId,
+    description: row.description,
+    status: row.status,
+    startedAt: row.startedAt,
+    stoppedAt: row.stoppedAt,
+    idleSeconds: row.idleSeconds,
+    durationSeconds: row.durationSeconds,
+  };
+}
+
+function uniqueConstraint(error: unknown): string | null {
+  if (typeof error !== "object" || error === null) return null;
+  const record = error as Record<string, unknown>;
+  return record.code === "23505" && typeof record.constraint_name === "string" ? record.constraint_name : null;
+}
+
+function mapCreateError(error: unknown): SessionRepositoryError | null {
+  const constraint = uniqueConstraint(error);
+  if (constraint === "time_sessions_one_running_user_unique") return new SessionRepositoryError("session_already_running");
+  if (constraint === "time_sessions_organization_user_client_unique") return new SessionRepositoryError("client_id");
+  return null;
+}
+
+export class DrizzleProjectRepository implements ProjectRepository {
+  public constructor(private readonly db: DatabaseConnection["db"]) {}
+
+  public async listForMember(subject: AuthenticatedSubject): Promise<ProjectRecord[]> {
+    return this.db
+      .select({ id: projects.id, organizationId: projects.organizationId, name: projects.name, archived: projects.archived })
+      .from(projects)
+      .innerJoin(projectMemberships, and(
+        eq(projectMemberships.organizationId, projects.organizationId),
+        eq(projectMemberships.projectId, projects.id),
+      ))
+      .where(and(
+        eq(projects.organizationId, subject.organizationId),
+        eq(projectMemberships.userId, subject.userId),
+        eq(projectMemberships.organizationId, subject.organizationId),
+        eq(projects.archived, false),
+      ))
+      .orderBy(asc(projects.name), asc(projects.id));
+  }
+
+  public async findForMember(subject: AuthenticatedSubject, projectId: string): Promise<ProjectRecord | null> {
+    const rows = await this.db
+      .select({ id: projects.id, organizationId: projects.organizationId, name: projects.name, archived: projects.archived })
+      .from(projects)
+      .innerJoin(projectMemberships, and(
+        eq(projectMemberships.organizationId, projects.organizationId),
+        eq(projectMemberships.projectId, projects.id),
+      ))
+      .where(and(
+        eq(projects.id, projectId),
+        eq(projects.organizationId, subject.organizationId),
+        eq(projectMemberships.organizationId, subject.organizationId),
+        eq(projectMemberships.userId, subject.userId),
+      ))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+}
+
+export class DrizzleSessionRepository implements SessionRepository {
+  public constructor(private readonly db: DatabaseConnection["db"]) {}
+
+  public async findByClientId(subject: AuthenticatedSubject, clientId: string): Promise<SessionRecord | null> {
+    const rows = await this.db.select().from(timeSessions).where(and(
+      eq(timeSessions.organizationId, subject.organizationId),
+      eq(timeSessions.userId, subject.userId),
+      eq(timeSessions.clientId, clientId),
+    )).limit(1);
+    return rows[0] === undefined ? null : asSessionRecord(rows[0]);
+  }
+
+  public async findRunning(subject: AuthenticatedSubject): Promise<SessionRecord | null> {
+    const rows = await this.db.select().from(timeSessions).where(and(
+      eq(timeSessions.organizationId, subject.organizationId),
+      eq(timeSessions.userId, subject.userId),
+      eq(timeSessions.status, "running"),
+    )).limit(1);
+    return rows[0] === undefined ? null : asSessionRecord(rows[0]);
+  }
+
+  public async findById(subject: AuthenticatedSubject, sessionId: string): Promise<SessionRecord | null> {
+    const rows = await this.db.select().from(timeSessions).where(and(
+      eq(timeSessions.id, sessionId),
+      eq(timeSessions.organizationId, subject.organizationId),
+      eq(timeSessions.userId, subject.userId),
+    )).limit(1);
+    return rows[0] === undefined ? null : asSessionRecord(rows[0]);
+  }
+
+  public async createRunning(input: CreateRunningSession): Promise<SessionRecord> {
+    try {
+      const rows = await this.db.transaction(async (transaction) => transaction
+        .insert(timeSessions)
+        .values({ ...input, status: "running", stoppedAt: null, idleSeconds: 0, durationSeconds: null })
+        .returning());
+      return asSessionRecord(rows[0]!);
+    } catch (error) {
+      const mapped = mapCreateError(error);
+      if (mapped !== null) throw mapped;
+      throw error;
+    }
+  }
+
+  public async stopRunning(subject: AuthenticatedSubject, sessionId: string, input: StopRunningSession): Promise<SessionRecord | null> {
+    const rows = await this.db.transaction(async (transaction) => transaction
+      .update(timeSessions)
+      .set({
+        status: input.status,
+        stoppedAt: input.stoppedAt,
+        idleSeconds: input.idleSeconds,
+        durationSeconds: input.durationSeconds,
+        updatedAt: input.updatedAt,
+      })
+      .where(and(
+        eq(timeSessions.id, sessionId),
+        eq(timeSessions.organizationId, subject.organizationId),
+        eq(timeSessions.userId, subject.userId),
+        eq(timeSessions.status, "running"),
+      ))
+      .returning());
+    return rows[0] === undefined ? null : asSessionRecord(rows[0]);
+  }
+}
+
+export class DrizzleUserCredentialStore implements UserCredentialStore {
+  public constructor(private readonly db: DatabaseConnection["db"]) {}
+
+  public async findByEmail(email: string): Promise<UserCredential | null> {
+    // ponytail: email is only unique per organization, so an email shared across
+    // organizations is ambiguous at login and is rejected rather than guessed.
+    const rows = await this.db
+      .select({
+        id: users.id,
+        email: users.email,
+        name: users.name,
+        organizationId: users.organizationId,
+        passwordHash: users.passwordHash,
+      })
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(2);
+    const row = rows.length === 1 ? rows[0] : undefined;
+    if (row === undefined) return null;
+    return {
+      email: row.email,
+      passwordHash: row.passwordHash,
+      user: { id: row.id, email: row.email, name: row.name, organizationId: row.organizationId },
+    };
+  }
+}
+
+export class DrizzleReportRepository implements ReportRepository {
+  public constructor(private readonly db: DatabaseConnection["db"]) {}
+
+  public async findProjectForOrganization(subject: AuthenticatedSubject, projectId: string): Promise<ReportLookupRecord | null> {
+    const rows = await this.db
+      .select({ id: projects.id, name: projects.name })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), eq(projects.organizationId, subject.organizationId)))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  public async findUserForOrganization(subject: AuthenticatedSubject, userId: string): Promise<ReportLookupRecord | null> {
+    const rows = await this.db
+      .select({ id: users.id, name: users.name })
+      .from(users)
+      .where(and(eq(users.id, userId), eq(users.organizationId, subject.organizationId)))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  private predicates(subject: AuthenticatedSubject, query: ReportQuery) {
+    const conditions = [
+      eq(timeSessions.organizationId, subject.organizationId),
+      or(eq(timeSessions.status, "stopped"), eq(timeSessions.status, "needs_review")),
+    ];
+    if (query.from !== undefined) conditions.push(gte(timeSessions.startedAt, query.from));
+    if (query.toExclusive !== undefined) conditions.push(lt(timeSessions.startedAt, query.toExclusive));
+    if (query.projectId !== undefined) conditions.push(eq(timeSessions.projectId, query.projectId));
+    if (query.userId !== undefined) conditions.push(eq(timeSessions.userId, query.userId));
+    return conditions;
+  }
+
+  private async summaryFor(db: Pick<DatabaseConnection["db"], "select">, subject: AuthenticatedSubject, query: ReportQuery): Promise<ReportSummaryRecord> {
+    const rows = await db
+      .select({ totalRows: count(timeSessions.id), totalDurationSeconds: sum(timeSessions.durationSeconds) })
+      .from(timeSessions)
+      .where(and(...this.predicates(subject, query)));
+    return rows[0] ?? { totalRows: 0, totalDurationSeconds: 0 };
+  }
+
+  private async rowsFor(
+    db: Pick<DatabaseConnection["db"], "select">,
+    subject: AuthenticatedSubject,
+    query: ReportQuery,
+    options: ReportPageOptions,
+  ): Promise<ReportRowRecord[]> {
+    const conditions = [
+      ...this.predicates(subject, query),
+      eq(users.organizationId, subject.organizationId),
+      eq(projects.organizationId, subject.organizationId),
+    ];
+    const rows = await db
+      .select({
+        id: timeSessions.id,
+        userId: users.id,
+        userName: users.name,
+        projectId: projects.id,
+        projectName: projects.name,
+        description: timeSessions.description,
+        status: timeSessions.status,
+        startedAt: timeSessions.startedAt,
+        stoppedAt: timeSessions.stoppedAt,
+        idleSeconds: timeSessions.idleSeconds,
+        durationSeconds: timeSessions.durationSeconds,
+      })
+      .from(timeSessions)
+      .innerJoin(users, and(
+        eq(users.organizationId, timeSessions.organizationId),
+        eq(users.id, timeSessions.userId),
+      ))
+      .innerJoin(projects, and(
+        eq(projects.organizationId, timeSessions.organizationId),
+        eq(projects.id, timeSessions.projectId),
+      ))
+      .where(and(...conditions))
+      .orderBy(desc(timeSessions.startedAt), asc(timeSessions.id))
+      .limit(options.limit)
+      .offset(options.offset);
+
+    return rows.map((row) => {
+      if (row.status === "running" || row.stoppedAt === null || row.durationSeconds === null) {
+        throw new Error("Completed report query returned an invalid session.");
+      }
+      return {
+        id: row.id,
+        user: { id: row.userId, name: row.userName },
+        project: { id: row.projectId, name: row.projectName },
+        description: row.description,
+        status: row.status,
+        startedAt: row.startedAt,
+        stoppedAt: row.stoppedAt,
+        idleSeconds: row.idleSeconds,
+        durationSeconds: row.durationSeconds,
+      };
+    });
+  }
+
+  private async snapshot<T>(callback: (db: Pick<DatabaseConnection["db"], "select">) => Promise<T>): Promise<T> {
+    return this.db.transaction(
+      async (transaction) => callback(transaction),
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+  }
+
+  public readPageForOrganization(subject: AuthenticatedSubject, query: ReportQuery, options: ReportPageOptions): Promise<ReportPageRead> {
+    return this.snapshot(async (db) => ({
+      summary: await this.summaryFor(db, subject, query),
+      rows: await this.rowsFor(db, subject, query, options),
+    }));
+  }
+
+  public readExportForOrganization(subject: AuthenticatedSubject, query: ReportQuery, maxRows: number): Promise<ReportExportRead> {
+    return this.snapshot(async (db) => {
+      const summary = await this.summaryFor(db, subject, query);
+      const totalRows = typeof summary.totalRows === "bigint"
+        ? summary.totalRows
+        : typeof summary.totalRows === "string" && /^\d+$/.test(summary.totalRows)
+          ? BigInt(summary.totalRows)
+          : typeof summary.totalRows === "number" && Number.isSafeInteger(summary.totalRows) && summary.totalRows >= 0
+            ? BigInt(summary.totalRows)
+            : null;
+      if (totalRows === null) throw new RangeError("Invalid report row count.");
+      if (totalRows > BigInt(maxRows)) return { summary };
+      return { summary, rows: await this.rowsFor(db, subject, query, { limit: maxRows + 1, offset: 0 }) };
+    });
+  }
+}

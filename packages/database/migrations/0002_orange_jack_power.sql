@@ -1,0 +1,1 @@
+CREATE INDEX "time_sessions_organization_report_started_id_idx" ON "time_sessions" USING btree ("organization_id","started_at" desc,"id") WHERE "time_sessions"."status" in ('stopped', 'needs_review');
