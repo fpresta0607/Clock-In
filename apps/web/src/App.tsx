@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { formatDuration, type LeaderboardEntry, type Organization, type ReportRow } from "@clock-in/shared";
 
 import { ClientError, type Client } from "./client.js";
+import { DownloadApp } from "./DownloadApp.js";
 
 type AppProps = { client: Client };
 
@@ -189,6 +190,7 @@ export const App = ({ client }: AppProps) => {
           <button className="link" type="button" onClick={() => { setMode(isSignUp ? "sign-in" : "sign-up"); setAuthError(undefined); setPassword(""); }}>
             {isSignUp ? "Already have an account? Sign in" : "New here? Create an account"}
           </button>
+          <p className="subtle">Track time from your desktop: <DownloadApp className="link" /></p>
         </section>
       </main>
     );
@@ -210,6 +212,7 @@ export const App = ({ client }: AppProps) => {
               ))}
             </select>
           </label>
+          <DownloadApp />
           <button className="ghost" type="button" onClick={() => void downloadCsv()}>Export CSV</button>
           <button className="ghost" type="button" onClick={() => void signOut()}>Sign out</button>
         </div>

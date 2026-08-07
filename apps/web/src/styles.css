@@ -61,6 +61,8 @@ button { border-radius: 3px; font: inherit; font-size: .84rem; font-weight: 650;
 .primary { border: 1px solid #ffc65a; padding: 10px 14px; background: var(--amber); color: #1c160b; text-transform: uppercase; }
 .ghost { border: 1px solid var(--line); padding: 8px 12px; background: transparent; color: var(--ivory); }
 .ghost:hover { border-color: var(--muted); }
+a.ghost { border-radius: 3px; font-size: .84rem; font-weight: 650; letter-spacing: .06em; text-decoration: none; }
+a.link { display: inline-block; width: auto; margin-top: 0; }
 .link { width: 100%; margin-top: 14px; border: 0; padding: 0; background: transparent; color: var(--muted); font-weight: 400; text-decoration: underline; text-underline-offset: 3px; }
 .link:hover { color: var(--ivory); }
 button:disabled { opacity: .55; cursor: default; }

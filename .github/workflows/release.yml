@@ -43,5 +43,6 @@ jobs:
           projectPath: apps/desktop
           tagName: ${{ github.ref_name }}
           releaseName: Clock-In ${{ github.ref_name }}
-          releaseDraft: true
+          # Published (not draft) so the web app's download links work immediately.
+          releaseDraft: false
           prerelease: false
