@@ -28,6 +28,7 @@ const messageFor = (error: unknown): string =>
 
 export const App = ({ client }: AppProps) => {
   const [signedIn, setSignedIn] = useState(false);
+  const [justSignedUp, setJustSignedUp] = useState(false);
   const [mode, setMode] = useState<"sign-in" | "sign-up">("sign-in");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -93,6 +94,7 @@ export const App = ({ client }: AppProps) => {
       setPassword("");
       setName("");
       setInviteCode("");
+      setJustSignedUp(mode === "sign-up");
       setSignedIn(true);
     } catch (error: unknown) {
       setAuthError(messageFor(error));
@@ -104,6 +106,7 @@ export const App = ({ client }: AppProps) => {
   const signOut = async (): Promise<void> => {
     await client.signOut();
     setSignedIn(false);
+    setJustSignedUp(false);
     setOrganization(undefined);
     setEntries([]);
     setRows([]);
@@ -192,7 +195,26 @@ export const App = ({ client }: AppProps) => {
           <button className="link" type="button" onClick={() => { setMode(isSignUp ? "sign-in" : "sign-up"); setAuthError(undefined); setPassword(""); }}>
             {isSignUp ? "Already have an account? Sign in" : "New here? Create an account"}
           </button>
-          <p className="subtle">Track time from your desktop: <DownloadApp className="link" /></p>
+        </section>
+      </main>
+    );
+  }
+
+  if (justSignedUp) {
+    return (
+      <main className="shell welcome-shell">
+        <WebGLShader />
+        <section className="welcome" aria-labelledby="welcome-title">
+          <p className="eyebrow">You're in</p>
+          <h1 id="welcome-title" className="hero-title">One last thing — the app.</h1>
+          <p className="hero-sub">
+            Clock-In tracks time from your desktop. Download the app, sign in with this account,
+            and your hours show up on the dashboard.
+          </p>
+          <DownloadApp className="primary cta" />
+          <button className="link" type="button" onClick={() => setJustSignedUp(false)}>
+            Skip to your dashboard
+          </button>
         </section>
       </main>
     );

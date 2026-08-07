@@ -109,6 +109,30 @@ describe("dashboard", () => {
     }));
   });
 
+  it("walks a brand-new account through the download step before the dashboard", async () => {
+    const person = userEvent.setup();
+    render(<App client={clientFor()} />);
+
+    await person.click(screen.getByRole("button", { name: "New here? Create an account" }));
+    await person.type(screen.getByLabelText("Name"), "Alex Morgan");
+    await person.type(screen.getByLabelText("Email"), "alex@example.com");
+    await person.type(screen.getByLabelText("Password"), "long-enough-password");
+    await person.click(screen.getByRole("button", { name: "Create account" }));
+
+    expect(await screen.findByRole("heading", { name: /the app/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /download/i })).toBeInTheDocument();
+
+    await person.click(screen.getByRole("button", { name: "Skip to your dashboard" }));
+    expect(await screen.findByRole("heading", { name: "SIQstack" })).toBeInTheDocument();
+  });
+
+  it("takes a returning account straight to the dashboard", async () => {
+    await signIn(clientFor());
+
+    expect(await screen.findByRole("heading", { name: "SIQstack" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /the app/i })).not.toBeInTheDocument();
+  });
+
   it("returns to sign-in with a readable message when the session expires", async () => {
     const client = clientFor({
       leaderboard: vi.fn().mockRejectedValue(new ClientError("auth", "Your session expired. Sign in again.")),

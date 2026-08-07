@@ -99,5 +99,22 @@ a.link { display: inline-block; width: auto; margin-top: 0; }
 button:disabled { opacity: .55; cursor: default; }
 
 .error { margin: 14px 0 0; border-left: 3px solid var(--red); padding: 8px 10px; background: rgba(221, 93, 79, .11); color: #ffb4aa; font-size: .87rem; }
+
+/* Post-sign-up welcome hero (mirrors the siqstack.com homepage hero) */
+.welcome-shell { min-height: 100svh; place-content: center; }
+.welcome { display: grid; justify-items: center; gap: 18px; max-width: 640px; margin: 0 auto; text-align: center; }
+.welcome .link { width: auto; margin-top: 0; }
+.hero-title { margin: 0; font-size: clamp(30px, 6vw, 56px); font-weight: 800; letter-spacing: -.015em; line-height: 1.1; }
+.hero-sub { margin: 0; max-width: 46ch; color: var(--text-secondary); font-size: 1.02rem; }
+
+a.primary { display: inline-block; border: 1px solid var(--accent-green); background: var(--accent-green); color: #03130c; text-decoration: none; text-transform: uppercase; transition: background .15s ease, border-color .15s ease; }
+a.primary:hover { background: var(--accent-green-deep); border-color: var(--accent-green-deep); }
+.cta { border-radius: 9999px; padding: 16px 38px; font-size: 1rem; font-weight: 700; letter-spacing: .08em; animation: elec-rest-pulse 6s ease-in-out infinite; }
+
+@keyframes elec-rest-pulse {
+  0%, 100% { box-shadow: 0 0 18px rgba(0, 229, 155, .35); }
+  33% { box-shadow: 0 0 22px rgba(0, 140, 255, .35); }
+  66% { box-shadow: 0 0 22px rgba(168, 85, 247, .35); }
+}
 .range-picker span { position: absolute; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
