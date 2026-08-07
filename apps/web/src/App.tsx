@@ -4,6 +4,7 @@ import { formatDuration, type LeaderboardEntry, type Organization, type ReportRo
 
 import { ClientError, type Client } from "./client.js";
 import { DownloadApp } from "./DownloadApp.js";
+import { HelpModal } from "./HelpModal.js";
 import { WebGLShader } from "./WebGLShader.js";
 
 type AppProps = { client: Client };
@@ -49,6 +50,7 @@ export const App = ({ client }: AppProps) => {
   const [joinCode, setJoinCode] = useState("");
   const [joinBusy, setJoinBusy] = useState(false);
   const [joinError, setJoinError] = useState<string | undefined>();
+  const [helpOpen, setHelpOpen] = useState(false);
 
   const load = useCallback(async (selected: Range) => {
     setLoading(true);
@@ -252,6 +254,15 @@ export const App = ({ client }: AppProps) => {
             </select>
           </label>
           <DownloadApp />
+          <button
+            className="ghost help-button"
+            type="button"
+            aria-label="How Clock-In works"
+            title="How Clock-In works"
+            onClick={() => setHelpOpen(true)}
+          >
+            ?
+          </button>
           <button className="ghost" type="button" onClick={() => void downloadCsv()}>Export CSV</button>
           <button className="ghost" type="button" onClick={() => void signOut()}>Sign out</button>
         </div>
@@ -340,6 +351,8 @@ export const App = ({ client }: AppProps) => {
           </table>
         )}
       </section>
+
+      <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
     </main>
   );
 };

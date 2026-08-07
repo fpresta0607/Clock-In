@@ -79,6 +79,24 @@ describe("dashboard", () => {
     expect(await screen.findByRole("button", { name: "Copied" })).toBeInTheDocument();
   });
 
+  it("explains how the app works from the dashboard help button", async () => {
+    const person = await signIn(clientFor());
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "How Clock-In works" }));
+
+    const dialog = screen.getByRole("dialog", { name: "How Clock-In works" });
+    expect(dialog).toHaveTextContent("Install the desktop app");
+    expect(within(dialog).getByRole("link", { name: /download/i })).toBeInTheDocument();
+
+    await person.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    await person.click(screen.getByRole("button", { name: "How Clock-In works" }));
+    await person.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
   it("reloads with inclusive calendar bounds when the range changes", async () => {
     const leaderboard = vi.fn().mockResolvedValue({ entries, totalDurationSeconds: 10_800, filters: {} });
     const person = await signIn(clientFor({ leaderboard }));

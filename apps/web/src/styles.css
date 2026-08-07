@@ -4,8 +4,10 @@
 /* Web-only layout. Brand tokens, primitives, and shared components live in
    @clock-in/shared/brand.css. */
 
-/* WebGL sine-wave background, fixed behind all content */
-.shader-bg { position: fixed; inset: 0; width: 100%; height: 100%; display: block; z-index: 0; }
+/* WebGL sine-wave background, fixed behind all content. A negative z-index
+   (not 0) keeps the GPU-composited canvas from painting over non-carded
+   content on some Chrome/GPU stacks. */
+.shader-bg { position: fixed; inset: 0; width: 100%; height: 100%; display: block; z-index: -1; }
 
 .shell { position: relative; z-index: 1; max-width: 960px; margin: 0 auto; padding: 32px 20px 64px; display: grid; gap: 20px; }
 .auth-shell { min-height: 100vh; place-content: center; max-width: 420px; }
@@ -44,3 +46,11 @@ a.primary { display: inline-block; text-decoration: none; }
   66% { box-shadow: 0 0 22px rgba(168, 85, 247, .35); }
 }
 .range-picker span { position: absolute; }
+
+/* Round "?" trigger in the masthead and the dialog it opens */
+.help-button { width: 32px; height: 32px; padding: 0; font-weight: 700; }
+
+.modal-overlay { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 20px; background: rgba(3, 5, 10, .72); }
+.modal { width: min(100%, 480px); }
+.help-steps { margin: 0; padding-left: 20px; display: grid; gap: 12px; color: var(--text-secondary); font-size: .93rem; }
+.help-steps strong { color: #ffffff; font-weight: 650; }
