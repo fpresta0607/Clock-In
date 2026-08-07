@@ -8,8 +8,9 @@ const developmentOrganizationId = "00000000-0000-4000-8000-000000000001";
 const developmentUserId = "00000000-0000-4000-8000-000000000002";
 const developmentProjectId = "00000000-0000-4000-8000-000000000003";
 const developmentEmail = "dev@clock-in.test";
-const developmentPassword = "clock-in-development-only";
 const developmentPasswordHash = "$argon2id$v=19$m=65536,t=3,p=4$OkdlLdh793IA7hen/DfHcg$dGpuA/K8HfNbNTRXAUfXZSMn5Q3lc0yhgaJgIP9aOOQ";
+
+export const seedSuccessMessage = "Development seed applied.";
 
 export async function seedDevelopmentDatabase(database: DatabaseConnection): Promise<void> {
   await database.db
@@ -53,7 +54,7 @@ async function main(): Promise<void> {
   const database = createDatabase(databaseUrl);
   try {
     await seedDevelopmentDatabase(database);
-    console.info(`Development seed applied. Login: ${developmentEmail}; password: ${developmentPassword}`);
+    console.info(seedSuccessMessage);
   } finally {
     await database.client.end({ timeout: 5 });
   }

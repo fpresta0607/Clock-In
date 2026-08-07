@@ -5,6 +5,8 @@ import { spawn } from "node:child_process";
 
 import { describe, expect, it } from "vitest";
 
+import { seedSuccessMessage } from "./seed.js";
+
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const packageDirectory = resolve(sourceDirectory, "..");
 const require = createRequire(import.meta.url);
@@ -55,5 +57,10 @@ describe("database CLI entrypoints", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.output).toBe("");
+  });
+
+  it("does not expose the development password in seed success output", () => {
+    expect(seedSuccessMessage).not.toContain("clock-in-development-only");
+    expect(seedSuccessMessage).not.toMatch(/password\s*:/i);
   });
 });
