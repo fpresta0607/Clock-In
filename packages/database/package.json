@@ -18,8 +18,7 @@
     "test": "vitest run src/schema.test.ts src/cli.test.ts",
     "test:integration": "vitest run --reporter=verbose src/migrations.integration.test.ts",
     "typecheck": "tsc --noEmit",
-    "migrate": "tsx src/migrate.ts",
-    "seed": "tsx src/seed.ts"
+    "migrate": "tsx src/migrate.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.2",

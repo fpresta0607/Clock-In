@@ -1,18 +1,12 @@
-import { describe, expect, it } from "vitest";
-import { SignJWT } from "jose";
+import { SignJWT, exportJWK, generateKeyPair, type JWTVerifyGetKey } from "jose";
+import { beforeAll, describe, expect, it } from "vitest";
 
-import {
-  createAuthService,
-  hashPassword,
-  signAccessToken,
-  verifyAccessToken,
-  type UserCredential,
-} from "./auth.js";
+import { verifyIdentity } from "./auth.js";
 import { parseEnv } from "./env.js";
 
 const config = parseEnv({
   DATABASE_URL: "postgres://clock_in:password@localhost:5432/clock_in",
-  JWT_SECRET: "this-is-a-long-test-secret-with-enough-entropy-123",
+  AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
   NODE_ENV: "test",
 });
 
@@ -20,70 +14,77 @@ const user = {
   id: "e1c7e513-b094-4d4c-ae55-21790ae019a4",
   email: "alex@example.com",
   name: "Alex Morgan",
-  organizationId: "0e59dfd6-3d1f-4795-9420-3ab65f0df843",
 };
 
-describe("authentication service", () => {
-  it("verifies Argon2id credentials and normalizes the identifier", async () => {
-    const credential: UserCredential = { email: user.email, passwordHash: await hashPassword("correct horse battery staple"), user };
-    const service = createAuthService({
-      config,
-      credentials: { findByEmail: async (email) => (email === user.email ? credential : null) },
-      clock: () => new Date("2026-08-06T14:00:00.000Z"),
-    });
+const issuedAt = new Date("2026-08-06T14:00:00.000Z");
+let signingKey: CryptoKey;
+let keys: JWTVerifyGetKey;
+let otherKeys: JWTVerifyGetKey;
 
-    const login = await service.login({ email: " ALEX@EXAMPLE.COM ", password: "correct horse battery staple" });
+/** Mirrors the claims Neon Auth's /token endpoint issues. */
+async function issue(
+  overrides: Record<string, unknown> = {},
+  options: { key?: CryptoKey; algorithm?: string; issuer?: string; audience?: string } = {},
+): Promise<string> {
+  return new SignJWT({ email: user.email, name: user.name, banned: false, ...overrides })
+    .setProtectedHeader({ alg: options.algorithm ?? "EdDSA" })
+    .setIssuer(options.issuer ?? config.authIssuer)
+    .setAudience(options.audience ?? config.authIssuer)
+    .setSubject(user.id)
+    .setIssuedAt(Math.floor(issuedAt.getTime() / 1_000))
+    .setExpirationTime(Math.floor(issuedAt.getTime() / 1_000) + 900)
+    .sign(options.key ?? signingKey);
+}
 
-    expect(login.user).toEqual(user);
-    expect(await verifyAccessToken(login.accessToken, config, new Date("2026-08-06T14:00:01.000Z"))).toEqual({
-      userId: user.id,
-      organizationId: user.organizationId,
+beforeAll(async () => {
+  const pair = await generateKeyPair("EdDSA", { extractable: true });
+  const other = await generateKeyPair("EdDSA", { extractable: true });
+  signingKey = pair.privateKey;
+  keys = async () => pair.publicKey;
+  otherKeys = async () => other.publicKey;
+  // Confirms the key type is exportable as a JWK, as a remote JWKS would serve it.
+  expect((await exportJWK(pair.publicKey)).kty).toBe("OKP");
+});
+
+describe("Neon Auth token verification", () => {
+  it("accepts a current token and returns the signed-in identity", async () => {
+    await expect(verifyIdentity(await issue(), keys, config, new Date(issuedAt.getTime() + 1_000))).resolves.toEqual({
+      authUserId: user.id,
+      email: user.email,
+      name: user.name,
     });
   });
 
-  it("uses an indistinguishable public error for a wrong password or unknown user", async () => {
-    const credential: UserCredential = { email: user.email, passwordHash: await hashPassword("correct horse battery staple"), user };
-    const service = createAuthService({
-      config,
-      credentials: { findByEmail: async (email) => (email === user.email ? credential : null) },
-      clock: () => new Date("2026-08-06T14:00:00.000Z"),
-    });
+  it("rejects expired, malformed, and incorrectly signed tokens", async () => {
+    const token = await issue();
 
-    await expect(service.login({ email: user.email, password: "wrong password" })).rejects.toMatchObject({
-      code: "invalid_credentials",
-      status: 401,
-    });
-    await expect(service.login({ email: "unknown@example.com", password: "wrong password" })).rejects.toMatchObject({
-      code: "invalid_credentials",
-      status: 401,
-    });
+    await expect(verifyIdentity(token, keys, config, new Date(issuedAt.getTime() + 901_000)))
+      .rejects.toMatchObject({ code: "unauthorized" });
+    await expect(verifyIdentity(token, otherKeys, config, issuedAt)).rejects.toMatchObject({ code: "unauthorized" });
+    await expect(verifyIdentity("not.a.jwt", keys, config, issuedAt)).rejects.toMatchObject({ code: "unauthorized" });
   });
 
-  it("rejects expired, malformed, and incorrectly signed bearer tokens", async () => {
-    const issuedAt = new Date("2026-08-06T14:00:00.000Z");
-    const expired = await signAccessToken(user, config, issuedAt);
-    const otherConfig = parseEnv({
-      DATABASE_URL: "postgres://clock_in:password@localhost:5432/clock_in",
-      JWT_SECRET: "a-different-long-test-secret-with-enough-entropy-456",
-      NODE_ENV: "test",
-    });
+  it("rejects tokens issued for another auth instance", async () => {
+    const foreignIssuer = await issue({}, { issuer: "https://other.auth.test" });
+    const foreignAudience = await issue({}, { audience: "https://other.auth.test" });
 
-    await expect(verifyAccessToken(expired, config, new Date("2026-08-06T14:15:01.000Z"))).rejects.toMatchObject({ code: "unauthorized" });
-    await expect(verifyAccessToken(expired, otherConfig, issuedAt)).rejects.toMatchObject({ code: "unauthorized" });
-    await expect(verifyAccessToken("not.a.jwt", config, issuedAt)).rejects.toMatchObject({ code: "unauthorized" });
+    await expect(verifyIdentity(foreignIssuer, keys, config, issuedAt)).rejects.toMatchObject({ code: "unauthorized" });
+    await expect(verifyIdentity(foreignAudience, keys, config, issuedAt)).rejects.toMatchObject({ code: "unauthorized" });
   });
 
-  it("rejects a valid-claims token signed with HS384", async () => {
-    const issuedAt = new Date("2026-08-06T14:00:00.000Z");
-    const token = await new SignJWT({ organizationId: user.organizationId })
-      .setProtectedHeader({ alg: "HS384", typ: "JWT" })
-      .setIssuer("clock-in-api")
-      .setAudience("clock-in-desktop")
-      .setSubject(user.id)
-      .setIssuedAt(Math.floor(issuedAt.getTime() / 1_000))
-      .setExpirationTime(Math.floor(issuedAt.getTime() / 1_000) + config.jwtTtlSeconds)
-      .sign(new TextEncoder().encode(config.jwtSecret));
+  it("rejects a valid-claims token signed with an unexpected algorithm", async () => {
+    const { privateKey, publicKey } = await generateKeyPair("RS256", { extractable: true });
+    const token = await issue({}, { key: privateKey, algorithm: "RS256" });
 
-    await expect(verifyAccessToken(token, config, issuedAt)).rejects.toMatchObject({ code: "unauthorized" });
+    await expect(verifyIdentity(token, async () => publicKey, config, issuedAt)).rejects.toMatchObject({ code: "unauthorized" });
+  });
+
+  it("rejects banned accounts and tokens missing identity claims", async () => {
+    await expect(verifyIdentity(await issue({ banned: true }), keys, config, issuedAt))
+      .rejects.toMatchObject({ code: "unauthorized" });
+    await expect(verifyIdentity(await issue({ email: "not-an-email" }), keys, config, issuedAt))
+      .rejects.toMatchObject({ code: "unauthorized" });
+    await expect(verifyIdentity(await issue({ name: "" }), keys, config, issuedAt))
+      .rejects.toMatchObject({ code: "unauthorized" });
   });
 });

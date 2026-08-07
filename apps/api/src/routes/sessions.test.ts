@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import { createApp } from "../app.js";
-import { signAccessToken } from "../auth.js";
+import { createTestAuth } from "../test-tokens.js";
 import type { ProjectRepository, SessionRecord, SessionRepository } from "../repositories.js";
 import { createProjectRoutes } from "./projects.js";
 import { createSessionRoutes } from "./sessions.js";
@@ -15,10 +15,19 @@ const ids = {
 };
 const config = parseEnv({
   DATABASE_URL: "postgres://clock_in:password@localhost:5432/clock_in",
-  JWT_SECRET: "this-is-a-long-test-secret-with-enough-entropy-123",
+  AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
   NODE_ENV: "test",
 });
 const user = { id: ids.user, email: "alex@example.com", name: "Alex", organizationId: ids.organization };
+
+let keys: Awaited<ReturnType<typeof createTestAuth>>["keys"];
+let bearerHeader: string;
+
+beforeAll(async () => {
+  const auth = await createTestAuth(config, new Date("2026-08-06T14:00:00.000Z"));
+  keys = auth.keys;
+  bearerHeader = await auth.bearer(ids.user);
+});
 
 class Projects implements ProjectRepository {
   public async listForMember() {
@@ -50,7 +59,8 @@ function createTestApp() {
   const sessions = new Sessions();
   const app = createApp({
     config,
-    credentials: { findByEmail: async () => null },
+    keys,
+    accounts: { resolve: async () => user },
     clock: () => new Date("2026-08-06T14:00:00.000Z"),
     projectRepository: projects,
     sessionRepository: sessions,
@@ -68,8 +78,7 @@ describe("timer routes", () => {
   });
 
   it("validates requests and returns shared session payloads", async () => {
-    const token = await signAccessToken(user, config, new Date("2026-08-06T14:00:00.000Z"));
-    const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+        const headers = { authorization: bearerHeader, "content-type": "application/json" };
     const app = createTestApp();
 
     const invalid = await app.request("http://api.test/sessions", { method: "POST", headers, body: "{bad" });

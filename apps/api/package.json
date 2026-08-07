@@ -22,7 +22,6 @@
     "@clock-in/database": "workspace:*",
     "@clock-in/shared": "workspace:*",
     "@hono/node-server": "^2.1.0",
-    "argon2": "^0.44.0",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.9.3",
     "jose": "^6.0.12",

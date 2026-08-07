@@ -22,6 +22,13 @@
       "when": 1786074677163,
       "tag": "0002_orange_jack_power",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1786111105788,
+      "tag": "0003_neon_auth_users",
+      "breakpoints": true
     }
   ]
 }

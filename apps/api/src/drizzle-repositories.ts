@@ -1,5 +1,6 @@
 import { and, asc, count, desc, eq, gte, lt, or, sum } from "drizzle-orm";
 import {
+  organizations,
   projectMemberships,
   projects,
   timeSessions,
@@ -7,7 +8,7 @@ import {
   type DatabaseConnection,
 } from "@clock-in/database";
 
-import type { AuthenticatedSubject, UserCredential, UserCredentialStore } from "./auth.js";
+import type { AccountStore, AuthenticatedSubject, AuthenticatedUser, AuthIdentity } from "./auth.js";
 import {
   SessionRepositoryError,
   type CreateRunningSession,
@@ -159,30 +160,78 @@ export class DrizzleSessionRepository implements SessionRepository {
   }
 }
 
-export class DrizzleUserCredentialStore implements UserCredentialStore {
+export class DrizzleAccountStore implements AccountStore {
   public constructor(private readonly db: DatabaseConnection["db"]) {}
 
-  public async findByEmail(email: string): Promise<UserCredential | null> {
-    // ponytail: email is only unique per organization, so an email shared across
-    // organizations is ambiguous at login and is rejected rather than guessed.
+  public async resolve(identity: AuthIdentity): Promise<AuthenticatedUser> {
+    const existing = await this.find(identity.authUserId);
+    if (existing !== null) {
+      return existing.email === identity.email && existing.name === identity.name
+        ? existing
+        : this.syncProfile(identity);
+    }
+    try {
+      return await this.provision(identity);
+    } catch (error) {
+      // ponytail: a concurrent first request may have provisioned this account,
+      // which rolls this transaction back on the users primary key.
+      const raced = await this.find(identity.authUserId);
+      if (raced !== null) return raced;
+      throw error;
+    }
+  }
+
+  private async find(authUserId: string): Promise<AuthenticatedUser | null> {
     const rows = await this.db
-      .select({
-        id: users.id,
-        email: users.email,
-        name: users.name,
-        organizationId: users.organizationId,
-        passwordHash: users.passwordHash,
-      })
+      .select({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId })
       .from(users)
-      .where(eq(users.email, email))
-      .limit(2);
-    const row = rows.length === 1 ? rows[0] : undefined;
-    if (row === undefined) return null;
-    return {
-      email: row.email,
-      passwordHash: row.passwordHash,
-      user: { id: row.id, email: row.email, name: row.name, organizationId: row.organizationId },
-    };
+      .where(eq(users.id, authUserId))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  private async syncProfile(identity: AuthIdentity): Promise<AuthenticatedUser> {
+    const rows = await this.db
+      .update(users)
+      .set({ email: identity.email, name: identity.name, updatedAt: new Date() })
+      .where(eq(users.id, identity.authUserId))
+      .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
+    const row = rows[0];
+    if (row === undefined) throw new Error("The signed-in account disappeared during profile sync.");
+    return row;
+  }
+
+  private async provision(identity: AuthIdentity): Promise<AuthenticatedUser> {
+    return this.db.transaction(async (tx) => {
+      const [organization] = await tx
+        .insert(organizations)
+        .values({ name: `${identity.name}'s workspace` })
+        .returning({ id: organizations.id });
+      if (organization === undefined) throw new Error("Failed to create an organization for a new account.");
+
+      const [user] = await tx
+        .insert(users)
+        .values({
+          id: identity.authUserId,
+          organizationId: organization.id,
+          email: identity.email,
+          name: identity.name,
+        })
+        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
+      if (user === undefined) throw new Error("Failed to create a user for a new account.");
+
+      const [project] = await tx
+        .insert(projects)
+        .values({ organizationId: organization.id, name: "General" })
+        .returning({ id: projects.id });
+      if (project === undefined) throw new Error("Failed to create a starter project for a new account.");
+
+      await tx
+        .insert(projectMemberships)
+        .values({ organizationId: organization.id, projectId: project.id, userId: user.id });
+
+      return user;
+    });
   }
 }
 

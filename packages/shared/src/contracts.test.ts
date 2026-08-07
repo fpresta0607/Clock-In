@@ -3,8 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   apiErrorSchema,
   currentSessionResponseSchema,
-  loginRequestSchema,
-  loginResponseSchema,
+  meResponseSchema,
   projectListItemSchema,
   reportFiltersSchema,
   reportResponseSchema,
@@ -28,24 +27,20 @@ const startedAt = "2026-08-06T14:00:00.000Z";
 const stoppedAt = "2026-08-06T15:03:04.000Z";
 
 describe("authentication contracts", () => {
-  it("accepts a login request with an email and password", () => {
-    expect(loginRequestSchema.parse({ email: "alex@example.com", password: "correct horse battery staple" })).toEqual({
-      email: "alex@example.com",
-      password: "correct horse battery staple",
-    });
-  });
-
-  it("rejects a login request without valid credentials", () => {
-    expect(() => loginRequestSchema.parse({ email: "not-an-email", password: "" })).toThrow();
-  });
-
-  it("accepts a login response with the signed-in user", () => {
+  it("accepts the signed-in account with its organization", () => {
     expect(
-      loginResponseSchema.parse({
-        accessToken: "signed.jwt.token",
+      meResponseSchema.parse({
         user: { id: ids.user, email: "alex@example.com", name: "Alex Morgan", organizationId: ids.organization },
       }),
-    ).toMatchObject({ accessToken: "signed.jwt.token", user: { id: ids.user } });
+    ).toMatchObject({ user: { id: ids.user, organizationId: ids.organization } });
+  });
+
+  it("rejects an account without an organization or with unknown fields", () => {
+    expect(() => meResponseSchema.parse({ user: { id: ids.user, email: "alex@example.com", name: "Alex Morgan" } })).toThrow();
+    expect(() => meResponseSchema.parse({
+      user: { id: ids.user, email: "alex@example.com", name: "Alex Morgan", organizationId: ids.organization },
+      accessToken: "leaked",
+    })).toThrow();
   });
 });
 

@@ -27,14 +27,15 @@ export const organizations = pgTable("organizations", {
   ...auditColumns,
 });
 
+// id mirrors neon_auth."user".id. No foreign key: neon_auth is Neon-managed and
+// may be recreated, so the link is enforced by verified JWT claims instead.
 export const users = pgTable(
   "users",
   {
-    id: uuid("id").defaultRandom().primaryKey(),
+    id: uuid("id").primaryKey(),
     organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
     email: text("email").notNull(),
     name: text("name").notNull(),
-    passwordHash: text("password_hash").notNull(),
     ...auditColumns,
   },
   (table) => [

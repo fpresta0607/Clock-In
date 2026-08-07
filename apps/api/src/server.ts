@@ -1,11 +1,12 @@
 import { createDatabase } from "@clock-in/database";
 
 import { createApp } from "./app.js";
+import { createNeonAuthKeys } from "./auth.js";
 import {
+  DrizzleAccountStore,
   DrizzleProjectRepository,
   DrizzleReportRepository,
   DrizzleSessionRepository,
-  DrizzleUserCredentialStore,
 } from "./drizzle-repositories.js";
 import { parseEnv } from "./env.js";
 import { serveApp } from "./index.js";
@@ -16,7 +17,8 @@ const { db } = createDatabase(config.databaseUrl);
 serveApp(
   createApp({
     config,
-    credentials: new DrizzleUserCredentialStore(db),
+    keys: createNeonAuthKeys(config),
+    accounts: new DrizzleAccountStore(db),
     projectRepository: new DrizzleProjectRepository(db),
     sessionRepository: new DrizzleSessionRepository(db),
     reportRepository: new DrizzleReportRepository(db),
