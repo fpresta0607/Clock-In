@@ -1,0 +1,6 @@
+# The desktop reads these at COMPILE time via option_env!, so they are set here
+# rather than in a shell nobody remembers to export. A real shell variable still
+# wins over these, which is how a production build points at production.
+[env]
+CLOCK_IN_AUTH_URL = "https://ep-tiny-mountain-ay0l41z3.neonauth.c-5.us-east-2.aws.neon.tech/neondb/auth"
+CLOCK_IN_API_URL = "http://localhost:3977"

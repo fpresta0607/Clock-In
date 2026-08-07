@@ -15,8 +15,8 @@
     "build": "pnpm --filter @clock-in/shared build && pnpm --filter @clock-in/database build && tsc --project tsconfig.json",
     "test": "pnpm --filter @clock-in/shared build && pnpm --filter @clock-in/database build && vitest run",
     "typecheck": "pnpm --filter @clock-in/shared build && pnpm --filter @clock-in/database build && tsc --noEmit",
-    "start": "node dist/server.js",
-    "dev": "tsx watch src/server.ts"
+    "start": "node --env-file-if-exists=../../.env dist/server.js",
+    "dev": "tsx watch --env-file-if-exists=../../.env src/server.ts"
   },
   "dependencies": {
     "@clock-in/database": "workspace:*",
