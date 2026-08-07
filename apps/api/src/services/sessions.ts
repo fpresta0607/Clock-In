@@ -92,11 +92,11 @@ export function createSessionService(dependencies: SessionServiceDependencies): 
         });
       } catch (error) {
         if (!(error instanceof SessionRepositoryError)) throw error;
+        const raced = await dependencies.sessions.findByClientId(subject, normalized.clientId);
+        if (raced !== null && sameStartIdentity(raced, normalized)) return raced;
         if (error.conflict === "session_already_running") {
           throw new AppError("session_already_running", "A time session is already running.");
         }
-        const raced = await dependencies.sessions.findByClientId(subject, normalized.clientId);
-        if (raced !== null && sameStartIdentity(raced, normalized)) return raced;
         throw new AppError("conflict", "The client id is already associated with a different session.");
       }
     },
@@ -115,7 +115,7 @@ export function createSessionService(dependencies: SessionServiceDependencies): 
         throw invalidStop("The stop time is too far in the future.");
       }
       const elapsedSeconds = Math.floor(elapsedMs / 1_000);
-      if (input.idleSeconds < 0 || input.idleSeconds > elapsedSeconds) {
+      if (!Number.isInteger(input.idleSeconds) || input.idleSeconds < 0 || input.idleSeconds > elapsedSeconds) {
         throw invalidStop("Idle seconds must not exceed elapsed time.");
       }
 

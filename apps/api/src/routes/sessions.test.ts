@@ -111,5 +111,17 @@ describe("timer routes", () => {
     });
     expect(stopped.status).toBe(200);
     await expect(stopped.json()).resolves.toMatchObject({ session: { status: "stopped", durationSeconds: 540, idleSeconds: 60 } });
+
+    const idempotentRetry = await app.request("http://api.test/sessions", {
+      method: "POST", headers, body: JSON.stringify({ clientId: ids.client, projectId: ids.project, description: "Route test", startedAt: "2026-08-06T13:00:00.000Z" }),
+    });
+    expect(idempotentRetry.status).toBe(200);
+    await expect(idempotentRetry.json()).resolves.toMatchObject({ session: { status: "stopped", durationSeconds: 540 } });
+
+    const malformedId = await app.request("http://api.test/sessions/not-a-uuid/stop", {
+      method: "POST", headers, body: JSON.stringify({ stoppedAt: "2026-08-06T13:10:00.000Z", idleSeconds: 0 }),
+    });
+    expect(malformedId.status).toBe(400);
+    await expect(malformedId.json()).resolves.toEqual({ error: { code: "validation_error", message: "Invalid session id." } });
   });
 });

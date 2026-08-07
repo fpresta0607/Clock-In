@@ -8,11 +8,14 @@ import {
   type Session,
 } from "@clock-in/shared";
 import { Hono } from "hono";
+import { z } from "zod";
 
 import { getAuthenticatedSubject, type ApiEnvironment } from "../app.js";
 import { AppError } from "../errors.js";
 import type { SessionRecord } from "../repositories.js";
 import type { SessionService } from "../services/sessions.js";
+
+const sessionIdSchema = z.string().uuid();
 
 function asSession(record: SessionRecord): Session {
   return sessionSchema.parse({
@@ -50,9 +53,11 @@ export function createSessionRoutes(service: SessionService): Hono<ApiEnvironmen
     return context.json(sessionStartResponseSchema.parse({ session: asSession(session) }));
   });
   routes.post("/:id/stop", async (context) => {
+    const sessionId = sessionIdSchema.safeParse(context.req.param("id"));
+    if (!sessionId.success) throw new AppError("validation_error", "Invalid session id.");
     const input = sessionStopRequestSchema.safeParse(await requestBody(context));
     if (!input.success) throw new AppError("validation_error", "Invalid request body.");
-    const session = await service.stop(getAuthenticatedSubject(context), context.req.param("id"), {
+    const session = await service.stop(getAuthenticatedSubject(context), sessionId.data, {
       stoppedAt: new Date(input.data.stoppedAt),
       idleSeconds: input.data.idleSeconds,
     });

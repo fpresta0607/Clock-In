@@ -95,7 +95,7 @@ describe("session contracts", () => {
     ).toMatchObject({ session: { id: ids.session, status: "running" } });
   });
 
-  it("rejects completed sessions from a start response", () => {
+  it("accepts completed persisted sessions from an idempotent start response", () => {
     const completedSession = {
       id: ids.session,
       clientId: ids.client,
@@ -107,8 +107,12 @@ describe("session contracts", () => {
       durationSeconds: 3_784,
     };
 
-    expect(() => sessionStartResponseSchema.parse({ session: { ...completedSession, status: "stopped" } })).toThrow();
-    expect(() => sessionStartResponseSchema.parse({ session: { ...completedSession, status: "needs_review" } })).toThrow();
+    expect(sessionStartResponseSchema.parse({ session: { ...completedSession, status: "stopped" } })).toMatchObject({
+      session: { status: "stopped", durationSeconds: 3_784 },
+    });
+    expect(sessionStartResponseSchema.parse({ session: { ...completedSession, status: "needs_review" } })).toMatchObject({
+      session: { status: "needs_review", durationSeconds: 3_784 },
+    });
   });
 
   it("accepts a stop request and the stopped session response", () => {

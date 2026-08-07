@@ -150,12 +150,20 @@ describe("session service", () => {
     await expect(raced.service.start(subject, {
       clientId: ids.client, projectId: ids.project, description: "Investigate timer", startedAt: new Date("2026-08-06T13:00:00.000Z"),
     })).resolves.toEqual(running());
+
+    const oneRunningRace = createService();
+    oneRunningRace.sessions.nextCreateError = new SessionRepositoryError("session_already_running");
+    oneRunningRace.sessions.raceRecord = running();
+    await expect(oneRunningRace.service.start(subject, {
+      clientId: ids.client, projectId: ids.project, description: "Investigate timer", startedAt: new Date("2026-08-06T13:00:00.000Z"),
+    })).resolves.toEqual(running());
   });
 
   it("validates stop times and idle seconds, computes duration, and marks long sessions for review", async () => {
     const { service } = createService([running()]);
     await expect(service.stop(subject, ids.session, { stoppedAt: new Date("2026-08-06T12:59:59.000Z"), idleSeconds: 0 })).rejects.toMatchObject({ code: "invalid_session_stop" });
     await expect(service.stop(subject, ids.session, { stoppedAt: new Date("2026-08-06T14:00:31.000Z"), idleSeconds: 0 })).rejects.toMatchObject({ code: "invalid_session_stop" });
+    await expect(service.stop(subject, ids.session, { stoppedAt: new Date("2026-08-06T13:10:00.000Z"), idleSeconds: 0.5 })).rejects.toMatchObject({ code: "invalid_session_stop" });
     await expect(service.stop(subject, ids.session, { stoppedAt: new Date("2026-08-06T13:10:00.000Z"), idleSeconds: 601 })).rejects.toMatchObject({ code: "invalid_session_stop" });
     await expect(service.stop(subject, ids.session, { stoppedAt: new Date("2026-08-06T13:10:00.999Z"), idleSeconds: 60 })).resolves.toMatchObject({ status: "stopped", durationSeconds: 540, description: "Investigate timer" });
 
@@ -168,6 +176,12 @@ describe("session service", () => {
     const { service } = createService([completed]);
 
     await expect(service.stop(subject, ids.session, { stoppedAt: new Date("2026-08-06T13:20:00.000Z"), idleSeconds: 5 })).resolves.toEqual(completed);
+    await expect(service.start(subject, {
+      clientId: ids.client,
+      projectId: ids.project,
+      description: "Investigate timer",
+      startedAt: new Date("2026-08-06T13:00:00.000Z"),
+    })).resolves.toEqual(completed);
     await expect(service.current(subject)).resolves.toBeNull();
     await expect(service.stop({ ...subject, userId: ids.otherUser }, ids.session, { stoppedAt: now, idleSeconds: 0 })).rejects.toMatchObject({ code: "not_found" });
   });

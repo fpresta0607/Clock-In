@@ -92,7 +92,7 @@ export const sessionStartRequestSchema = z
   })
   .strict();
 
-export const sessionStartResponseSchema = z.object({ session: runningSessionSchema }).strict();
+export const sessionStartResponseSchema = z.object({ session: sessionSchema }).strict();
 
 export const sessionStopRequestSchema = z
   .object({
