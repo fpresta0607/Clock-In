@@ -18,10 +18,23 @@ import {
 } from "./auth.js";
 import type { AppConfig } from "./env.js";
 import { AppError, handleAppError, jsonError } from "./errors.js";
-import type { ProjectRepository, ReportRepository, SessionRepository } from "./repositories.js";
+import type {
+  ActivitySegmentRepository,
+  AgentSessionRepository,
+  PathMappingRepository,
+  ProjectRepository,
+  ReportRepository,
+  SessionRepository,
+} from "./repositories.js";
+import { createActivityRoutes } from "./routes/activity.js";
+import { createAgentSessionRoutes } from "./routes/agent-sessions.js";
+import { createPathMappingRoutes } from "./routes/path-mappings.js";
 import { createProjectRoutes } from "./routes/projects.js";
 import { createReportRoutes } from "./routes/reports.js";
 import { createSessionRoutes } from "./routes/sessions.js";
+import { createActivityService } from "./services/activity.js";
+import { createAgentSessionService } from "./services/agent-sessions.js";
+import { createPathMappingService } from "./services/path-mappings.js";
 import { createReportService } from "./services/reports.js";
 import { createSessionService } from "./services/sessions.js";
 
@@ -43,6 +56,9 @@ export interface CreateAppDependencies {
   projectRepository?: ProjectRepository;
   reportRepository?: ReportRepository;
   sessionRepository?: SessionRepository;
+  activitySegmentRepository?: ActivitySegmentRepository;
+  agentSessionRepository?: AgentSessionRepository;
+  pathMappingRepository?: PathMappingRepository;
 }
 
 function addSecurityHeaders(context: Context): void {
@@ -220,6 +236,39 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
     app.use("/reports", authenticate);
     app.use("/reports/*", authenticate);
     app.route("/reports", createReportRoutes(createReportService({ reports: dependencies.reportRepository })));
+  }
+  if (dependencies.activitySegmentRepository !== undefined) {
+    const activityService = createActivityService({ segments: dependencies.activitySegmentRepository, clock });
+    app.use("/activity", authenticate);
+    app.use("/activity/*", authenticate);
+    app.route("/activity", createActivityRoutes(activityService));
+  }
+  if (dependencies.agentSessionRepository !== undefined) {
+    if (dependencies.pathMappingRepository === undefined || dependencies.sessionRepository === undefined) {
+      throw new Error("Path mapping and session repositories are required for agent-session routes.");
+    }
+    const agentSessionService = createAgentSessionService({
+      agentSessions: dependencies.agentSessionRepository,
+      pathMappings: dependencies.pathMappingRepository,
+      sessions: dependencies.sessionRepository,
+      clock,
+    });
+    app.use("/agent-sessions", authenticate);
+    app.use("/agent-sessions/*", authenticate);
+    app.route("/agent-sessions", createAgentSessionRoutes(agentSessionService));
+  }
+  if (dependencies.pathMappingRepository !== undefined) {
+    if (dependencies.projectRepository === undefined) {
+      throw new Error("A project repository is required for path-mapping routes.");
+    }
+    const pathMappingService = createPathMappingService({
+      pathMappings: dependencies.pathMappingRepository,
+      projects: dependencies.projectRepository,
+      clock,
+    });
+    app.use("/path-mappings", authenticate);
+    app.use("/path-mappings/*", authenticate);
+    app.route("/path-mappings", createPathMappingRoutes(pathMappingService));
   }
 
   return app;

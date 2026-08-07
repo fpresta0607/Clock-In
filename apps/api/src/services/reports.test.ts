@@ -162,8 +162,8 @@ describe("leaderboard", () => {
     const result = await service.leaderboard(subject, {});
 
     expect(result.entries).toEqual([
-      { rank: 1, user: { id: ids.user, name: "Alex" }, durationSeconds: 7_200, sessionCount: 3 },
-      { rank: 2, user: { id: ids.otherUser, name: "Sam" }, durationSeconds: 3_600, sessionCount: 1 },
+      { rank: 1, user: { id: ids.user, name: "Alex" }, durationSeconds: 7_200, sessionCount: 3, corroboratedSeconds: 0 },
+      { rank: 2, user: { id: ids.otherUser, name: "Sam" }, durationSeconds: 3_600, sessionCount: 1, corroboratedSeconds: 0 },
     ]);
     expect(result.totalDurationSeconds).toBe(10_800);
   });

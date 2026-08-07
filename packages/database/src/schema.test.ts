@@ -3,8 +3,11 @@ import type { SQL } from "drizzle-orm";
 import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
 
 import {
+  activitySegments,
+  agentSessions,
   organizations,
   projectMemberships,
+  projectPathMappings,
   projects,
   timeSessions,
   users,
@@ -113,5 +116,129 @@ describe("database schema", () => {
       expect(reportingIndex?.config.unique).toBe(false);
       expect(reportingIndex?.config.where).toBeUndefined();
     }
+  });
+
+  it("defines idempotent, time-ordered activity segments scoped to a user device", () => {
+    expect(activitySegments.id.primary).toBe(true);
+    expect(activitySegments.organizationId.notNull).toBe(true);
+    expect(activitySegments.userId.notNull).toBe(true);
+    expect(activitySegments.clientId.notNull).toBe(true);
+    expect(activitySegments.deviceId.notNull).toBe(true);
+    expect(activitySegments.kind.notNull).toBe(true);
+    expect(activitySegments.kind.enumValues).toEqual(["active", "idle", "locked", "suspended"]);
+    expect(activitySegments.processName.notNull).toBe(false);
+    expect(activitySegments.processName.columnType).toBe("PgText");
+    expect(activitySegments.startedAt.notNull).toBe(true);
+    expect(activitySegments.endedAt.notNull).toBe(true);
+    expect(activitySegments.startedAt.withTimezone).toBe(true);
+    expect(activitySegments.endedAt.withTimezone).toBe(true);
+    expect(activitySegments.receivedAt.notNull).toBe(true);
+    expect(activitySegments.receivedAt.withTimezone).toBe(true);
+    expect(activitySegments.createdAt.notNull).toBe(true);
+    expect(activitySegments.updatedAt.notNull).toBe(true);
+
+    const config = getTableConfig(activitySegments);
+    expect(config.foreignKeys).toHaveLength(1);
+    expect(config.uniqueConstraints.map((constraint) => constraint.name)).toContain(
+      "activity_segments_organization_user_client_unique",
+    );
+    expect(config.checks.map((constraint) => constraint.name)).toEqual(
+      expect.arrayContaining([
+        "activity_segments_time_order_valid",
+        "activity_segments_process_name_length_valid",
+      ]),
+    );
+    const timeOrderCheck = config.checks.find((constraint) => constraint.name === "activity_segments_time_order_valid");
+    expect(new PgDialect().sqlToQuery(timeOrderCheck!.value).sql).toContain('"ended_at" > "activity_segments"."started_at"');
+    const processNameCheck = config.checks.find(
+      (constraint) => constraint.name === "activity_segments_process_name_length_valid",
+    );
+    expect(new PgDialect().sqlToQuery(processNameCheck!.value).sql).toContain(
+      'char_length("activity_segments"."process_name") <= 200',
+    );
+    const userTimelineIndex = config.indexes.find(
+      (index) => index.config.name === "activity_segments_organization_user_started_at_idx",
+    );
+    expect(userTimelineIndex?.config.unique).toBe(false);
+    expect(userTimelineIndex?.config.where).toBeUndefined();
+  });
+
+  it("defines upsertable agent sessions with status-consistent timestamps", () => {
+    expect(agentSessions.id.primary).toBe(true);
+    expect(agentSessions.organizationId.notNull).toBe(true);
+    expect(agentSessions.userId.notNull).toBe(true);
+    expect(agentSessions.source.notNull).toBe(true);
+    expect(agentSessions.source.enumValues).toEqual(["claude_code", "codex", "kimi_code", "other"]);
+    expect(agentSessions.externalSessionId.notNull).toBe(true);
+    expect(agentSessions.externalSessionId.columnType).toBe("PgText");
+    expect(agentSessions.projectId.notNull).toBe(false);
+    expect(agentSessions.cwd.notNull).toBe(true);
+    expect(agentSessions.status.notNull).toBe(true);
+    expect(agentSessions.status.enumValues).toEqual(["running", "ended"]);
+    expect(agentSessions.startedAt.notNull).toBe(true);
+    expect(agentSessions.endedAt.notNull).toBe(false);
+    expect(agentSessions.lastEventAt.notNull).toBe(true);
+    expect(agentSessions.lastEventAt.withTimezone).toBe(true);
+    expect(agentSessions.linkedSessionId.notNull).toBe(false);
+    expect(agentSessions.receivedAt.notNull).toBe(true);
+    expect(agentSessions.createdAt.notNull).toBe(true);
+    expect(agentSessions.updatedAt.notNull).toBe(true);
+
+    const config = getTableConfig(agentSessions);
+    expect(config.foreignKeys).toHaveLength(3);
+    expect(config.uniqueConstraints.map((constraint) => constraint.name)).toContain(
+      "agent_sessions_organization_user_source_external_unique",
+    );
+    expect(config.checks.map((constraint) => constraint.name)).toEqual(
+      expect.arrayContaining([
+        "agent_sessions_status_fields_valid",
+        "agent_sessions_external_session_id_length_valid",
+        "agent_sessions_cwd_length_valid",
+      ]),
+    );
+    const statusCheck = config.checks.find((constraint) => constraint.name === "agent_sessions_status_fields_valid");
+    expect(new PgDialect().sqlToQuery(statusCheck!.value).sql).toContain("'running'");
+    const externalIdCheck = config.checks.find(
+      (constraint) => constraint.name === "agent_sessions_external_session_id_length_valid",
+    );
+    expect(new PgDialect().sqlToQuery(externalIdCheck!.value).sql).toContain(
+      'char_length("agent_sessions"."external_session_id") between 1 and 200',
+    );
+    const cwdCheck = config.checks.find((constraint) => constraint.name === "agent_sessions_cwd_length_valid");
+    expect(new PgDialect().sqlToQuery(cwdCheck!.value).sql).toContain(
+      'char_length("agent_sessions"."cwd") between 1 and 1000',
+    );
+    const userTimelineIndex = config.indexes.find(
+      (index) => index.config.name === "agent_sessions_organization_user_started_at_idx",
+    );
+    expect(userTimelineIndex?.config.unique).toBe(false);
+    expect(userTimelineIndex?.config.where).toBeUndefined();
+  });
+
+  it("defines per-user project path mappings with unique prefixes", () => {
+    expect(projectPathMappings.id.primary).toBe(true);
+    expect(projectPathMappings.organizationId.notNull).toBe(true);
+    expect(projectPathMappings.userId.notNull).toBe(true);
+    expect(projectPathMappings.pathPrefix.notNull).toBe(true);
+    expect(projectPathMappings.pathPrefix.columnType).toBe("PgText");
+    expect(projectPathMappings.repoUrl.notNull).toBe(false);
+    expect(projectPathMappings.projectId.notNull).toBe(true);
+    expect(projectPathMappings.createdAt.notNull).toBe(true);
+    expect(projectPathMappings.updatedAt.notNull).toBe(true);
+
+    const config = getTableConfig(projectPathMappings);
+    expect(config.foreignKeys).toHaveLength(2);
+    expect(config.uniqueConstraints.map((constraint) => constraint.name)).toContain(
+      "project_path_mappings_organization_user_prefix_unique",
+    );
+    expect(config.checks.map((constraint) => constraint.name)).toContain(
+      "project_path_mappings_path_prefix_length_valid",
+    );
+    const prefixCheck = config.checks.find(
+      (constraint) => constraint.name === "project_path_mappings_path_prefix_length_valid",
+    );
+    expect(new PgDialect().sqlToQuery(prefixCheck!.value).sql).toContain(
+      'char_length("project_path_mappings"."path_prefix") between 1 and 500',
+    );
   });
 });

@@ -1,10 +1,13 @@
 import { randomBytes } from "node:crypto";
 
-import { generateInviteCode } from "@clock-in/shared";
-import { and, asc, count, desc, eq, gte, lt, or, sum } from "drizzle-orm";
+import { generateInviteCode, type AgentSource } from "@clock-in/shared";
+import { and, asc, count, desc, eq, gte, lt, or, sql, sum } from "drizzle-orm";
 import {
+  activitySegments,
+  agentSessions,
   organizations,
   projectMemberships,
+  projectPathMappings,
   projects,
   timeSessions,
   users,
@@ -20,9 +23,18 @@ import type {
 } from "./auth.js";
 import { AppError } from "./errors.js";
 import {
+  PathMappingRepositoryError,
   SessionRepositoryError,
+  type ActivitySegmentInsert,
+  type ActivitySegmentRepository,
+  type AgentSessionRecord,
+  type AgentSessionRepository,
+  type CreatePathMapping,
   type CreateRunningSession,
+  type InsertEndedAgentSession,
   type LeaderboardRowRecord,
+  type PathMappingRecord,
+  type PathMappingRepository,
   type ProjectRecord,
   type ProjectRepository,
   type ReportExportRead,
@@ -36,6 +48,8 @@ import {
   type SessionRecord,
   type SessionRepository,
   type StopRunningSession,
+  type UpdatePathMapping,
+  type UpsertStartedAgentSession,
 } from "./repositories.js";
 
 function asSessionRecord(row: typeof timeSessions.$inferSelect): SessionRecord {
@@ -530,5 +544,247 @@ export class DrizzleReportRepository implements ReportRepository {
       if (totalRows > BigInt(maxRows)) return { summary };
       return { summary, rows: await this.rowsFor(db, subject, query, { limit: maxRows + 1, offset: 0 }) };
     });
+  }
+}
+
+export class DrizzleActivitySegmentRepository implements ActivitySegmentRepository {
+  public constructor(private readonly db: DatabaseConnection["db"]) {}
+
+  /** Replay-safe: the (organization, user, client) unique key makes re-uploads no-ops. */
+  public async insertBatch(segments: ActivitySegmentInsert[]): Promise<void> {
+    if (segments.length === 0) return;
+    await this.db
+      .insert(activitySegments)
+      .values(segments)
+      .onConflictDoNothing({
+        target: [activitySegments.organizationId, activitySegments.userId, activitySegments.clientId],
+      });
+  }
+}
+
+function asAgentSessionRecord(row: typeof agentSessions.$inferSelect): AgentSessionRecord {
+  return {
+    id: row.id,
+    organizationId: row.organizationId,
+    userId: row.userId,
+    source: row.source,
+    externalSessionId: row.externalSessionId,
+    projectId: row.projectId,
+    cwd: row.cwd,
+    status: row.status,
+    startedAt: row.startedAt,
+    endedAt: row.endedAt,
+    lastEventAt: row.lastEventAt,
+    linkedSessionId: row.linkedSessionId,
+  };
+}
+
+const agentSessionKey = [
+  agentSessions.organizationId,
+  agentSessions.userId,
+  agentSessions.source,
+  agentSessions.externalSessionId,
+];
+
+export class DrizzleAgentSessionRepository implements AgentSessionRepository {
+  public constructor(private readonly db: DatabaseConnection["db"]) {}
+
+  public async findByExternalKey(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string): Promise<AgentSessionRecord | null> {
+    const rows = await this.db.select().from(agentSessions).where(and(
+      eq(agentSessions.organizationId, subject.organizationId),
+      eq(agentSessions.userId, subject.userId),
+      eq(agentSessions.source, source),
+      eq(agentSessions.externalSessionId, externalSessionId),
+    )).limit(1);
+    return rows[0] === undefined ? null : asAgentSessionRecord(rows[0]);
+  }
+
+  public async upsertStarted(input: UpsertStartedAgentSession): Promise<AgentSessionRecord> {
+    const rows = await this.db
+      .insert(agentSessions)
+      .values({
+        organizationId: input.organizationId,
+        userId: input.userId,
+        source: input.source,
+        externalSessionId: input.externalSessionId,
+        cwd: input.cwd,
+        projectId: input.projectId,
+        linkedSessionId: input.linkedSessionId,
+        status: "running",
+        startedAt: input.occurredAt,
+        endedAt: null,
+        lastEventAt: input.occurredAt,
+        receivedAt: input.receivedAt,
+      })
+      .onConflictDoUpdate({
+        target: agentSessionKey,
+        // A replayed start refreshes lastEventAt only; an ended row stays ended.
+        set: {
+          lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${input.occurredAt})`,
+          updatedAt: input.receivedAt,
+        },
+      })
+      .returning();
+    return asAgentSessionRecord(rows[0]!);
+  }
+
+  public async closeRunning(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, endedAt: Date, now: Date): Promise<AgentSessionRecord | null> {
+    const rows = await this.db
+      .update(agentSessions)
+      .set({
+        status: "ended",
+        endedAt,
+        lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${endedAt})`,
+        updatedAt: now,
+      })
+      .where(and(
+        eq(agentSessions.organizationId, subject.organizationId),
+        eq(agentSessions.userId, subject.userId),
+        eq(agentSessions.source, source),
+        eq(agentSessions.externalSessionId, externalSessionId),
+        eq(agentSessions.status, "running"),
+      ))
+      .returning();
+    return rows[0] === undefined ? null : asAgentSessionRecord(rows[0]);
+  }
+
+  public async insertEnded(input: InsertEndedAgentSession): Promise<void> {
+    await this.db
+      .insert(agentSessions)
+      .values({
+        organizationId: input.organizationId,
+        userId: input.userId,
+        source: input.source,
+        externalSessionId: input.externalSessionId,
+        cwd: input.cwd,
+        projectId: input.projectId,
+        status: "ended",
+        startedAt: input.occurredAt,
+        endedAt: input.occurredAt,
+        lastEventAt: input.occurredAt,
+        receivedAt: input.receivedAt,
+      })
+      .onConflictDoNothing({ target: agentSessionKey });
+  }
+
+  public async advanceLastEvent(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, occurredAt: Date, now: Date): Promise<boolean> {
+    const rows = await this.db
+      .update(agentSessions)
+      .set({
+        lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${occurredAt})`,
+        updatedAt: now,
+      })
+      .where(and(
+        eq(agentSessions.organizationId, subject.organizationId),
+        eq(agentSessions.userId, subject.userId),
+        eq(agentSessions.source, source),
+        eq(agentSessions.externalSessionId, externalSessionId),
+        eq(agentSessions.status, "running"),
+      ))
+      .returning({ id: agentSessions.id });
+    return rows.length > 0;
+  }
+
+  public async reapStale(subject: AuthenticatedSubject, cutoff: Date, now: Date): Promise<number> {
+    const rows = await this.db
+      .update(agentSessions)
+      .set({ status: "ended", endedAt: sql`${agentSessions.lastEventAt}`, updatedAt: now })
+      .where(and(
+        eq(agentSessions.organizationId, subject.organizationId),
+        eq(agentSessions.userId, subject.userId),
+        eq(agentSessions.status, "running"),
+        lt(agentSessions.lastEventAt, cutoff),
+      ))
+      .returning({ id: agentSessions.id });
+    return rows.length;
+  }
+}
+
+function asPathMappingRecord(row: typeof projectPathMappings.$inferSelect): PathMappingRecord {
+  return {
+    id: row.id,
+    organizationId: row.organizationId,
+    userId: row.userId,
+    pathPrefix: row.pathPrefix,
+    repoUrl: row.repoUrl,
+    projectId: row.projectId,
+  };
+}
+
+export class DrizzlePathMappingRepository implements PathMappingRepository {
+  public constructor(private readonly db: DatabaseConnection["db"]) {}
+
+  public async listForSubject(subject: AuthenticatedSubject): Promise<PathMappingRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(projectPathMappings)
+      .where(and(
+        eq(projectPathMappings.organizationId, subject.organizationId),
+        eq(projectPathMappings.userId, subject.userId),
+      ))
+      .orderBy(asc(projectPathMappings.pathPrefix), asc(projectPathMappings.id));
+    return rows.map(asPathMappingRecord);
+  }
+
+  public async findById(subject: AuthenticatedSubject, mappingId: string): Promise<PathMappingRecord | null> {
+    const rows = await this.db.select().from(projectPathMappings).where(and(
+      eq(projectPathMappings.id, mappingId),
+      eq(projectPathMappings.organizationId, subject.organizationId),
+      eq(projectPathMappings.userId, subject.userId),
+    )).limit(1);
+    return rows[0] === undefined ? null : asPathMappingRecord(rows[0]);
+  }
+
+  public async findByPathPrefix(subject: AuthenticatedSubject, pathPrefix: string): Promise<PathMappingRecord | null> {
+    const rows = await this.db.select().from(projectPathMappings).where(and(
+      eq(projectPathMappings.organizationId, subject.organizationId),
+      eq(projectPathMappings.userId, subject.userId),
+      eq(projectPathMappings.pathPrefix, pathPrefix),
+    )).limit(1);
+    return rows[0] === undefined ? null : asPathMappingRecord(rows[0]);
+  }
+
+  public async create(input: CreatePathMapping): Promise<PathMappingRecord> {
+    try {
+      const rows = await this.db.insert(projectPathMappings).values(input).returning();
+      return asPathMappingRecord(rows[0]!);
+    } catch (error) {
+      if (uniqueConstraint(error) === "project_path_mappings_organization_user_prefix_unique") {
+        throw new PathMappingRepositoryError("path_prefix");
+      }
+      throw error;
+    }
+  }
+
+  public async update(subject: AuthenticatedSubject, mappingId: string, input: UpdatePathMapping): Promise<PathMappingRecord | null> {
+    try {
+      const rows = await this.db
+        .update(projectPathMappings)
+        .set(input)
+        .where(and(
+          eq(projectPathMappings.id, mappingId),
+          eq(projectPathMappings.organizationId, subject.organizationId),
+          eq(projectPathMappings.userId, subject.userId),
+        ))
+        .returning();
+      return rows[0] === undefined ? null : asPathMappingRecord(rows[0]);
+    } catch (error) {
+      if (uniqueConstraint(error) === "project_path_mappings_organization_user_prefix_unique") {
+        throw new PathMappingRepositoryError("path_prefix");
+      }
+      throw error;
+    }
+  }
+
+  public async remove(subject: AuthenticatedSubject, mappingId: string): Promise<boolean> {
+    const rows = await this.db
+      .delete(projectPathMappings)
+      .where(and(
+        eq(projectPathMappings.id, mappingId),
+        eq(projectPathMappings.organizationId, subject.organizationId),
+        eq(projectPathMappings.userId, subject.userId),
+      ))
+      .returning({ id: projectPathMappings.id });
+    return rows.length > 0;
   }
 }

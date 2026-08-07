@@ -73,6 +73,8 @@ function asReportRow(record: ReportRowRecord): ReportRow {
     stoppedAt: record.stoppedAt.toISOString(),
     idleSeconds: record.idleSeconds,
     durationSeconds: record.durationSeconds,
+    // Real corroboration overlap math lands with the reporting changes; until then rows report zero.
+    corroboratedSeconds: 0,
   };
 }
 
@@ -85,6 +87,7 @@ function asLeaderboardEntry(record: LeaderboardRowRecord, index: number, all: Le
   user: { id: string; name: string };
   durationSeconds: number;
   sessionCount: number;
+  corroboratedSeconds: number;
 } {
   const durationSeconds = safeInteger(record.durationSeconds, "leaderboard duration");
   const previous = index === 0 ? undefined : all[index - 1];
@@ -95,6 +98,8 @@ function asLeaderboardEntry(record: LeaderboardRowRecord, index: number, all: Le
     user: record.user,
     durationSeconds,
     sessionCount: safeInteger(record.sessionCount, "leaderboard session count"),
+    // Corroboration is computed by the reporting changes in a later task; zero until then.
+    corroboratedSeconds: 0,
   };
 }
 

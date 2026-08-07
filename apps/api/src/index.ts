@@ -11,16 +11,40 @@ export type { AccountStore, AuthenticatedSubject, AuthenticatedUser, AuthIdentit
 export { parseEnv } from "./env.js";
 export type { AppConfig } from "./env.js";
 export { AppError } from "./errors.js";
-export { DrizzleAccountStore, DrizzleProjectRepository, DrizzleReportRepository, DrizzleSessionRepository } from "./drizzle-repositories.js";
+export {
+  DrizzleAccountStore,
+  DrizzleActivitySegmentRepository,
+  DrizzleAgentSessionRepository,
+  DrizzlePathMappingRepository,
+  DrizzleProjectRepository,
+  DrizzleReportRepository,
+  DrizzleSessionRepository,
+} from "./drizzle-repositories.js";
+export { createActivityRoutes } from "./routes/activity.js";
+export { createAgentSessionRoutes } from "./routes/agent-sessions.js";
+export { createPathMappingRoutes } from "./routes/path-mappings.js";
 export { createProjectRoutes } from "./routes/projects.js";
 export { createReportRoutes } from "./routes/reports.js";
 export { createSessionRoutes } from "./routes/sessions.js";
+export { createActivityService } from "./services/activity.js";
+export { createAgentSessionService } from "./services/agent-sessions.js";
+export { normalizePath, resolveProjectForCwd } from "./services/attribution.js";
+export { createPathMappingService } from "./services/path-mappings.js";
 export { listProjects } from "./services/projects.js";
 export { createReportService } from "./services/reports.js";
 export { createSessionService } from "./services/sessions.js";
-export { SessionRepositoryError } from "./repositories.js";
+export { PathMappingRepositoryError, SessionRepositoryError } from "./repositories.js";
 export type {
+  ActivitySegmentInsert,
+  ActivitySegmentRepository,
+  AgentSessionRecord,
+  AgentSessionRepository,
+  CreatePathMapping,
   CreateRunningSession,
+  InsertEndedAgentSession,
+  PathMappingRecord,
+  PathMappingRepository,
+  PathMappingRepositoryConflict,
   ProjectRecord,
   ProjectRepository,
   LeaderboardRowRecord,
@@ -36,7 +60,18 @@ export type {
   SessionRepository,
   SessionRepositoryConflict,
   StopRunningSession,
+  UpdatePathMapping,
+  UpsertStartedAgentSession,
 } from "./repositories.js";
+export type { ActivityService, ActivityServiceDependencies, ActivitySegmentInput } from "./services/activity.js";
+export type { AgentSessionEventInput, AgentSessionService, AgentSessionServiceDependencies } from "./services/agent-sessions.js";
+export type { PathMappingCandidate } from "./services/attribution.js";
+export type {
+  CreatePathMappingInput,
+  PathMappingService,
+  PathMappingServiceDependencies,
+  UpdatePathMappingInput,
+} from "./services/path-mappings.js";
 export type { SessionService, SessionServiceDependencies, StartSessionInput, StopSessionInput } from "./services/sessions.js";
 export type { ReportService, ReportServiceDependencies } from "./services/reports.js";
 

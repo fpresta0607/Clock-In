@@ -1,10 +1,25 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  activitySegmentBatchRequestSchema,
+  activitySegmentBatchResponseSchema,
+  activitySegmentKindValues,
+  activitySegmentUploadSchema,
+  agentEventKindValues,
+  agentSessionEventBatchRequestSchema,
+  agentSessionEventBatchResponseSchema,
+  agentSessionEventSchema,
+  agentSourceValues,
   apiErrorSchema,
   currentSessionResponseSchema,
+  leaderboardResponseSchema,
   meResponseSchema,
+  meStatsResponseSchema,
+  pathMappingCreateRequestSchema,
+  pathMappingListResponseSchema,
+  pathMappingUpdateRequestSchema,
   projectListItemSchema,
+  projectPathMappingSchema,
   reportFiltersSchema,
   reportResponseSchema,
   sessionStartRequestSchema,
@@ -25,6 +40,19 @@ const ids = {
 
 const startedAt = "2026-08-06T14:00:00.000Z";
 const stoppedAt = "2026-08-06T15:03:04.000Z";
+
+const reportRow = {
+  id: ids.session,
+  user: { id: ids.user, name: "Alex Morgan" },
+  project: { id: ids.project, name: "Website redesign" },
+  description: null,
+  status: "stopped",
+  startedAt,
+  stoppedAt,
+  idleSeconds: 120,
+  durationSeconds: 3_600,
+  corroboratedSeconds: 1_800,
+};
 
 describe("authentication contracts", () => {
   it("accepts the signed-in account with its organization", () => {
@@ -231,18 +259,38 @@ describe("report and error contracts", () => {
       filters: { from: "2026-08-01", to: "2026-08-06", projectId: ids.project, userId: ids.user },
       totalDurationSeconds: 3_600,
       pagination: { page: 1, pageSize: 50, totalRows: 1, totalPages: 1 },
-      rows: [{
-        id: ids.session,
-        user: { id: ids.user, name: "Alex Morgan" },
-        project: { id: ids.project, name: "Website redesign" },
-        description: null,
-        status: "stopped",
-        startedAt,
-        stoppedAt,
-        idleSeconds: 120,
-        durationSeconds: 3_600,
-      }],
-    })).toMatchObject({ totalDurationSeconds: 3_600, rows: [{ status: "stopped" }] });
+      rows: [reportRow],
+    })).toMatchObject({ totalDurationSeconds: 3_600, rows: [{ status: "stopped", corroboratedSeconds: 1_800 }] });
+  });
+
+  it("requires corroborated seconds on report rows and leaderboard entries", () => {
+    const { corroboratedSeconds: _dropped, ...uncorroboratedRow } = reportRow;
+    expect(() => reportResponseSchema.parse({
+      filters: {},
+      totalDurationSeconds: 0,
+      pagination: { page: 1, pageSize: 50, totalRows: 1, totalPages: 1 },
+      rows: [uncorroboratedRow],
+    })).toThrow();
+    expect(() => reportResponseSchema.parse({
+      filters: {},
+      totalDurationSeconds: 0,
+      pagination: { page: 1, pageSize: 50, totalRows: 1, totalPages: 1 },
+      rows: [{ ...reportRow, corroboratedSeconds: -1 }],
+    })).toThrow();
+
+    const entry = {
+      rank: 1,
+      user: { id: ids.user, name: "Alex Morgan" },
+      durationSeconds: 3_600,
+      sessionCount: 2,
+      corroboratedSeconds: 1_800,
+    };
+    expect(
+      leaderboardResponseSchema.parse({ filters: {}, totalDurationSeconds: 3_600, entries: [entry] }),
+    ).toMatchObject({ entries: [{ rank: 1, corroboratedSeconds: 1_800 }] });
+    const { corroboratedSeconds: _droppedFromEntry, ...uncorroboratedEntry } = entry;
+    expect(() => leaderboardResponseSchema.parse({ filters: {}, totalDurationSeconds: 0, entries: [uncorroboratedEntry] })).toThrow();
+    expect(() => leaderboardResponseSchema.parse({ filters: {}, totalDurationSeconds: 0, entries: [{ ...entry, corroboratedSeconds: 1.5 }] })).toThrow();
   });
 
   it("rejects running rows and incomplete report rows", () => {
@@ -265,5 +313,185 @@ describe("report and error contracts", () => {
       error: { code: "session_already_running", message: "Stop the active session first." },
     });
     expect(() => apiErrorSchema.parse({ error: { code: "unrecognized", message: "Nope" } })).toThrow();
+  });
+});
+
+
+describe("activity segment contracts", () => {
+  const segment = {
+    clientId: ids.client,
+    deviceId: "3f6f0dbb-9a3b-4d62-9b70-5f87a9c6c6f0",
+    kind: "active",
+    processName: "Code.exe",
+    startedAt,
+    endedAt: stoppedAt,
+  };
+
+  it("covers every supported activity segment kind", () => {
+    expect(activitySegmentKindValues).toEqual(["active", "idle", "locked", "suspended"]);
+  });
+
+  it("accepts a bounded batch of client-stamped segments", () => {
+    expect(activitySegmentUploadSchema.parse(segment)).toEqual(segment);
+    expect(activitySegmentUploadSchema.parse({ ...segment, processName: undefined })).toEqual({ ...segment, processName: undefined });
+    const { processName: _dropped, ...withoutProcess } = segment;
+    expect(activitySegmentUploadSchema.parse(withoutProcess)).toEqual(withoutProcess);
+    expect(
+      activitySegmentBatchRequestSchema.parse({ segments: [segment, { ...segment, kind: "idle", processName: undefined }] })
+        .segments,
+    ).toHaveLength(2);
+  });
+
+  it("rejects malformed segments and out-of-bounds batches", () => {
+    expect(() => activitySegmentUploadSchema.parse({ ...segment, kind: "working" })).toThrow();
+    expect(() => activitySegmentUploadSchema.parse({ ...segment, processName: "x".repeat(201) })).toThrow();
+    expect(() => activitySegmentUploadSchema.parse({ ...segment, clientId: "not-a-uuid" })).toThrow();
+    expect(() => activitySegmentUploadSchema.parse({ ...segment, startedAt: "yesterday" })).toThrow();
+    expect(() => activitySegmentUploadSchema.parse({ ...segment, windowTitle: "leaked" })).toThrow();
+    expect(() => activitySegmentBatchRequestSchema.parse({ segments: [] })).toThrow();
+    expect(() => activitySegmentBatchRequestSchema.parse({ segments: Array.from({ length: 501 }, () => segment) })).toThrow();
+    expect(() => activitySegmentBatchRequestSchema.parse({ segments: [segment], deviceId: ids.client })).toThrow();
+  });
+
+  it("accepts a per-row accepted/rejected batch response", () => {
+    expect(
+      activitySegmentBatchResponseSchema.parse({
+        accepted: 1,
+        rejected: [{ clientId: ids.client, reason: "Segment ends before it starts." }],
+      }),
+    ).toEqual({ accepted: 1, rejected: [{ clientId: ids.client, reason: "Segment ends before it starts." }] });
+    expect(() => activitySegmentBatchResponseSchema.parse({ accepted: -1, rejected: [] })).toThrow();
+    expect(() => activitySegmentBatchResponseSchema.parse({ accepted: 0, rejected: [{ clientId: "nope", reason: "x" }] })).toThrow();
+    expect(() => activitySegmentBatchResponseSchema.parse({ accepted: 0, rejected: [{ clientId: ids.client }] })).toThrow();
+  });
+});
+
+describe("agent session contracts", () => {
+  const event = {
+    source: "kimi_code",
+    externalSessionId: "session-42",
+    event: "started",
+    occurredAt: startedAt,
+    cwd: "C:/dev/Clock-In",
+  };
+
+  it("covers every supported agent source and event kind", () => {
+    expect(agentSourceValues).toEqual(["claude_code", "codex", "kimi_code", "other"]);
+    expect(agentEventKindValues).toEqual(["started", "ended", "heartbeat"]);
+  });
+
+  it("accepts a bounded batch of agent session events", () => {
+    expect(agentSessionEventSchema.parse(event)).toEqual(event);
+    expect(
+      agentSessionEventBatchRequestSchema.parse({ events: [event, { ...event, event: "ended", occurredAt: stoppedAt }] }).events,
+    ).toHaveLength(2);
+  });
+
+  it("rejects malformed events and out-of-bounds batches", () => {
+    expect(() => agentSessionEventSchema.parse({ ...event, source: "claude-code" })).toThrow();
+    expect(() => agentSessionEventSchema.parse({ ...event, event: "resumed" })).toThrow();
+    expect(() => agentSessionEventSchema.parse({ ...event, externalSessionId: "" })).toThrow();
+    expect(() => agentSessionEventSchema.parse({ ...event, externalSessionId: "x".repeat(201) })).toThrow();
+    expect(() => agentSessionEventSchema.parse({ ...event, cwd: "" })).toThrow();
+    expect(() => agentSessionEventSchema.parse({ ...event, cwd: "x".repeat(1_001) })).toThrow();
+    expect(() => agentSessionEventSchema.parse({ ...event, occurredAt: "2026-08-06" })).toThrow();
+    expect(() => agentSessionEventSchema.parse({ ...event, transcript: "leaked" })).toThrow();
+    expect(() => agentSessionEventBatchRequestSchema.parse({ events: [] })).toThrow();
+    expect(() => agentSessionEventBatchRequestSchema.parse({ events: Array.from({ length: 501 }, () => event) })).toThrow();
+  });
+
+  it("accepts a per-event accepted/rejected batch response", () => {
+    expect(
+      agentSessionEventBatchResponseSchema.parse({
+        results: [
+          { externalSessionId: "session-42", accepted: true },
+          { externalSessionId: "session-43", accepted: false, reason: "Event timestamp is too far in the future." },
+        ],
+      }),
+    ).toEqual({
+      results: [
+        { externalSessionId: "session-42", accepted: true },
+        { externalSessionId: "session-43", accepted: false, reason: "Event timestamp is too far in the future." },
+      ],
+    });
+    expect(() => agentSessionEventBatchResponseSchema.parse({ results: [{ externalSessionId: "s", accepted: "yes" }] })).toThrow();
+    expect(() => agentSessionEventBatchResponseSchema.parse({ results: [{ externalSessionId: "", accepted: true }] })).toThrow();
+  });
+});
+
+describe("path mapping contracts", () => {
+  const mapping = {
+    id: ids.session,
+    pathPrefix: "C:/dev/Clock-In",
+    repoUrl: "https://github.com/siqstack/clock-in.git",
+    projectId: ids.project,
+  };
+
+  it("accepts a mapping with an optional repository URL", () => {
+    expect(projectPathMappingSchema.parse(mapping)).toEqual(mapping);
+    expect(projectPathMappingSchema.parse({ ...mapping, repoUrl: null })).toEqual({ ...mapping, repoUrl: null });
+    const { repoUrl: _dropped, ...withoutRepo } = mapping;
+    expect(projectPathMappingSchema.parse(withoutRepo)).toEqual(withoutRepo);
+  });
+
+  it("rejects malformed mappings and unknown fields", () => {
+    expect(() => projectPathMappingSchema.parse({ ...mapping, pathPrefix: "" })).toThrow();
+    expect(() => projectPathMappingSchema.parse({ ...mapping, pathPrefix: "x".repeat(501) })).toThrow();
+    expect(() => projectPathMappingSchema.parse({ ...mapping, projectId: "not-a-uuid" })).toThrow();
+    expect(() => projectPathMappingSchema.parse({ ...mapping, branch: "main" })).toThrow();
+  });
+
+  it("accepts create and update requests without a server-assigned id", () => {
+    const { id: _dropped, ...createRequest } = mapping;
+    expect(pathMappingCreateRequestSchema.parse(createRequest)).toEqual(createRequest);
+    expect(() => pathMappingCreateRequestSchema.parse(mapping)).toThrow();
+    expect(() => pathMappingCreateRequestSchema.parse({ pathPrefix: mapping.pathPrefix })).toThrow();
+
+    expect(pathMappingUpdateRequestSchema.parse({})).toEqual({});
+    expect(pathMappingUpdateRequestSchema.parse({ pathPrefix: "D:/work", repoUrl: null })).toEqual({ pathPrefix: "D:/work", repoUrl: null });
+    expect(() => pathMappingUpdateRequestSchema.parse({ id: ids.session })).toThrow();
+    expect(() => pathMappingUpdateRequestSchema.parse({ pathPrefix: "" })).toThrow();
+  });
+
+  it("accepts a list response of mappings", () => {
+    expect(pathMappingListResponseSchema.parse({ mappings: [mapping] })).toEqual({ mappings: [mapping] });
+    expect(pathMappingListResponseSchema.parse({ mappings: [] })).toEqual({ mappings: [] });
+    expect(() => pathMappingListResponseSchema.parse({ mappings: [mapping], total: 1 })).toThrow();
+  });
+});
+
+describe("personal stats contracts", () => {
+  const stats = {
+    filters: { from: "2026-08-01", to: "2026-08-06" },
+    totalDurationSeconds: 7_200,
+    corroboratedSeconds: 5_400,
+    projects: [
+      {
+        project: { id: ids.project, name: "Website redesign" },
+        durationSeconds: 7_200,
+        corroboratedSeconds: 5_400,
+        sessionCount: 2,
+      },
+    ],
+  };
+
+  it("accepts a per-project corroborated/uncorroborated split", () => {
+    expect(meStatsResponseSchema.parse(stats)).toEqual(stats);
+    expect(meStatsResponseSchema.parse({ ...stats, filters: {}, projects: [] })).toEqual({ ...stats, filters: {}, projects: [] });
+  });
+
+  it("rejects unsafe or negative counters and unknown fields", () => {
+    expect(() => meStatsResponseSchema.parse({ ...stats, corroboratedSeconds: -1 })).toThrow();
+    expect(() => meStatsResponseSchema.parse({ ...stats, totalDurationSeconds: 1.5 })).toThrow();
+    expect(() => meStatsResponseSchema.parse({ ...stats, totalDurationSeconds: Number.MAX_SAFE_INTEGER + 1 })).toThrow();
+    expect(() => meStatsResponseSchema.parse({ ...stats, filters: { from: "2026-99-99" } })).toThrow();
+    expect(() => meStatsResponseSchema.parse({
+      ...stats,
+      projects: [{ ...stats.projects[0], corroboratedSeconds: undefined }],
+    })).toThrow();
+    expect(() => meStatsResponseSchema.parse({
+      ...stats,
+      projects: [{ ...stats.projects[0], project: { ...stats.projects[0]!.project, color: "#2563eb" } }],
+    })).toThrow();
   });
 });

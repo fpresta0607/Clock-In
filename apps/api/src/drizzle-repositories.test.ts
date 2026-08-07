@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { DatabaseConnection } from "@clock-in/database";
 
-import { DrizzleReportRepository, DrizzleSessionRepository } from "./drizzle-repositories.js";
+import { DrizzlePathMappingRepository, DrizzleReportRepository, DrizzleSessionRepository } from "./drizzle-repositories.js";
 
 const input = {
   organizationId: "0e59dfd6-3d1f-4795-9420-3ab65f0df843",
@@ -55,5 +55,22 @@ describe("Drizzle report repository", () => {
     await expect(repository.readPageForOrganization(subject, {}, { limit: 50, offset: 0 })).resolves.toMatchObject({ summary: { totalRows: 0 }, rows: [] });
     await expect(repository.readExportForOrganization(subject, {}, 10_000)).resolves.toMatchObject({ summary: { totalRows: 0 }, rows: [] });
     expect(transactionSelects).toBe(4);
+  });
+});
+
+describe("Drizzle path-mapping repository", () => {
+  it("maps the duplicate-prefix unique constraint to a stable repository conflict", async () => {
+    const db = {
+      insert: () => ({ values: () => ({ returning: async () => { throw { code: "23505", constraint_name: "project_path_mappings_organization_user_prefix_unique" }; } }) }),
+    } as unknown as DatabaseConnection["db"];
+    const repository = new DrizzlePathMappingRepository(db);
+
+    await expect(repository.create({
+      organizationId: input.organizationId,
+      userId: input.userId,
+      pathPrefix: "C:/dev/clock-in",
+      repoUrl: null,
+      projectId: input.projectId,
+    })).rejects.toMatchObject({ conflict: "path_prefix" });
   });
 });

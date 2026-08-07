@@ -64,6 +64,7 @@ export const leaderboardEntrySchema = z
     user: z.object({ id: idSchema, name: z.string().min(1) }).strict(),
     durationSeconds: z.number().int().nonnegative().safe(),
     sessionCount: z.number().int().nonnegative().safe(),
+    corroboratedSeconds: z.number().int().nonnegative().safe(),
   })
   .strict();
 
@@ -166,6 +167,7 @@ export const reportRowSchema = z
     stoppedAt: timestampSchema,
     idleSeconds: z.number().int().nonnegative().safe(),
     durationSeconds: z.number().int().nonnegative().safe(),
+    corroboratedSeconds: z.number().int().nonnegative().safe(),
   })
   .strict();
 
@@ -180,6 +182,123 @@ export const reportResponseSchema = z
       totalPages: z.number().int().nonnegative().safe(),
     }).strict(),
     rows: z.array(reportRowSchema),
+  })
+  .strict();
+
+export const activitySegmentKindValues = ["active", "idle", "locked", "suspended"] as const;
+export const activitySegmentKindSchema = z.enum(activitySegmentKindValues);
+
+/** One coarse OS-activity span uploaded by the desktop monitor; `clientId` makes replays idempotent. */
+export const activitySegmentUploadSchema = z
+  .object({
+    clientId: idSchema,
+    deviceId: idSchema,
+    kind: activitySegmentKindSchema,
+    processName: z.string().max(200).optional(),
+    startedAt: timestampSchema,
+    endedAt: timestampSchema,
+  })
+  .strict();
+
+export const activitySegmentBatchRequestSchema = z
+  .object({
+    segments: z.array(activitySegmentUploadSchema).min(1).max(500),
+  })
+  .strict();
+
+export const activitySegmentBatchResponseSchema = z
+  .object({
+    accepted: z.number().int().nonnegative(),
+    rejected: z.array(z.object({ clientId: idSchema, reason: z.string().min(1) }).strict()),
+  })
+  .strict();
+
+export const agentSourceValues = ["claude_code", "codex", "kimi_code", "other"] as const;
+export const agentSourceSchema = z.enum(agentSourceValues);
+
+export const agentEventKindValues = ["started", "ended", "heartbeat"] as const;
+export const agentEventKindSchema = z.enum(agentEventKindValues);
+
+/** One lifecycle event drained from the agent-hook spool; keyed server-side by (source, externalSessionId). */
+export const agentSessionEventSchema = z
+  .object({
+    source: agentSourceSchema,
+    externalSessionId: z.string().min(1).max(200),
+    event: agentEventKindSchema,
+    occurredAt: timestampSchema,
+    cwd: z.string().min(1).max(1_000),
+  })
+  .strict();
+
+export const agentSessionEventBatchRequestSchema = z
+  .object({
+    events: z.array(agentSessionEventSchema).min(1).max(500),
+  })
+  .strict();
+
+export const agentSessionEventBatchResponseSchema = z
+  .object({
+    results: z.array(z
+      .object({
+        externalSessionId: z.string().min(1).max(200),
+        accepted: z.boolean(),
+        reason: z.string().min(1).optional(),
+      })
+      .strict()),
+  })
+  .strict();
+
+export const projectPathMappingSchema = z
+  .object({
+    id: idSchema,
+    pathPrefix: z.string().min(1).max(500),
+    repoUrl: z.string().nullable().optional(),
+    projectId: idSchema,
+  })
+  .strict();
+
+export const pathMappingCreateRequestSchema = z
+  .object({
+    pathPrefix: z.string().min(1).max(500),
+    repoUrl: z.string().nullable().optional(),
+    projectId: idSchema,
+  })
+  .strict();
+
+export const pathMappingUpdateRequestSchema = z
+  .object({
+    pathPrefix: z.string().min(1).max(500).optional(),
+    repoUrl: z.string().nullable().optional(),
+    projectId: idSchema.optional(),
+  })
+  .strict();
+
+export const pathMappingListResponseSchema = z
+  .object({ mappings: z.array(projectPathMappingSchema) })
+  .strict();
+
+export const meStatsFiltersSchema = z
+  .object({
+    from: dateSchema.optional(),
+    to: dateSchema.optional(),
+  })
+  .strict();
+
+export const meStatsProjectSchema = z
+  .object({
+    project: z.object({ id: idSchema, name: z.string().min(1) }).strict(),
+    durationSeconds: z.number().int().nonnegative().safe(),
+    corroboratedSeconds: z.number().int().nonnegative().safe(),
+    sessionCount: z.number().int().nonnegative().safe(),
+  })
+  .strict();
+
+export const meStatsResponseSchema = z
+  .object({
+    filters: meStatsFiltersSchema,
+    totalDurationSeconds: z.number().int().nonnegative().safe(),
+    corroboratedSeconds: z.number().int().nonnegative().safe(),
+    projects: z.array(meStatsProjectSchema),
   })
   .strict();
 
@@ -210,6 +329,15 @@ export const apiErrorSchema = z
   })
   .strict();
 
+export type ActivitySegmentBatchRequest = z.infer<typeof activitySegmentBatchRequestSchema>;
+export type ActivitySegmentBatchResponse = z.infer<typeof activitySegmentBatchResponseSchema>;
+export type ActivitySegmentKind = z.infer<typeof activitySegmentKindSchema>;
+export type ActivitySegmentUpload = z.infer<typeof activitySegmentUploadSchema>;
+export type AgentEventKind = z.infer<typeof agentEventKindSchema>;
+export type AgentSessionEvent = z.infer<typeof agentSessionEventSchema>;
+export type AgentSessionEventBatchRequest = z.infer<typeof agentSessionEventBatchRequestSchema>;
+export type AgentSessionEventBatchResponse = z.infer<typeof agentSessionEventBatchResponseSchema>;
+export type AgentSource = z.infer<typeof agentSourceSchema>;
 export type ApiError = z.infer<typeof apiErrorSchema>;
 export type ApiErrorCode = z.infer<typeof apiErrorCodeSchema>;
 export type CurrentSessionResponse = z.infer<typeof currentSessionResponseSchema>;
@@ -218,11 +346,18 @@ export type LeaderboardEntry = z.infer<typeof leaderboardEntrySchema>;
 export type LeaderboardFilters = z.infer<typeof leaderboardFiltersSchema>;
 export type LeaderboardResponse = z.infer<typeof leaderboardResponseSchema>;
 export type MeResponse = z.infer<typeof meResponseSchema>;
+export type MeStatsFilters = z.infer<typeof meStatsFiltersSchema>;
+export type MeStatsProject = z.infer<typeof meStatsProjectSchema>;
+export type MeStatsResponse = z.infer<typeof meStatsResponseSchema>;
 export type Organization = z.infer<typeof organizationSchema>;
 export type OrganizationResponse = z.infer<typeof organizationResponseSchema>;
-export type ProvisionAccountRequest = z.infer<typeof provisionAccountRequestSchema>;
+export type PathMappingCreateRequest = z.infer<typeof pathMappingCreateRequestSchema>;
+export type PathMappingListResponse = z.infer<typeof pathMappingListResponseSchema>;
+export type PathMappingUpdateRequest = z.infer<typeof pathMappingUpdateRequestSchema>;
 export type ProjectListItem = z.infer<typeof projectListItemSchema>;
 export type ProjectListResponse = z.infer<typeof projectListResponseSchema>;
+export type ProjectPathMapping = z.infer<typeof projectPathMappingSchema>;
+export type ProvisionAccountRequest = z.infer<typeof provisionAccountRequestSchema>;
 export type ReportFilters = z.infer<typeof reportFiltersSchema>;
 export type ReportRow = z.infer<typeof reportRowSchema>;
 export type ReportResponse = z.infer<typeof reportResponseSchema>;
