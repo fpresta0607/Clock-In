@@ -42,6 +42,7 @@ function createTestApp(options: { bodyLimitBytes?: number; accounts?: AccountSto
       resolved.push(identity.authUserId);
       return account;
     },
+    findOrganization: async (id) => ({ id, name: "SIQstack", inviteCode: "ACDEF-GHJKM" }),
   };
   const app = createApp({
     config,
@@ -141,5 +142,90 @@ describe("API composition", () => {
 
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toEqual({ error: { code: "not_found", message: "Route not found." } });
+  });
+
+  it("provisions a new account with a typed invite code, however it was typed", async () => {
+    const seen: (string | undefined)[] = [];
+    const { app } = createTestApp({
+      accounts: {
+        resolve: async (_identity, inviteCode) => { seen.push(inviteCode); return account; },
+        findOrganization: async (id) => ({ id, name: "SIQstack", inviteCode: "ACDEF-GHJKM" }),
+      },
+    });
+    const authorization = await bearer();
+    const post = (body: unknown) => app.request("http://api.test/accounts", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify(body),
+    });
+
+    expect((await post({ inviteCode: "acdefghjkm" })).status).toBe(200);
+    expect((await post({ inviteCode: "  ACDEF-GHJKM " })).status).toBe(200);
+    expect((await post({})).status).toBe(200);
+
+    // Every spelling normalizes to the same stored code; no code stays undefined.
+    expect(seen).toEqual(["ACDEF-GHJKM", "ACDEF-GHJKM", undefined]);
+  });
+
+  it("rejects an invite code that could not be one", async () => {
+    const { app } = createTestApp();
+
+    const response = await app.request("http://api.test/accounts", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: await bearer() },
+      body: JSON.stringify({ inviteCode: "nope" }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "validation_error" } });
+  });
+
+  it("does not create a personal organization while a coded sign-up is in flight", async () => {
+    const codes: (string | undefined)[] = [];
+    const { app } = createTestApp({
+      accounts: {
+        resolve: async (_identity, inviteCode) => { codes.push(inviteCode); return account; },
+        findOrganization: async (id) => ({ id, name: "SIQstack", inviteCode: "ACDEF-GHJKM" }),
+      },
+    });
+
+    await app.request("http://api.test/accounts", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: await bearer() },
+      body: JSON.stringify({ inviteCode: "ACDEF-GHJKM" }),
+    });
+
+    // Exactly one resolve, carrying the code. A second, code-less resolve from
+    // the standard middleware would have already made a personal workspace.
+    expect(codes).toEqual(["ACDEF-GHJKM"]);
+  });
+
+  it("requires a bearer token to provision an account", async () => {
+    const { app } = createTestApp();
+
+    const response = await app.request("http://api.test/accounts", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    expect(response.status).toBe(401);
+  });
+
+  it("returns the organization with the invite code a member can share", async () => {
+    const { app } = createTestApp();
+
+    const response = await app.request("http://api.test/organization", { headers: { authorization: await bearer() } });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      organization: { id: ids.organization, name: "SIQstack", inviteCode: "ACDEF-GHJKM" },
+    });
+  });
+
+  it("does not expose an invite code without authentication", async () => {
+    const { app } = createTestApp();
+
+    expect((await app.request("http://api.test/organization")).status).toBe(401);
   });
 });

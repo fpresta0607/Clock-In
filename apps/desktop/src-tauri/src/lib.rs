@@ -17,7 +17,10 @@ use tauri::{
 };
 use tokio::sync::Mutex;
 
-use api::{ApiClient, ApiResult, BridgeError, ErrorKind, TimerProject, TimerUser};
+use api::{
+    ApiClient, ApiResult, BridgeError, ErrorKind, LeaderboardEntry, Organization, TimerProject,
+    TimerUser,
+};
 use recovery::{reconcile, PendingStop, Reconciliation, RecoveryState, RunningTimer, StartIntent};
 
 const KEYRING_SERVICE: &str = "clock-in";
@@ -195,6 +198,8 @@ pub struct SignupInput {
     email: String,
     password: String,
     name: String,
+    #[serde(default)]
+    invite_code: Option<String>,
 }
 
 #[tauri::command]
@@ -206,8 +211,37 @@ async fn auth_signup(state: State<'_, AppState>, input: SignupInput) -> ApiResul
     state.store_session_token(&session)?;
     state.write_recovery(RecoveryState::default()).await?;
     let access_token = state.client.fetch_access_token(&session).await?;
-    // The first authenticated call provisions the organization and starter project.
+
+    // Provision explicitly and first: any other authenticated call would create a
+    // personal workspace before the invite code could be applied.
+    let code = input
+        .invite_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|code| !code.is_empty());
+    state.client.provision_account(&access_token, code).await?;
+
     state.snapshot(&access_token).await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OrganizationOverview {
+    organization: Organization,
+    entries: Vec<LeaderboardEntry>,
+}
+
+#[tauri::command]
+async fn org_overview(state: State<'_, AppState>) -> ApiResult<OrganizationOverview> {
+    let access_token = state.access_token().await?;
+    let (organization, entries) = tokio::try_join!(
+        state.client.organization(&access_token),
+        state.client.leaderboard(&access_token)
+    )?;
+    Ok(OrganizationOverview {
+        organization,
+        entries,
+    })
 }
 
 #[tauri::command]
@@ -365,6 +399,7 @@ pub fn run() {
             auth_login,
             auth_signup,
             auth_logout,
+            org_overview,
             timer_start,
             timer_stop,
             timer_retry_pending,

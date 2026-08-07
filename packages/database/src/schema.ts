@@ -21,11 +21,18 @@ const auditColumns = {
   updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),
 };
 
-export const organizations = pgTable("organizations", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  name: text("name").notNull(),
-  ...auditColumns,
-});
+export const organizations = pgTable(
+  "organizations",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    name: text("name").notNull(),
+    // A standing code that lets a new account join this organization instead of
+    // getting its own. Rotating it is an update, which is how a leaked code is revoked.
+    inviteCode: text("invite_code").notNull(),
+    ...auditColumns,
+  },
+  (table) => [unique("organizations_invite_code_unique").on(table.inviteCode)],
+);
 
 // id mirrors neon_auth."user".id. No foreign key: neon_auth is Neon-managed and
 // may be recreated, so the link is enforced by verified JWT claims instead.

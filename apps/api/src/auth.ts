@@ -25,10 +25,18 @@ export interface AuthIdentity {
 
 export interface AccountStore {
   /**
-   * Returns the Clock-In account for a Neon Auth identity, creating the
-   * organization, user, and starter project on first sign-in.
+   * Returns the Clock-In account for a Neon Auth identity. On first sign-in it
+   * either joins the organization the invite code names, or creates a personal
+   * one with a starter project. The code is ignored for an existing account.
    */
-  resolve(identity: AuthIdentity): Promise<AuthenticatedUser>;
+  resolve(identity: AuthIdentity, inviteCode?: string): Promise<AuthenticatedUser>;
+  findOrganization(organizationId: string): Promise<OrganizationRecord | null>;
+}
+
+export interface OrganizationRecord {
+  id: string;
+  name: string;
+  inviteCode: string;
 }
 
 const claimsSchema = z.object({

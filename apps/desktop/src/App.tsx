@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 
-import { bridgeError, defaultBridge, type TimerBridge } from "./bridge.js";
+import { bridgeError, defaultBridge, type OrganizationOverview, type TimerBridge } from "./bridge.js";
 import { formatDuration } from "@clock-in/shared";
 import { initialTimerState, timerReducer, type BootstrapSnapshot, type StartIntent } from "./timer-machine.js";
 
@@ -16,7 +16,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
   const [authMode, setAuthMode] = useState<"sign-in" | "sign-up">("sign-in");
+  const [overview, setOverview] = useState<OrganizationOverview | undefined>();
+  const [overviewError, setOverviewError] = useState<string | undefined>();
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | undefined>();
   const [accountError, setAccountError] = useState<string | undefined>();
@@ -53,6 +56,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setDescription("");
     setPassword("");
     setName("");
+    setInviteCode("");
+    setOverview(undefined);
+    setOverviewError(undefined);
     if (clearEmail) setEmail("");
   };
 
@@ -177,6 +183,32 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     return () => window.clearInterval(timer);
   }, [state.kind]);
 
+  // The board is worth refreshing whenever a timer stops, so a finished session
+  // shows up without the user reopening the app.
+  useEffect(() => {
+    if (state.kind === "booting" || state.kind === "sign-in") return undefined;
+    let active = true;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    void service.orgOverview().then(
+      (result) => {
+        if (active && isCurrent(service, generation, epoch)) {
+          setOverview(result);
+          setOverviewError(undefined);
+        }
+      },
+      (error: unknown) => {
+        if (!active || !isCurrent(service, generation, epoch)) return;
+        const problem = bridgeError(error);
+        // An expired session is handled by whatever the user does next; the board
+        // going stale is not worth throwing them back to sign-in over.
+        if (problem.kind !== "auth") setOverviewError(problem.message);
+      },
+    );
+    return () => { active = false; };
+  }, [bridge, state.kind === "idle", state.kind === "sign-in"]);
+
   const submitAuth = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     setAuthBusy(true);
@@ -188,12 +220,18 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     let snapshotEpoch: number | undefined;
     try {
       const snapshot = authMode === "sign-up"
-        ? await service.signup({ email, password, name: name.trim() })
+        ? await service.signup({
+            email,
+            password,
+            name: name.trim(),
+            ...(inviteCode.trim() === "" ? {} : { inviteCode: inviteCode.trim() }),
+          })
         : await service.login({ email, password });
       snapshotEpoch = await applySnapshot(snapshot, service, () => isCurrent(service, generation), requestEpoch, true);
       if (snapshotEpoch !== undefined && isCurrent(service, generation, snapshotEpoch)) {
         setPassword("");
         setName("");
+        setInviteCode("");
       }
     } catch (error: unknown) {
       if (isRequestCurrent()) setAuthError(bridgeError(error).message);
@@ -327,6 +365,19 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             {isSignUp && <label>Name<input value={name} onChange={(event) => setName(event.target.value)} type="text" autoComplete="name" required /></label>}
             <label>Email<input value={email} onChange={(event) => setEmail(event.target.value)} type="email" autoComplete="email" required /></label>
             <label>Password<input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete={isSignUp ? "new-password" : "current-password"} minLength={isSignUp ? 8 : undefined} required /></label>
+            {isSignUp && (
+              <label>
+                Invite code <span className="optional">optional</span>
+                <input
+                  value={inviteCode}
+                  onChange={(event) => setInviteCode(event.target.value)}
+                  type="text"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="Join a team, or leave blank"
+                />
+              </label>
+            )}
             <button className="signal-button" type="submit" disabled={authBusy}>
               {authBusy ? (isSignUp ? "Creating account…" : "Signing in…") : (isSignUp ? "Create account" : "Sign in")}
             </button>
@@ -385,6 +436,34 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           <label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Select active project</option>{account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
           <label>Description<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={1000} rows={3} placeholder="What are you working on?" /></label>
           <div className="entry-foot"><span>{description.length}/1000</span><button className="signal-button" type="button" disabled={state.kind === "starting" || state.kind === "pending-sync" || !hasSelectedProject} onClick={() => void startTimer()}>{state.kind === "starting" ? "Starting…" : "Start timer"}</button></div>
+        </section>
+      )}
+
+      {overview && (
+        <section className="board-panel" aria-labelledby="board-title">
+          <div className="board-head">
+            <h2 id="board-title">{overview.organization.name}</h2>
+            <span className="invite-code" title="Share this code so teammates join this workspace">
+              {overview.organization.inviteCode}
+            </span>
+          </div>
+          {overviewError && <p className="form-error" role="alert">{overviewError}</p>}
+          {overview.entries.length === 0 ? (
+            <p className="subtle">No recorded time yet. Stop a timer to appear here.</p>
+          ) : (
+            <ol className="board-list">
+              {overview.entries.slice(0, 5).map((entry) => (
+                <li key={entry.user.id} className={entry.user.id === account.user.id ? "is-you" : undefined}>
+                  <span className="board-rank">{entry.rank}</span>
+                  <span className="board-name">
+                    {entry.user.name}
+                    {entry.user.id === account.user.id && <span className="you-tag"> you</span>}
+                  </span>
+                  <span className="board-hours">{formatDuration(entry.durationSeconds)}</span>
+                </li>
+              ))}
+            </ol>
+          )}
         </section>
       )}
     </main>

@@ -66,6 +66,13 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   retryPending: vi.fn().mockResolvedValue({ remaining: 0 }),
   useServerTimer: vi.fn().mockResolvedValue({ kind: "running", user, projects: [project], running, source: "server-only" }),
   retryLocalStart: vi.fn().mockResolvedValue({ kind: "running", user, projects: [project], running, source: "local-server-match" }),
+  orgOverview: vi.fn().mockResolvedValue({
+    organization: { id: "00000000-0000-4000-8000-000000000900", name: "SIQstack", inviteCode: "ACDEF-GHJKM" },
+    entries: [
+      { rank: 1, user: { id: "b1c7e513-b094-4d4c-ae55-21790ae019a4", name: "Sam" }, durationSeconds: 7_200, sessionCount: 3 },
+      { rank: 2, user: { id: user.id, name: user.name }, durationSeconds: 3_600, sessionCount: 1 },
+    ],
+  }),
   ...overrides,
 });
 
@@ -538,5 +545,92 @@ describe("App", () => {
     expect(screen.getByLabelText("Password")).toHaveValue("");
     expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+  });
+
+  it("shows the team leaderboard with the signed-in member marked", async () => {
+    render(<App bridge={bridgeFor()} />);
+
+    expect(await screen.findByRole("heading", { name: "SIQstack" })).toBeInTheDocument();
+    const rows = await screen.findAllByRole("listitem");
+    expect(rows[0]).toHaveTextContent("Sam");
+    expect(rows[0]).toHaveTextContent("02:00:00");
+    expect(rows[1]).toHaveTextContent(user.name);
+    expect(rows[1]).toHaveTextContent("you");
+  });
+
+  it("shows the invite code a teammate needs to join", async () => {
+    render(<App bridge={bridgeFor()} />);
+
+    expect(await screen.findByText("ACDEF-GHJKM")).toBeInTheDocument();
+  });
+
+  it("shows at most five members so the window stays compact", async () => {
+    const entries = Array.from({ length: 9 }, (_, index) => ({
+      rank: index + 1,
+      user: { id: `00000000-0000-4000-8000-00000000090${index}`, name: `Member ${index}` },
+      durationSeconds: 9_000 - index * 100,
+      sessionCount: 1,
+    }));
+    const bridge = bridgeFor({
+      orgOverview: vi.fn().mockResolvedValue({
+        organization: { id: "00000000-0000-4000-8000-000000000900", name: "SIQstack", inviteCode: "ACDEF-GHJKM" },
+        entries,
+      }),
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByRole("heading", { name: "SIQstack" });
+    expect(screen.getAllByRole("listitem")).toHaveLength(5);
+  });
+
+  it("invites a teammate into an existing workspace at sign-up", async () => {
+    const signup = vi.fn().mockResolvedValue({ kind: "idle", user, projects: [project] });
+    const bridge = bridgeFor({ bootstrap: vi.fn().mockResolvedValue({ kind: "signed-out" }), signup });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "New here? Create an account" }));
+    await person.type(screen.getByLabelText(/Name/), "Alex Morgan");
+    await person.type(screen.getByLabelText("Email"), user.email);
+    await person.type(screen.getByLabelText("Password"), "long-enough-password");
+    await person.type(screen.getByLabelText(/Invite code/), "  acdef-ghjkm ");
+    await person.click(screen.getByRole("button", { name: "Create account" }));
+
+    await waitFor(() => expect(signup).toHaveBeenCalledWith({
+      email: user.email,
+      password: "long-enough-password",
+      name: "Alex Morgan",
+      inviteCode: "acdef-ghjkm",
+    }));
+  });
+
+  it("omits the invite code entirely when none is typed", async () => {
+    const signup = vi.fn().mockResolvedValue({ kind: "idle", user, projects: [project] });
+    const bridge = bridgeFor({ bootstrap: vi.fn().mockResolvedValue({ kind: "signed-out" }), signup });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "New here? Create an account" }));
+    await person.type(screen.getByLabelText(/Name/), "Alex Morgan");
+    await person.type(screen.getByLabelText("Email"), user.email);
+    await person.type(screen.getByLabelText("Password"), "long-enough-password");
+    await person.type(screen.getByLabelText(/Invite code/), "   ");
+    await person.click(screen.getByRole("button", { name: "Create account" }));
+
+    await waitFor(() => expect(signup).toHaveBeenCalledWith({
+      email: user.email,
+      password: "long-enough-password",
+      name: "Alex Morgan",
+    }));
+  });
+
+  it("keeps the timer usable when the leaderboard cannot be read", async () => {
+    const bridge = bridgeFor({
+      orgOverview: vi.fn().mockRejectedValue({ kind: "transient", message: "Board unavailable" }),
+    });
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByRole("heading", { name: "Start a timer" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "SIQstack" })).not.toBeInTheDocument();
   });
 });

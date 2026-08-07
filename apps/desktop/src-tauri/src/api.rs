@@ -126,6 +126,40 @@ struct MeUser {
     name: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Organization {
+    pub id: String,
+    pub name: String,
+    pub invite_code: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaderboardEntry {
+    pub rank: u32,
+    pub user: LeaderboardMember,
+    pub duration_seconds: u64,
+    pub session_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaderboardMember {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+struct OrganizationResponse {
+    organization: Organization,
+}
+
+#[derive(Deserialize)]
+struct LeaderboardResponse {
+    entries: Vec<LeaderboardEntry>,
+}
+
 #[derive(Deserialize)]
 struct ProjectListResponse {
     projects: Vec<ProjectListItem>,
@@ -291,6 +325,53 @@ impl ApiClient {
             .await
             .map_err(|_| BridgeError::unknown("The access token could not be read."))?;
         Ok(body.token)
+    }
+
+    /// Sent once after sign-up. An invite code places the account in an existing
+    /// organization; without one the API creates a personal workspace.
+    pub async fn provision_account(
+        &self,
+        access_token: &str,
+        invite_code: Option<&str>,
+    ) -> ApiResult<TimerUser> {
+        let response = self
+            .http
+            .post(format!("{}/accounts", self.api_base_url))
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({ "inviteCode": invite_code }))
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+
+        if !response.status().is_success() {
+            return Err(match response.status().as_u16() {
+                404 => BridgeError::new(
+                    ErrorKind::Validation,
+                    "That invite code does not match a workspace. Check it and try again.",
+                ),
+                status => classify(status),
+            });
+        }
+
+        let body: MeResponse = response
+            .json()
+            .await
+            .map_err(|_| BridgeError::unknown("The account response could not be read."))?;
+        Ok(TimerUser {
+            id: body.user.id,
+            email: body.user.email,
+            name: body.user.name,
+        })
+    }
+
+    pub async fn organization(&self, access_token: &str) -> ApiResult<Organization> {
+        let body: OrganizationResponse = self.get_json(access_token, "/organization").await?;
+        Ok(body.organization)
+    }
+
+    pub async fn leaderboard(&self, access_token: &str) -> ApiResult<Vec<LeaderboardEntry>> {
+        let body: LeaderboardResponse = self.get_json(access_token, "/reports/leaderboard").await?;
+        Ok(body.entries)
     }
 
     pub async fn me(&self, access_token: &str) -> ApiResult<TimerUser> {

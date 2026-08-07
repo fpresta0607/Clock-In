@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { inviteCodePattern } from "./invite-code.js";
+
 const idSchema = z.string().uuid();
 const timestampSchema = z.string().datetime({ offset: true });
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
@@ -24,6 +26,45 @@ export const userSchema = z
   .strict();
 
 export const meResponseSchema = z.object({ user: userSchema }).strict();
+
+export const organizationSchema = z
+  .object({
+    id: idSchema,
+    name: z.string().min(1),
+    inviteCode: z.string().regex(inviteCodePattern),
+  })
+  .strict();
+
+export const organizationResponseSchema = z.object({ organization: organizationSchema }).strict();
+
+/** Sent once, right after sign-up, to place the new account in an existing organization. */
+export const provisionAccountRequestSchema = z
+  .object({ inviteCode: z.string().min(1).optional() })
+  .strict();
+
+export const leaderboardFiltersSchema = z
+  .object({
+    from: dateSchema.optional(),
+    to: dateSchema.optional(),
+  })
+  .strict();
+
+export const leaderboardEntrySchema = z
+  .object({
+    rank: z.number().int().positive(),
+    user: z.object({ id: idSchema, name: z.string().min(1) }).strict(),
+    durationSeconds: z.number().int().nonnegative().safe(),
+    sessionCount: z.number().int().nonnegative().safe(),
+  })
+  .strict();
+
+export const leaderboardResponseSchema = z
+  .object({
+    filters: leaderboardFiltersSchema,
+    totalDurationSeconds: z.number().int().nonnegative().safe(),
+    entries: z.array(leaderboardEntrySchema),
+  })
+  .strict();
 
 export const projectListItemSchema = z
   .object({
@@ -163,7 +204,13 @@ export const apiErrorSchema = z
 export type ApiError = z.infer<typeof apiErrorSchema>;
 export type ApiErrorCode = z.infer<typeof apiErrorCodeSchema>;
 export type CurrentSessionResponse = z.infer<typeof currentSessionResponseSchema>;
+export type LeaderboardEntry = z.infer<typeof leaderboardEntrySchema>;
+export type LeaderboardFilters = z.infer<typeof leaderboardFiltersSchema>;
+export type LeaderboardResponse = z.infer<typeof leaderboardResponseSchema>;
 export type MeResponse = z.infer<typeof meResponseSchema>;
+export type Organization = z.infer<typeof organizationSchema>;
+export type OrganizationResponse = z.infer<typeof organizationResponseSchema>;
+export type ProvisionAccountRequest = z.infer<typeof provisionAccountRequestSchema>;
 export type ProjectListItem = z.infer<typeof projectListItemSchema>;
 export type ProjectListResponse = z.infer<typeof projectListResponseSchema>;
 export type ReportFilters = z.infer<typeof reportFiltersSchema>;
