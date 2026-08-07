@@ -4,6 +4,7 @@ import { createApp } from "../app.js";
 import { signAccessToken } from "../auth.js";
 import { parseEnv } from "../env.js";
 import type { ReportRepository, ReportRowRecord } from "../repositories.js";
+import type { AuthenticatedSubject } from "../auth.js";
 import { createReportRoutes } from "./reports.js";
 
 const ids = {
@@ -20,17 +21,14 @@ const config = parseEnv({
 const user = { id: ids.user, email: "alex@example.com", name: "Alex", organizationId: ids.organization };
 
 class Reports implements ReportRepository {
-  public async findProjectForOrganization(_subject: unknown, projectId: string) {
+  public failExport: Error | null = null;
+  public async findProjectForOrganization(_subject: AuthenticatedSubject, projectId: string) {
     return projectId === ids.project ? { id: ids.project, name: "Timer" } : null;
   }
-  public async findUserForOrganization(_subject: unknown, userId: string) {
+  public async findUserForOrganization(_subject: AuthenticatedSubject, userId: string) {
     return userId === ids.user ? { id: ids.user, name: "Alex" } : null;
   }
-  public async summarizeForOrganization() {
-    return { totalRows: 1, totalDurationSeconds: "3600" };
-  }
-  public async listPageForOrganization(): Promise<ReportRowRecord[]> {
-    return [{
+  private readonly rows: ReportRowRecord[] = [{
       id: "c1c7e513-b094-4d4c-ae55-21790ae019a4",
       user: { id: ids.user, name: "Alex" },
       project: { id: ids.project, name: "Timer" },
@@ -41,15 +39,21 @@ class Reports implements ReportRepository {
       idleSeconds: 0,
       durationSeconds: 3_600,
     }];
+  public async readPageForOrganization(_subject: AuthenticatedSubject, _query: Parameters<ReportRepository["readPageForOrganization"]>[1], _options: Parameters<ReportRepository["readPageForOrganization"]>[2]) {
+    return { summary: { totalRows: 1, totalDurationSeconds: "3600" }, rows: this.rows };
+  }
+  public async readExportForOrganization(_subject: AuthenticatedSubject, _query: Parameters<ReportRepository["readExportForOrganization"]>[1], _maxRows: number) {
+    if (this.failExport !== null) throw this.failExport;
+    return { summary: { totalRows: 1, totalDurationSeconds: "3600" }, rows: this.rows };
   }
 }
 
-function app() {
+function app(reports = new Reports()) {
   return createApp({
     config,
     credentials: { findByEmail: async () => null },
     clock: () => new Date("2026-08-06T14:00:00.000Z"),
-    reportRepository: new Reports(),
+    reportRepository: reports,
   });
 }
 
@@ -89,5 +93,15 @@ describe("report routes", () => {
     const response = await app().request("http://api.test/reports?pageSize=201", { headers: { authorization: `Bearer ${token}` } });
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({ error: { code: "validation_error", message: "Invalid report filters." } });
+  });
+
+  it("returns a stable JSON error before a CSV stream begins when the snapshot read fails", async () => {
+    const reports = new Reports();
+    reports.failExport = new Error("database unavailable");
+    const token = await signAccessToken(user, config, new Date("2026-08-06T14:00:00.000Z"));
+    const response = await app(reports).request("http://api.test/reports/export.csv", { headers: { authorization: `Bearer ${token}` } });
+    expect(response.status).toBe(500);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    await expect(response.text()).resolves.not.toContain("sessionId,userId");
   });
 });

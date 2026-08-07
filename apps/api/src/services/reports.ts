@@ -2,7 +2,7 @@ import type { ReportFilters, ReportResponse, ReportRow } from "@clock-in/shared"
 
 import type { AuthenticatedSubject } from "../auth.js";
 import { AppError } from "../errors.js";
-import type { ReportPageQuery, ReportQuery, ReportRepository, ReportRowRecord, ReportSummaryRecord } from "../repositories.js";
+import type { ReportQuery, ReportRepository, ReportRowRecord, ReportSummaryRecord } from "../repositories.js";
 
 export interface ReportService {
   list(subject: AuthenticatedSubject, filters: ReportFilters): Promise<ReportResponse>;
@@ -11,7 +11,7 @@ export interface ReportService {
 
 export interface ReportExport {
   totalDurationSeconds: number;
-  rows: AsyncIterable<ReportRow[]>;
+  rows: ReportRow[];
 }
 
 export interface ReportServiceDependencies {
@@ -20,7 +20,6 @@ export interface ReportServiceDependencies {
 
 const millisecondsPerDay = 24 * 60 * 60 * 1_000;
 export const reportExportRowCap = 10_000;
-const reportExportBatchSize = 500;
 
 function validatePagination(filters: ReportFilters): void {
   if (!Number.isSafeInteger(filters.page) || !Number.isSafeInteger(filters.pageSize)
@@ -101,11 +100,10 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       validatePagination(filters);
       const query = normalizedQuery(filters);
       await authorizeFilters(dependencies.reports, subject, query);
-      const summary = summaryValues(await dependencies.reports.summarizeForOrganization(subject, query));
       const offset = (filters.page - 1) * filters.pageSize;
       if (!Number.isSafeInteger(offset)) throw new AppError("validation_error", "Invalid report pagination.");
-      const pageQuery: ReportPageQuery = { ...query, limit: filters.pageSize, offset };
-      const rows = await dependencies.reports.listPageForOrganization(subject, pageQuery);
+      const page = await dependencies.reports.readPageForOrganization(subject, query, { limit: filters.pageSize, offset });
+      const summary = summaryValues(page.summary);
       return {
         filters,
         totalDurationSeconds: summary.totalDurationSeconds,
@@ -115,7 +113,7 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
           totalRows: summary.totalRows,
           totalPages: Math.ceil(summary.totalRows / filters.pageSize),
         },
-        rows: rows.map(asReportRow),
+        rows: page.rows.map(asReportRow),
       };
     },
 
@@ -123,19 +121,16 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       validatePagination(filters);
       const query = normalizedQuery(filters);
       await authorizeFilters(dependencies.reports, subject, query);
-      const summary = summaryValues(await dependencies.reports.summarizeForOrganization(subject, query));
+      const exportRead = await dependencies.reports.readExportForOrganization(subject, query, reportExportRowCap);
+      const summary = summaryValues(exportRead.summary);
       if (summary.totalRows > reportExportRowCap) {
         throw new AppError("validation_error", "Report export is limited to 10,000 rows. Narrow the filters and try again.");
       }
+      const rows = exportRead.rows ?? [];
+      if (rows.length > reportExportRowCap) throw new RangeError("Report export row count exceeded its limit.");
       return {
         totalDurationSeconds: summary.totalDurationSeconds,
-        rows: (async function* (): AsyncGenerator<ReportRow[]> {
-          for (let offset = 0; offset < summary.totalRows; offset += reportExportBatchSize) {
-            const limit = Math.min(reportExportBatchSize, summary.totalRows - offset);
-            const rows = await dependencies.reports.listPageForOrganization(subject, { ...query, limit, offset });
-            yield rows.map(asReportRow);
-          }
-        })(),
+        rows: rows.map(asReportRow),
       };
     },
   };

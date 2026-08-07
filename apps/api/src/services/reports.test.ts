@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ReportFilters } from "@clock-in/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
-import type { ReportPageQuery, ReportRepository, ReportRowRecord } from "../repositories.js";
+import type { ReportPageOptions, ReportRepository, ReportRowRecord } from "../repositories.js";
 import { createReportService } from "./reports.js";
 
 const ids = {
@@ -31,7 +31,8 @@ function row(overrides: Partial<ReportRowRecord> = {}): ReportRowRecord {
 }
 
 class Reports implements ReportRepository {
-  public lastQuery: Parameters<ReportRepository["listForOrganization"]>[1] | null = null;
+  public lastPage: { query: Parameters<ReportRepository["readPageForOrganization"]>[1]; options: ReportPageOptions } | null = null;
+  public exportReads = 0;
   public constructor(private readonly rows: ReportRowRecord[] = [], private readonly accessible = new Set([ids.project, ids.user])) {}
   public async findProjectForOrganization(_subject: AuthenticatedSubject, projectId: string) {
     return this.accessible.has(projectId) && projectId === ids.project ? { id: projectId, name: "Timer" } : null;
@@ -39,18 +40,16 @@ class Reports implements ReportRepository {
   public async findUserForOrganization(_subject: AuthenticatedSubject, userId: string) {
     return this.accessible.has(userId) && userId === ids.user ? { id: userId, name: "Alex" } : null;
   }
-  public async listForOrganization(_subject: AuthenticatedSubject, query: Parameters<ReportRepository["listForOrganization"]>[1]) {
-    this.lastQuery = query;
-    return this.rows;
-  }
-
-  public async summarizeForOrganization() {
+  private summary() {
     return { totalRows: this.rows.length, totalDurationSeconds: this.rows.reduce((total, record) => total + record.durationSeconds, 0) };
   }
-
-  public async listPageForOrganization(_subject: AuthenticatedSubject, query: ReportPageQuery) {
-    this.lastQuery = query;
-    return this.rows.slice(query.offset, query.offset + query.limit);
+  public async readPageForOrganization(_subject: AuthenticatedSubject, query: Parameters<ReportRepository["readPageForOrganization"]>[1], options: ReportPageOptions) {
+    this.lastPage = { query, options };
+    return { summary: this.summary(), rows: this.rows.slice(options.offset, options.offset + options.limit) };
+  }
+  public async readExportForOrganization(_subject: AuthenticatedSubject, _query: Parameters<ReportRepository["readExportForOrganization"]>[1], _maxRows: number) {
+    this.exportReads += 1;
+    return { summary: this.summary(), rows: this.rows };
   }
 }
 
@@ -64,13 +63,14 @@ describe("report service", () => {
       totalDurationSeconds: 3_600,
       rows: [{ id: ids.otherProject }, { id: ids.session }],
     });
-    expect(reports.lastQuery).toEqual({
-      from: new Date("2026-08-01T00:00:00.000Z"),
-      toExclusive: new Date("2026-08-07T00:00:00.000Z"),
-      projectId: ids.project,
-      userId: ids.user,
-      limit: 50,
-      offset: 0,
+    expect(reports.lastPage).toEqual({
+      query: {
+        from: new Date("2026-08-01T00:00:00.000Z"),
+        toExclusive: new Date("2026-08-07T00:00:00.000Z"),
+        projectId: ids.project,
+        userId: ids.user,
+      },
+      options: { limit: 50, offset: 0 },
     });
   });
 
@@ -114,27 +114,20 @@ describe("report service", () => {
     });
   });
 
-  it("rejects oversized exports before fetching rows and fetches valid exports in bounded batches", async () => {
+  it("uses one snapshot read for export and rejects an oversized export before row materialization", async () => {
     const oversized = new Reports();
-    oversized.summarizeForOrganization = async () => ({ totalRows: 10_001, totalDurationSeconds: 0 });
-    let oversizedFetches = 0;
-    oversized.listPageForOrganization = async () => {
-      oversizedFetches += 1;
-      return [];
+    oversized.readExportForOrganization = async () => {
+      oversized.exportReads += 1;
+      return { summary: { totalRows: 10_001, totalDurationSeconds: 0 }, rows: [] };
     };
     const oversizedService = createReportService({ reports: oversized });
     await expect(oversizedService.export(subject, { page: 1, pageSize: 50 })).rejects.toMatchObject({ code: "validation_error" });
-    expect(oversizedFetches).toBe(0);
+    expect(oversized.exportReads).toBe(1);
 
     const exported = new Reports([row()]);
-    const calls: Array<{ limit: number; offset: number }> = [];
-    exported.listPageForOrganization = async (_subject: AuthenticatedSubject, query: { limit: number; offset: number }) => {
-      calls.push(query);
-      return query.offset === 0 ? [row()] : [];
-    };
     const exportService = createReportService({ reports: exported });
     const result = await exportService.export(subject, { page: 1, pageSize: 50 });
-    for await (const _chunk of result.rows) { /* consume */ }
-    expect(calls).toEqual([{ limit: 1, offset: 0 }]);
+    expect(result.rows).toHaveLength(1);
+    expect(exported.exportReads).toBe(1);
   });
 });

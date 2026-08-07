@@ -84,7 +84,7 @@ export interface ReportQuery {
   userId?: string;
 }
 
-export interface ReportPageQuery extends ReportQuery {
+export interface ReportPageOptions {
   limit: number;
   offset: number;
 }
@@ -94,9 +94,19 @@ export interface ReportSummaryRecord {
   totalDurationSeconds: number | string | bigint | null;
 }
 
+export interface ReportPageRead {
+  summary: ReportSummaryRecord;
+  rows: ReportRowRecord[];
+}
+
+export interface ReportExportRead {
+  summary: ReportSummaryRecord;
+  rows?: ReportRowRecord[];
+}
+
 export interface ReportRepository {
   findProjectForOrganization(subject: AuthenticatedSubject, projectId: string): Promise<ReportLookupRecord | null>;
   findUserForOrganization(subject: AuthenticatedSubject, userId: string): Promise<ReportLookupRecord | null>;
-  summarizeForOrganization(subject: AuthenticatedSubject, query: ReportQuery): Promise<ReportSummaryRecord>;
-  listPageForOrganization(subject: AuthenticatedSubject, query: ReportPageQuery): Promise<ReportRowRecord[]>;
+  readPageForOrganization(subject: AuthenticatedSubject, query: ReportQuery, options: ReportPageOptions): Promise<ReportPageRead>;
+  readExportForOrganization(subject: AuthenticatedSubject, query: ReportQuery, maxRows: number): Promise<ReportExportRead>;
 }

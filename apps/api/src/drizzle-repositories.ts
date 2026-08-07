@@ -13,8 +13,10 @@ import {
   type CreateRunningSession,
   type ProjectRecord,
   type ProjectRepository,
+  type ReportExportRead,
   type ReportLookupRecord,
-  type ReportPageQuery,
+  type ReportPageOptions,
+  type ReportPageRead,
   type ReportQuery,
   type ReportRepository,
   type ReportRowRecord,
@@ -190,15 +192,20 @@ export class DrizzleReportRepository implements ReportRepository {
     return conditions;
   }
 
-  public async summarizeForOrganization(subject: AuthenticatedSubject, query: ReportQuery): Promise<ReportSummaryRecord> {
-    const rows = await this.db
+  private async summaryFor(db: Pick<DatabaseConnection["db"], "select">, subject: AuthenticatedSubject, query: ReportQuery): Promise<ReportSummaryRecord> {
+    const rows = await db
       .select({ totalRows: count(timeSessions.id), totalDurationSeconds: sum(timeSessions.durationSeconds) })
       .from(timeSessions)
       .where(and(...this.predicates(subject, query)));
     return rows[0] ?? { totalRows: 0, totalDurationSeconds: 0 };
   }
 
-  public async listPageForOrganization(subject: AuthenticatedSubject, query: ReportPageQuery): Promise<ReportRowRecord[]> {
+  private async rowsFor(
+    db: Pick<DatabaseConnection["db"], "select">,
+    subject: AuthenticatedSubject,
+    query: ReportQuery,
+    options: ReportPageOptions,
+  ): Promise<ReportRowRecord[]> {
     const conditions = [
       ...this.predicates(subject, query),
       eq(users.organizationId, subject.organizationId),
@@ -229,8 +236,8 @@ export class DrizzleReportRepository implements ReportRepository {
       ))
       .where(and(...conditions))
       .orderBy(desc(timeSessions.startedAt), asc(timeSessions.id))
-      .limit(query.limit)
-      .offset(query.offset);
+      .limit(options.limit)
+      .offset(options.offset);
 
     return rows.map((row) => {
       if (row.status === "running" || row.stoppedAt === null || row.durationSeconds === null) {
@@ -247,6 +254,36 @@ export class DrizzleReportRepository implements ReportRepository {
         idleSeconds: row.idleSeconds,
         durationSeconds: row.durationSeconds,
       };
+    });
+  }
+
+  private async snapshot<T>(callback: (db: Pick<DatabaseConnection["db"], "select">) => Promise<T>): Promise<T> {
+    return this.db.transaction(
+      async (transaction) => callback(transaction),
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+  }
+
+  public readPageForOrganization(subject: AuthenticatedSubject, query: ReportQuery, options: ReportPageOptions): Promise<ReportPageRead> {
+    return this.snapshot(async (db) => ({
+      summary: await this.summaryFor(db, subject, query),
+      rows: await this.rowsFor(db, subject, query, options),
+    }));
+  }
+
+  public readExportForOrganization(subject: AuthenticatedSubject, query: ReportQuery, maxRows: number): Promise<ReportExportRead> {
+    return this.snapshot(async (db) => {
+      const summary = await this.summaryFor(db, subject, query);
+      const totalRows = typeof summary.totalRows === "bigint"
+        ? summary.totalRows
+        : typeof summary.totalRows === "string" && /^\d+$/.test(summary.totalRows)
+          ? BigInt(summary.totalRows)
+          : typeof summary.totalRows === "number" && Number.isSafeInteger(summary.totalRows) && summary.totalRows >= 0
+            ? BigInt(summary.totalRows)
+            : null;
+      if (totalRows === null) throw new RangeError("Invalid report row count.");
+      if (totalRows > BigInt(maxRows)) return { summary };
+      return { summary, rows: await this.rowsFor(db, subject, query, { limit: maxRows + 1, offset: 0 }) };
     });
   }
 }

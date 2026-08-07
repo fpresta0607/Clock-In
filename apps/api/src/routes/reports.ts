@@ -1,6 +1,6 @@
 import { reportFiltersSchema, reportResponseSchema } from "@clock-in/shared";
 import { Hono } from "hono";
-import { stream } from "hono/streaming";
+import { streamText } from "hono/streaming";
 
 import { reportCsvHeader, reportCsvRow, reportCsvTotal } from "../csv.js";
 import { getAuthenticatedSubject, type ApiEnvironment } from "../app.js";
@@ -20,15 +20,14 @@ export function createReportRoutes(service: ReportService): Hono<ApiEnvironment>
   )));
   routes.get("/export.csv", async (context) => {
     const report = await service.export(getAuthenticatedSubject(context), requestFilters(context));
-    context.header("content-type", "text/csv; charset=utf-8");
-    context.header("content-disposition", 'attachment; filename="clock-in-report.csv"');
-    return stream(context, async (stream) => {
+    const response = streamText(context, async (stream) => {
       await stream.write(reportCsvHeader());
-      for await (const rows of report.rows) {
-        for (const row of rows) await stream.write(reportCsvRow(row));
-      }
+      for (const row of report.rows) await stream.write(reportCsvRow(row));
       await stream.write(reportCsvTotal(report.totalDurationSeconds));
     });
+    response.headers.set("content-type", "text/csv; charset=utf-8");
+    response.headers.set("content-disposition", 'attachment; filename="clock-in-report.csv"');
+    return response;
   });
   return routes;
 }
