@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "pnpm --filter @clock-in/shared build && tsc --noEmit && vite build",
+    "dev": "vite",
+    "tauri": "tauri",
     "test": "pnpm --filter @clock-in/shared build && vitest run",
     "typecheck": "pnpm --filter @clock-in/shared build && tsc --noEmit"
   },
@@ -15,6 +17,7 @@
     "react-dom": "^19.1.1"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.8.0",
     "@testing-library/jest-dom": "6.9.1",
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^14.6.1",
