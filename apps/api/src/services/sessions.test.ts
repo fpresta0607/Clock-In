@@ -123,6 +123,18 @@ describe("session service", () => {
     })).resolves.toEqual(persisted);
   });
 
+  it("returns an old persisted session for an explicit compatible idempotent retry", async () => {
+    const persisted = running({ startedAt: new Date("2026-07-30T13:59:59.999Z") });
+    const { service } = createService([persisted], []);
+
+    await expect(service.start(subject, {
+      clientId: ids.client,
+      projectId: ids.project,
+      description: "Investigate timer",
+      startedAt: persisted.startedAt,
+    })).resolves.toEqual(persisted);
+  });
+
   it("rejects a client id reused with a different start identity", async () => {
     const { service } = createService([running()]);
 

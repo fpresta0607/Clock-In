@@ -60,12 +60,6 @@ export function createSessionService(dependencies: SessionServiceDependencies): 
     async start(subject: AuthenticatedSubject, input: StartSessionInput): Promise<SessionRecord> {
       const now = clock();
       const startedAt = input.startedAt ?? now;
-      const startTime = startedAt.getTime();
-      if (!Number.isFinite(startTime)
-        || startTime > now.getTime() + futureStopToleranceMs
-        || startTime < now.getTime() - maxStartBackdateMs) {
-        throw new AppError("validation_error", "Invalid session start time.");
-      }
       const normalized: NormalizedStartInput = {
         clientId: input.clientId,
         projectId: input.projectId,
@@ -77,6 +71,13 @@ export function createSessionService(dependencies: SessionServiceDependencies): 
       if (existing !== null) {
         if (sameStartIdentity(existing, normalized)) return existing;
         throw new AppError("conflict", "The client id is already associated with a different session.");
+      }
+
+      const startTime = startedAt.getTime();
+      if (!Number.isFinite(startTime)
+        || startTime > now.getTime() + futureStopToleranceMs
+        || startTime < now.getTime() - maxStartBackdateMs) {
+        throw new AppError("validation_error", "Invalid session start time.");
       }
 
       const project = await dependencies.projects.findForMember(subject, normalized.projectId);
