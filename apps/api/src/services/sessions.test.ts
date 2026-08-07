@@ -131,6 +131,16 @@ describe("session service", () => {
     })).rejects.toMatchObject({ code: "conflict", status: 409 });
   });
 
+  it("validates explicit start times against the injected clock", async () => {
+    const { service } = createService();
+    const input = { clientId: ids.client, projectId: ids.project };
+
+    await expect(service.start(subject, { ...input, startedAt: new Date("not-a-date") })).rejects.toMatchObject({ code: "validation_error", status: 400 });
+    await expect(service.start(subject, { ...input, startedAt: new Date("2026-08-06T14:00:30.001Z") })).rejects.toMatchObject({ code: "validation_error", status: 400 });
+    await expect(service.start(subject, { ...input, startedAt: new Date("2026-07-30T13:59:59.999Z") })).rejects.toMatchObject({ code: "validation_error", status: 400 });
+    await expect(service.start(subject, { ...input, startedAt: new Date("2026-07-30T14:00:00.000Z") })).resolves.toMatchObject({ startedAt: new Date("2026-07-30T14:00:00.000Z") });
+  });
+
   it("does not leak inaccessible projects and rejects archived projects", async () => {
     const inaccessible = createService([], []);
     const archived = createService([], [{ id: ids.project, organizationId: ids.organization, name: "Old", archived: true }]);

@@ -8,6 +8,7 @@ import {
 } from "../repositories.js";
 
 const futureStopToleranceMs = 30_000;
+const maxStartBackdateMs = 7 * 24 * 60 * 60 * 1_000;
 const reviewThresholdSeconds = 12 * 60 * 60;
 
 export interface StartSessionInput {
@@ -57,11 +58,19 @@ export function createSessionService(dependencies: SessionServiceDependencies): 
 
   return {
     async start(subject: AuthenticatedSubject, input: StartSessionInput): Promise<SessionRecord> {
+      const now = clock();
+      const startedAt = input.startedAt ?? now;
+      const startTime = startedAt.getTime();
+      if (!Number.isFinite(startTime)
+        || startTime > now.getTime() + futureStopToleranceMs
+        || startTime < now.getTime() - maxStartBackdateMs) {
+        throw new AppError("validation_error", "Invalid session start time.");
+      }
       const normalized: NormalizedStartInput = {
         clientId: input.clientId,
         projectId: input.projectId,
         description: input.description ?? null,
-        startedAt: input.startedAt ?? clock(),
+        startedAt,
         ...(input.startedAt === undefined ? {} : { requestedStartedAt: input.startedAt }),
       };
       const existing = await dependencies.sessions.findByClientId(subject, normalized.clientId);

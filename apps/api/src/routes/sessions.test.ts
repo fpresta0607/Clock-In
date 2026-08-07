@@ -123,5 +123,11 @@ describe("timer routes", () => {
     });
     expect(malformedId.status).toBe(400);
     await expect(malformedId.json()).resolves.toEqual({ error: { code: "validation_error", message: "Invalid session id." } });
+
+    const farFutureStart = await app.request("http://api.test/sessions", {
+      method: "POST", headers, body: JSON.stringify({ clientId: "b1c7e513-b094-4d4c-ae55-21790ae019a4", projectId: ids.project, startedAt: "2026-08-06T14:00:30.001Z" }),
+    });
+    expect(farFutureStart.status).toBe(400);
+    await expect(farFutureStart.json()).resolves.toEqual({ error: { code: "validation_error", message: "Invalid session start time." } });
   });
 });
