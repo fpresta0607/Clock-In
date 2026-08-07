@@ -174,6 +174,34 @@ describe("App", () => {
     expect(await screen.findByTestId("elapsed-time")).toBeVisible();
   });
 
+  it("deduplicates a retry-local-start command while returning from bridge B to bridge A", async () => {
+    const retry = deferred<Awaited<ReturnType<TimerBridge["retryLocalStart"]>>>();
+    const firstBridge = bridgeFor({
+      bootstrap: vi.fn().mockResolvedValue({ kind: "retry-local-start", user, projects: [project], start }),
+      retryLocalStart: vi.fn().mockReturnValue(retry.promise),
+    });
+    const secondBridge = bridgeFor({ bootstrap: vi.fn().mockResolvedValue({ kind: "signed-out" }) });
+    const view = render(<App bridge={firstBridge} />);
+    await waitFor(() => expect(firstBridge.retryLocalStart).toHaveBeenCalledWith(start));
+    view.rerender(<App bridge={secondBridge} />);
+    await screen.findByRole("heading", { name: "Clock in" });
+    view.rerender(<App bridge={firstBridge} />);
+    expect(firstBridge.retryLocalStart).toHaveBeenCalledTimes(1);
+    retry.resolve({ kind: "running", user, projects: [project], running, source: "local-server-match" });
+    expect(await screen.findByTestId("elapsed-time")).toBeVisible();
+  });
+
+  it("deduplicates recovery commands during StrictMode replay", async () => {
+    const retry = deferred<Awaited<ReturnType<TimerBridge["retryLocalStart"]>>>();
+    const bridge = bridgeFor({
+      bootstrap: vi.fn().mockResolvedValue({ kind: "retry-local-start", user, projects: [project], start }),
+      retryLocalStart: vi.fn().mockReturnValue(retry.promise),
+    });
+    render(<StrictMode><App bridge={bridge} /></StrictMode>);
+    await waitFor(() => expect(bridge.retryLocalStart).toHaveBeenCalledWith(start));
+    expect(bridge.retryLocalStart).toHaveBeenCalledTimes(1);
+  });
+
   it("automatically retries a login local start and returns idle with an error when it fails", async () => {
     const bridge = bridgeFor({
       bootstrap: vi.fn().mockResolvedValue({ kind: "signed-out" }),
@@ -273,5 +301,64 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Stopping…" })).toBeDisabled();
     await vi.advanceTimersByTimeAsync(2_000);
     expect(screen.getByTestId("elapsed-time")).toHaveTextContent("00:00:05");
+  });
+
+  it("does not let a stale start completion overwrite a replacement bridge", async () => {
+    const request = deferred<typeof running>();
+    const firstBridge = bridgeFor({ start: vi.fn().mockReturnValue(request.promise) });
+    const secondBridge = bridgeFor({ bootstrap: vi.fn().mockResolvedValue({ kind: "signed-out" }) });
+    const person = userEvent.setup();
+    const view = render(<App bridge={firstBridge} />);
+    await person.selectOptions(await screen.findByLabelText("Project"), project.id);
+    await person.click(screen.getByRole("button", { name: "Start timer" }));
+    view.rerender(<App bridge={secondBridge} />);
+    expect(await screen.findByRole("heading", { name: "Clock in" })).toBeVisible();
+    request.resolve(running);
+    await Promise.resolve();
+    expect(screen.getByRole("heading", { name: "Clock in" })).toBeVisible();
+  });
+
+  it("ignores a stale stop completion after bridge replacement", async () => {
+    const request = deferred<void>();
+    const firstBridge = bridgeFor({
+      bootstrap: vi.fn().mockResolvedValue({ kind: "running", user, projects: [project], running, source: "server-only" }),
+      stop: vi.fn().mockReturnValue(request.promise),
+    });
+    const secondBridge = bridgeFor({ bootstrap: vi.fn().mockResolvedValue({ kind: "signed-out" }) });
+    const person = userEvent.setup();
+    const view = render(<App bridge={firstBridge} />);
+    await person.click(await screen.findByRole("button", { name: "Stop timer" }));
+    view.rerender(<App bridge={secondBridge} />);
+    expect(await screen.findByRole("heading", { name: "Clock in" })).toBeVisible();
+    request.resolve(undefined);
+    await Promise.resolve();
+    expect(screen.getByRole("heading", { name: "Clock in" })).toBeVisible();
+  });
+
+  it("disables duplicate logout attempts and retains the account on a current failure", async () => {
+    const request = deferred<void>();
+    const bridge = bridgeFor({ logout: vi.fn().mockReturnValue(request.promise) });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+    const logout = await screen.findByRole("button", { name: "Log out" });
+    await person.click(logout);
+    expect(screen.getByRole("button", { name: "Logging out…" })).toBeDisabled();
+    await person.click(screen.getByRole("button", { name: "Logging out…" }));
+    expect(bridge.logout).toHaveBeenCalledTimes(1);
+    request.reject({ kind: "transient", message: "Unable to sign out right now" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Unable to sign out right now");
+    expect(screen.getByRole("heading", { name: "Start a timer" })).toBeVisible();
+  });
+
+  it("ignores a logout failure after unmount", async () => {
+    const request = deferred<void>();
+    const bridge = bridgeFor({ logout: vi.fn().mockReturnValue(request.promise) });
+    const person = userEvent.setup();
+    const view = render(<App bridge={bridge} />);
+    await person.click(await screen.findByRole("button", { name: "Log out" }));
+    view.unmount();
+    request.reject({ kind: "transient", message: "Unable to sign out right now" });
+    await Promise.resolve();
+    expect(view.container).toBeEmptyDOMElement();
   });
 });
