@@ -3,6 +3,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import type { AccountStore, AuthenticatedUser } from "./auth.js";
 import { createApp } from "./app.js";
+import { AppError } from "./errors.js";
 import { parseEnv, type AppConfig } from "./env.js";
 import { createTestAuth } from "./test-tokens.js";
 
@@ -43,6 +44,7 @@ function createTestApp(options: { bodyLimitBytes?: number; accounts?: AccountSto
       return account;
     },
     findOrganization: async (id) => ({ id, name: "SIQstack", inviteCode: "ACDEF-GHJKM" }),
+    joinOrganization: async () => account,
   };
   const app = createApp({
     config,
@@ -150,6 +152,7 @@ describe("API composition", () => {
       accounts: {
         resolve: async (_identity, inviteCode) => { seen.push(inviteCode); return account; },
         findOrganization: async (id) => ({ id, name: "SIQstack", inviteCode: "ACDEF-GHJKM" }),
+        joinOrganization: async () => account,
       },
     });
     const authorization = await bearer();
@@ -186,6 +189,7 @@ describe("API composition", () => {
       accounts: {
         resolve: async (_identity, inviteCode) => { codes.push(inviteCode); return account; },
         findOrganization: async (id) => ({ id, name: "SIQstack", inviteCode: "ACDEF-GHJKM" }),
+        joinOrganization: async () => account,
       },
     });
 
@@ -227,5 +231,68 @@ describe("API composition", () => {
     const { app } = createTestApp();
 
     expect((await app.request("http://api.test/organization")).status).toBe(401);
+  });
+
+  it("moves an existing account into a workspace, however the code was typed", async () => {
+    const seen: string[] = [];
+    const { app } = createTestApp({
+      accounts: {
+        resolve: async () => account,
+        findOrganization: async (id) => ({ id, name: "SIQstack", inviteCode: "ACDEF-GHJKM" }),
+        joinOrganization: async (_subject, code) => { seen.push(code); return account; },
+      },
+    });
+    const authorization = await bearer();
+    const join = (inviteCode: string) => app.request("http://api.test/organization/join", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify({ inviteCode }),
+    });
+
+    expect((await join("acdefghjkm")).status).toBe(200);
+    expect((await join(" ACDEF-GHJKM ")).status).toBe(200);
+
+    expect(seen).toEqual(["ACDEF-GHJKM", "ACDEF-GHJKM"]);
+  });
+
+  it("surfaces a refusal to move an account that already recorded time", async () => {
+    const { app } = createTestApp({
+      accounts: {
+        resolve: async () => account,
+        findOrganization: async (id) => ({ id, name: "SIQstack", inviteCode: "ACDEF-GHJKM" }),
+        joinOrganization: async () => {
+          throw new AppError("conflict", "This account has already recorded time in its current workspace, so it cannot be moved.");
+        },
+      },
+    });
+
+    const response = await app.request("http://api.test/organization/join", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: await bearer() },
+      body: JSON.stringify({ inviteCode: "ACDEF-GHJKM" }),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "conflict", message: expect.stringContaining("already recorded time") },
+    });
+  });
+
+  it("rejects a malformed join code and an unauthenticated join", async () => {
+    const { app } = createTestApp();
+
+    const malformed = await app.request("http://api.test/organization/join", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: await bearer() },
+      body: JSON.stringify({ inviteCode: "nope" }),
+    });
+    const anonymous = await app.request("http://api.test/organization/join", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ inviteCode: "ACDEF-GHJKM" }),
+    });
+
+    expect(malformed.status).toBe(400);
+    expect(anonymous.status).toBe(401);
   });
 });

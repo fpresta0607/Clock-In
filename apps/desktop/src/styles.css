@@ -75,6 +75,11 @@ select { appearance: auto; }
 .board-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
 .board-head h2 { margin: 0; color: var(--ivory); font-size: .92rem; letter-spacing: .02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .invite-code { flex: none; border: 1px solid var(--line); border-radius: 2px; padding: 3px 7px; color: var(--amber); font-family: Bahnschrift, "Courier New", monospace; font-size: .76rem; letter-spacing: .09em; }
+.join-form { display: flex; gap: 6px; margin: 0 0 11px; }
+.join-form label { flex: 1; }
+.join-form input { width: 100%; }
+.join-form button { flex: none; min-height: 33px; border: 1px solid var(--line); border-radius: 2px; padding: 0 11px; background: transparent; color: var(--ivory); font-family: inherit; font-size: .76rem; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; cursor: pointer; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .board-list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
 .board-list li { display: grid; align-items: baseline; gap: 9px; grid-template-columns: 18px 1fr auto; padding: 4px 6px; border-radius: 2px; font-size: .84rem; }
 .board-list li.is-you { background: rgba(239, 168, 47, .1); }

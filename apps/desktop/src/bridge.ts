@@ -50,6 +50,7 @@ export interface TimerBridge {
   useServerTimer(): Promise<BootstrapSnapshot>;
   retryLocalStart(input: StartIntent): Promise<BootstrapSnapshot>;
   orgOverview(): Promise<OrganizationOverview>;
+  orgJoin(inviteCode: string): Promise<OrganizationOverview>;
 }
 
 type TauriInvoke = <Result>(command: string, args?: Record<string, unknown>) => Promise<Result>;
@@ -205,6 +206,7 @@ export const defaultBridge: TimerBridge = {
   useServerTimer: () => invokeDecoded("timer_use_server", decodeBootstrapSnapshot),
   retryLocalStart: (input) => invokeDecoded("timer_retry_local_start", decodeBootstrapSnapshot, { input }),
   orgOverview: () => invokeDecoded("org_overview", decodeOrganizationOverview),
+  orgJoin: (inviteCode) => invokeDecoded("org_join", decodeOrganizationOverview, { input: { inviteCode } }),
 };
 
 export const bridgeError = (error: unknown): BridgeError => {

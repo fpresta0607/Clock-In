@@ -227,4 +227,93 @@ integration(integrationDescription, () => {
 
     expect(response.status).toBe(404);
   }, 60_000);
+
+  it("moves a late signup into the workspace and cleans up the one it left", async () => {
+    const { organization } = await (await app.request("/organization", { headers: authorized })).json();
+
+    // Signs up with no code at all, landing in a personal workspace.
+    const latecomer = await createTestAuth(config, new Date());
+    const latecomerId = randomUUID();
+    const latecomerApp = createApp({
+      config,
+      keys: latecomer.keys,
+      accounts: new DrizzleAccountStore(database.db),
+      projectRepository: new DrizzleProjectRepository(database.db),
+      reportRepository: new DrizzleReportRepository(database.db),
+    });
+    const headers = {
+      authorization: await latecomer.bearer(latecomerId, { email: "late@clock-in.test", name: "Late Comer" }),
+      "content-type": "application/json",
+    };
+
+    const before = (await (await latecomerApp.request("/me", { headers })).json()).user;
+    expect(before.organizationId).not.toBe(organization.id);
+    const strandedOrganizationId = before.organizationId;
+
+    const joined = await latecomerApp.request("/organization/join", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ inviteCode: organization.inviteCode.replace("-", "").toLowerCase() }),
+    });
+    expect(joined.status).toBe(200);
+    expect((await joined.json()).user.organizationId).toBe(organization.id);
+
+    // The move carries project access with it.
+    const projects = await latecomerApp.request("/projects", { headers });
+    expect((await projects.json()).projects.map((project: { name: string }) => project.name)).toEqual(["General"]);
+
+    // The abandoned personal workspace is gone rather than left behind.
+    const abandoned = await database.client<{ total: number }[]>`
+      select count(*)::int as total from organizations where id = ${strandedOrganizationId}
+    `;
+    expect(abandoned[0]?.total).toBe(0);
+
+    // Joining again is a no-op rather than an error.
+    const again = await latecomerApp.request("/organization/join", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ inviteCode: organization.inviteCode }),
+    });
+    expect(again.status).toBe(200);
+  }, 90_000);
+
+  it("refuses to move an account that already recorded time", async () => {
+    const { organization } = await (await app.request("/organization", { headers: authorized })).json();
+
+    const tracked = await createTestAuth(config, new Date());
+    const trackedApp = createApp({
+      config,
+      keys: tracked.keys,
+      accounts: new DrizzleAccountStore(database.db),
+      projectRepository: new DrizzleProjectRepository(database.db),
+      sessionRepository: new DrizzleSessionRepository(database.db),
+      reportRepository: new DrizzleReportRepository(database.db),
+    });
+    const headers = {
+      authorization: await tracked.bearer(randomUUID(), { email: "tracked@clock-in.test", name: "Tracked User" }),
+      "content-type": "application/json",
+    };
+
+    const own = (await (await trackedApp.request("/projects", { headers })).json()).projects[0];
+    const started = await trackedApp.request("/sessions", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ clientId: randomUUID(), projectId: own.id, startedAt: new Date(Date.now() - 60_000).toISOString() }),
+    });
+    await trackedApp.request(`/sessions/${(await started.json()).session.id}/stop`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ stoppedAt: new Date().toISOString(), idleSeconds: 0 }),
+    });
+
+    const refused = await trackedApp.request("/organization/join", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ inviteCode: organization.inviteCode }),
+    });
+
+    expect(refused.status).toBe(409);
+    // The refusal must leave the account exactly where it was.
+    expect((await (await trackedApp.request("/me", { headers })).json()).user.organizationId).not.toBe(organization.id);
+  }, 90_000);
 });

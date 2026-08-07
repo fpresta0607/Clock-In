@@ -42,6 +42,9 @@ export const App = ({ client }: AppProps) => {
   const [loading, setLoading] = useState(false);
   const [dataError, setDataError] = useState<string | undefined>();
   const [copied, setCopied] = useState(false);
+  const [joinCode, setJoinCode] = useState("");
+  const [joinBusy, setJoinBusy] = useState(false);
+  const [joinError, setJoinError] = useState<string | undefined>();
 
   const load = useCallback(async (selected: Range) => {
     setLoading(true);
@@ -116,6 +119,21 @@ export const App = ({ client }: AppProps) => {
       URL.revokeObjectURL(url);
     } catch (error: unknown) {
       setDataError(messageFor(error));
+    }
+  };
+
+  const joinWorkspace = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    setJoinBusy(true);
+    setJoinError(undefined);
+    try {
+      await client.joinOrganization(joinCode.trim());
+      setJoinCode("");
+      await load(range);
+    } catch (error: unknown) {
+      setJoinError(messageFor(error));
+    } finally {
+      setJoinBusy(false);
     }
   };
 
@@ -209,6 +227,23 @@ export const App = ({ client }: AppProps) => {
             <code className="invite-code">{organization.inviteCode}</code>
             <button className="ghost" type="button" onClick={() => void copyInviteCode()}>{copied ? "Copied" : "Copy"}</button>
           </div>
+        </section>
+      )}
+
+      {organization && entries.length <= 1 && (
+        <section className="card join-card" aria-labelledby="join-title">
+          <div>
+            <h2 id="join-title">Joining a teammate?</h2>
+            <p className="subtle">Enter their invite code to move this account into their workspace.</p>
+          </div>
+          {joinError && <p className="error" role="alert">{joinError}</p>}
+          <form className="join-form" onSubmit={joinWorkspace}>
+            <label>
+              <span className="visually-hidden">Invite code to join</span>
+              <input value={joinCode} onChange={(event) => setJoinCode(event.target.value)} placeholder="ABCDE-FGHJK" autoComplete="off" spellCheck={false} required />
+            </label>
+            <button className="ghost" type="submit" disabled={joinBusy}>{joinBusy ? "Joining…" : "Join"}</button>
+          </form>
         </section>
       )}
 

@@ -20,6 +20,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [authMode, setAuthMode] = useState<"sign-in" | "sign-up">("sign-in");
   const [overview, setOverview] = useState<OrganizationOverview | undefined>();
   const [overviewError, setOverviewError] = useState<string | undefined>();
+  const [joinCode, setJoinCode] = useState("");
+  const [joinBusy, setJoinBusy] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | undefined>();
   const [accountError, setAccountError] = useState<string | undefined>();
@@ -57,6 +59,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setPassword("");
     setName("");
     setInviteCode("");
+    setJoinCode("");
     setOverview(undefined);
     setOverviewError(undefined);
     if (clearEmail) setEmail("");
@@ -325,6 +328,31 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     }
   };
 
+  const joinWorkspace = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (joinBusy) return;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
+    setJoinBusy(true);
+    setOverviewError(undefined);
+    try {
+      const result = await service.orgJoin(joinCode.trim());
+      if (isRequestCurrent()) {
+        setOverview(result);
+        setJoinCode("");
+      }
+    } catch (error: unknown) {
+      if (!isRequestCurrent()) return;
+      const problem = bridgeError(error);
+      if (problem.kind === "auth") resetToSignIn(problem.message);
+      else setOverviewError(problem.message);
+    } finally {
+      if (isRequestCurrent()) setJoinBusy(false);
+    }
+  };
+
   const logout = async (): Promise<void> => {
     if (logoutBusy) return;
     const service = bridge;
@@ -448,6 +476,15 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             </span>
           </div>
           {overviewError && <p className="form-error" role="alert">{overviewError}</p>}
+          {overview.entries.length <= 1 && (
+            <form className="join-form" onSubmit={joinWorkspace}>
+              <label>
+                <span className="visually-hidden">Invite code to join a teammate</span>
+                <input value={joinCode} onChange={(event) => setJoinCode(event.target.value)} placeholder="Join a team: ABCDE-FGHJK" autoComplete="off" spellCheck={false} required />
+              </label>
+              <button type="submit" disabled={joinBusy}>{joinBusy ? "Joining…" : "Join"}</button>
+            </form>
+          )}
           {overview.entries.length === 0 ? (
             <p className="subtle">No recorded time yet. Stop a timer to appear here.</p>
           ) : (
