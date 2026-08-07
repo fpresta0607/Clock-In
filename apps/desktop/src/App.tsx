@@ -1,8 +1,8 @@
-import { useEffect, useReducer, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 
 import { bridgeError, defaultBridge, type TimerBridge } from "./bridge.js";
 import { formatDuration } from "@clock-in/shared";
-import { initialTimerState, timerReducer, type StartIntent } from "./timer-machine.js";
+import { initialTimerState, timerReducer, type BootstrapSnapshot, type StartIntent } from "./timer-machine.js";
 
 type AppProps = {
   bridge?: TimerBridge;
@@ -17,22 +17,66 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [password, setPassword] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | undefined>();
+  const [accountError, setAccountError] = useState<string | undefined>();
   const [projectId, setProjectId] = useState("");
   const [description, setDescription] = useState("");
   const [now, setNow] = useState(() => Date.now());
+  const [retryPendingBusy, setRetryPendingBusy] = useState(false);
+  const [conflictBusy, setConflictBusy] = useState(false);
+  const latestBridge = useRef(bridge);
+  const bootstrapRequests = useRef(new WeakMap<TimerBridge, Promise<BootstrapSnapshot>>());
+  const operationGeneration = useRef(0);
+
+  latestBridge.current = bridge;
+
+  const applySnapshot = async (
+    snapshot: BootstrapSnapshot,
+    service: TimerBridge,
+    isCurrent: () => boolean,
+  ): Promise<void> => {
+    if (!isCurrent()) return;
+    dispatch({ type: "bootstrapped", snapshot });
+    if (snapshot.kind !== "retry-local-start") return;
+
+    try {
+      const retriedSnapshot = await service.retryLocalStart(snapshot.start);
+      if (isCurrent()) dispatch({ type: "bootstrapped", snapshot: retriedSnapshot });
+    } catch (error: unknown) {
+      if (!isCurrent()) return;
+      const problem = bridgeError(error);
+      dispatch(problem.kind === "auth" ? { type: "auth-failed", message: problem.message } : { type: "start-failed", message: problem.message });
+    }
+  };
 
   useEffect(() => {
-    void bridge.bootstrap().then(
-      (snapshot) => dispatch({ type: "bootstrapped", snapshot }),
+    let active = true;
+    let request = bootstrapRequests.current.get(bridge);
+    if (request === undefined) {
+      request = bridge.bootstrap();
+      bootstrapRequests.current.set(bridge, request);
+    }
+    const isCurrent = (): boolean => active && latestBridge.current === bridge;
+
+    void request.then(
+      (snapshot) => applySnapshot(snapshot, bridge, isCurrent),
       (error: unknown) => {
+        if (!isCurrent()) return;
         const problem = bridgeError(error);
         dispatch({ type: "auth-failed", message: problem.message });
       },
     );
+    return () => { active = false; };
   }, [bridge]);
 
   useEffect(() => {
-    if (state.kind !== "running" && state.kind !== "stopping") return undefined;
+    operationGeneration.current += 1;
+    setAuthBusy(false);
+    setRetryPendingBusy(false);
+    setConflictBusy(false);
+  }, [bridge]);
+
+  useEffect(() => {
+    if (state.kind !== "running") return undefined;
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
@@ -42,13 +86,16 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     event.preventDefault();
     setAuthBusy(true);
     setAuthError(undefined);
+    const service = bridge;
+    const generation = operationGeneration.current;
+    const isCurrent = (): boolean => latestBridge.current === service && operationGeneration.current === generation;
     try {
-      dispatch({ type: "bootstrapped", snapshot: await bridge.login({ email, password }) });
-      setPassword("");
+      await applySnapshot(await service.login({ email, password }), service, isCurrent);
+      if (isCurrent()) setPassword("");
     } catch (error: unknown) {
-      setAuthError(bridgeError(error).message);
+      if (isCurrent()) setAuthError(bridgeError(error).message);
     } finally {
-      setAuthBusy(false);
+      if (isCurrent()) setAuthBusy(false);
     }
   };
 
@@ -85,29 +132,46 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   };
 
   const retryPending = async (): Promise<void> => {
-    if (state.kind !== "pending-sync") return;
+    if (state.kind !== "pending-sync" || retryPendingBusy) return;
+    const service = bridge;
+    const generation = operationGeneration.current;
+    const isCurrent = (): boolean => latestBridge.current === service && operationGeneration.current === generation;
+    setRetryPendingBusy(true);
     try {
-      dispatch({ type: "pending-retried", ...(await bridge.retryPending()) });
+      const result = await service.retryPending();
+      if (isCurrent()) dispatch({ type: "pending-retried", ...result });
     } catch (error: unknown) {
       const problem = bridgeError(error);
-      if (problem.kind === "auth") dispatch({ type: "auth-failed", message: problem.message });
+      if (isCurrent() && problem.kind === "auth") dispatch({ type: "auth-failed", message: problem.message });
+    } finally {
+      if (isCurrent()) setRetryPendingBusy(false);
     }
   };
 
   const recover = async (choice: "server" | "local"): Promise<void> => {
-    if (state.kind !== "conflict") return;
+    if (state.kind !== "conflict" || conflictBusy) return;
+    const service = bridge;
+    const generation = operationGeneration.current;
+    const isCurrent = (): boolean => latestBridge.current === service && operationGeneration.current === generation;
+    setConflictBusy(true);
     try {
-      const snapshot = choice === "server" ? await bridge.useServerTimer() : await bridge.retryLocalStart(state.localStart);
-      dispatch({ type: "bootstrapped", snapshot });
+      const snapshot = choice === "server" ? await service.useServerTimer() : await service.retryLocalStart(state.localStart);
+      if (isCurrent()) await applySnapshot(snapshot, service, isCurrent);
     } catch (error: unknown) {
       const problem = bridgeError(error);
-      dispatch(problem.kind === "auth" ? { type: "auth-failed", message: problem.message } : { type: "conflict-retry-failed", message: problem.message });
+      if (isCurrent()) dispatch(problem.kind === "auth" ? { type: "auth-failed", message: problem.message } : { type: "conflict-retry-failed", message: problem.message });
+    } finally {
+      if (isCurrent()) setConflictBusy(false);
     }
   };
 
   const logout = async (): Promise<void> => {
-    await bridge.logout();
-    dispatch({ type: "auth-failed", message: "You have signed out." });
+    try {
+      await bridge.logout();
+      if (latestBridge.current === bridge) dispatch({ type: "auth-failed", message: "You have signed out." });
+    } catch (error: unknown) {
+      if (latestBridge.current === bridge) setAccountError(bridgeError(error).message);
+    }
   };
 
   if (state.kind === "booting") {
@@ -136,6 +200,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const account = state;
   const activeRunning = state.kind === "running" || state.kind === "stopping" ? state.running : undefined;
   const project = activeRunning ? account.projects.find((item) => item.id === activeRunning.projectId) : undefined;
+  const elapsedAt = state.kind === "stopping" ? Date.parse(state.stoppedAt) : now;
 
   return (
     <main className={`chronometer ${state.kind}`}>
@@ -144,6 +209,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         <div><p className="eyebrow">Manual time terminal</p><h1>Field chronometer</h1></div>
         <button className="logout" type="button" onClick={() => void logout()}>Log out</button>
       </header>
+      {accountError && <p className="form-error" role="alert">{accountError}</p>}
 
       {state.kind === "conflict" ? (
         <section className="conflict-panel" aria-labelledby="conflict-title">
@@ -151,15 +217,15 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           <p>Your device recorded <strong>{state.localStart.description || "a local start"}</strong>; the service has an active timer. Neither record has been discarded.</p>
           {state.error && <p role="alert" className="form-error">{state.error}</p>}
           <div className="action-stack">
-            <button className="signal-button" type="button" onClick={() => void recover("server")}>Use server timer</button>
-            <button className="outline-button" type="button" onClick={() => void recover("local")}>Retry local start</button>
+            <button className="signal-button" type="button" disabled={conflictBusy} onClick={() => void recover("server")}>{conflictBusy ? "Resolving…" : "Use server timer"}</button>
+            <button className="outline-button" type="button" disabled={conflictBusy} onClick={() => void recover("local")}>Retry local start</button>
           </div>
         </section>
       ) : activeRunning ? (
         <section className="running-panel" aria-label="Running timer">
           <div className="dial" aria-hidden="true"><span className="dial-core" /></div>
           <p className="eyebrow">Recording · {project?.name ?? "Unknown project"}</p>
-          <output className="elapsed" data-testid="elapsed-time" aria-label="Elapsed time">{formatDuration(elapsedSeconds(activeRunning.startedAt, now))}</output>
+          <output className="elapsed" data-testid="elapsed-time" aria-label="Elapsed time">{formatDuration(elapsedSeconds(activeRunning.startedAt, elapsedAt))}</output>
           <p className="started-at">Started {new Date(activeRunning.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
           {state.kind === "running" && state.error && <p className="form-error" role="alert">{state.error}</p>}
           <button className="stop-button" type="button" disabled={state.kind === "stopping"} onClick={() => void stopTimer()}>{state.kind === "stopping" ? "Stopping…" : "Stop timer"}</button>
@@ -168,7 +234,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         <section className="idle-panel" aria-labelledby="timer-title">
           <p className="eyebrow">Ready for a new entry</p><h2 id="timer-title">Start a timer</h2>
           {state.kind === "idle" && state.error && <p className="form-error" role="alert">{state.error}</p>}
-          {state.kind === "pending-sync" && <div className="sync-banner" role="status"><span>{state.message}</span><button type="button" onClick={() => void retryPending()}>Retry sync</button></div>}
+          {state.kind === "pending-sync" && <div className="sync-banner" role="status"><span>{state.message}</span><button type="button" disabled={retryPendingBusy} onClick={() => void retryPending()}>{retryPendingBusy ? "Retrying…" : "Retry sync"}</button></div>}
           <label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Select active project</option>{account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
           <label>Description<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={1000} rows={3} placeholder="What are you working on?" /></label>
           <div className="entry-foot"><span>{description.length}/1000</span><button className="signal-button" type="button" disabled={state.kind === "starting" || state.kind === "pending-sync" || projectId === ""} onClick={() => void startTimer()}>{state.kind === "starting" ? "Starting…" : "Start timer"}</button></div>
