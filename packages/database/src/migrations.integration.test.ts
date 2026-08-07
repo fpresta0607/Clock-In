@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDatabase } from "./client.js";
 import { runMigrations } from "./migrate.js";
 
-const databaseUrl = process.env.TEST_DATABASE_URL;
+const databaseUrl = process.env.TEST_DATABASE_URL || undefined;
 const integration = databaseUrl ? describe : describe.skip;
 const integrationDescription = databaseUrl
   ? "initial PostgreSQL migration"

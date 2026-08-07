@@ -13,7 +13,8 @@ import {
 import { parseEnv } from "./env.js";
 import { createTestAuth } from "./test-tokens.js";
 
-const databaseUrl = process.env.TEST_DATABASE_URL;
+// An empty TEST_DATABASE_URL in a .env means "not configured", not "connect to ''".
+const databaseUrl = process.env.TEST_DATABASE_URL || undefined;
 const integration = databaseUrl ? describe : describe.skip;
 const integrationDescription = databaseUrl
   ? "manual timer smoke path"
