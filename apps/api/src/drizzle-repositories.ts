@@ -211,7 +211,7 @@ export class DrizzleReportRepository implements ReportRepository {
       eq(users.organizationId, subject.organizationId),
       eq(projects.organizationId, subject.organizationId),
     ];
-    const rows = await this.db
+    const rows = await db
       .select({
         id: timeSessions.id,
         userId: users.id,
