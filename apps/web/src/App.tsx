@@ -28,6 +28,7 @@ const messageFor = (error: unknown): string =>
   error instanceof ClientError ? error.message : "Something went wrong. Try again.";
 
 export const App = ({ client }: AppProps) => {
+  const [booting, setBooting] = useState(true);
   const [signedIn, setSignedIn] = useState(false);
   const [justSignedUp, setJustSignedUp] = useState(false);
   const [mode, setMode] = useState<"sign-in" | "sign-up">("sign-in");
@@ -76,6 +77,20 @@ export const App = ({ client }: AppProps) => {
     } finally {
       setLoading(false);
     }
+  }, [client]);
+
+  // On page load, trade a persisted auth cookie for a JWT before choosing
+  // between the sign-in form and the dashboard — no form flash for a live session.
+  useEffect(() => {
+    let cancelled = false;
+    void client.restoreSession().then((restored) => {
+      if (cancelled) return;
+      if (restored) setSignedIn(true);
+      setBooting(false);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [client]);
 
   useEffect(() => {
@@ -164,6 +179,14 @@ export const App = ({ client }: AppProps) => {
       setDataError("Could not copy. Select the code and copy it manually.");
     }
   };
+
+  if (booting) {
+    return (
+      <main className="shell auth-shell">
+        <WebGLShader />
+      </main>
+    );
+  }
 
   if (!signedIn) {
     const isSignUp = mode === "sign-up";

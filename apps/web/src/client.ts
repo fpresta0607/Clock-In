@@ -124,6 +124,19 @@ export function createClient(config: ClientConfig) {
       return accessToken !== undefined;
     },
 
+    /**
+     * Trades a persisted Neon Auth cookie for a fresh JWT on page load, so a
+     * returning user skips the sign-in form. False when there is no live cookie.
+     */
+    async restoreSession(): Promise<boolean> {
+      try {
+        await refreshAccessToken();
+        return true;
+      } catch {
+        return false;
+      }
+    },
+
     async signIn(input: Credentials): Promise<void> {
       const response = await authRequest("/sign-in/email", {
         method: "POST",

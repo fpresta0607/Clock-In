@@ -40,6 +40,7 @@ function clientFor(overrides: Partial<Client> = {}): Client {
     report: vi.fn().mockResolvedValue({ rows, totalDurationSeconds: 7_200, filters: {}, pagination: {} }),
     exportCsv: vi.fn().mockResolvedValue(new Blob(["a,b"], { type: "text/csv" })),
     joinOrganization: vi.fn().mockResolvedValue(undefined),
+    restoreSession: vi.fn().mockResolvedValue(false),
     ...overrides,
   } as unknown as Client;
 }
@@ -47,7 +48,7 @@ function clientFor(overrides: Partial<Client> = {}): Client {
 async function signIn(client: Client) {
   const person = userEvent.setup();
   render(<App client={client} />);
-  await person.type(screen.getByLabelText("Email"), "alex@example.com");
+  await person.type(await screen.findByLabelText("Email"), "alex@example.com");
   await person.type(screen.getByLabelText("Password"), "long-enough-password");
   await person.click(screen.getByRole("button", { name: "Sign in" }));
   return person;
@@ -112,7 +113,7 @@ describe("dashboard", () => {
     const person = userEvent.setup();
     render(<App client={clientFor({ signUp })} />);
 
-    await person.click(screen.getByRole("button", { name: "New here? Create an account" }));
+    await person.click(await screen.findByRole("button", { name: "New here? Create an account" }));
     await person.type(screen.getByLabelText("Name"), "Alex Morgan");
     await person.type(screen.getByLabelText("Email"), "alex@example.com");
     await person.type(screen.getByLabelText("Password"), "long-enough-password");
@@ -131,7 +132,7 @@ describe("dashboard", () => {
     const person = userEvent.setup();
     render(<App client={clientFor()} />);
 
-    await person.click(screen.getByRole("button", { name: "New here? Create an account" }));
+    await person.click(await screen.findByRole("button", { name: "New here? Create an account" }));
     await person.type(screen.getByLabelText("Name"), "Alex Morgan");
     await person.type(screen.getByLabelText("Email"), "alex@example.com");
     await person.type(screen.getByLabelText("Password"), "long-enough-password");
@@ -149,7 +150,7 @@ describe("dashboard", () => {
     const person = userEvent.setup();
     render(<App client={clientFor({ signUp })} />);
 
-    await person.click(screen.getByRole("button", { name: "New here? Create an account" }));
+    await person.click(await screen.findByRole("button", { name: "New here? Create an account" }));
     await person.type(screen.getByLabelText("Name"), "Alex Morgan");
     await person.type(screen.getByLabelText("Email"), "alex@example.com");
     await person.type(screen.getByLabelText("Password"), "long-enough-password");
@@ -168,7 +169,7 @@ describe("dashboard", () => {
     const person = userEvent.setup();
     render(<App client={clientFor()} />);
 
-    await person.click(screen.getByRole("button", { name: "New here? Create an account" }));
+    await person.click(await screen.findByRole("button", { name: "New here? Create an account" }));
     expect(screen.getByLabelText(/Workspace name/)).toBeInTheDocument();
 
     await person.type(screen.getByLabelText(/Invite code/), "ACDEF-GHJKM");
@@ -180,6 +181,14 @@ describe("dashboard", () => {
 
     expect(await screen.findByRole("heading", { name: "SIQstack" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: /the app/i })).not.toBeInTheDocument();
+  });
+
+  it("restores a live session on load and skips the sign-in form", async () => {
+    const client = clientFor({ restoreSession: vi.fn().mockResolvedValue(true) });
+    render(<App client={client} />);
+
+    expect(await screen.findByRole("heading", { name: "SIQstack" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Sign in" })).not.toBeInTheDocument();
   });
 
   it("returns to sign-in with a readable message when the session expires", async () => {

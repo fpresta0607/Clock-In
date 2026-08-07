@@ -38,6 +38,25 @@ describe("web client", () => {
     }
   });
 
+  it("restores a live cookie session and serves API calls with the fresh token", async () => {
+    const { client, fetchMock } = clientWith(async (url) => {
+      if (url.endsWith("/token")) return jsonResponse({ token: "jwt-restored" });
+      return jsonResponse({ organization: { id: "o", name: "SIQstack", inviteCode: "ACDEF-GHJKM" } });
+    });
+
+    expect(await client.restoreSession()).toBe(true);
+    await client.organization();
+
+    const apiCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/organization"));
+    expect((apiCall?.[1]?.headers as Record<string, string>).authorization).toBe("Bearer jwt-restored");
+  });
+
+  it("reports no session when the auth host rejects the cookie", async () => {
+    const { client } = clientWith(async () => jsonResponse({}, 401));
+
+    expect(await client.restoreSession()).toBe(false);
+  });
+
   it("never sends the bearer token to the auth host", async () => {
     const { client, fetchMock } = clientWith(async (url) => {
       if (url.endsWith("/token")) return jsonResponse({ token: "jwt-1" });
