@@ -17,10 +17,19 @@ interface CommandResult {
   output: string;
 }
 
-function runTsx(arguments_: string[]): Promise<CommandResult> {
+interface EnvironmentOverrides {
+  ALLOW_DEVELOPMENT_SEED?: string;
+  DATABASE_URL?: string;
+  NODE_ENV?: string;
+}
+
+function runTsx(arguments_: string[], overrides: EnvironmentOverrides = {}): Promise<CommandResult> {
   return new Promise((resolveResult, reject) => {
     const environment = { ...process.env };
     delete environment.DATABASE_URL;
+    delete environment.NODE_ENV;
+    delete environment.ALLOW_DEVELOPMENT_SEED;
+    Object.assign(environment, overrides);
     const child = spawn(process.execPath, [tsxCli, ...arguments_], {
       cwd: packageDirectory,
       env: environment,
@@ -41,8 +50,11 @@ function runTsx(arguments_: string[]): Promise<CommandResult> {
 }
 
 describe("database CLI entrypoints", () => {
-  it.each(["migrate.ts", "seed.ts"])("fails safely without DATABASE_URL when %s is executed", async (entrypoint) => {
-    const result = await runTsx([resolve(sourceDirectory, entrypoint)]);
+  it.each([
+    ["migrate.ts", {}],
+    ["seed.ts", { NODE_ENV: "development", ALLOW_DEVELOPMENT_SEED: "true" }],
+  ])("fails safely without DATABASE_URL when %s is executed", async (entrypoint, overrides) => {
+    const result = await runTsx([resolve(sourceDirectory, entrypoint)], overrides);
 
     expect(result.exitCode).toBe(1);
     expect(result.output).toContain("DATABASE_URL is required");
@@ -62,5 +74,21 @@ describe("database CLI entrypoints", () => {
   it("does not expose the development password in seed success output", () => {
     expect(seedSuccessMessage).not.toContain("clock-in-development-only");
     expect(seedSuccessMessage).not.toMatch(/password\s*:/i);
+  });
+
+  it.each([
+    ["NODE_ENV is unset", {}, "NODE_ENV must be development or test"],
+    ["NODE_ENV is production", { NODE_ENV: "production", ALLOW_DEVELOPMENT_SEED: "true" }, "NODE_ENV must be development or test"],
+    ["development has no opt-in", { NODE_ENV: "development" }, "ALLOW_DEVELOPMENT_SEED=true is required"],
+  ])("fails closed when %s", async (_scenario, overrides, expectedMessage) => {
+    const result = await runTsx([resolve(sourceDirectory, "seed.ts")], {
+      ...overrides,
+      DATABASE_URL: "postgresql://127.0.0.1:1/clock_in",
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toContain(expectedMessage);
+    expect(result.output).not.toContain("Failed query");
+    expect(result.output).not.toContain("127.0.0.1:1");
   });
 });

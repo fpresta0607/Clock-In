@@ -12,6 +12,8 @@ const developmentPasswordHash = "$argon2id$v=19$m=65536,t=3,p=4$OkdlLdh793IA7hen
 
 export const seedSuccessMessage = "Development seed applied.";
 
+const seedEnvironments = new Set(["development", "test"]);
+
 export async function seedDevelopmentDatabase(database: DatabaseConnection): Promise<void> {
   await database.db
     .insert(organizations)
@@ -42,8 +44,12 @@ export async function seedDevelopmentDatabase(database: DatabaseConnection): Pro
 }
 
 async function main(): Promise<void> {
-  if (process.env.NODE_ENV === "production") {
-    throw new Error("Development seeding is disabled in production.");
+  if (!seedEnvironments.has(process.env.NODE_ENV ?? "")) {
+    throw new Error("NODE_ENV must be development or test to run development seeding.");
+  }
+
+  if (process.env.ALLOW_DEVELOPMENT_SEED !== "true") {
+    throw new Error("ALLOW_DEVELOPMENT_SEED=true is required to run development seeding.");
   }
 
   const databaseUrl = process.env.DATABASE_URL;

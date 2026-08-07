@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getTableConfig } from "drizzle-orm/pg-core";
+import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
 
 import {
   organizations,
@@ -58,6 +58,8 @@ describe("database schema", () => {
     expect(timeSessions.userId.notNull).toBe(true);
     expect(timeSessions.projectId.notNull).toBe(true);
     expect(timeSessions.clientId.notNull).toBe(true);
+    expect(timeSessions.description.notNull).toBe(false);
+    expect(timeSessions.description.columnType).toBe("PgText");
     expect(timeSessions.status.enumValues).toEqual(["running", "stopped", "needs_review"]);
     expect(timeSessions.startedAt.notNull).toBe(true);
     expect(timeSessions.idleSeconds.notNull).toBe(true);
@@ -76,8 +78,15 @@ describe("database schema", () => {
       expect.arrayContaining([
         "time_sessions_idle_seconds_nonnegative",
         "time_sessions_duration_seconds_nonnegative",
+        "time_sessions_description_length_valid",
         "time_sessions_status_fields_valid",
       ]),
+    );
+    const descriptionLengthCheck = config.checks.find(
+      (constraint) => constraint.name === "time_sessions_description_length_valid",
+    );
+    expect(new PgDialect().sqlToQuery(descriptionLengthCheck!.value).sql).toContain(
+      'char_length("time_sessions"."description") <= 1000',
     );
     const runningSessionIndex = config.indexes.find(
       (index) => index.config.name === "time_sessions_one_running_user_unique",

@@ -96,6 +96,7 @@ export const timeSessions = pgTable(
     userId: uuid("user_id").notNull(),
     projectId: uuid("project_id").notNull(),
     clientId: uuid("client_id").notNull(),
+    description: text("description"),
     status: sessionStatus("status").default("running").notNull(),
     startedAt: timestamp("started_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),
     stoppedAt: timestamp("stopped_at", { mode: "date", withTimezone: true }),
@@ -116,6 +117,10 @@ export const timeSessions = pgTable(
     }).onDelete("restrict"),
     check("time_sessions_idle_seconds_nonnegative", sql`${table.idleSeconds} >= 0`),
     check("time_sessions_duration_seconds_nonnegative", sql`${table.durationSeconds} is null or ${table.durationSeconds} >= 0`),
+    check(
+      "time_sessions_description_length_valid",
+      sql`${table.description} is null or char_length(${table.description}) <= 1000`,
+    ),
     check(
       "time_sessions_status_fields_valid",
       sql`(

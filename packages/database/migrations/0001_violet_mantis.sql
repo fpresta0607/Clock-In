@@ -1,0 +1,2 @@
+ALTER TABLE "time_sessions" ADD COLUMN "description" text;--> statement-breakpoint
+ALTER TABLE "time_sessions" ADD CONSTRAINT "time_sessions_description_length_valid" CHECK ("time_sessions"."description" is null or char_length("time_sessions"."description") <= 1000);
