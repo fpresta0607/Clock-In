@@ -1,7 +1,9 @@
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  server: { port: 5173, strictPort: true },
+  // A distinctive port so a stray Vite dev server on the default 5173 cannot
+  // shadow this app.
+  server: { port: 5180, strictPort: true },
   test: {
     environment: "jsdom",
     setupFiles: ["./src/test-setup.ts"],
