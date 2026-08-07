@@ -8,11 +8,11 @@ export interface DatabaseConnection {
   db: PostgresJsDatabase<typeof schema>;
 }
 
-export function createDatabase(databaseUrl: string): DatabaseConnection {
+export function createDatabase(databaseUrl: string, options?: { max?: number }): DatabaseConnection {
   if (databaseUrl.length === 0) {
     throw new Error("A database URL is required.");
   }
 
-  const client = postgres(databaseUrl);
+  const client = postgres(databaseUrl, options);
   return { client, db: drizzle({ client, schema }) };
 }

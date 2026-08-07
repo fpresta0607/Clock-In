@@ -13,7 +13,7 @@ const integrationDescription = databaseUrl
 
 integration(integrationDescription, () => {
   const schemaName = `clock_in_test_${randomUUID().replaceAll("-", "")}`;
-  const database = databaseUrl ? createDatabase(databaseUrl) : undefined;
+  const database = databaseUrl ? createDatabase(databaseUrl, { max: 1 }) : undefined;
 
   beforeAll(async () => {
     if (!database) return;
@@ -25,8 +25,11 @@ integration(integrationDescription, () => {
 
   afterAll(async () => {
     if (!database) return;
-    await database.client.unsafe(`drop schema \"${schemaName}\" cascade`);
-    await database.client.end({ timeout: 5 });
+    try {
+      await database.client.unsafe(`drop schema if exists \"${schemaName}\" cascade`);
+    } finally {
+      await database.client.end({ timeout: 5 });
+    }
   });
 
   it("enforces tenant foreign keys and a single running session per user", async () => {

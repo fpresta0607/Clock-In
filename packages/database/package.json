@@ -15,7 +15,7 @@
   "scripts": {
     "build": "pnpm clean && tsc --project tsconfig.json",
     "clean": "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
-    "test": "vitest run src/schema.test.ts",
+    "test": "vitest run src/schema.test.ts src/cli.test.ts",
     "test:integration": "vitest run --reporter=verbose src/migrations.integration.test.ts",
     "typecheck": "tsc --noEmit",
     "migrate": "tsx src/migrate.ts",

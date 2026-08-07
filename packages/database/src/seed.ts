@@ -1,3 +1,6 @@
+import { pathToFileURL } from "node:url";
+import { resolve } from "node:path";
+
 import { createDatabase, type DatabaseConnection } from "./client.js";
 import { organizations, projectMemberships, projects, users } from "./schema.js";
 
@@ -56,7 +59,7 @@ async function main(): Promise<void> {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   void main().catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : "Development seed failed.");
     process.exitCode = 1;
