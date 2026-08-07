@@ -59,3 +59,33 @@ export interface SessionRepository {
   createRunning(input: CreateRunningSession): Promise<SessionRecord>;
   stopRunning(subject: AuthenticatedSubject, sessionId: string, input: StopRunningSession): Promise<SessionRecord | null>;
 }
+
+export interface ReportLookupRecord {
+  id: string;
+  name: string;
+}
+
+export interface ReportRowRecord {
+  id: string;
+  user: ReportLookupRecord;
+  project: ReportLookupRecord;
+  description: string | null;
+  status: "stopped" | "needs_review";
+  startedAt: Date;
+  stoppedAt: Date;
+  idleSeconds: number;
+  durationSeconds: number;
+}
+
+export interface ReportQuery {
+  from?: Date;
+  toExclusive?: Date;
+  projectId?: string;
+  userId?: string;
+}
+
+export interface ReportRepository {
+  findProjectForOrganization(subject: AuthenticatedSubject, projectId: string): Promise<ReportLookupRecord | null>;
+  findUserForOrganization(subject: AuthenticatedSubject, userId: string): Promise<ReportLookupRecord | null>;
+  listForOrganization(subject: AuthenticatedSubject, query: ReportQuery): Promise<ReportRowRecord[]>;
+}

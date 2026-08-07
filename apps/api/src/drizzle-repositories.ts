@@ -1,8 +1,9 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lt, or } from "drizzle-orm";
 import {
   projectMemberships,
   projects,
   timeSessions,
+  users,
   type DatabaseConnection,
 } from "@clock-in/database";
 
@@ -12,6 +13,10 @@ import {
   type CreateRunningSession,
   type ProjectRecord,
   type ProjectRepository,
+  type ReportLookupRecord,
+  type ReportQuery,
+  type ReportRepository,
+  type ReportRowRecord,
   type SessionRecord,
   type SessionRepository,
   type StopRunningSession,
@@ -147,5 +152,82 @@ export class DrizzleSessionRepository implements SessionRepository {
       ))
       .returning());
     return rows[0] === undefined ? null : asSessionRecord(rows[0]);
+  }
+}
+
+export class DrizzleReportRepository implements ReportRepository {
+  public constructor(private readonly db: DatabaseConnection["db"]) {}
+
+  public async findProjectForOrganization(subject: AuthenticatedSubject, projectId: string): Promise<ReportLookupRecord | null> {
+    const rows = await this.db
+      .select({ id: projects.id, name: projects.name })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), eq(projects.organizationId, subject.organizationId)))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  public async findUserForOrganization(subject: AuthenticatedSubject, userId: string): Promise<ReportLookupRecord | null> {
+    const rows = await this.db
+      .select({ id: users.id, name: users.name })
+      .from(users)
+      .where(and(eq(users.id, userId), eq(users.organizationId, subject.organizationId)))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  public async listForOrganization(subject: AuthenticatedSubject, query: ReportQuery): Promise<ReportRowRecord[]> {
+    const conditions = [
+      eq(timeSessions.organizationId, subject.organizationId),
+      eq(users.organizationId, subject.organizationId),
+      eq(projects.organizationId, subject.organizationId),
+      or(eq(timeSessions.status, "stopped"), eq(timeSessions.status, "needs_review")),
+    ];
+    if (query.from !== undefined) conditions.push(gte(timeSessions.startedAt, query.from));
+    if (query.toExclusive !== undefined) conditions.push(lt(timeSessions.startedAt, query.toExclusive));
+    if (query.projectId !== undefined) conditions.push(eq(timeSessions.projectId, query.projectId));
+    if (query.userId !== undefined) conditions.push(eq(timeSessions.userId, query.userId));
+    const rows = await this.db
+      .select({
+        id: timeSessions.id,
+        userId: users.id,
+        userName: users.name,
+        projectId: projects.id,
+        projectName: projects.name,
+        description: timeSessions.description,
+        status: timeSessions.status,
+        startedAt: timeSessions.startedAt,
+        stoppedAt: timeSessions.stoppedAt,
+        idleSeconds: timeSessions.idleSeconds,
+        durationSeconds: timeSessions.durationSeconds,
+      })
+      .from(timeSessions)
+      .innerJoin(users, and(
+        eq(users.organizationId, timeSessions.organizationId),
+        eq(users.id, timeSessions.userId),
+      ))
+      .innerJoin(projects, and(
+        eq(projects.organizationId, timeSessions.organizationId),
+        eq(projects.id, timeSessions.projectId),
+      ))
+      .where(and(...conditions))
+      .orderBy(desc(timeSessions.startedAt), asc(timeSessions.id));
+
+    return rows.map((row) => {
+      if (row.status === "running" || row.stoppedAt === null || row.durationSeconds === null) {
+        throw new Error("Completed report query returned an invalid session.");
+      }
+      return {
+        id: row.id,
+        user: { id: row.userId, name: row.userName },
+        project: { id: row.projectId, name: row.projectName },
+        description: row.description,
+        status: row.status,
+        startedAt: row.startedAt,
+        stoppedAt: row.stoppedAt,
+        idleSeconds: row.idleSeconds,
+        durationSeconds: row.durationSeconds,
+      };
+    });
   }
 }

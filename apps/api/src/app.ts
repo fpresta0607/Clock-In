@@ -11,9 +11,11 @@ import {
 } from "./auth.js";
 import type { AppConfig } from "./env.js";
 import { AppError, handleAppError, jsonError } from "./errors.js";
-import type { ProjectRepository, SessionRepository } from "./repositories.js";
+import type { ProjectRepository, ReportRepository, SessionRepository } from "./repositories.js";
 import { createProjectRoutes } from "./routes/projects.js";
+import { createReportRoutes } from "./routes/reports.js";
 import { createSessionRoutes } from "./routes/sessions.js";
+import { createReportService } from "./services/reports.js";
 import { createSessionService } from "./services/sessions.js";
 
 export interface AppVariables {
@@ -92,6 +94,7 @@ export interface CreateAppDependencies {
   loginRateLimitStore?: LoginRateLimitStore;
   clientKeyResolver?: ClientKeyResolver;
   projectRepository?: ProjectRepository;
+  reportRepository?: ReportRepository;
   sessionRepository?: SessionRepository;
 }
 
@@ -250,6 +253,11 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
     app.use("/sessions", createAuthenticationMiddleware(dependencies.config, clock));
     app.use("/sessions/*", createAuthenticationMiddleware(dependencies.config, clock));
     app.route("/sessions", createSessionRoutes(sessionService));
+  }
+  if (dependencies.reportRepository !== undefined) {
+    app.use("/reports", createAuthenticationMiddleware(dependencies.config, clock));
+    app.use("/reports/*", createAuthenticationMiddleware(dependencies.config, clock));
+    app.route("/reports", createReportRoutes(createReportService({ reports: dependencies.reportRepository })));
   }
 
   return app;

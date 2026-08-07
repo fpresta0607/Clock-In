@@ -113,6 +113,30 @@ export const reportFiltersSchema = z
   })
   .strict();
 
+const completedReportStatusSchema = z.enum(["stopped", "needs_review"]);
+
+export const reportRowSchema = z
+  .object({
+    id: idSchema,
+    user: z.object({ id: idSchema, name: z.string().min(1) }).strict(),
+    project: z.object({ id: idSchema, name: z.string().min(1) }).strict(),
+    description: z.string().max(1_000).nullable(),
+    status: completedReportStatusSchema,
+    startedAt: timestampSchema,
+    stoppedAt: timestampSchema,
+    idleSeconds: z.number().int().nonnegative().safe(),
+    durationSeconds: z.number().int().nonnegative().safe(),
+  })
+  .strict();
+
+export const reportResponseSchema = z
+  .object({
+    filters: reportFiltersSchema,
+    totalDurationSeconds: z.number().int().nonnegative().safe(),
+    rows: z.array(reportRowSchema),
+  })
+  .strict();
+
 export const apiErrorCodeValues = [
   "validation_error",
   "invalid_credentials",
@@ -148,6 +172,8 @@ export type LoginResponse = z.infer<typeof loginResponseSchema>;
 export type ProjectListItem = z.infer<typeof projectListItemSchema>;
 export type ProjectListResponse = z.infer<typeof projectListResponseSchema>;
 export type ReportFilters = z.infer<typeof reportFiltersSchema>;
+export type ReportRow = z.infer<typeof reportRowSchema>;
+export type ReportResponse = z.infer<typeof reportResponseSchema>;
 export type Session = z.infer<typeof sessionSchema>;
 export type SessionStartRequest = z.infer<typeof sessionStartRequestSchema>;
 export type SessionStartResponse = z.infer<typeof sessionStartResponseSchema>;

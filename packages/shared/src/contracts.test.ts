@@ -7,6 +7,7 @@ import {
   loginResponseSchema,
   projectListItemSchema,
   reportFiltersSchema,
+  reportResponseSchema,
   sessionStartRequestSchema,
   sessionStartResponseSchema,
   sessionSchema,
@@ -220,6 +221,39 @@ describe("report and error contracts", () => {
   it("rejects impossible calendar dates", () => {
     expect(() => reportFiltersSchema.parse({ from: "2026-99-99" })).toThrow();
     expect(() => reportFiltersSchema.parse({ to: "2026-02-29" })).toThrow();
+  });
+
+  it("accepts completed organization report rows and normalized filters", () => {
+    expect(reportResponseSchema.parse({
+      filters: { from: "2026-08-01", to: "2026-08-06", projectId: ids.project, userId: ids.user },
+      totalDurationSeconds: 3_600,
+      rows: [{
+        id: ids.session,
+        user: { id: ids.user, name: "Alex Morgan" },
+        project: { id: ids.project, name: "Website redesign" },
+        description: null,
+        status: "stopped",
+        startedAt,
+        stoppedAt,
+        idleSeconds: 120,
+        durationSeconds: 3_600,
+      }],
+    })).toMatchObject({ totalDurationSeconds: 3_600, rows: [{ status: "stopped" }] });
+  });
+
+  it("rejects running rows and incomplete report rows", () => {
+    const row = {
+      id: ids.session,
+      user: { id: ids.user, name: "Alex Morgan" },
+      project: { id: ids.project, name: "Website redesign" },
+      description: null,
+      status: "running",
+      startedAt,
+      stoppedAt: null,
+      idleSeconds: 0,
+      durationSeconds: null,
+    };
+    expect(() => reportResponseSchema.parse({ filters: {}, totalDurationSeconds: 0, rows: [row] })).toThrow();
   });
 
   it("uses stable API error codes and actionable messages", () => {
