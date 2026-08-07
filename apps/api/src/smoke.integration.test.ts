@@ -137,4 +137,94 @@ integration(integrationDescription, () => {
     const report = await otherApp.request("/reports", { headers });
     expect((await report.json()).rows).toEqual([]);
   }, 60_000);
+
+  it("joins a teammate through the invite code and ranks them on one leaderboard", async () => {
+    const organizationResponse = await app.request("/organization", { headers: authorized });
+    expect(organizationResponse.status).toBe(200);
+    const { organization } = await organizationResponse.json();
+    expect(organization.inviteCode).toMatch(/^[A-Z0-9]{5}-[A-Z0-9]{5}$/);
+
+    const teammate = await createTestAuth(config, new Date());
+    const teammateId = randomUUID();
+    const teammateApp = createApp({
+      config,
+      keys: teammate.keys,
+      accounts: new DrizzleAccountStore(database.db),
+      projectRepository: new DrizzleProjectRepository(database.db),
+      sessionRepository: new DrizzleSessionRepository(database.db),
+      reportRepository: new DrizzleReportRepository(database.db),
+    });
+    const teammateAuth = {
+      authorization: await teammate.bearer(teammateId, { email: "teammate@clock-in.test", name: "Teammate" }),
+      "content-type": "application/json",
+    };
+
+    // Typed the way a person would: lower case, no dash.
+    const joined = await teammateApp.request("/accounts", {
+      method: "POST",
+      headers: teammateAuth,
+      body: JSON.stringify({ inviteCode: organization.inviteCode.replace("-", "").toLowerCase() }),
+    });
+    expect(joined.status).toBe(200);
+    const joinedUser = (await joined.json()).user;
+    expect(joinedUser.organizationId).toBe(organization.id);
+
+    // Joining grants access to the organization's existing projects.
+    const teammateProjects = await teammateApp.request("/projects", { headers: teammateAuth });
+    const sharedProject = (await teammateProjects.json()).projects[0];
+    expect(sharedProject.name).toBe("General");
+
+    const teammateStart = new Date(Date.now() - 1_800_000).toISOString();
+    const started = await teammateApp.request("/sessions", {
+      method: "POST",
+      headers: teammateAuth,
+      body: JSON.stringify({ clientId: randomUUID(), projectId: sharedProject.id, description: "Teammate work", startedAt: teammateStart }),
+    });
+    expect(started.status).toBe(200);
+    await teammateApp.request(`/sessions/${(await started.json()).session.id}/stop`, {
+      method: "POST",
+      headers: teammateAuth,
+      body: JSON.stringify({ stoppedAt: new Date().toISOString(), idleSeconds: 0 }),
+    });
+
+    const leaderboard = await app.request("/reports/leaderboard", { headers: authorized });
+    expect(leaderboard.status).toBe(200);
+    const board = await leaderboard.json();
+
+    expect(board.entries).toHaveLength(2);
+    // The teammate recorded ~30 minutes against the first account's ~50 seconds,
+    // so ranking follows recorded time rather than the order accounts were created.
+    expect(board.entries[0]).toMatchObject({ rank: 1, user: { name: "Teammate" } });
+    expect(board.entries[1]).toMatchObject({ rank: 2, user: { name: "Smoke User" } });
+    expect(board.entries[0].durationSeconds).toBeGreaterThan(board.entries[1].durationSeconds);
+    expect(board.entries[0].sessionCount).toBe(1);
+    expect(board.totalDurationSeconds).toBe(
+      board.entries[0].durationSeconds + board.entries[1].durationSeconds,
+    );
+
+    // Both members see the same board, because they are in the same organization.
+    const teammateBoard = await teammateApp.request("/reports/leaderboard", { headers: teammateAuth });
+    expect((await teammateBoard.json()).entries.map((row: { user: { name: string } }) => row.user.name))
+      .toEqual(["Teammate", "Smoke User"]);
+  }, 90_000);
+
+  it("refuses an invite code that matches no organization", async () => {
+    const stranger = await createTestAuth(config, new Date());
+    const strangerApp = createApp({
+      config,
+      keys: stranger.keys,
+      accounts: new DrizzleAccountStore(database.db),
+    });
+
+    const response = await strangerApp.request("/accounts", {
+      method: "POST",
+      headers: {
+        authorization: await stranger.bearer(randomUUID(), { email: "stranger@clock-in.test", name: "Stranger" }),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ inviteCode: "ACDEF-GHJKM" }),
+    });
+
+    expect(response.status).toBe(404);
+  }, 60_000);
 });

@@ -1,3 +1,6 @@
+import { randomBytes } from "node:crypto";
+
+import { generateInviteCode } from "@clock-in/shared";
 import { and, asc, count, desc, eq, gte, lt, or, sum } from "drizzle-orm";
 import {
   organizations,
@@ -8,10 +11,18 @@ import {
   type DatabaseConnection,
 } from "@clock-in/database";
 
-import type { AccountStore, AuthenticatedSubject, AuthenticatedUser, AuthIdentity } from "./auth.js";
+import type {
+  AccountStore,
+  AuthenticatedSubject,
+  AuthenticatedUser,
+  AuthIdentity,
+  OrganizationRecord,
+} from "./auth.js";
+import { AppError } from "./errors.js";
 import {
   SessionRepositoryError,
   type CreateRunningSession,
+  type LeaderboardRowRecord,
   type ProjectRecord,
   type ProjectRepository,
   type ReportExportRead,
@@ -163,7 +174,7 @@ export class DrizzleSessionRepository implements SessionRepository {
 export class DrizzleAccountStore implements AccountStore {
   public constructor(private readonly db: DatabaseConnection["db"]) {}
 
-  public async resolve(identity: AuthIdentity): Promise<AuthenticatedUser> {
+  public async resolve(identity: AuthIdentity, inviteCode?: string): Promise<AuthenticatedUser> {
     const existing = await this.find(identity.authUserId);
     if (existing !== null) {
       return existing.email === identity.email && existing.name === identity.name
@@ -171,7 +182,9 @@ export class DrizzleAccountStore implements AccountStore {
         : this.syncProfile(identity);
     }
     try {
-      return await this.provision(identity);
+      return inviteCode === undefined
+        ? await this.provision(identity)
+        : await this.join(identity, inviteCode);
     } catch (error) {
       // ponytail: a concurrent first request may have provisioned this account,
       // which rolls this transaction back on the users primary key.
@@ -179,6 +192,59 @@ export class DrizzleAccountStore implements AccountStore {
       if (raced !== null) return raced;
       throw error;
     }
+  }
+
+  public async findOrganization(organizationId: string): Promise<OrganizationRecord | null> {
+    const rows = await this.db
+      .select({ id: organizations.id, name: organizations.name, inviteCode: organizations.inviteCode })
+      .from(organizations)
+      .where(eq(organizations.id, organizationId))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  /**
+   * Places a new account in the organization an invite code names, with access
+   * to every project that organization is currently running.
+   */
+  private async join(identity: AuthIdentity, inviteCode: string): Promise<AuthenticatedUser> {
+    return this.db.transaction(async (tx) => {
+      const [organization] = await tx
+        .select({ id: organizations.id })
+        .from(organizations)
+        .where(eq(organizations.inviteCode, inviteCode))
+        .limit(1);
+      if (organization === undefined) {
+        throw new AppError("not_found", "That invite code does not match an organization.");
+      }
+
+      const [user] = await tx
+        .insert(users)
+        .values({
+          id: identity.authUserId,
+          organizationId: organization.id,
+          email: identity.email,
+          name: identity.name,
+        })
+        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
+      if (user === undefined) throw new Error("Failed to create a user for a joining account.");
+
+      const active = await tx
+        .select({ id: projects.id })
+        .from(projects)
+        .where(and(eq(projects.organizationId, organization.id), eq(projects.archived, false)));
+      if (active.length > 0) {
+        await tx.insert(projectMemberships).values(
+          active.map((project) => ({
+            organizationId: organization.id,
+            projectId: project.id,
+            userId: user.id,
+          })),
+        );
+      }
+
+      return user;
+    });
   }
 
   private async find(authUserId: string): Promise<AuthenticatedUser | null> {
@@ -205,7 +271,10 @@ export class DrizzleAccountStore implements AccountStore {
     return this.db.transaction(async (tx) => {
       const [organization] = await tx
         .insert(organizations)
-        .values({ name: `${identity.name}'s workspace` })
+        .values({
+          name: `${identity.name}'s workspace`,
+          inviteCode: generateInviteCode((size) => randomBytes(size)),
+        })
         .returning({ id: organizations.id });
       if (organization === undefined) throw new Error("Failed to create an organization for a new account.");
 
@@ -331,6 +400,36 @@ export class DrizzleReportRepository implements ReportRepository {
         durationSeconds: row.durationSeconds,
       };
     });
+  }
+
+  /** One row per member who recorded time, heaviest first. */
+  public async readLeaderboardForOrganization(
+    subject: AuthenticatedSubject,
+    query: ReportQuery,
+  ): Promise<LeaderboardRowRecord[]> {
+    const totalDuration = sum(timeSessions.durationSeconds);
+    const rows = await this.db
+      .select({
+        userId: users.id,
+        userName: users.name,
+        durationSeconds: totalDuration,
+        sessionCount: count(timeSessions.id),
+      })
+      .from(timeSessions)
+      .innerJoin(users, and(
+        eq(users.organizationId, timeSessions.organizationId),
+        eq(users.id, timeSessions.userId),
+      ))
+      .where(and(...this.predicates(subject, query), eq(users.organizationId, subject.organizationId)))
+      .groupBy(users.id, users.name)
+      // id breaks ties so equal totals do not reorder between requests.
+      .orderBy(desc(totalDuration), asc(users.id));
+
+    return rows.map((row) => ({
+      user: { id: row.userId, name: row.userName },
+      durationSeconds: row.durationSeconds,
+      sessionCount: row.sessionCount,
+    }));
   }
 
   private async snapshot<T>(callback: (db: Pick<DatabaseConnection["db"], "select">) => Promise<T>): Promise<T> {

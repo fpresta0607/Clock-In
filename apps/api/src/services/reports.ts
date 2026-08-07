@@ -1,12 +1,25 @@
-import type { ReportFilters, ReportResponse, ReportRow } from "@clock-in/shared";
+import type {
+  LeaderboardFilters,
+  LeaderboardResponse,
+  ReportFilters,
+  ReportResponse,
+  ReportRow,
+} from "@clock-in/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import { AppError } from "../errors.js";
-import type { ReportQuery, ReportRepository, ReportRowRecord, ReportSummaryRecord } from "../repositories.js";
+import type {
+  LeaderboardRowRecord,
+  ReportQuery,
+  ReportRepository,
+  ReportRowRecord,
+  ReportSummaryRecord,
+} from "../repositories.js";
 
 export interface ReportService {
   list(subject: AuthenticatedSubject, filters: ReportFilters): Promise<ReportResponse>;
   export(subject: AuthenticatedSubject, filters: ReportFilters): Promise<ReportExport>;
+  leaderboard(subject: AuthenticatedSubject, filters: LeaderboardFilters): Promise<LeaderboardResponse>;
 }
 
 export interface ReportExport {
@@ -61,6 +74,37 @@ function asReportRow(record: ReportRowRecord): ReportRow {
     idleSeconds: record.idleSeconds,
     durationSeconds: record.durationSeconds,
   };
+}
+
+/**
+ * Ranks by position in the already-sorted rows, but shares a rank between equal
+ * totals so a tie does not read as one member ahead of another.
+ */
+function asLeaderboardEntry(record: LeaderboardRowRecord, index: number, all: LeaderboardRowRecord[]): {
+  rank: number;
+  user: { id: string; name: string };
+  durationSeconds: number;
+  sessionCount: number;
+} {
+  const durationSeconds = safeInteger(record.durationSeconds, "leaderboard duration");
+  const previous = index === 0 ? undefined : all[index - 1];
+  const isTiedWithPrevious = previous !== undefined
+    && safeInteger(previous.durationSeconds, "leaderboard duration") === durationSeconds;
+  return {
+    rank: isTiedWithPrevious ? sharedRank(record, index, all) : index + 1,
+    user: record.user,
+    durationSeconds,
+    sessionCount: safeInteger(record.sessionCount, "leaderboard session count"),
+  };
+}
+
+function sharedRank(record: LeaderboardRowRecord, index: number, all: LeaderboardRowRecord[]): number {
+  const duration = safeInteger(record.durationSeconds, "leaderboard duration");
+  let first = index;
+  while (first > 0 && safeInteger(all[first - 1]!.durationSeconds, "leaderboard duration") === duration) {
+    first -= 1;
+  }
+  return first + 1;
 }
 
 function safeInteger(value: number | string | bigint | null, field: string): number {
@@ -131,6 +175,17 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       return {
         totalDurationSeconds: summary.totalDurationSeconds,
         rows: rows.map(asReportRow),
+      };
+    },
+
+    async leaderboard(subject: AuthenticatedSubject, filters: LeaderboardFilters): Promise<LeaderboardResponse> {
+      const query = normalizedQuery({ ...filters, page: 1, pageSize: 1 });
+      const rows = await dependencies.reports.readLeaderboardForOrganization(subject, query);
+      const entries = rows.map(asLeaderboardEntry);
+      return {
+        filters,
+        totalDurationSeconds: entries.reduce((total, entry) => total + entry.durationSeconds, 0),
+        entries,
       };
     },
   };

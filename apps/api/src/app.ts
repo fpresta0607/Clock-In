@@ -1,4 +1,9 @@
-import { meResponseSchema } from "@clock-in/shared";
+import {
+  meResponseSchema,
+  normalizeInviteCode,
+  organizationResponseSchema,
+  provisionAccountRequestSchema,
+} from "@clock-in/shared";
 import { bodyLimit } from "hono/body-limit";
 import type { JWTVerifyGetKey } from "jose";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
@@ -8,6 +13,7 @@ import {
   type AccountStore,
   type AuthenticatedSubject,
   type AuthenticatedUser,
+  type AuthIdentity,
 } from "./auth.js";
 import type { AppConfig } from "./env.js";
 import { AppError, handleAppError, jsonError } from "./errors.js";
@@ -21,6 +27,7 @@ import { createSessionService } from "./services/sessions.js";
 export interface AppVariables {
   authenticatedSubject: AuthenticatedSubject;
   authenticatedUser: AuthenticatedUser;
+  authenticatedIdentity: AuthIdentity;
   requestId: string;
 }
 
@@ -77,18 +84,32 @@ function parseAuthorizationHeader(header: string | undefined): string {
   return match[1];
 }
 
-export function createAuthenticationMiddleware(
-  dependencies: Pick<CreateAppDependencies, "config" | "keys" | "accounts">,
+/**
+ * Verifies the token without touching the account, so a route can decide how the
+ * account should be created. Everything else wants the middleware below.
+ */
+export function createIdentityMiddleware(
+  dependencies: Pick<CreateAppDependencies, "config" | "keys">,
   clock: () => Date = () => new Date(),
 ): MiddlewareHandler<ApiEnvironment> {
   return async (context, next) => {
     const token = parseAuthorizationHeader(context.req.header("authorization"));
-    const identity = await verifyIdentity(token, dependencies.keys, dependencies.config, clock());
-    const user = await dependencies.accounts.resolve(identity);
+    context.set("authenticatedIdentity", await verifyIdentity(token, dependencies.keys, dependencies.config, clock()));
+    await next();
+  };
+}
+
+export function createAuthenticationMiddleware(
+  dependencies: Pick<CreateAppDependencies, "config" | "keys" | "accounts">,
+  clock: () => Date = () => new Date(),
+): MiddlewareHandler<ApiEnvironment> {
+  const identify = createIdentityMiddleware(dependencies, clock);
+  return async (context, next) => identify(context, async () => {
+    const user = await dependencies.accounts.resolve(context.get("authenticatedIdentity"));
     context.set("authenticatedUser", user);
     context.set("authenticatedSubject", { userId: user.id, organizationId: user.organizationId });
     await next();
-  };
+  });
 }
 
 export function getAuthenticatedSubject(context: Context<ApiEnvironment>): AuthenticatedSubject {
@@ -124,6 +145,38 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
 
   app.use("/me", authenticate);
   app.get("/me", (context) => context.json(meResponseSchema.parse({ user: context.get("authenticatedUser") })));
+
+  // Sent once after sign-up. Identity-only auth, because the invite code in the
+  // body decides which organization this account is about to land in.
+  app.use("/accounts", createIdentityMiddleware(dependencies, clock));
+  app.post("/accounts", async (context) => {
+    let body: unknown = {};
+    try {
+      const raw = await context.req.text();
+      body = raw.length === 0 ? {} : JSON.parse(raw);
+    } catch {
+      throw new AppError("validation_error", "Invalid request body.");
+    }
+    const input = provisionAccountRequestSchema.safeParse(body);
+    if (!input.success) throw new AppError("validation_error", "Invalid request body.");
+
+    let inviteCode: string | undefined;
+    if (input.data.inviteCode !== undefined) {
+      const normalized = normalizeInviteCode(input.data.inviteCode);
+      if (normalized === null) throw new AppError("validation_error", "That invite code is not in the right format.");
+      inviteCode = normalized;
+    }
+    const user = await dependencies.accounts.resolve(context.get("authenticatedIdentity"), inviteCode);
+    return context.json(meResponseSchema.parse({ user }));
+  });
+
+  app.use("/organization", authenticate);
+  app.get("/organization", async (context) => {
+    const subject = getAuthenticatedSubject(context);
+    const organization = await dependencies.accounts.findOrganization(subject.organizationId);
+    if (organization === null) throw new AppError("not_found", "Organization not found.");
+    return context.json(organizationResponseSchema.parse({ organization }));
+  });
 
   if (dependencies.projectRepository !== undefined) {
     app.use("/projects", authenticate);

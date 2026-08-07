@@ -3,7 +3,13 @@ export {
   apiErrorCodeValues,
   apiErrorSchema,
   currentSessionResponseSchema,
+  leaderboardEntrySchema,
+  leaderboardFiltersSchema,
+  leaderboardResponseSchema,
   meResponseSchema,
+  organizationResponseSchema,
+  organizationSchema,
+  provisionAccountRequestSchema,
   projectListItemSchema,
   projectListResponseSchema,
   reportFiltersSchema,
@@ -22,7 +28,13 @@ export type {
   ApiError,
   ApiErrorCode,
   CurrentSessionResponse,
+  LeaderboardEntry,
+  LeaderboardFilters,
+  LeaderboardResponse,
   MeResponse,
+  Organization,
+  OrganizationResponse,
+  ProvisionAccountRequest,
   ProjectListItem,
   ProjectListResponse,
   ReportFilters,
@@ -35,4 +47,10 @@ export type {
   SessionStopRequest,
   SessionStopResponse,
 } from "./contracts.js";
+export {
+  generateInviteCode,
+  inviteCodeLength,
+  inviteCodePattern,
+  normalizeInviteCode,
+} from "./invite-code.js";
 export { formatDuration } from "./time.js";

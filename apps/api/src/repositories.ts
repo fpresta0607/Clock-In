@@ -104,9 +104,16 @@ export interface ReportExportRead {
   rows?: ReportRowRecord[];
 }
 
+export interface LeaderboardRowRecord {
+  user: ReportLookupRecord;
+  durationSeconds: number | string | bigint | null;
+  sessionCount: number | string | bigint;
+}
+
 export interface ReportRepository {
   findProjectForOrganization(subject: AuthenticatedSubject, projectId: string): Promise<ReportLookupRecord | null>;
   findUserForOrganization(subject: AuthenticatedSubject, userId: string): Promise<ReportLookupRecord | null>;
   readPageForOrganization(subject: AuthenticatedSubject, query: ReportQuery, options: ReportPageOptions): Promise<ReportPageRead>;
   readExportForOrganization(subject: AuthenticatedSubject, query: ReportQuery, maxRows: number): Promise<ReportExportRead>;
+  readLeaderboardForOrganization(subject: AuthenticatedSubject, query: ReportQuery): Promise<LeaderboardRowRecord[]>;
 }

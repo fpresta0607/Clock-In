@@ -29,6 +29,13 @@
       "when": 1786111105788,
       "tag": "0003_neon_auth_users",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786118117067,
+      "tag": "0004_organization_invite_code",
+      "breakpoints": true
     }
   ]
 }

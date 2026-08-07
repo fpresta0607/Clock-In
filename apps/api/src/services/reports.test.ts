@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { ReportFilters } from "@clock-in/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
-import type { ReportPageOptions, ReportRepository, ReportRowRecord } from "../repositories.js";
+import type {
+  LeaderboardRowRecord,
+  ReportPageOptions,
+  ReportQuery,
+  ReportRepository,
+  ReportRowRecord,
+} from "../repositories.js";
 import { createReportService } from "./reports.js";
 
 const ids = {
@@ -32,8 +38,14 @@ function row(overrides: Partial<ReportRowRecord> = {}): ReportRowRecord {
 
 class Reports implements ReportRepository {
   public lastPage: { query: Parameters<ReportRepository["readPageForOrganization"]>[1]; options: ReportPageOptions } | null = null;
+  public lastLeaderboardQuery: ReportQuery | null = null;
   public exportReads = 0;
+  public leaderboardRows: LeaderboardRowRecord[] = [];
   public constructor(private readonly rows: ReportRowRecord[] = [], private readonly accessible = new Set([ids.project, ids.user])) {}
+  public async readLeaderboardForOrganization(_subject: AuthenticatedSubject, query: ReportQuery) {
+    this.lastLeaderboardQuery = query;
+    return this.leaderboardRows;
+  }
   public async findProjectForOrganization(_subject: AuthenticatedSubject, projectId: string) {
     return this.accessible.has(projectId) && projectId === ids.project ? { id: projectId, name: "Timer" } : null;
   }
@@ -129,5 +141,79 @@ describe("report service", () => {
     const result = await exportService.export(subject, { page: 1, pageSize: 50 });
     expect(result.rows).toHaveLength(1);
     expect(exported.exportReads).toBe(1);
+  });
+});
+
+describe("leaderboard", () => {
+  const entry = (id: string, name: string, durationSeconds: number | string | null, sessionCount: number): LeaderboardRowRecord => ({
+    user: { id, name },
+    durationSeconds,
+    sessionCount,
+  });
+
+  it("ranks members by recorded time and totals the organization", async () => {
+    const reports = new Reports();
+    reports.leaderboardRows = [
+      entry(ids.user, "Alex", 7_200, 3),
+      entry(ids.otherUser, "Sam", 3_600, 1),
+    ];
+    const service = createReportService({ reports });
+
+    const result = await service.leaderboard(subject, {});
+
+    expect(result.entries).toEqual([
+      { rank: 1, user: { id: ids.user, name: "Alex" }, durationSeconds: 7_200, sessionCount: 3 },
+      { rank: 2, user: { id: ids.otherUser, name: "Sam" }, durationSeconds: 3_600, sessionCount: 1 },
+    ]);
+    expect(result.totalDurationSeconds).toBe(10_800);
+  });
+
+  it("shares a rank between members with identical totals", async () => {
+    const reports = new Reports();
+    reports.leaderboardRows = [
+      entry(ids.user, "Alex", 3_600, 2),
+      entry(ids.otherUser, "Sam", 3_600, 1),
+      entry(ids.project, "Jo", 60, 1),
+    ];
+    const service = createReportService({ reports });
+
+    const result = await service.leaderboard(subject, {});
+
+    expect(result.entries.map((row) => row.rank)).toEqual([1, 1, 3]);
+  });
+
+  it("reads postgres sum strings and a null total without losing precision", async () => {
+    const reports = new Reports();
+    reports.leaderboardRows = [entry(ids.user, "Alex", "9007199254740990", 2), entry(ids.otherUser, "Sam", null, 0)];
+    const service = createReportService({ reports });
+
+    const result = await service.leaderboard(subject, {});
+
+    expect(result.entries[0]?.durationSeconds).toBe(9_007_199_254_740_990);
+    expect(result.entries[1]?.durationSeconds).toBe(0);
+  });
+
+  it("applies the same inclusive calendar bounds the reports use", async () => {
+    const reports = new Reports();
+    const service = createReportService({ reports });
+
+    await service.leaderboard(subject, { from: "2026-08-01", to: "2026-08-06" });
+
+    expect(reports.lastLeaderboardQuery?.from).toEqual(new Date("2026-08-01T00:00:00.000Z"));
+    expect(reports.lastLeaderboardQuery?.toExclusive).toEqual(new Date("2026-08-07T00:00:00.000Z"));
+  });
+
+  it("rejects a range wider than a year and returns an empty board for no activity", async () => {
+    const reports = new Reports();
+    const service = createReportService({ reports });
+
+    await expect(service.leaderboard(subject, { from: "2024-01-01", to: "2026-01-01" })).rejects.toMatchObject({
+      code: "validation_error",
+    });
+    await expect(service.leaderboard(subject, {})).resolves.toEqual({
+      filters: {},
+      totalDurationSeconds: 0,
+      entries: [],
+    });
   });
 });
