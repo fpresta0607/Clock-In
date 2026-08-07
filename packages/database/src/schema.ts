@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { desc, sql } from "drizzle-orm";
 import {
   boolean,
   check,
@@ -134,5 +134,8 @@ export const timeSessions = pgTable(
       .where(sql`${table.status} = 'running'`),
     index("time_sessions_organization_project_started_at_idx").on(table.organizationId, table.projectId, table.startedAt),
     index("time_sessions_organization_user_started_at_idx").on(table.organizationId, table.userId, table.startedAt),
+    index("time_sessions_organization_report_started_id_idx")
+      .on(table.organizationId, desc(table.startedAt), table.id)
+      .where(sql`${table.status} in ('stopped', 'needs_review')`),
   ],
 );

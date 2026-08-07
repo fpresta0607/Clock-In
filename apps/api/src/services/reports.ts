@@ -2,10 +2,16 @@ import type { ReportFilters, ReportResponse, ReportRow } from "@clock-in/shared"
 
 import type { AuthenticatedSubject } from "../auth.js";
 import { AppError } from "../errors.js";
-import type { ReportQuery, ReportRepository, ReportRowRecord } from "../repositories.js";
+import type { ReportPageQuery, ReportQuery, ReportRepository, ReportRowRecord, ReportSummaryRecord } from "../repositories.js";
 
 export interface ReportService {
   list(subject: AuthenticatedSubject, filters: ReportFilters): Promise<ReportResponse>;
+  export(subject: AuthenticatedSubject, filters: ReportFilters): Promise<ReportExport>;
+}
+
+export interface ReportExport {
+  totalDurationSeconds: number;
+  rows: AsyncIterable<ReportRow[]>;
 }
 
 export interface ReportServiceDependencies {
@@ -13,6 +19,15 @@ export interface ReportServiceDependencies {
 }
 
 const millisecondsPerDay = 24 * 60 * 60 * 1_000;
+export const reportExportRowCap = 10_000;
+const reportExportBatchSize = 500;
+
+function validatePagination(filters: ReportFilters): void {
+  if (!Number.isSafeInteger(filters.page) || !Number.isSafeInteger(filters.pageSize)
+    || filters.page < 1 || filters.page > 10_000 || filters.pageSize < 1 || filters.pageSize > 200) {
+    throw new AppError("validation_error", "Invalid report pagination.");
+  }
+}
 
 function utcStart(date: string): Date {
   return new Date(`${date}T00:00:00.000Z`);
@@ -49,35 +64,79 @@ function asReportRow(record: ReportRowRecord): ReportRow {
   };
 }
 
-function compareRows(left: ReportRowRecord, right: ReportRowRecord): number {
-  const byStart = right.startedAt.getTime() - left.startedAt.getTime();
-  if (byStart !== 0) return byStart;
-  return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+function safeInteger(value: number | string | bigint | null, field: string): number {
+  if (value === null) return 0;
+  const bigint = typeof value === "bigint"
+    ? value
+    : typeof value === "string" && /^\d+$/.test(value)
+      ? BigInt(value)
+      : typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+        ? BigInt(value)
+        : null;
+  if (bigint === null || bigint > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new RangeError(`Report ${field} exceeds the safe integer range.`);
+  }
+  return Number(bigint);
 }
 
-function totalDuration(rows: ReportRowRecord[]): number {
-  return rows.reduce((total, row) => {
-    const next = total + row.durationSeconds;
-    if (!Number.isSafeInteger(row.durationSeconds) || row.durationSeconds < 0 || !Number.isSafeInteger(next)) {
-      throw new RangeError("Report duration total exceeds the safe integer range.");
-    }
-    return next;
-  }, 0);
+function summaryValues(summary: ReportSummaryRecord): { totalRows: number; totalDurationSeconds: number } {
+  return {
+    totalRows: safeInteger(summary.totalRows, "row count"),
+    totalDurationSeconds: safeInteger(summary.totalDurationSeconds, "duration total"),
+  };
+}
+
+async function authorizeFilters(repository: ReportRepository, subject: AuthenticatedSubject, query: ReportQuery): Promise<void> {
+  if (query.projectId !== undefined && await repository.findProjectForOrganization(subject, query.projectId) === null) {
+    throw new AppError("not_found", "Project not found.");
+  }
+  if (query.userId !== undefined && await repository.findUserForOrganization(subject, query.userId) === null) {
+    throw new AppError("not_found", "User not found.");
+  }
 }
 
 export function createReportService(dependencies: ReportServiceDependencies): ReportService {
   return {
     async list(subject: AuthenticatedSubject, filters: ReportFilters): Promise<ReportResponse> {
+      validatePagination(filters);
       const query = normalizedQuery(filters);
-      if (query.projectId !== undefined && await dependencies.reports.findProjectForOrganization(subject, query.projectId) === null) {
-        throw new AppError("not_found", "Project not found.");
+      await authorizeFilters(dependencies.reports, subject, query);
+      const summary = summaryValues(await dependencies.reports.summarizeForOrganization(subject, query));
+      const offset = (filters.page - 1) * filters.pageSize;
+      if (!Number.isSafeInteger(offset)) throw new AppError("validation_error", "Invalid report pagination.");
+      const pageQuery: ReportPageQuery = { ...query, limit: filters.pageSize, offset };
+      const rows = await dependencies.reports.listPageForOrganization(subject, pageQuery);
+      return {
+        filters,
+        totalDurationSeconds: summary.totalDurationSeconds,
+        pagination: {
+          page: filters.page,
+          pageSize: filters.pageSize,
+          totalRows: summary.totalRows,
+          totalPages: Math.ceil(summary.totalRows / filters.pageSize),
+        },
+        rows: rows.map(asReportRow),
+      };
+    },
+
+    async export(subject: AuthenticatedSubject, filters: ReportFilters): Promise<ReportExport> {
+      validatePagination(filters);
+      const query = normalizedQuery(filters);
+      await authorizeFilters(dependencies.reports, subject, query);
+      const summary = summaryValues(await dependencies.reports.summarizeForOrganization(subject, query));
+      if (summary.totalRows > reportExportRowCap) {
+        throw new AppError("validation_error", "Report export is limited to 10,000 rows. Narrow the filters and try again.");
       }
-      if (query.userId !== undefined && await dependencies.reports.findUserForOrganization(subject, query.userId) === null) {
-        throw new AppError("not_found", "User not found.");
-      }
-      const rows = await dependencies.reports.listForOrganization(subject, query);
-      rows.sort(compareRows);
-      return { filters, totalDurationSeconds: totalDuration(rows), rows: rows.map(asReportRow) };
+      return {
+        totalDurationSeconds: summary.totalDurationSeconds,
+        rows: (async function* (): AsyncGenerator<ReportRow[]> {
+          for (let offset = 0; offset < summary.totalRows; offset += reportExportBatchSize) {
+            const limit = Math.min(reportExportBatchSize, summary.totalRows - offset);
+            const rows = await dependencies.reports.listPageForOrganization(subject, { ...query, limit, offset });
+            yield rows.map(asReportRow);
+          }
+        })(),
+      };
     },
   };
 }

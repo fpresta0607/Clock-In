@@ -1,4 +1,4 @@
-import type { ReportResponse } from "@clock-in/shared";
+import type { ReportResponse, ReportRow } from "@clock-in/shared";
 
 const header = [
   "sessionId", "userId", "userName", "projectId", "projectName", "description",
@@ -15,10 +15,21 @@ function csvCell(value: string | number): string {
   return /[",\r\n]/.test(text) ? `"${text.replaceAll("\"", "\"\"")}"` : text;
 }
 
-export function reportToCsv(report: ReportResponse): string {
-  const rows = report.rows.map((row) => [
+export function reportCsvHeader(): string {
+  return `${header.join(",")}\r\n`;
+}
+
+export function reportCsvRow(row: ReportRow): string {
+  return [
     row.id, row.user.id, row.user.name, row.project.id, row.project.name, row.description ?? "", row.status,
     row.startedAt, row.stoppedAt, row.idleSeconds, row.durationSeconds,
-  ].map(csvCell).join(","));
-  return [header.join(","), ...rows, ["TOTAL", "", "", "", "", "", "", "", "", "", report.totalDurationSeconds].map(csvCell).join(",")].join("\r\n") + "\r\n";
+  ].map(csvCell).join(",") + "\r\n";
+}
+
+export function reportCsvTotal(totalDurationSeconds: number): string {
+  return ["TOTAL", "", "", "", "", "", "", "", "", "", totalDurationSeconds].map(csvCell).join(",") + "\r\n";
+}
+
+export function reportToCsv(report: ReportResponse): string {
+  return reportCsvHeader() + report.rows.map(reportCsvRow).join("") + reportCsvTotal(report.totalDurationSeconds);
 }

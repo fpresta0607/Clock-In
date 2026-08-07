@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, lt, or } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, lt, or, sum } from "drizzle-orm";
 import {
   projectMemberships,
   projects,
@@ -14,9 +14,11 @@ import {
   type ProjectRecord,
   type ProjectRepository,
   type ReportLookupRecord,
+  type ReportPageQuery,
   type ReportQuery,
   type ReportRepository,
   type ReportRowRecord,
+  type ReportSummaryRecord,
   type SessionRecord,
   type SessionRepository,
   type StopRunningSession,
@@ -176,17 +178,32 @@ export class DrizzleReportRepository implements ReportRepository {
     return rows[0] ?? null;
   }
 
-  public async listForOrganization(subject: AuthenticatedSubject, query: ReportQuery): Promise<ReportRowRecord[]> {
+  private predicates(subject: AuthenticatedSubject, query: ReportQuery) {
     const conditions = [
       eq(timeSessions.organizationId, subject.organizationId),
-      eq(users.organizationId, subject.organizationId),
-      eq(projects.organizationId, subject.organizationId),
       or(eq(timeSessions.status, "stopped"), eq(timeSessions.status, "needs_review")),
     ];
     if (query.from !== undefined) conditions.push(gte(timeSessions.startedAt, query.from));
     if (query.toExclusive !== undefined) conditions.push(lt(timeSessions.startedAt, query.toExclusive));
     if (query.projectId !== undefined) conditions.push(eq(timeSessions.projectId, query.projectId));
     if (query.userId !== undefined) conditions.push(eq(timeSessions.userId, query.userId));
+    return conditions;
+  }
+
+  public async summarizeForOrganization(subject: AuthenticatedSubject, query: ReportQuery): Promise<ReportSummaryRecord> {
+    const rows = await this.db
+      .select({ totalRows: count(timeSessions.id), totalDurationSeconds: sum(timeSessions.durationSeconds) })
+      .from(timeSessions)
+      .where(and(...this.predicates(subject, query)));
+    return rows[0] ?? { totalRows: 0, totalDurationSeconds: 0 };
+  }
+
+  public async listPageForOrganization(subject: AuthenticatedSubject, query: ReportPageQuery): Promise<ReportRowRecord[]> {
+    const conditions = [
+      ...this.predicates(subject, query),
+      eq(users.organizationId, subject.organizationId),
+      eq(projects.organizationId, subject.organizationId),
+    ];
     const rows = await this.db
       .select({
         id: timeSessions.id,
@@ -211,7 +228,9 @@ export class DrizzleReportRepository implements ReportRepository {
         eq(projects.id, timeSessions.projectId),
       ))
       .where(and(...conditions))
-      .orderBy(desc(timeSessions.startedAt), asc(timeSessions.id));
+      .orderBy(desc(timeSessions.startedAt), asc(timeSessions.id))
+      .limit(query.limit)
+      .offset(query.offset);
 
     return rows.map((row) => {
       if (row.status === "running" || row.stoppedAt === null || row.durationSeconds === null) {

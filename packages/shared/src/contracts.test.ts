@@ -214,8 +214,16 @@ describe("report and error contracts", () => {
         to: "2026-08-06",
         projectId: ids.project,
         userId: ids.user,
+        page: "2",
+        pageSize: "100",
       }),
-    ).toMatchObject({ from: "2026-08-01", to: "2026-08-06" });
+    ).toEqual({ from: "2026-08-01", to: "2026-08-06", projectId: ids.project, userId: ids.user, page: 2, pageSize: 100 });
+  });
+
+  it("defaults and bounds coercible report pagination", () => {
+    expect(reportFiltersSchema.parse({})).toMatchObject({ page: 1, pageSize: 50 });
+    expect(() => reportFiltersSchema.parse({ page: "0" })).toThrow();
+    expect(() => reportFiltersSchema.parse({ pageSize: "201" })).toThrow();
   });
 
   it("rejects impossible calendar dates", () => {
@@ -227,6 +235,7 @@ describe("report and error contracts", () => {
     expect(reportResponseSchema.parse({
       filters: { from: "2026-08-01", to: "2026-08-06", projectId: ids.project, userId: ids.user },
       totalDurationSeconds: 3_600,
+      pagination: { page: 1, pageSize: 50, totalRows: 1, totalPages: 1 },
       rows: [{
         id: ids.session,
         user: { id: ids.user, name: "Alex Morgan" },

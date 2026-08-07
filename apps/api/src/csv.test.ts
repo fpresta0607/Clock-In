@@ -5,8 +5,9 @@ import { reportToCsv } from "./csv.js";
 describe("report CSV", () => {
   it("uses a fixed header, CRLF lines, RFC4180 escaping, and a clear total row", () => {
     expect(reportToCsv({
-      filters: {},
+      filters: { page: 1, pageSize: 50 },
       totalDurationSeconds: 60,
+      pagination: { page: 1, pageSize: 50, totalRows: 1, totalPages: 1 },
       rows: [{
         id: "c1c7e513-b094-4d4c-ae55-21790ae019a4",
         user: { id: "e1c7e513-b094-4d4c-ae55-21790ae019a4", name: " Alex, \"Formula\"" },
@@ -26,7 +27,7 @@ describe("report CSV", () => {
   });
 
   it("neutralizes formulas after whitespace, including tabs and carriage returns", () => {
-    expect(reportToCsv({ filters: {}, totalDurationSeconds: 0, rows: [{
+    expect(reportToCsv({ filters: { page: 1, pageSize: 50 }, totalDurationSeconds: 0, pagination: { page: 1, pageSize: 50, totalRows: 1, totalPages: 1 }, rows: [{
       id: "c1c7e513-b094-4d4c-ae55-21790ae019a4", user: { id: "e1c7e513-b094-4d4c-ae55-21790ae019a4", name: "\t@bad" }, project: { id: "a1c7e513-b094-4d4c-ae55-21790ae019a4", name: "\r-safe" }, description: null, status: "needs_review", startedAt: "2026-08-06T14:00:00.000Z", stoppedAt: "2026-08-06T14:00:00.000Z", idleSeconds: 0, durationSeconds: 0,
     }] })).toContain("'\t@bad");
   });

@@ -110,6 +110,8 @@ export const reportFiltersSchema = z
     to: dateSchema.optional(),
     projectId: idSchema.optional(),
     userId: idSchema.optional(),
+    page: z.coerce.number().int().min(1).max(10_000).default(1),
+    pageSize: z.coerce.number().int().min(1).max(200).default(50),
   })
   .strict();
 
@@ -133,6 +135,12 @@ export const reportResponseSchema = z
   .object({
     filters: reportFiltersSchema,
     totalDurationSeconds: z.number().int().nonnegative().safe(),
+    pagination: z.object({
+      page: z.number().int().positive(),
+      pageSize: z.number().int().positive().max(200),
+      totalRows: z.number().int().nonnegative().safe(),
+      totalPages: z.number().int().nonnegative().safe(),
+    }).strict(),
     rows: z.array(reportRowSchema),
   })
   .strict();

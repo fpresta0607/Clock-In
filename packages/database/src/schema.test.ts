@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { SQL } from "drizzle-orm";
 import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
 
 import {
@@ -93,6 +94,15 @@ describe("database schema", () => {
     );
     expect(runningSessionIndex?.config.unique).toBe(true);
     expect(runningSessionIndex?.config.where).toBeDefined();
+    const reportIndex = config.indexes.find(
+      (index) => index.config.name === "time_sessions_organization_report_started_id_idx",
+    );
+    expect(reportIndex?.config.unique).toBe(false);
+    expect(reportIndex?.config.where).toBeDefined();
+    expect(new PgDialect().sqlToQuery(reportIndex!.config.where!).sql).toContain("'stopped'");
+    expect(reportIndex?.config.columns[0]?.indexConfig.order).toBe("asc");
+    expect(new PgDialect().sqlToQuery(reportIndex!.config.columns[1] as SQL).sql).toContain('"started_at" desc');
+    expect(reportIndex?.config.columns[2]?.indexConfig.order).toBe("asc");
     expect(config.uniqueConstraints.map((constraint) => constraint.name)).toContain(
       "time_sessions_organization_user_client_unique",
     );

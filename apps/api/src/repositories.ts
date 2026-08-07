@@ -84,8 +84,19 @@ export interface ReportQuery {
   userId?: string;
 }
 
+export interface ReportPageQuery extends ReportQuery {
+  limit: number;
+  offset: number;
+}
+
+export interface ReportSummaryRecord {
+  totalRows: number | string | bigint;
+  totalDurationSeconds: number | string | bigint | null;
+}
+
 export interface ReportRepository {
   findProjectForOrganization(subject: AuthenticatedSubject, projectId: string): Promise<ReportLookupRecord | null>;
   findUserForOrganization(subject: AuthenticatedSubject, userId: string): Promise<ReportLookupRecord | null>;
-  listForOrganization(subject: AuthenticatedSubject, query: ReportQuery): Promise<ReportRowRecord[]>;
+  summarizeForOrganization(subject: AuthenticatedSubject, query: ReportQuery): Promise<ReportSummaryRecord>;
+  listPageForOrganization(subject: AuthenticatedSubject, query: ReportPageQuery): Promise<ReportRowRecord[]>;
 }

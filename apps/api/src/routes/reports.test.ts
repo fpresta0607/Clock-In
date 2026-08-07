@@ -26,7 +26,10 @@ class Reports implements ReportRepository {
   public async findUserForOrganization(_subject: unknown, userId: string) {
     return userId === ids.user ? { id: ids.user, name: "Alex" } : null;
   }
-  public async listForOrganization(): Promise<ReportRowRecord[]> {
+  public async summarizeForOrganization() {
+    return { totalRows: 1, totalDurationSeconds: "3600" };
+  }
+  public async listPageForOrganization(): Promise<ReportRowRecord[]> {
     return [{
       id: "c1c7e513-b094-4d4c-ae55-21790ae019a4",
       user: { id: ids.user, name: "Alex" },
@@ -72,11 +75,19 @@ describe("report routes", () => {
     const headers = { authorization: `Bearer ${token}` };
     const json = await app().request("http://api.test/reports?from=2026-08-06", { headers });
     expect(json.status).toBe(200);
-    await expect(json.json()).resolves.toMatchObject({ filters: { from: "2026-08-06" }, totalDurationSeconds: 3_600, rows: [{ status: "stopped" }] });
+    await expect(json.json()).resolves.toMatchObject({ filters: { from: "2026-08-06", page: 1, pageSize: 50 }, totalDurationSeconds: 3_600, pagination: { totalRows: 1, totalPages: 1 }, rows: [{ status: "stopped" }] });
     const csv = await app().request("http://api.test/reports/export.csv?from=2026-08-06", { headers });
     expect(csv.status).toBe(200);
     expect(csv.headers.get("content-type")).toContain("text/csv; charset=utf-8");
     expect(csv.headers.get("content-disposition")).toBe('attachment; filename="clock-in-report.csv"');
-    await expect(csv.text()).resolves.toContain("description,status");
+    expect(csv.headers.get("x-content-type-options")).toBe("nosniff");
+    await expect(csv.text()).resolves.toContain("'=formula");
+  });
+
+  it("rejects invalid report pagination", async () => {
+    const token = await signAccessToken(user, config, new Date("2026-08-06T14:00:00.000Z"));
+    const response = await app().request("http://api.test/reports?pageSize=201", { headers: { authorization: `Bearer ${token}` } });
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: { code: "validation_error", message: "Invalid report filters." } });
   });
 });

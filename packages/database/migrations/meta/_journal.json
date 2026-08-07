@@ -15,6 +15,13 @@
       "when": 1786069360141,
       "tag": "0001_violet_mantis",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786074677163,
+      "tag": "0002_orange_jack_power",
+      "breakpoints": true
     }
   ]
 }
