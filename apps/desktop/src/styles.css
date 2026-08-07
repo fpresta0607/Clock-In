@@ -70,6 +70,18 @@ select { appearance: auto; }
 .stop-button { width: min(100%, 250px); border: 1px solid #f07568; background: var(--red); color: #24100d; }
 .link-button { width: 100%; margin-top: 15px; border: 0; background: transparent; color: var(--muted); font-family: inherit; font-size: .81rem; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 .link-button:hover, .link-button:focus-visible { color: var(--ivory); }
+.optional { color: var(--muted); font-size: .72rem; font-weight: 400; letter-spacing: .04em; text-transform: none; }
+.board-panel { margin-top: 22px; border-top: 1px solid var(--line); padding-top: 15px; }
+.board-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.board-head h2 { margin: 0; color: var(--ivory); font-size: .92rem; letter-spacing: .02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.invite-code { flex: none; border: 1px solid var(--line); border-radius: 2px; padding: 3px 7px; color: var(--amber); font-family: Bahnschrift, "Courier New", monospace; font-size: .76rem; letter-spacing: .09em; }
+.board-list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.board-list li { display: grid; align-items: baseline; gap: 9px; grid-template-columns: 18px 1fr auto; padding: 4px 6px; border-radius: 2px; font-size: .84rem; }
+.board-list li.is-you { background: rgba(239, 168, 47, .1); }
+.board-rank { color: var(--muted); font-variant-numeric: tabular-nums; }
+.board-name { color: var(--ivory); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.you-tag { color: var(--muted); font-size: .74rem; text-transform: uppercase; letter-spacing: .08em; }
+.board-hours { color: var(--amber); font-family: Bahnschrift, "Courier New", monospace; font-variant-numeric: tabular-nums; }
 .form-error { margin: 13px 0 0; border-left: 3px solid var(--red); padding: 8px 10px; background: rgba(221, 93, 79, .11); color: #ffb4aa; font-size: .83rem; }
 
 .running-panel { display: grid; justify-items: center; padding-top: 25px; text-align: center; }

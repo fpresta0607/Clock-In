@@ -14,6 +14,19 @@ export type LoginInput = {
 
 export type SignupInput = LoginInput & {
   name: string;
+  inviteCode?: string;
+};
+
+export type LeaderboardEntry = {
+  rank: number;
+  user: { id: string; name: string };
+  durationSeconds: number;
+  sessionCount: number;
+};
+
+export type OrganizationOverview = {
+  organization: { id: string; name: string; inviteCode: string };
+  entries: readonly LeaderboardEntry[];
 };
 
 export type StopInput = {
@@ -36,6 +49,7 @@ export interface TimerBridge {
   retryPending(): Promise<PendingRetryResult>;
   useServerTimer(): Promise<BootstrapSnapshot>;
   retryLocalStart(input: StartIntent): Promise<BootstrapSnapshot>;
+  orgOverview(): Promise<OrganizationOverview>;
 }
 
 type TauriInvoke = <Result>(command: string, args?: Record<string, unknown>) => Promise<Result>;
@@ -134,6 +148,32 @@ export const decodeBootstrapSnapshot = (value: unknown): BootstrapSnapshot => {
   }
 };
 
+const decodeLeaderboardEntry = (value: unknown): LeaderboardEntry => {
+  const candidate = record(value);
+  const member = record(candidate.user);
+  return {
+    rank: nonnegativeInteger(candidate.rank),
+    user: { id: uuid(member.id), name: string(member.name) },
+    durationSeconds: nonnegativeInteger(candidate.durationSeconds),
+    sessionCount: nonnegativeInteger(candidate.sessionCount),
+  };
+};
+
+export const decodeOrganizationOverview = (value: unknown): OrganizationOverview => {
+  const candidate = record(value);
+  const organization = record(candidate.organization);
+  const entries = candidate.entries;
+  if (!Array.isArray(entries)) invalidResponse();
+  return {
+    organization: {
+      id: uuid(organization.id),
+      name: string(organization.name),
+      inviteCode: string(organization.inviteCode),
+    },
+    entries: (entries as unknown[]).map(decodeLeaderboardEntry),
+  };
+};
+
 export const decodePendingRetryResult = (value: unknown): PendingRetryResult => {
   const candidate = record(value);
   return { remaining: nonnegativeInteger(candidate.remaining) };
@@ -164,6 +204,7 @@ export const defaultBridge: TimerBridge = {
   retryPending: () => invokeDecoded("timer_retry_pending", decodePendingRetryResult),
   useServerTimer: () => invokeDecoded("timer_use_server", decodeBootstrapSnapshot),
   retryLocalStart: (input) => invokeDecoded("timer_retry_local_start", decodeBootstrapSnapshot, { input }),
+  orgOverview: () => invokeDecoded("org_overview", decodeOrganizationOverview),
 };
 
 export const bridgeError = (error: unknown): BridgeError => {
