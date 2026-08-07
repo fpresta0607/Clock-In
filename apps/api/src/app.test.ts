@@ -1,8 +1,10 @@
+import type { JWTVerifyGetKey } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
 
-import { hashPassword, type UserCredential } from "./auth.js";
-import { createApp, MemoryLoginRateLimitStore, type LoginRateLimitStore } from "./app.js";
+import type { AccountStore, AuthenticatedUser } from "./auth.js";
+import { createApp } from "./app.js";
 import { parseEnv, type AppConfig } from "./env.js";
+import { createTestAuth } from "./test-tokens.js";
 
 const ids = {
   organization: "0e59dfd6-3d1f-4795-9420-3ab65f0df843",
@@ -11,126 +13,49 @@ const ids = {
 
 const config: AppConfig = parseEnv({
   DATABASE_URL: "postgres://clock_in:password@localhost:5432/clock_in",
-  JWT_SECRET: "this-is-a-long-test-secret-with-enough-entropy-123",
+  AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
   CORS_ORIGINS: "https://desktop.clock-in.test,https://admin.clock-in.test",
-  JWT_TTL_SECONDS: "300",
-  LOGIN_RATE_LIMIT_MAX: "2",
-  LOGIN_RATE_LIMIT_WINDOW_SECONDS: "60",
   NODE_ENV: "test",
 });
 
-let credential: UserCredential;
+const account: AuthenticatedUser = {
+  id: ids.user,
+  email: "alex@example.com",
+  name: "Alex Morgan",
+  organizationId: ids.organization,
+};
+
+const now = new Date("2026-08-06T14:00:00.000Z");
+let keys: JWTVerifyGetKey;
+let bearer: () => Promise<string>;
 
 beforeAll(async () => {
-  credential = {
-    email: "alex@example.com",
-    passwordHash: await hashPassword("correct horse battery staple"),
-    user: {
-      id: ids.user,
-      email: "alex@example.com",
-      name: "Alex Morgan",
-      organizationId: ids.organization,
-    },
-  };
+  const auth = await createTestAuth(config, now);
+  keys = auth.keys;
+  bearer = () => auth.bearer(ids.user);
 });
 
-function createTestApp(options: {
-  now?: number;
-  bodyLimitBytes?: number;
-  credential?: UserCredential;
-  config?: AppConfig;
-  clientKeyResolver?: (request: Request) => string;
-  loginRateLimitStore?: MemoryLoginRateLimitStore;
-} = {}) {
-  let now = options.now ?? Date.parse("2026-08-06T14:00:00.000Z");
-  const entries = new Map<string, { count: number; resetAt: number }>();
+function createTestApp(options: { bodyLimitBytes?: number; accounts?: AccountStore } = {}) {
+  const resolved: string[] = [];
+  const accounts: AccountStore = options.accounts ?? {
+    resolve: async (identity) => {
+      resolved.push(identity.authUserId);
+      return account;
+    },
+  };
   const app = createApp({
-    config: options.config ?? config,
+    config,
+    keys,
+    accounts,
     ...(options.bodyLimitBytes === undefined ? {} : { bodyLimitBytes: options.bodyLimitBytes }),
-    credentials: {
-      findByEmail: async (email) => (email === (options.credential ?? credential).email ? options.credential ?? credential : null),
-    },
-    clock: () => new Date(now),
-    loginRateLimitStore: options.loginRateLimitStore ?? {
-      scope: "distributed",
-      take: (key, limit, windowMs, at) => {
-        const current = entries.get(key);
-        const record = current !== undefined && current.resetAt > at
-          ? current
-          : { count: 0, resetAt: at + windowMs };
-        record.count += 1;
-        entries.set(key, record);
-        return { allowed: record.count <= limit, retryAfterSeconds: Math.ceil((record.resetAt - at) / 1_000) };
-      },
-    },
-    clientKeyResolver: (context) => options.clientKeyResolver?.(context.req.raw) ?? "test-local-client",
+    clock: () => now,
   });
 
-  return { app, advance: (milliseconds: number) => { now += milliseconds; } };
+  return { app, resolved };
 }
 
 describe("API composition", () => {
-  it("bounds the default memory limiter and evicts the oldest key deterministically", () => {
-    const store = new MemoryLoginRateLimitStore(2);
-
-    expect(store.take("first", 1, 60_000, 0).allowed).toBe(true);
-    expect(store.take("second", 1, 60_000, 0).allowed).toBe(true);
-    expect(store.take("third", 1, 60_000, 0).allowed).toBe(true);
-
-    expect(store.size).toBe(2);
-    expect(store.take("second", 1, 60_000, 0).allowed).toBe(false);
-    expect(store.take("first", 1, 60_000, 0).allowed).toBe(true);
-  });
-
-  it("isolates login limits for the same account across trusted client keys", async () => {
-    const { app } = createTestApp({ clientKeyResolver: (request) => request.headers.get("x-test-client") ?? "missing" });
-    const request = (client: string) => app.request("http://api.test/auth/login", {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-test-client": client },
-      body: JSON.stringify({ email: "alex@example.com", password: "wrong password" }),
-    });
-
-    expect((await request("client-a")).status).toBe(401);
-    expect((await request("client-a")).status).toBe(401);
-    expect((await request("client-a")).status).toBe(429);
-    expect((await request("client-b")).status).toBe(401);
-  });
-
-  it("requires a distributed rate-limit store and trusted resolver in production", () => {
-    const productionConfig = parseEnv({
-      DATABASE_URL: "postgres://clock_in:password@localhost:5432/clock_in",
-      JWT_SECRET: "this-is-a-long-test-secret-with-enough-entropy-123",
-      CORS_ORIGINS: "https://desktop.clock-in.test",
-      NODE_ENV: "production",
-    });
-    const credentials = { findByEmail: async () => null };
-
-    expect(() => createApp({ config: productionConfig, credentials })).toThrow("rate limit store");
-    expect(() => createApp({
-      config: productionConfig,
-      credentials,
-      loginRateLimitStore: new MemoryLoginRateLimitStore(2),
-    })).toThrow("client key resolver");
-    expect(() => createApp({
-      config: productionConfig,
-      credentials,
-      loginRateLimitStore: new MemoryLoginRateLimitStore(2),
-      clientKeyResolver: () => "trusted-client",
-    })).toThrow("distributed rate limit store");
-
-    const distributedStore: LoginRateLimitStore = {
-      scope: "distributed",
-      take: () => ({ allowed: true, retryAfterSeconds: 1 }),
-    };
-    expect(() => createApp({
-      config: productionConfig,
-      credentials,
-      loginRateLimitStore: distributedStore,
-      clientKeyResolver: () => "trusted-client",
-    })).not.toThrow();
-  });
-
-  it("returns a JSON health response and request id", async () => {
+  it("returns a JSON health response and request id without authentication", async () => {
     const { app } = createTestApp();
 
     const response = await app.request("http://api.test/health");
@@ -141,13 +66,35 @@ describe("API composition", () => {
     await expect(response.json()).resolves.toEqual({ status: "ok" });
   });
 
+  it("returns the signed-in account and provisions it through the account store", async () => {
+    const { app, resolved } = createTestApp();
+
+    const response = await app.request("http://api.test/me", { headers: { authorization: await bearer() } });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ user: account });
+    expect(resolved).toEqual([ids.user]);
+  });
+
+  it("rejects missing, malformed, and untrusted bearer tokens", async () => {
+    const { app } = createTestApp();
+    const request = (headers: Record<string, string>) => app.request("http://api.test/me", { headers });
+
+    expect((await request({})).status).toBe(401);
+    expect((await request({ authorization: "Basic abc" })).status).toBe(401);
+    expect((await request({ authorization: "Bearer not.a.jwt" })).status).toBe(401);
+    await expect((await request({})).json()).resolves.toEqual({
+      error: { code: "unauthorized", message: "Authentication is required." },
+    });
+  });
+
   it("rejects request bodies larger than the configured limit", async () => {
     const { app } = createTestApp({ bodyLimitBytes: 32 });
 
-    const response = await app.request("http://api.test/auth/login", {
+    const response = await app.request("http://api.test/me", {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: "alex@example.com", password: "a password longer than the body limit" }),
+      headers: { "content-type": "application/json", authorization: await bearer() },
+      body: JSON.stringify({ padding: "a body that is longer than the configured limit" }),
     });
 
     expect(response.status).toBe(413);
@@ -157,12 +104,9 @@ describe("API composition", () => {
   it("allows configured CORS origins and handles preflight", async () => {
     const { app } = createTestApp();
 
-    const response = await app.request("http://api.test/auth/login", {
+    const response = await app.request("http://api.test/me", {
       method: "OPTIONS",
-      headers: {
-        origin: "https://desktop.clock-in.test",
-        "access-control-request-method": "POST",
-      },
+      headers: { origin: "https://desktop.clock-in.test", "access-control-request-method": "GET" },
     });
 
     expect(response.status).toBe(204);
@@ -173,9 +117,7 @@ describe("API composition", () => {
   it("does not grant CORS access to an unconfigured origin", async () => {
     const { app } = createTestApp();
 
-    const response = await app.request("http://api.test/health", {
-      headers: { origin: "https://evil.example" },
-    });
+    const response = await app.request("http://api.test/health", { headers: { origin: "https://evil.example" } });
 
     expect(response.status).toBe(200);
     expect(response.headers.get("access-control-allow-origin")).toBeNull();
@@ -192,69 +134,12 @@ describe("API composition", () => {
     expect(response.headers.get("content-security-policy")).toBe("default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
   });
 
-  it("returns stable validation errors for malformed JSON and invalid login input", async () => {
-    const { app } = createTestApp();
-    const malformed = await app.request("http://api.test/auth/login", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: "{not json",
-    });
-    const invalid = await app.request("http://api.test/auth/login", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: "not-an-email", password: "" }),
-    });
-
-    expect(malformed.status).toBe(400);
-    await expect(malformed.json()).resolves.toEqual({ error: { code: "validation_error", message: "Invalid request body." } });
-    expect(invalid.status).toBe(400);
-    await expect(invalid.json()).resolves.toEqual({ error: { code: "validation_error", message: "Invalid request body." } });
-  });
-
-  it("returns the shared login response contract for valid credentials", async () => {
+  it("returns a stable not-found error for unknown routes", async () => {
     const { app } = createTestApp();
 
-    const response = await app.request("http://api.test/auth/login", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: " ALEX@EXAMPLE.COM ", password: "correct horse battery staple" }),
-    });
+    const response = await app.request("http://api.test/nope");
 
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({
-      accessToken: expect.any(String),
-      user: { id: ids.user, email: "alex@example.com", organizationId: ids.organization },
-    });
-  });
-
-  it("returns the same stable error for invalid credentials", async () => {
-    const { app } = createTestApp();
-
-    const response = await app.request("http://api.test/auth/login", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: "unknown@example.com", password: "incorrect password" }),
-    });
-
-    expect(response.status).toBe(401);
-    await expect(response.json()).resolves.toEqual({ error: { code: "invalid_credentials", message: "Invalid email or password." } });
-  });
-
-  it("rate limits normalized login identifiers deterministically", async () => {
-    const { app, advance } = createTestApp();
-    const request = () => app.request("http://api.test/auth/login", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: "ALEX@EXAMPLE.COM", password: "wrong password" }),
-    });
-
-    expect((await request()).status).toBe(401);
-    expect((await request()).status).toBe(401);
-    const limited = await request();
-    expect(limited.status).toBe(429);
-    expect(limited.headers.get("retry-after")).toBe("60");
-    await expect(limited.json()).resolves.toEqual({ error: { code: "rate_limited", message: "Too many login attempts. Try again later." } });
-    advance(60_000);
-    expect((await request()).status).toBe(401);
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual({ error: { code: "not_found", message: "Route not found." } });
   });
 });

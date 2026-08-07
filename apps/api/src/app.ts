@@ -1,13 +1,13 @@
-import { loginRequestSchema, loginResponseSchema } from "@clock-in/shared";
+import { meResponseSchema } from "@clock-in/shared";
 import { bodyLimit } from "hono/body-limit";
+import type { JWTVerifyGetKey } from "jose";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 
 import {
-  createAuthService,
-  normalizeEmail,
-  verifyAccessToken,
+  verifyIdentity,
+  type AccountStore,
   type AuthenticatedSubject,
-  type UserCredentialStore,
+  type AuthenticatedUser,
 } from "./auth.js";
 import type { AppConfig } from "./env.js";
 import { AppError, handleAppError, jsonError } from "./errors.js";
@@ -20,79 +20,18 @@ import { createSessionService } from "./services/sessions.js";
 
 export interface AppVariables {
   authenticatedSubject: AuthenticatedSubject;
+  authenticatedUser: AuthenticatedUser;
   requestId: string;
 }
 
 export type ApiEnvironment = { Variables: AppVariables };
 
-export interface RateLimitDecision {
-  allowed: boolean;
-  retryAfterSeconds: number;
-}
-
-export interface LoginRateLimitStore {
-  readonly scope: "local" | "distributed";
-  take(key: string, limit: number, windowMs: number, now: number): RateLimitDecision;
-}
-
-export type ClientKeyResolver = (context: Context) => string | Promise<string>;
-
-interface RateLimitEntry {
-  count: number;
-  resetAt: number;
-}
-
-export class MemoryLoginRateLimitStore implements LoginRateLimitStore {
-  public readonly scope = "local" as const;
-  private readonly entries = new Map<string, RateLimitEntry>();
-  private readonly capacity: number;
-
-  public constructor(capacity = 10_000) {
-    if (!Number.isSafeInteger(capacity) || capacity < 1) {
-      throw new RangeError("Rate-limit capacity must be a positive integer.");
-    }
-    this.capacity = capacity;
-  }
-
-  public get size(): number {
-    return this.entries.size;
-  }
-
-  public take(key: string, limit: number, windowMs: number, now: number): RateLimitDecision {
-    const existing = this.entries.get(key);
-    const entry = existing !== undefined && existing.resetAt > now
-      ? existing
-      : this.createEntry(key, windowMs, now);
-    entry.count += 1;
-    return {
-      allowed: entry.count <= limit,
-      retryAfterSeconds: Math.max(1, Math.ceil((entry.resetAt - now) / 1_000)),
-    };
-  }
-
-  private createEntry(key: string, windowMs: number, now: number): RateLimitEntry {
-    if (this.entries.has(key)) {
-      this.entries.delete(key);
-    }
-    if (this.entries.size === this.capacity) {
-      const oldestKey = this.entries.keys().next().value;
-      if (oldestKey !== undefined) {
-        this.entries.delete(oldestKey);
-      }
-    }
-    const entry = { count: 0, resetAt: now + windowMs };
-    this.entries.set(key, entry);
-    return entry;
-  }
-}
-
 export interface CreateAppDependencies {
   config: AppConfig;
-  credentials: UserCredentialStore;
+  keys: JWTVerifyGetKey;
+  accounts: AccountStore;
   clock?: () => Date;
   bodyLimitBytes?: number;
-  loginRateLimitStore?: LoginRateLimitStore;
-  clientKeyResolver?: ClientKeyResolver;
   projectRepository?: ProjectRepository;
   reportRepository?: ReportRepository;
   sessionRepository?: SessionRepository;
@@ -139,12 +78,15 @@ function parseAuthorizationHeader(header: string | undefined): string {
 }
 
 export function createAuthenticationMiddleware(
-  config: AppConfig,
+  dependencies: Pick<CreateAppDependencies, "config" | "keys" | "accounts">,
   clock: () => Date = () => new Date(),
 ): MiddlewareHandler<ApiEnvironment> {
   return async (context, next) => {
     const token = parseAuthorizationHeader(context.req.header("authorization"));
-    context.set("authenticatedSubject", await verifyAccessToken(token, config, clock()));
+    const identity = await verifyIdentity(token, dependencies.keys, dependencies.config, clock());
+    const user = await dependencies.accounts.resolve(identity);
+    context.set("authenticatedUser", user);
+    context.set("authenticatedSubject", { userId: user.id, organizationId: user.organizationId });
     await next();
   };
 }
@@ -157,42 +99,10 @@ export function getAuthenticatedSubject(context: Context<ApiEnvironment>): Authe
   return subject;
 }
 
-function normalizeLoginRequestBody(body: unknown): unknown {
-  if (typeof body !== "object" || body === null || Array.isArray(body)) {
-    return body;
-  }
-  const record = body as Record<string, unknown>;
-  return {
-    ...record,
-    email: typeof record.email === "string" ? normalizeEmail(record.email) : record.email,
-  };
-}
-
-function loginRateLimitKey(clientKey: string, email: string): string {
-  return `${clientKey.length}:${clientKey}${email}`;
-}
-
 export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironment> {
-  const configuredRateLimitStore = dependencies.loginRateLimitStore;
-  let rateLimitStore: LoginRateLimitStore;
-  if (dependencies.config.nodeEnv === "production") {
-    if (configuredRateLimitStore === undefined) {
-      throw new Error("A rate limit store is required in production.");
-    }
-    if (dependencies.clientKeyResolver === undefined) {
-      throw new Error("A trusted client key resolver is required in production.");
-    }
-    if (configuredRateLimitStore.scope !== "distributed") {
-      throw new Error("A distributed rate limit store is required in production.");
-    }
-    rateLimitStore = configuredRateLimitStore;
-  } else {
-    rateLimitStore = configuredRateLimitStore ?? new MemoryLoginRateLimitStore();
-  }
   const app = new Hono<ApiEnvironment>();
   const clock = dependencies.clock ?? (() => new Date());
-  const auth = createAuthService({ config: dependencies.config, credentials: dependencies.credentials, clock });
-  const clientKeyResolver = dependencies.clientKeyResolver ?? (() => "local");
+  const authenticate = createAuthenticationMiddleware(dependencies, clock);
   const bodyLimitBytes = dependencies.bodyLimitBytes ?? 1_048_576;
 
   app.onError(handleAppError);
@@ -211,34 +121,13 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
   }));
 
   app.get("/health", (context) => context.json({ status: "ok" }));
-  app.post("/auth/login", async (context) => {
-    let body: unknown;
-    try {
-      body = await context.req.json();
-    } catch {
-      throw new AppError("validation_error", "Invalid request body.");
-    }
-    const input = loginRequestSchema.safeParse(normalizeLoginRequestBody(body));
-    if (!input.success) {
-      throw new AppError("validation_error", "Invalid request body.");
-    }
-    const now = clock().getTime();
-    const rateLimit = rateLimitStore.take(
-      loginRateLimitKey(await clientKeyResolver(context), input.data.email),
-      dependencies.config.loginRateLimitMax,
-      dependencies.config.loginRateLimitWindowSeconds * 1_000,
-      now,
-    );
-    if (!rateLimit.allowed) {
-      context.header("retry-after", rateLimit.retryAfterSeconds.toString());
-      throw new AppError("rate_limited", "Too many login attempts. Try again later.");
-    }
-    return context.json(loginResponseSchema.parse(await auth.login(input.data)));
-  });
+
+  app.use("/me", authenticate);
+  app.get("/me", (context) => context.json(meResponseSchema.parse({ user: context.get("authenticatedUser") })));
 
   if (dependencies.projectRepository !== undefined) {
-    app.use("/projects", createAuthenticationMiddleware(dependencies.config, clock));
-    app.use("/projects/*", createAuthenticationMiddleware(dependencies.config, clock));
+    app.use("/projects", authenticate);
+    app.use("/projects/*", authenticate);
     app.route("/projects", createProjectRoutes(dependencies.projectRepository));
   }
   if (dependencies.sessionRepository !== undefined) {
@@ -250,13 +139,13 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
       sessions: dependencies.sessionRepository,
       clock,
     });
-    app.use("/sessions", createAuthenticationMiddleware(dependencies.config, clock));
-    app.use("/sessions/*", createAuthenticationMiddleware(dependencies.config, clock));
+    app.use("/sessions", authenticate);
+    app.use("/sessions/*", authenticate);
     app.route("/sessions", createSessionRoutes(sessionService));
   }
   if (dependencies.reportRepository !== undefined) {
-    app.use("/reports", createAuthenticationMiddleware(dependencies.config, clock));
-    app.use("/reports/*", createAuthenticationMiddleware(dependencies.config, clock));
+    app.use("/reports", authenticate);
+    app.use("/reports/*", authenticate);
     app.route("/reports", createReportRoutes(createReportService({ reports: dependencies.reportRepository })));
   }
 

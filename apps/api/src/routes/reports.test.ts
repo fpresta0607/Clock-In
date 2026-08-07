@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import { createApp } from "../app.js";
-import { signAccessToken } from "../auth.js";
+import { createTestAuth } from "../test-tokens.js";
 import { parseEnv } from "../env.js";
 import type { ReportRepository, ReportRowRecord } from "../repositories.js";
 import type { AuthenticatedSubject } from "../auth.js";
@@ -15,10 +15,19 @@ const ids = {
 };
 const config = parseEnv({
   DATABASE_URL: "postgres://clock_in:password@localhost:5432/clock_in",
-  JWT_SECRET: "this-is-a-long-test-secret-with-enough-entropy-123",
+  AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
   NODE_ENV: "test",
 });
 const user = { id: ids.user, email: "alex@example.com", name: "Alex", organizationId: ids.organization };
+
+let keys: Awaited<ReturnType<typeof createTestAuth>>["keys"];
+let bearerHeader: string;
+
+beforeAll(async () => {
+  const auth = await createTestAuth(config, new Date("2026-08-06T14:00:00.000Z"));
+  keys = auth.keys;
+  bearerHeader = await auth.bearer(ids.user);
+});
 
 class Reports implements ReportRepository {
   public failExport: Error | null = null;
@@ -51,7 +60,8 @@ class Reports implements ReportRepository {
 function app(reports = new Reports()) {
   return createApp({
     config,
-    credentials: { findByEmail: async () => null },
+    keys,
+    accounts: { resolve: async () => user },
     clock: () => new Date("2026-08-06T14:00:00.000Z"),
     reportRepository: reports,
   });
@@ -64,8 +74,7 @@ describe("report routes", () => {
   });
 
   it("returns stable validation and not-found responses", async () => {
-    const token = await signAccessToken(user, config, new Date("2026-08-06T14:00:00.000Z"));
-    const headers = { authorization: `Bearer ${token}` };
+        const headers = { authorization: bearerHeader };
     const invalid = await app().request("http://api.test/reports?from=2026-08-07&to=2026-08-06", { headers });
     expect(invalid.status).toBe(400);
     await expect(invalid.json()).resolves.toEqual({ error: { code: "validation_error", message: "The report date range must be between zero and 366 days." } });
@@ -75,8 +84,7 @@ describe("report routes", () => {
   });
 
   it("returns the shared JSON report and a safe CSV attachment", async () => {
-    const token = await signAccessToken(user, config, new Date("2026-08-06T14:00:00.000Z"));
-    const headers = { authorization: `Bearer ${token}` };
+        const headers = { authorization: bearerHeader };
     const json = await app().request("http://api.test/reports?from=2026-08-06", { headers });
     expect(json.status).toBe(200);
     await expect(json.json()).resolves.toMatchObject({ filters: { from: "2026-08-06", page: 1, pageSize: 50 }, totalDurationSeconds: 3_600, pagination: { totalRows: 1, totalPages: 1 }, rows: [{ status: "stopped" }] });
@@ -89,8 +97,7 @@ describe("report routes", () => {
   });
 
   it("rejects invalid report pagination", async () => {
-    const token = await signAccessToken(user, config, new Date("2026-08-06T14:00:00.000Z"));
-    const response = await app().request("http://api.test/reports?pageSize=201", { headers: { authorization: `Bearer ${token}` } });
+        const response = await app().request("http://api.test/reports?pageSize=201", { headers: { authorization: bearerHeader } });
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({ error: { code: "validation_error", message: "Invalid report filters." } });
   });
@@ -98,8 +105,7 @@ describe("report routes", () => {
   it("returns a stable JSON error before a CSV stream begins when the snapshot read fails", async () => {
     const reports = new Reports();
     reports.failExport = new Error("database unavailable");
-    const token = await signAccessToken(user, config, new Date("2026-08-06T14:00:00.000Z"));
-    const response = await app(reports).request("http://api.test/reports/export.csv", { headers: { authorization: `Bearer ${token}` } });
+        const response = await app(reports).request("http://api.test/reports/export.csv", { headers: { authorization: bearerHeader } });
     expect(response.status).toBe(500);
     expect(response.headers.get("content-type")).toContain("application/json");
     await expect(response.text()).resolves.not.toContain("sessionId,userId");

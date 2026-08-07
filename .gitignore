@@ -7,3 +7,4 @@ target/
 coverage/
 *.log
 
+apps/desktop/src-tauri/gen/

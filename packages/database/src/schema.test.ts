@@ -20,7 +20,6 @@ describe("database schema", () => {
     expect(users.organizationId.notNull).toBe(true);
     expect(users.id.primary).toBe(true);
     expect(users.email.notNull).toBe(true);
-    expect(users.passwordHash.notNull).toBe(true);
     expect(projects.organizationId.notNull).toBe(true);
     expect(projects.id.primary).toBe(true);
     expect(projects.archived.notNull).toBe(true);

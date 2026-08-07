@@ -2,12 +2,9 @@ import { z } from "zod";
 
 const rawEnvironmentSchema = z.object({
   DATABASE_URL: z.string().url(),
-  JWT_SECRET: z.string().min(32, "JWT_SECRET must be at least 32 characters long."),
+  AUTH_BASE_URL: z.string().url(),
   PORT: z.coerce.number().int().min(1).max(65_535).default(3_000),
   CORS_ORIGINS: z.string().default(""),
-  JWT_TTL_SECONDS: z.coerce.number().int().min(60).max(3_600).default(900),
-  LOGIN_RATE_LIMIT_MAX: z.coerce.number().int().min(1).max(100).default(5),
-  LOGIN_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().min(1).max(3_600).default(60),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
 }).strict();
 
@@ -64,38 +61,41 @@ function parseCorsOrigins(value: string, nodeEnv: AppConfig["nodeEnv"]): string[
   return [...origins];
 }
 
+function parseAuthBaseUrl(value: string): { authJwksUrl: string; authIssuer: string } {
+  const url = new URL(value);
+  if (url.protocol !== "https:" && !isLoopbackHost(url.hostname)) {
+    return invalidEnvironment("AUTH_BASE_URL must use HTTPS outside loopback.", "AUTH_BASE_URL");
+  }
+  // Neon Auth issues tokens whose iss and aud are the origin of the auth host,
+  // while JWKS lives under the branch-scoped base path.
+  return {
+    authJwksUrl: new URL(`${url.pathname.replace(/\/$/, "")}/.well-known/jwks.json`, url.origin).toString(),
+    authIssuer: url.origin,
+  };
+}
+
 export interface AppConfig {
   databaseUrl: string;
-  jwtSecret: string;
+  authJwksUrl: string;
+  authIssuer: string;
   port: number;
   corsOrigins: readonly string[];
-  jwtTtlSeconds: number;
-  loginRateLimitMax: number;
-  loginRateLimitWindowSeconds: number;
   nodeEnv: "development" | "test" | "production";
 }
 
 export function parseEnv(input: Record<string, string | undefined>): AppConfig {
   const raw = rawEnvironmentSchema.parse({
     DATABASE_URL: input.DATABASE_URL,
-    JWT_SECRET: input.JWT_SECRET,
+    AUTH_BASE_URL: input.AUTH_BASE_URL,
     PORT: input.PORT,
     CORS_ORIGINS: input.CORS_ORIGINS,
-    JWT_TTL_SECONDS: input.JWT_TTL_SECONDS,
-    LOGIN_RATE_LIMIT_MAX: input.LOGIN_RATE_LIMIT_MAX,
-    LOGIN_RATE_LIMIT_WINDOW_SECONDS: input.LOGIN_RATE_LIMIT_WINDOW_SECONDS,
     NODE_ENV: input.NODE_ENV,
   });
-  const databaseUrl = parseDatabaseUrl(raw.DATABASE_URL);
-  const corsOrigins = parseCorsOrigins(raw.CORS_ORIGINS, raw.NODE_ENV);
   return {
-    databaseUrl,
-    jwtSecret: raw.JWT_SECRET,
+    databaseUrl: parseDatabaseUrl(raw.DATABASE_URL),
+    ...parseAuthBaseUrl(raw.AUTH_BASE_URL),
     port: raw.PORT,
-    corsOrigins,
-    jwtTtlSeconds: raw.JWT_TTL_SECONDS,
-    loginRateLimitMax: raw.LOGIN_RATE_LIMIT_MAX,
-    loginRateLimitWindowSeconds: raw.LOGIN_RATE_LIMIT_WINDOW_SECONDS,
+    corsOrigins: parseCorsOrigins(raw.CORS_ORIGINS, raw.NODE_ENV),
     nodeEnv: raw.NODE_ENV,
   };
 }

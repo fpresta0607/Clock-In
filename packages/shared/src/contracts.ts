@@ -23,19 +23,7 @@ export const userSchema = z
   })
   .strict();
 
-export const loginRequestSchema = z
-  .object({
-    email: z.string().email(),
-    password: z.string().min(1),
-  })
-  .strict();
-
-export const loginResponseSchema = z
-  .object({
-    accessToken: z.string().min(1),
-    user: userSchema,
-  })
-  .strict();
+export const meResponseSchema = z.object({ user: userSchema }).strict();
 
 export const projectListItemSchema = z
   .object({
@@ -175,8 +163,7 @@ export const apiErrorSchema = z
 export type ApiError = z.infer<typeof apiErrorSchema>;
 export type ApiErrorCode = z.infer<typeof apiErrorCodeSchema>;
 export type CurrentSessionResponse = z.infer<typeof currentSessionResponseSchema>;
-export type LoginRequest = z.infer<typeof loginRequestSchema>;
-export type LoginResponse = z.infer<typeof loginResponseSchema>;
+export type MeResponse = z.infer<typeof meResponseSchema>;
 export type ProjectListItem = z.infer<typeof projectListItemSchema>;
 export type ProjectListResponse = z.infer<typeof projectListResponseSchema>;
 export type ReportFilters = z.infer<typeof reportFiltersSchema>;

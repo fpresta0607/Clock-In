@@ -4,20 +4,14 @@ import type { Env, Hono } from "hono";
 
 import type { AppConfig } from "./env.js";
 
-export { createApp, createAuthenticationMiddleware, getAuthenticatedSubject, MemoryLoginRateLimitStore } from "./app.js";
-export type { ClientKeyResolver, CreateAppDependencies, LoginRateLimitStore, RateLimitDecision } from "./app.js";
-export { createAuthService, hashPassword, normalizeEmail, signAccessToken, verifyAccessToken } from "./auth.js";
-export type {
-  AuthenticatedSubject,
-  AuthenticatedUser,
-  AuthServiceDependencies,
-  UserCredential,
-  UserCredentialStore,
-} from "./auth.js";
+export { createApp, createAuthenticationMiddleware, getAuthenticatedSubject } from "./app.js";
+export type { CreateAppDependencies } from "./app.js";
+export { createNeonAuthKeys, verifyIdentity } from "./auth.js";
+export type { AccountStore, AuthenticatedSubject, AuthenticatedUser, AuthIdentity } from "./auth.js";
 export { parseEnv } from "./env.js";
 export type { AppConfig } from "./env.js";
 export { AppError } from "./errors.js";
-export { DrizzleProjectRepository, DrizzleReportRepository, DrizzleSessionRepository } from "./drizzle-repositories.js";
+export { DrizzleAccountStore, DrizzleProjectRepository, DrizzleReportRepository, DrizzleSessionRepository } from "./drizzle-repositories.js";
 export { createProjectRoutes } from "./routes/projects.js";
 export { createReportRoutes } from "./routes/reports.js";
 export { createSessionRoutes } from "./routes/sessions.js";

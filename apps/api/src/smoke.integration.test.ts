@@ -4,14 +4,14 @@ import { createDatabase, runMigrations, type DatabaseConnection } from "@clock-i
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createApp } from "./app.js";
-import { hashPassword } from "./auth.js";
 import {
+  DrizzleAccountStore,
   DrizzleProjectRepository,
   DrizzleReportRepository,
   DrizzleSessionRepository,
-  DrizzleUserCredentialStore,
 } from "./drizzle-repositories.js";
 import { parseEnv } from "./env.js";
+import { createTestAuth } from "./test-tokens.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -19,16 +19,18 @@ const integrationDescription = databaseUrl
   ? "manual timer smoke path"
   : "manual timer smoke path (skipped: TEST_DATABASE_URL is not set)";
 
-const password = "correct-horse-battery-staple";
-const email = "smoke@clock-in.test";
+const config = parseEnv({
+  DATABASE_URL: databaseUrl ?? "postgres://unused:unused@localhost:5432/unused",
+  AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
+  NODE_ENV: "test",
+});
 
 integration(integrationDescription, () => {
   const schemaName = `clock_in_smoke_${randomUUID().replaceAll("-", "")}`;
   const database = databaseUrl ? createDatabase(databaseUrl, { max: 1 }) : (undefined as unknown as DatabaseConnection);
-  const organizationId = randomUUID();
-  const userId = randomUUID();
-  const projectId = randomUUID();
+  const authUserId = randomUUID();
   let app: ReturnType<typeof createApp>;
+  let authorized: Record<string, string>;
 
   beforeAll(async () => {
     if (!databaseUrl) return;
@@ -36,20 +38,15 @@ integration(integrationDescription, () => {
     await database.client.unsafe(`set search_path to "${schemaName}"`);
     await runMigrations(database, { migrationsSchema: schemaName });
 
-    await database.client`insert into organizations (id, name) values (${organizationId}, 'Smoke Org')`;
-    await database.client`
-      insert into users (id, organization_id, email, name, password_hash)
-      values (${userId}, ${organizationId}, ${email}, 'Smoke User', ${await hashPassword(password)})
-    `;
-    await database.client`insert into projects (id, organization_id, name) values (${projectId}, ${organizationId}, 'Smoke Project')`;
-    await database.client`
-      insert into project_memberships (organization_id, project_id, user_id)
-      values (${organizationId}, ${projectId}, ${userId})
-    `;
-
+    const auth = await createTestAuth(config, new Date());
+    authorized = {
+      authorization: await auth.bearer(authUserId, { email: "smoke@clock-in.test", name: "Smoke User" }),
+      "content-type": "application/json",
+    };
     app = createApp({
-      config: parseEnv({ DATABASE_URL: databaseUrl, JWT_SECRET: "a".repeat(32), NODE_ENV: "test" }),
-      credentials: new DrizzleUserCredentialStore(database.db),
+      config,
+      keys: auth.keys,
+      accounts: new DrizzleAccountStore(database.db),
       projectRepository: new DrizzleProjectRepository(database.db),
       sessionRepository: new DrizzleSessionRepository(database.db),
       reportRepository: new DrizzleReportRepository(database.db),
@@ -65,20 +62,23 @@ integration(integrationDescription, () => {
     }
   });
 
-  it("logs in, tracks a session, and exports it in a report", async () => {
-    const login = await app.request("/auth/login", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email, password }),
-    });
-    expect(login.status).toBe(200);
-    const { accessToken, user } = await login.json();
-    expect(user.id).toBe(userId);
-    const authorized = { authorization: `Bearer ${accessToken}`, "content-type": "application/json" };
+  it("provisions an account on first sign-in, tracks a session, and exports it in a report", async () => {
+    const me = await app.request("/me", { headers: authorized });
+    expect(me.status).toBe(200);
+    const { user } = await me.json();
+    expect(user).toMatchObject({ id: authUserId, email: "smoke@clock-in.test", name: "Smoke User" });
+    expect(user.organizationId).toMatch(/^[0-9a-f-]{36}$/i);
+
+    // A second request must reuse the provisioned account rather than create another.
+    const repeat = await app.request("/me", { headers: authorized });
+    expect((await repeat.json()).user.organizationId).toBe(user.organizationId);
 
     const projects = await app.request("/projects", { headers: authorized });
     expect(projects.status).toBe(200);
-    expect(await projects.json()).toMatchObject({ projects: [{ id: projectId, isArchived: false }] });
+    const listed = (await projects.json()).projects;
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toMatchObject({ name: "General", isArchived: false });
+    const projectId = listed[0].id;
 
     const startedAt = new Date(Date.now() - 60_000).toISOString();
     const start = await app.request("/sessions", {
@@ -113,7 +113,27 @@ integration(integrationDescription, () => {
     expect(csv.status).toBe(200);
     expect(csv.headers.get("content-type")).toContain("text/csv");
     const text = await csv.text();
-    expect(text).toContain("Smoke Project");
+    expect(text).toContain("General");
     expect(text).toContain("Smoke work");
+  }, 60_000);
+
+  it("keeps another account's data out of this account's projects and reports", async () => {
+    const other = await createTestAuth(config, new Date());
+    const otherApp = createApp({
+      config,
+      keys: other.keys,
+      accounts: new DrizzleAccountStore(database.db),
+      projectRepository: new DrizzleProjectRepository(database.db),
+      reportRepository: new DrizzleReportRepository(database.db),
+    });
+    const headers = {
+      authorization: await other.bearer(randomUUID(), { email: "other@clock-in.test", name: "Other User" }),
+    };
+
+    const projects = await otherApp.request("/projects", { headers });
+    expect((await projects.json()).projects.map((project: { name: string }) => project.name)).toEqual(["General"]);
+
+    const report = await otherApp.request("/reports", { headers });
+    expect((await report.json()).rows).toEqual([]);
   }, 60_000);
 });
