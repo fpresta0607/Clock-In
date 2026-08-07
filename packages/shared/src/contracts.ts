@@ -2,7 +2,14 @@ import { z } from "zod";
 
 const idSchema = z.string().uuid();
 const timestampSchema = z.string().datetime({ offset: true });
-const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
+  const year = Number.parseInt(value.slice(0, 4), 10);
+  const month = Number.parseInt(value.slice(5, 7), 10);
+  const day = Number.parseInt(value.slice(8, 10), 10);
+  const date = new Date(Date.UTC(year, month - 1, day));
+
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+});
 
 export const sessionStatusValues = ["running", "stopped", "needs_review"] as const;
 export const sessionStatusSchema = z.enum(sessionStatusValues);
@@ -41,19 +48,40 @@ export const projectListItemSchema = z
 
 export const projectListResponseSchema = z.object({ projects: z.array(projectListItemSchema) }).strict();
 
-export const sessionSchema = z
+const sessionBaseSchema = z
   .object({
     id: idSchema,
     clientId: idSchema,
     projectId: idSchema,
-    status: sessionStatusSchema,
     description: z.string().max(1_000).nullable(),
     startedAt: timestampSchema,
-    stoppedAt: timestampSchema.nullable(),
     idleSeconds: z.number().int().nonnegative(),
-    durationSeconds: z.number().int().nonnegative().nullable(),
   })
   .strict();
+
+const runningSessionSchema = sessionBaseSchema.extend({
+  status: z.literal("running"),
+  stoppedAt: z.null(),
+  durationSeconds: z.null(),
+});
+
+const stoppedSessionSchema = sessionBaseSchema.extend({
+  status: z.literal("stopped"),
+  stoppedAt: timestampSchema,
+  durationSeconds: z.number().int().nonnegative(),
+});
+
+const needsReviewSessionSchema = sessionBaseSchema.extend({
+  status: z.literal("needs_review"),
+  stoppedAt: timestampSchema,
+  durationSeconds: z.number().int().nonnegative(),
+});
+
+export const sessionSchema = z.discriminatedUnion("status", [
+  runningSessionSchema,
+  stoppedSessionSchema,
+  needsReviewSessionSchema,
+]);
 
 export const sessionStartRequestSchema = z
   .object({
@@ -74,7 +102,7 @@ export const sessionStopRequestSchema = z
   .strict();
 
 export const sessionStopResponseSchema = z.object({ session: sessionSchema }).strict();
-export const currentSessionResponseSchema = z.object({ session: sessionSchema.nullable() }).strict();
+export const currentSessionResponseSchema = z.object({ session: runningSessionSchema.nullable() }).strict();
 
 export const reportFiltersSchema = z
   .object({

@@ -9,6 +9,7 @@ import {
   reportFiltersSchema,
   sessionStartRequestSchema,
   sessionStartResponseSchema,
+  sessionSchema,
   sessionStatusValues,
   sessionStopRequestSchema,
   sessionStopResponseSchema,
@@ -131,6 +132,41 @@ describe("session contracts", () => {
       }),
     ).toMatchObject({ session: { status: "running" } });
   });
+
+  it("rejects session timestamps and durations that contradict the status", () => {
+    const runningSession = {
+      id: ids.session,
+      clientId: ids.client,
+      projectId: ids.project,
+      status: "running",
+      description: null,
+      startedAt,
+      stoppedAt: null,
+      idleSeconds: 0,
+      durationSeconds: null,
+    };
+
+    expect(() => sessionSchema.parse({ ...runningSession, stoppedAt })).toThrow();
+    expect(() => sessionSchema.parse({ ...runningSession, durationSeconds: 1 })).toThrow();
+    expect(() => sessionSchema.parse({ ...runningSession, status: "stopped", stoppedAt: null, durationSeconds: 1 })).toThrow();
+    expect(() => sessionSchema.parse({ ...runningSession, status: "needs_review", stoppedAt, durationSeconds: null })).toThrow();
+  });
+
+  it("rejects a completed session as the current session", () => {
+    const completedSession = {
+      id: ids.session,
+      clientId: ids.client,
+      projectId: ids.project,
+      description: null,
+      startedAt,
+      stoppedAt,
+      idleSeconds: 0,
+      durationSeconds: 3_784,
+    };
+
+    expect(() => currentSessionResponseSchema.parse({ session: { ...completedSession, status: "stopped" } })).toThrow();
+    expect(() => currentSessionResponseSchema.parse({ session: { ...completedSession, status: "needs_review" } })).toThrow();
+  });
 });
 
 describe("report and error contracts", () => {
@@ -143,6 +179,11 @@ describe("report and error contracts", () => {
         userId: ids.user,
       }),
     ).toMatchObject({ from: "2026-08-01", to: "2026-08-06" });
+  });
+
+  it("rejects impossible calendar dates", () => {
+    expect(() => reportFiltersSchema.parse({ from: "2026-99-99" })).toThrow();
+    expect(() => reportFiltersSchema.parse({ to: "2026-02-29" })).toThrow();
   });
 
   it("uses stable API error codes and actionable messages", () => {
