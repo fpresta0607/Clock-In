@@ -7,9 +7,9 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "pnpm --recursive --if-present build",
-    "test": "pnpm --recursive test",
-    "typecheck": "pnpm --recursive typecheck"
+    "build": "pnpm --recursive --workspace-concurrency=1 --if-present build",
+    "test": "pnpm --recursive --workspace-concurrency=1 test",
+    "typecheck": "pnpm --recursive --workspace-concurrency=1 typecheck"
   },
   "devDependencies": {
     "typescript": "^5.9.2",
