@@ -92,6 +92,12 @@ Tracking that the user cannot see is surveillance; tracking the user can interro
 - **Live session stats.** The current-session card shows elapsed time, idle trimmed so far, corroborated seconds so far, and linked agent sessions with their resolved projects. These numbers are computed locally from the monitor's segment buffer, so they are instant and available offline.
 - **Personal history.** A stats view shows today/this week per project with the corroborated/uncorroborated split, session counts, and the user's own recent session rows. A new `GET /v1/me/stats` endpoint returns per-project totals for a date range; it is the reporting service's corroboration math scoped to the caller, not a separate computation, so the user always sees the same evidence and the same numbers the org's reports will show. Nothing about the user's own data is manager-only.
 
+### Design language
+
+All Phase 2 UI — status surfaces, live session card, personal stats view, settings, prompts — uses the SIQstack brand system already defined in `apps/web/src/styles.css`: body `#03050a`, chromatic glass cards (green/blue gradient fill, `rgba(0,229,155,…)` borders, backdrop blur), accent green `#00e59b` / deep `#00c97f` / mint `#6ee7b7`, secondary text `#a3b3c2`, Inter, pill buttons, uppercase eyebrow labels, tabular numerals for every time figure. The tokens move from `apps/web/src/styles.css` into a shared stylesheet in `packages/shared` that both apps import, so the brand is edited once.
+
+The desktop's Phase 1 "chronometer" theme (graphite/ivory/amber, Bahnschrift, 2px corners) is retired in favor of this single system — desktop and web should read as one product, and two themes inside one tray app would be incoherent. The WebGL sine-wave shader stays web-only: a GPU background in an always-running tray utility violates the lightweight principle. Display conventions for the new data: corroborated time renders in mint, uncorroborated in secondary gray, and agent-linked spans carry a small source badge (Claude Code / Codex / Kimi Code).
+
 ### Anti-manipulation stance
 
 The design assumption: a determined user can forge client-side evidence (the spool is a local file), so Phase 2 does not attempt cryptographic proof. Instead it makes honest use effortless and padding visible:
@@ -110,10 +116,10 @@ The design assumption: a determined user can forge client-side evidence (the spo
 
 ## Package architecture
 
-- `packages/shared`: contracts for activity-segment batch upload, agent-session events, path-mapping CRUD, the personal stats response, and corroboration fields on report rows and leaderboard entries.
+- `packages/shared`: contracts for activity-segment batch upload, agent-session events, path-mapping CRUD, the personal stats response, corroboration fields on report rows and leaderboard entries, and the shared SIQstack brand token stylesheet consumed by both frontends.
 - `packages/database`: new tables `activity_segments`, `agent_sessions`, `project_path_mappings`; migrations; no changes to `time_sessions` columns (Phase 2 stores evidence beside sessions, not inside them).
 - `apps/api`: three new route groups (`/v1/activity/segments`, `/v1/agent-sessions`, `/v1/path-mappings`), a `/v1/me/stats` endpoint reusing the reporting service's corroboration math scoped to the caller, prefix-match attribution in a new attribution service, `receivedAt` freshness enforcement.
-- `apps/desktop`: `monitor.rs` (activity traits, segment builder, spool, uploader), the `clock-in-hook` binary target, new timer-machine states for suggested start and away handling, tray icon and tooltip states for timer and monitoring status, a monitor-health status line, live session stats computed from the local segment buffer, a personal stats view backed by `/v1/me/stats`, a settings UI for thresholds, path mappings, and lock/sleep policy, an opt-in hook-registration wizard, and a "what's recorded" privacy panel.
+- `apps/desktop`: `monitor.rs` (activity traits, segment builder, spool, uploader), the `clock-in-hook` binary target, new timer-machine states for suggested start and away handling, tray icon and tooltip states for timer and monitoring status, a monitor-health status line, live session stats computed from the local segment buffer, a personal stats view backed by `/v1/me/stats`, a settings UI for thresholds, path mappings, and lock/sleep policy, an opt-in hook-registration wizard, and a "what's recorded" privacy panel. All surfaces are restyled on the shared SIQstack tokens, retiring the Phase 1 chronometer theme.
 
 ## Data and request flow
 

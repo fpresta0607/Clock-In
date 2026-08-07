@@ -126,6 +126,37 @@ describe("dashboard", () => {
     expect(await screen.findByRole("heading", { name: "SIQstack" })).toBeInTheDocument();
   });
 
+  it("names the new workspace when no invite code is given", async () => {
+    const signUp = vi.fn().mockResolvedValue(undefined);
+    const person = userEvent.setup();
+    render(<App client={clientFor({ signUp })} />);
+
+    await person.click(screen.getByRole("button", { name: "New here? Create an account" }));
+    await person.type(screen.getByLabelText("Name"), "Alex Morgan");
+    await person.type(screen.getByLabelText("Email"), "alex@example.com");
+    await person.type(screen.getByLabelText("Password"), "long-enough-password");
+    await person.type(screen.getByLabelText(/Workspace name/), "  SIQstack  ");
+    await person.click(screen.getByRole("button", { name: "Create account" }));
+
+    await waitFor(() => expect(signUp).toHaveBeenCalledWith({
+      email: "alex@example.com",
+      password: "long-enough-password",
+      name: "Alex Morgan",
+      workspaceName: "SIQstack",
+    }));
+  });
+
+  it("hides the workspace name field once an invite code is entered", async () => {
+    const person = userEvent.setup();
+    render(<App client={clientFor()} />);
+
+    await person.click(screen.getByRole("button", { name: "New here? Create an account" }));
+    expect(screen.getByLabelText(/Workspace name/)).toBeInTheDocument();
+
+    await person.type(screen.getByLabelText(/Invite code/), "ACDEF-GHJKM");
+    expect(screen.queryByLabelText(/Workspace name/)).not.toBeInTheDocument();
+  });
+
   it("takes a returning account straight to the dashboard", async () => {
     await signIn(clientFor());
 

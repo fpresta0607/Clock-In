@@ -174,7 +174,7 @@ export class DrizzleSessionRepository implements SessionRepository {
 export class DrizzleAccountStore implements AccountStore {
   public constructor(private readonly db: DatabaseConnection["db"]) {}
 
-  public async resolve(identity: AuthIdentity, inviteCode?: string): Promise<AuthenticatedUser> {
+  public async resolve(identity: AuthIdentity, inviteCode?: string, workspaceName?: string): Promise<AuthenticatedUser> {
     const existing = await this.find(identity.authUserId);
     if (existing !== null) {
       return existing.email === identity.email && existing.name === identity.name
@@ -183,7 +183,7 @@ export class DrizzleAccountStore implements AccountStore {
     }
     try {
       return inviteCode === undefined
-        ? await this.provision(identity)
+        ? await this.provision(identity, workspaceName)
         : await this.join(identity, inviteCode);
     } catch (error) {
       // ponytail: a concurrent first request may have provisioned this account,
@@ -337,12 +337,12 @@ export class DrizzleAccountStore implements AccountStore {
     return row;
   }
 
-  private async provision(identity: AuthIdentity): Promise<AuthenticatedUser> {
+  private async provision(identity: AuthIdentity, workspaceName?: string): Promise<AuthenticatedUser> {
     return this.db.transaction(async (tx) => {
       const [organization] = await tx
         .insert(organizations)
         .values({
-          name: `${identity.name}'s workspace`,
+          name: workspaceName ?? `${identity.name}'s workspace`,
           inviteCode: generateInviteCode((size) => randomBytes(size)),
         })
         .returning({ id: organizations.id });

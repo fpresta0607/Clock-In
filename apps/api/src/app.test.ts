@@ -170,6 +170,29 @@ describe("API composition", () => {
     expect(seen).toEqual(["ACDEF-GHJKM", "ACDEF-GHJKM", undefined]);
   });
 
+  it("passes a workspace name through provisioning", async () => {
+    const seen: (string | undefined)[] = [];
+    const { app } = createTestApp({
+      accounts: {
+        resolve: async (_identity, _inviteCode, workspaceName) => { seen.push(workspaceName); return account; },
+        findOrganization: async (id) => ({ id, name: "SIQstack", inviteCode: "ACDEF-GHJKM" }),
+        joinOrganization: async () => account,
+      },
+    });
+    const authorization = await bearer();
+    const post = (body: unknown) => app.request("http://api.test/accounts", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify(body),
+    });
+
+    expect((await post({ workspaceName: "SIQstack" })).status).toBe(200);
+    expect((await post({})).status).toBe(200);
+    expect((await post({ workspaceName: "  " })).status).toBe(400);
+
+    expect(seen).toEqual(["SIQstack", undefined]);
+  });
+
   it("rejects an invite code that could not be one", async () => {
     const { app } = createTestApp();
 

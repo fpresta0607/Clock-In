@@ -34,6 +34,7 @@ export const App = ({ client }: AppProps) => {
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [inviteCode, setInviteCode] = useState("");
+  const [workspaceName, setWorkspaceName] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | undefined>();
 
@@ -87,13 +88,21 @@ export const App = ({ client }: AppProps) => {
     try {
       if (mode === "sign-up") {
         const code = inviteCode.trim();
-        await client.signUp({ email, password, name: name.trim(), ...(code === "" ? {} : { inviteCode: code }) });
+        const workspace = workspaceName.trim();
+        await client.signUp({
+          email,
+          password,
+          name: name.trim(),
+          ...(code === "" ? {} : { inviteCode: code }),
+          ...(code === "" && workspace !== "" ? { workspaceName: workspace } : {}),
+        });
       } else {
         await client.signIn({ email, password });
       }
       setPassword("");
       setName("");
       setInviteCode("");
+      setWorkspaceName("");
       setJustSignedUp(mode === "sign-up");
       setSignedIn(true);
     } catch (error: unknown) {
@@ -186,6 +195,11 @@ export const App = ({ client }: AppProps) => {
             {isSignUp && (
               <label>Invite code <span className="optional">optional</span>
                 <input value={inviteCode} onChange={(event) => setInviteCode(event.target.value)} autoComplete="off" spellCheck={false} />
+              </label>
+            )}
+            {isSignUp && inviteCode.trim() === "" && (
+              <label>Workspace name <span className="optional">optional</span>
+                <input value={workspaceName} onChange={(event) => setWorkspaceName(event.target.value)} autoComplete="organization" placeholder="You're starting a new workspace" maxLength={80} />
               </label>
             )}
             <button className="primary" type="submit" disabled={authBusy}>

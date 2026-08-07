@@ -167,7 +167,11 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
       if (normalized === null) throw new AppError("validation_error", "That invite code is not in the right format.");
       inviteCode = normalized;
     }
-    const user = await dependencies.accounts.resolve(context.get("authenticatedIdentity"), inviteCode);
+    const user = await dependencies.accounts.resolve(
+      context.get("authenticatedIdentity"),
+      inviteCode,
+      input.data.workspaceName,
+    );
     return context.json(meResponseSchema.parse({ user }));
   });
 

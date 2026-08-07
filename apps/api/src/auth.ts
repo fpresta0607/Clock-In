@@ -27,9 +27,10 @@ export interface AccountStore {
   /**
    * Returns the Clock-In account for a Neon Auth identity. On first sign-in it
    * either joins the organization the invite code names, or creates a personal
-   * one with a starter project. The code is ignored for an existing account.
+   * one — named workspaceName when given — with a starter project. Both are
+   * ignored for an existing account.
    */
-  resolve(identity: AuthIdentity, inviteCode?: string): Promise<AuthenticatedUser>;
+  resolve(identity: AuthIdentity, inviteCode?: string, workspaceName?: string): Promise<AuthenticatedUser>;
   findOrganization(organizationId: string): Promise<OrganizationRecord | null>;
   /**
    * Moves an existing account into the organization an invite code names, for

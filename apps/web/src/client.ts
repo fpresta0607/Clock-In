@@ -31,6 +31,8 @@ export interface Credentials {
 export interface SignUpInput extends Credentials {
   name: string;
   inviteCode?: string;
+  /** Names the workspace this account starts; ignored when an invite code joins one instead. */
+  workspaceName?: string;
 }
 
 function classify(status: number): ClientError {
@@ -159,7 +161,10 @@ export function createClient(config: ClientConfig) {
       await apiRequest("/accounts", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(input.inviteCode === undefined ? {} : { inviteCode: input.inviteCode }),
+        body: JSON.stringify({
+          ...(input.inviteCode === undefined ? {} : { inviteCode: input.inviteCode }),
+          ...(input.workspaceName === undefined ? {} : { workspaceName: input.workspaceName }),
+        }),
       });
     },
 

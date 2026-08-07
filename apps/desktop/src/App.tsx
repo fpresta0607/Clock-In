@@ -380,7 +380,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     const isSignUp = authMode === "sign-up";
     return (
       <main className="chronometer sign-in-shell">
-        <section className="sign-in-panel" aria-labelledby="sign-in-title">
+        <section className="sign-in-panel card" aria-labelledby="sign-in-title">
           <p className="eyebrow">Manual time terminal</p>
           <h1 id="sign-in-title">{isSignUp ? "Create your account" : "Clock in"}</h1>
           <p className="subtle">
@@ -468,7 +468,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       )}
 
       {overview && (
-        <section className="board-panel" aria-labelledby="board-title">
+        <section className="board-panel card" aria-labelledby="board-title">
           <div className="board-head">
             <h2 id="board-title">{overview.organization.name}</h2>
             <span className="invite-code" title="Share this code so teammates join this workspace">
