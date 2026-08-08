@@ -376,7 +376,7 @@ describe("agent session contracts", () => {
   };
 
   it("covers every supported agent source and event kind", () => {
-    expect(agentSourceValues).toEqual(["claude_code", "codex", "kimi_code", "other"]);
+    expect(agentSourceValues).toEqual(["claude_code", "codex", "kimi_code", "cursor", "other"]);
     expect(agentEventKindValues).toEqual(["started", "ended", "heartbeat"]);
   });
 

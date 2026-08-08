@@ -43,6 +43,9 @@ pub const POLL_INTERVAL_SECONDS: u64 = 30;
 
 /// A poll reads "idle" once the last input is at least this old — one poll
 /// interval, so a single quiet moment between ticks still reads as active.
+// Only the Windows poll source reads this; non-Windows builds keep it for
+// tests and documentation.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 const IDLE_THRESHOLD_SECONDS: u32 = POLL_INTERVAL_SECONDS as u32;
 
 /// How long an open agent session without a fresh event still counts as
@@ -56,6 +59,9 @@ const MAX_BUFFERED_SEGMENTS: usize = 10_000;
 
 /// What the OS reports. `Locked` and `Suspended` are pushed by the event
 /// thread; `Active` and `Idle` come from the 30-second poll.
+// Constructors are Windows-only today (event thread + poll source); non-Windows
+// builds only consume signals in tests.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActivitySignal {
     Active { process_name: Option<String> },
@@ -572,6 +578,10 @@ pub fn default_hook_probes() -> Vec<HookProbe> {
             source: "kimi_code",
             config_path: home.join(".kimi").join("config.toml"),
         },
+        HookProbe {
+            source: "cursor",
+            config_path: home.join(".cursor").join("hooks.json"),
+        },
     ]
 }
 
@@ -592,8 +602,9 @@ pub fn detect_hooks(probes: &[HookProbe]) -> Vec<HookRegistration> {
 }
 
 /// The outcome of an opt-in `hook_register` call. Claude Code's settings.json
-/// hook arrays are merged in place; CLIs whose hook mechanism the host cannot
-/// edit safely get the exact snippet to paste instead of a guessed rewrite.
+/// and Cursor's hooks.json hook arrays are merged in place; CLIs whose hook
+/// mechanism the host cannot edit safely get the exact snippet to paste
+/// instead of a guessed rewrite.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(
     tag = "status",
@@ -616,6 +627,14 @@ pub enum HookRegisterResult {
 /// The two Claude Code lifecycle events the hook reports on; the arrays these
 /// name are what registration merges into.
 const CLAUDE_HOOK_EVENTS: [&str; 2] = ["SessionStart", "SessionEnd"];
+
+/// Cursor's sessionStart/sessionEnd hooks (IDE-only; cloud agents never fire
+/// them), paired with the `--event` flag each registered command passes, so
+/// the binary knows the event without parsing Cursor's stdin payload.
+const CURSOR_HOOKS: [(&str, &str); 2] = [
+    ("sessionStart", "session-start"),
+    ("sessionEnd", "session-end"),
+];
 
 fn hook_binary_file_name() -> &'static str {
     if cfg!(windows) {
@@ -651,6 +670,7 @@ pub fn register_hook(source: &str) -> ApiResult<HookRegisterResult> {
     let command = hook_binary_command()?;
     match source {
         "claude_code" => register_claude_code(&probe.config_path, &command),
+        "cursor" => register_cursor(&probe.config_path, &command),
         // Codex fires only a turn-completion `notify`, and Kimi Code's hook
         // coverage is unconfirmed against the installed version: both get an
         // honest paste-it-yourself snippet rather than a guessed TOML rewrite.
@@ -705,6 +725,44 @@ fn register_claude_code(config_path: &Path, command: &str) -> ApiResult<HookRegi
     })
 }
 
+/// Merges the hook into Cursor's sessionStart/sessionEnd arrays in
+/// `~/.cursor/hooks.json`, with the same discipline as the Claude merge:
+/// parse-then-merge, an unparseable file or an unexpected shape (including a
+/// declared schema version other than 1) fails loudly, the untouched original
+/// is backed up once beside it (`.bak`), and the write is a temp file plus
+/// rename. Each entry is argv-disambiguated (`--source cursor --event …`), so
+/// the binary knows the event without relying on Cursor's payload shape.
+fn register_cursor(config_path: &Path, command: &str) -> ApiResult<HookRegisterResult> {
+    let mut config = read_json_object(config_path)?;
+    if cursor_hook_present(&config) {
+        return Ok(HookRegisterResult::AlreadyRegistered {
+            config_path: config_path.to_string_lossy().into_owned(),
+        });
+    }
+
+    // Clock-In writes the version-1 flat schema; a file declaring another
+    // version is a shape this merge will not guess at.
+    match config.get("version") {
+        None => {
+            config.insert("version".to_string(), serde_json::json!(1));
+        }
+        Some(version) if version == &serde_json::json!(1) => {}
+        Some(_) => return Err(unexpected_settings_shape()),
+    }
+
+    let hooks = json_object_entry(&mut config, "hooks")?;
+    for (key, event) in CURSOR_HOOKS {
+        json_array_entry(hooks, key)?.push(serde_json::json!({
+            "command": format!("{command} --source cursor --event {event}")
+        }));
+    }
+
+    write_json_atomically(config_path, &config)?;
+    Ok(HookRegisterResult::Registered {
+        config_path: config_path.to_string_lossy().into_owned(),
+    })
+}
+
 /// Reads a JSON config file as an object; a missing file reads as empty.
 /// Anything present but unparseable is an error: a merge never clobbers.
 fn read_json_object(path: &Path) -> ApiResult<serde_json::Map<String, serde_json::Value>> {
@@ -754,10 +812,23 @@ fn unexpected_settings_shape() -> BridgeError {
 /// binary — the same substring heuristic detection uses, so a registration
 /// detection would later find reads as already registered here.
 fn claude_hook_present(settings: &serde_json::Map<String, serde_json::Value>) -> bool {
+    hook_arrays_mention_hook(settings, &CLAUDE_HOOK_EVENTS)
+}
+
+/// True when any sessionStart/sessionEnd entry already mentions the hook
+/// binary — same heuristic as `claude_hook_present`, on Cursor's keys.
+fn cursor_hook_present(config: &serde_json::Map<String, serde_json::Value>) -> bool {
+    hook_arrays_mention_hook(config, &["sessionStart", "sessionEnd"])
+}
+
+fn hook_arrays_mention_hook(
+    settings: &serde_json::Map<String, serde_json::Value>,
+    events: &[&str],
+) -> bool {
     let Some(hooks) = settings.get("hooks").and_then(|hooks| hooks.as_object()) else {
         return false;
     };
-    CLAUDE_HOOK_EVENTS
+    events
         .iter()
         .filter_map(|event| hooks.get(*event))
         .any(value_mentions_hook)
@@ -876,6 +947,8 @@ pub struct Monitor {
     agent_path: PathBuf,
     client: ApiClient,
     recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
+    // Read only by the Windows-gated poll/auto-stop path today.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     recovery_path: PathBuf,
     tasks: tokio::sync::Mutex<Option<MonitorTasks>>,
     upload_now: Arc<Notify>,
@@ -2134,6 +2207,137 @@ mod tests {
         assert!(
             !dir.join("settings.json.bak").exists(),
             "no write, no backup"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cursor_registration_merges_without_clobbering_and_backs_up_once() {
+        let dir =
+            std::env::temp_dir().join(format!("clock-in-cursor-register-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir is created");
+        let config = dir.join("hooks.json");
+        let original = r#"{"version":1,"hooks":{"sessionStart":[{"command":"echo hi"}]}}"#;
+        std::fs::write(&config, original).expect("config writes");
+
+        let result = register_cursor(&config, "\"C:/bin/clock-in-hook.exe\"")
+            .expect("registration succeeds");
+        assert!(
+            matches!(result, HookRegisterResult::Registered { .. }),
+            "first registration reports Registered"
+        );
+
+        let merged: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config).expect("config reads"))
+                .expect("merged config parses");
+        assert_eq!(merged["version"], 1, "the schema version survives");
+        let starts = merged["hooks"]["sessionStart"]
+            .as_array()
+            .expect("sessionStart is an array");
+        assert_eq!(starts.len(), 2, "the existing entry is kept, ours appended");
+        assert_eq!(
+            starts[1]["command"],
+            "\"C:/bin/clock-in-hook.exe\" --source cursor --event session-start"
+        );
+        assert_eq!(
+            merged["hooks"]["sessionEnd"][0]["command"],
+            "\"C:/bin/clock-in-hook.exe\" --source cursor --event session-end"
+        );
+
+        // The untouched original was backed up beside the file.
+        let backup = dir.join("hooks.json.bak");
+        assert_eq!(
+            std::fs::read_to_string(&backup).expect("backup reads"),
+            original
+        );
+
+        // A second run detects the hook and changes nothing, backup included.
+        let before = std::fs::read_to_string(&config).expect("config reads");
+        let result = register_cursor(&config, "\"C:/bin/clock-in-hook.exe\"")
+            .expect("re-registration succeeds");
+        assert!(
+            matches!(result, HookRegisterResult::AlreadyRegistered { .. }),
+            "the hook is already there"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config).expect("config reads"),
+            before
+        );
+        assert_eq!(
+            std::fs::read_to_string(&backup).expect("backup reads"),
+            original,
+            "the pristine backup is not overwritten"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cursor_registration_starts_from_a_missing_file() {
+        let dir =
+            std::env::temp_dir().join(format!("clock-in-cursor-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = dir.join("nested").join("hooks.json");
+
+        let result = register_cursor(&config, "\"C:/bin/clock-in-hook.exe\"")
+            .expect("registration succeeds");
+        assert!(matches!(result, HookRegisterResult::Registered { .. }));
+
+        let created: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config).expect("config reads"))
+                .expect("created config parses");
+        assert_eq!(created["version"], 1, "the schema version is written");
+        for (key, event) in CURSOR_HOOKS {
+            assert_eq!(
+                created["hooks"][key][0]["command"],
+                format!("\"C:/bin/clock-in-hook.exe\" --source cursor --event {event}")
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cursor_registration_refuses_to_clobber_an_unparseable_file() {
+        let dir =
+            std::env::temp_dir().join(format!("clock-in-cursor-corrupt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir is created");
+        let config = dir.join("hooks.json");
+        std::fs::write(&config, "not json at all").expect("config writes");
+
+        let error = register_cursor(&config, "\"C:/bin/clock-in-hook.exe\"")
+            .expect_err("an unparseable file fails loudly");
+        assert_eq!(error.kind, ErrorKind::Unknown);
+        assert_eq!(
+            std::fs::read_to_string(&config).expect("config reads"),
+            "not json at all",
+            "the file is untouched"
+        );
+        assert!(!dir.join("hooks.json.bak").exists(), "no write, no backup");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cursor_registration_refuses_an_unknown_schema_version() {
+        let dir =
+            std::env::temp_dir().join(format!("clock-in-cursor-version-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir is created");
+        let config = dir.join("hooks.json");
+        let original = r#"{"version":2,"hooks":{}}"#;
+        std::fs::write(&config, original).expect("config writes");
+
+        let error = register_cursor(&config, "\"C:/bin/clock-in-hook.exe\"")
+            .expect_err("an unknown schema version fails loudly");
+        assert_eq!(error.kind, ErrorKind::Unknown);
+        assert_eq!(
+            std::fs::read_to_string(&config).expect("config reads"),
+            original,
+            "the file is untouched"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -16,7 +16,7 @@ import {
 
 export const sessionStatus = pgEnum("session_status", ["running", "stopped", "needs_review"]);
 export const activitySegmentKind = pgEnum("activity_segment_kind", ["active", "idle", "locked", "suspended"]);
-export const agentSource = pgEnum("agent_source", ["claude_code", "codex", "kimi_code", "other"]);
+export const agentSource = pgEnum("agent_source", ["claude_code", "codex", "kimi_code", "cursor", "other"]);
 export const agentSessionStatus = pgEnum("agent_session_status", ["running", "ended"]);
 
 const auditColumns = {

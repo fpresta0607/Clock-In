@@ -183,9 +183,56 @@ fn a_missing_flag_value_exits_non_zero_and_writes_nothing() {
     let dir = temp_dir("argv-missing");
     let spool = dir.join("agent-spool.jsonl");
 
-    let output = run_hook(&spool, &["--source", "codex", "--event", "heartbeat"], None);
+    // --session-id without the rest of the identity flags is incomplete.
+    let output = run_hook(&spool, &["--source", "codex", "--session-id", "s1"], None);
 
     assert!(!output.status.success());
+    assert!(!spool.exists());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cursor_flags_with_a_native_payload_spool_an_event() {
+    let dir = temp_dir("cursor-native");
+    let spool = dir.join("agent-spool.jsonl");
+
+    let output = run_hook(
+        &spool,
+        &["--source", "cursor", "--event", "session-start"],
+        Some(r#"{"conversation_id":"c1","workspace_roots":["C:/dev/Clock-In"]}"#),
+    );
+
+    assert!(output.status.success());
+    let content = std::fs::read_to_string(&spool).expect("spool reads");
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), 1);
+    let value: serde_json::Value = serde_json::from_str(lines[0]).expect("line parses");
+    assert_eq!(value["source"], "cursor");
+    assert_eq!(value["event"], "started");
+    assert_eq!(value["externalSessionId"], "c1");
+    assert_eq!(value["cwd"], "C:/dev/Clock-In");
+    // Cursor's payload has no timestamp; the hook stamps the current time.
+    assert!(value["occurredAt"]
+        .as_str()
+        .expect("stamped")
+        .ends_with('Z'));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_cursor_payload_without_a_session_id_exits_zero_and_writes_nothing() {
+    let dir = temp_dir("cursor-ignored");
+    let spool = dir.join("agent-spool.jsonl");
+
+    let output = run_hook(
+        &spool,
+        &["--source", "cursor", "--event", "session-end"],
+        Some(r#"{"cwd":"/x"}"#),
+    );
+
+    assert!(output.status.success());
     assert!(!spool.exists());
 
     let _ = std::fs::remove_dir_all(&dir);

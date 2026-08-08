@@ -1,0 +1,1 @@
+ALTER TYPE "public"."agent_source" ADD VALUE 'cursor' BEFORE 'other';
