@@ -36,6 +36,7 @@ const AGENT_SOURCE_LABELS: Record<string, string> = {
   claude_code: "Claude Code",
   codex: "Codex",
   kimi_code: "Kimi Code",
+  cursor: "Cursor",
 };
 
 const sourceLabel = (source: string): string => AGENT_SOURCE_LABELS[source] ?? source;

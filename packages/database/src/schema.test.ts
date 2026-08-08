@@ -168,7 +168,7 @@ describe("database schema", () => {
     expect(agentSessions.organizationId.notNull).toBe(true);
     expect(agentSessions.userId.notNull).toBe(true);
     expect(agentSessions.source.notNull).toBe(true);
-    expect(agentSessions.source.enumValues).toEqual(["claude_code", "codex", "kimi_code", "other"]);
+    expect(agentSessions.source.enumValues).toEqual(["claude_code", "codex", "kimi_code", "cursor", "other"]);
     expect(agentSessions.externalSessionId.notNull).toBe(true);
     expect(agentSessions.externalSessionId.columnType).toBe("PgText");
     expect(agentSessions.projectId.notNull).toBe(false);

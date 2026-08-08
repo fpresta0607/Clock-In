@@ -5,7 +5,9 @@
 //! fallback for CLIs that cannot pipe. Claude Code pipes its own native payload
 //! rather than the Clock-In contract, so stdin is translated when it carries
 //! `hook_event_name` (`SessionStart`/`SessionEnd`/`PostToolUse`; any other
-//! Claude event is accepted and ignored). The binary holds no credentials and
+//! Claude event is accepted and ignored). Cursor's registration passes only
+//! `--source cursor --event …`, and its stdin payload is then mined
+//! best-effort for a session id and cwd. The binary holds no credentials and
 //! opens no sockets — the spool file is the whole interface, so a hook can
 //! never slow down or block the agent CLI. Invalid input exits non-zero with a
 //! one-line message the CLI surfaces, and never writes a partial line.
@@ -13,7 +15,7 @@
 use std::io::Read;
 use std::process::ExitCode;
 
-use clock_in_desktop_lib::spool::{self, HookInput, HookStdin};
+use clock_in_desktop_lib::spool::{self, ArgvContext, HookInput, HookStdin};
 
 fn main() -> ExitCode {
     match run() {
@@ -28,10 +30,11 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let event = match input_from_args(&args)? {
-        Some(input) => input.into_event(),
-        None => match input_from_stdin()? {
+        ArgvInput::Event(input) => input.into_event(),
+        ArgvInput::Stdin(context) => match input_from_stdin(context)? {
             HookStdin::Event(event) => event,
-            // A Claude Code event Clock-In does not track: accepted, not spooled.
+            // An event Clock-In does not track (or a Cursor payload without a
+            // session id): accepted, not spooled.
             HookStdin::Ignored => return Ok(()),
         },
     };
@@ -39,18 +42,27 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("could not write the spool: {error}"))
 }
 
-fn input_from_stdin() -> Result<HookStdin, String> {
+/// How the command line says the event arrives.
+enum ArgvInput {
+    /// Stdin carries the event; `Some` when the flags supplied the event
+    /// identity (`--source`/`--event` only) and stdin carries a CLI-native
+    /// payload to extract from, `None` when stdin must stand alone.
+    Stdin(Option<ArgvContext>),
+    /// Every flag was passed: the event is complete without stdin.
+    Event(HookInput),
+}
+
+fn input_from_stdin(context: Option<ArgvContext>) -> Result<HookStdin, String> {
     let mut buffer = String::new();
     std::io::stdin()
         .read_to_string(&mut buffer)
         .map_err(|error| format!("could not read stdin: {error}"))?;
-    spool::parse_stdin(&buffer)
+    spool::parse_stdin_with_context(&buffer, context)
 }
 
-/// Returns `None` when no flags were passed, meaning stdin carries the event.
-fn input_from_args(args: &[String]) -> Result<Option<HookInput>, String> {
+fn input_from_args(args: &[String]) -> Result<ArgvInput, String> {
     if args.is_empty() {
-        return Ok(None);
+        return Ok(ArgvInput::Stdin(None));
     }
 
     let mut source = None;
@@ -70,23 +82,35 @@ fn input_from_args(args: &[String]) -> Result<Option<HookInput>, String> {
             "--occurred-at" => occurred_at = Some(value.clone()),
             _ => {
                 return Err(format!(
-                    "unknown flag {flag}; usage: clock-in-hook --source SOURCE --event EVENT --session-id ID --cwd DIR [--occurred-at ISO8601]"
+                    "unknown flag {flag}; usage: clock-in-hook --source SOURCE --event EVENT [--session-id ID --cwd DIR [--occurred-at ISO8601]]"
                 ))
             }
         }
     }
 
-    Ok(Some(
-        HookInput {
-            version: 1,
-            source: source.ok_or("missing --source")?,
-            event: event.ok_or("missing --event")?,
-            session_id: session_id.ok_or("missing --session-id")?,
-            cwd: cwd.ok_or("missing --cwd")?,
-            occurred_at: occurred_at.unwrap_or_else(spool::now_iso8601),
+    match (source, event, session_id, cwd, occurred_at) {
+        // Identity only: stdin carries a CLI-native payload (Cursor).
+        (Some(source), Some(event), None, None, None) => {
+            Ok(ArgvInput::Stdin(Some(ArgvContext { source, event })))
         }
-        .validate()?,
-    ))
+        (Some(source), Some(event), Some(session_id), Some(cwd), occurred_at) => {
+            Ok(ArgvInput::Event(
+                HookInput {
+                    version: 1,
+                    source,
+                    event,
+                    session_id,
+                    cwd,
+                    occurred_at: occurred_at.unwrap_or_else(spool::now_iso8601),
+                }
+                .validate()?,
+            ))
+        }
+        _ => Err(
+            "incomplete flags; pass --source and --event, optionally with --session-id and --cwd"
+                .to_string(),
+        ),
+    }
 }
 
 /// Reuses the serde aliases so flags accept the same spellings as stdin JSON.

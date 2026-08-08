@@ -213,7 +213,7 @@ export const activitySegmentBatchResponseSchema = z
   })
   .strict();
 
-export const agentSourceValues = ["claude_code", "codex", "kimi_code", "other"] as const;
+export const agentSourceValues = ["claude_code", "codex", "kimi_code", "cursor", "other"] as const;
 export const agentSourceSchema = z.enum(agentSourceValues);
 
 export const agentEventKindValues = ["started", "ended", "heartbeat"] as const;

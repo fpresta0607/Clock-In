@@ -747,6 +747,20 @@ describe("App", () => {
     expect(missing).toHaveAttribute("title", "C:/Users/dev/.codex/config.toml");
   });
 
+  it("labels a Cursor hook badge from the host-reported hooks", async () => {
+    const bridge = bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue({
+        ...idleMonitorStatus,
+        hooks: [{ source: "cursor", detected: true, configPath: "C:/Users/dev/.cursor/hooks.json" }],
+      }),
+    });
+    render(<App bridge={bridge} />);
+
+    const detected = await screen.findByText("Cursor");
+    expect(detected).toHaveClass("hook-badge", "is-detected");
+    expect(detected).toHaveAttribute("title", "C:/Users/dev/.cursor/hooks.json");
+  });
+
   it("registers a missing hook from settings and shows a returned manual snippet", async () => {
     const bridge = bridgeFor({
       monitorStatus: vi.fn().mockResolvedValue(idleMonitorStatus),

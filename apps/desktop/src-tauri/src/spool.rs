@@ -44,6 +44,8 @@ pub enum AgentSource {
     Codex,
     #[serde(rename = "kimi_code", alias = "kimi-code")]
     KimiCode,
+    #[serde(rename = "cursor")]
+    Cursor,
     #[serde(rename = "other")]
     Other,
 }
@@ -140,6 +142,15 @@ pub enum HookStdin {
     Ignored,
 }
 
+/// The event identity a hook command line supplies when the CLI's own payload
+/// does not carry it. Cursor's registration passes only `--source`/`--event`;
+/// the session id and cwd are then extracted from Cursor's stdin payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArgvContext {
+    pub source: AgentSource,
+    pub event: AgentEventKind,
+}
+
 /// Parses hook stdin, accepting the Clock-In contract first and falling back
 /// to Claude Code's native payload. Claude pipes its own JSON to whatever
 /// binary its hooks register, so the same binary serves both: known Claude
@@ -148,13 +159,39 @@ pub enum HookStdin {
 /// so future hook types never spam errors. Claude's payload has no timestamp,
 /// so the current time is stamped here.
 pub fn parse_stdin(json: &str) -> Result<HookStdin, String> {
+    parse_stdin_with_context(json, None)
+}
+
+/// `parse_stdin` plus a third fallback when the command line supplied the
+/// event identity: a Cursor-native payload (no contract shape, no
+/// `hook_event_name`) is mined best-effort for a session id and cwd. Cursor's
+/// payload field names are not yet verified against a real session, so every
+/// documented candidate spelling is tried. A payload without a usable session
+/// id or cwd is accepted and ignored — never an error, so a hook can never
+/// spam the agent CLI.
+pub fn parse_stdin_with_context(
+    json: &str,
+    context: Option<ArgvContext>,
+) -> Result<HookStdin, String> {
     match HookInput::parse(json) {
         Ok(input) => Ok(HookStdin::Event(input.into_event())),
         // The contract says what went wrong; keep that message if the input
-        // turns out not to be a Claude payload either.
+        // turns out to be neither a Claude payload nor (with argv context) a
+        // Cursor payload either.
         Err(contract_error) => {
-            let claude: ClaudeHookInput = serde_json::from_str(json).map_err(|_| contract_error)?;
-            translate_claude(claude)
+            if let Ok(claude) = serde_json::from_str::<ClaudeHookInput>(json) {
+                return translate_claude(claude);
+            }
+            if let Some(context) = context {
+                // With the identity on the command line, stdin is a
+                // CLI-native payload: extract what is there and accept the
+                // rest silently, so a hook can never spam the agent CLI.
+                return Ok(match serde_json::from_str::<serde_json::Value>(json) {
+                    Ok(value) if value.is_object() => translate_cursor(&value, context),
+                    _ => HookStdin::Ignored,
+                });
+            }
+            Err(contract_error)
         }
     }
 }
@@ -179,6 +216,53 @@ fn translate_claude(input: ClaudeHookInput) -> Result<HookStdin, String> {
         occurred_at: now_iso8601(),
         cwd: input.cwd,
     }))
+}
+
+/// Best-effort event building from a Cursor-native payload. The session id
+/// comes from the first present of
+/// `conversation_id`/`session_id`/`sessionId`/`sessionID`, the cwd from `cwd`
+/// or the first element of `workspace_roots`/`workspaceRoots`; the source and
+/// event kind always come from the argv context, so registration does not
+/// depend on Cursor's payload carrying an event name. Like Claude's payload,
+/// Cursor's has no contract timestamp, so the current time is stamped here.
+/// Anything without a usable session id or cwd is accepted and ignored.
+fn translate_cursor(value: &serde_json::Value, context: ArgvContext) -> HookStdin {
+    let session_id = ["conversation_id", "session_id", "sessionId", "sessionID"]
+        .iter()
+        .find_map(|key| value.get(key).and_then(|field| field.as_str()))
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let Some(session_id) = session_id else {
+        return HookStdin::Ignored;
+    };
+
+    let cwd = value
+        .get("cwd")
+        .and_then(|field| field.as_str())
+        .or_else(|| {
+            ["workspace_roots", "workspaceRoots"]
+                .iter()
+                .find_map(|key| {
+                    value
+                        .get(key)
+                        .and_then(|field| field.as_array())
+                        .and_then(|roots| roots.first())
+                        .and_then(|root| root.as_str())
+                })
+        })
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty());
+    let Some(cwd) = cwd else {
+        return HookStdin::Ignored;
+    };
+
+    HookStdin::Event(SpoolEvent {
+        source: context.source,
+        external_session_id: session_id.to_string(),
+        event: context.event,
+        occurred_at: now_iso8601(),
+        cwd: cwd.to_string(),
+    })
 }
 
 /// What `read_pending` covered. `acked_bytes` is passed back to
@@ -589,6 +673,104 @@ mod tests {
         .expect_err("still rejected");
 
         assert!(error.contains("version"));
+    }
+
+    fn cursor_context() -> ArgvContext {
+        ArgvContext {
+            source: AgentSource::Cursor,
+            event: AgentEventKind::Started,
+        }
+    }
+
+    fn cursor_event(json: &str) -> SpoolEvent {
+        match parse_stdin_with_context(json, Some(cursor_context()))
+            .expect("cursor payloads are never errors")
+        {
+            HookStdin::Event(event) => event,
+            HookStdin::Ignored => panic!("expected an extracted event"),
+        }
+    }
+
+    #[test]
+    fn a_cursor_payload_extracts_session_id_and_cwd_under_the_argv_identity() {
+        let event = cursor_event(r#"{"conversation_id":"c1","cwd":"/repo"}"#);
+
+        assert_eq!(event.source, AgentSource::Cursor);
+        assert_eq!(event.event, AgentEventKind::Started);
+        assert_eq!(event.external_session_id, "c1");
+        assert_eq!(event.cwd, "/repo");
+        // Cursor's payload has no contract timestamp; the hook stamps now.
+        assert!(event.occurred_at.ends_with('Z'));
+    }
+
+    #[test]
+    fn every_cursor_session_id_spelling_is_accepted_in_priority_order() {
+        for json in [
+            r#"{"session_id":"s1","cwd":"/repo"}"#,
+            r#"{"sessionId":"s1","cwd":"/repo"}"#,
+            r#"{"sessionID":"s1","cwd":"/repo"}"#,
+        ] {
+            assert_eq!(cursor_event(json).external_session_id, "s1");
+        }
+
+        // conversation_id wins when several spellings coexist.
+        let event = cursor_event(r#"{"conversation_id":"c1","session_id":"s1","cwd":"/repo"}"#);
+        assert_eq!(event.external_session_id, "c1");
+    }
+
+    #[test]
+    fn the_cursor_cwd_falls_back_to_the_first_workspace_root() {
+        let snake =
+            cursor_event(r#"{"conversation_id":"c1","workspace_roots":["/repo","/other"]}"#);
+        assert_eq!(snake.cwd, "/repo");
+
+        let camel = cursor_event(r#"{"conversation_id":"c1","workspaceRoots":["/repo"]}"#);
+        assert_eq!(camel.cwd, "/repo");
+    }
+
+    #[test]
+    fn a_cursor_payload_without_identity_fields_is_accepted_and_ignored() {
+        let no_session = parse_stdin_with_context(r#"{"cwd":"/repo"}"#, Some(cursor_context()))
+            .expect("accepted, not an error");
+        assert!(matches!(no_session, HookStdin::Ignored));
+
+        let no_cwd =
+            parse_stdin_with_context(r#"{"conversation_id":"c1"}"#, Some(cursor_context()))
+                .expect("accepted, not an error");
+        assert!(matches!(no_cwd, HookStdin::Ignored));
+    }
+
+    #[test]
+    fn cursor_extraction_only_applies_with_argv_context() {
+        // Without --source/--event the same payload keeps the old behaviour:
+        // not a contract payload, not a Claude payload, so the contract error.
+        let error = parse_stdin(r#"{"conversation_id":"c1","cwd":"/repo"}"#)
+            .expect_err("no context, no cursor extraction");
+        assert!(error.contains("invalid hook JSON"));
+    }
+
+    #[test]
+    fn unparseable_stdin_is_accepted_and_ignored_in_argv_context_mode() {
+        let outcome = parse_stdin_with_context("not json at all", Some(cursor_context()))
+            .expect("accepted, not an error");
+
+        assert!(matches!(outcome, HookStdin::Ignored));
+    }
+
+    #[test]
+    fn cursor_serializes_as_the_canonical_source() {
+        let line = serde_json::to_string(&SpoolEvent {
+            source: AgentSource::Cursor,
+            ..event("s1")
+        })
+        .expect("event serializes");
+
+        assert!(line.contains("\"source\":\"cursor\""));
+        // And the flag spelling round-trips.
+        assert_eq!(
+            serde_json::from_str::<AgentSource>("\"cursor\"").expect("source parses"),
+            AgentSource::Cursor
+        );
     }
 
     #[test]

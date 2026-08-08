@@ -2,7 +2,7 @@
 
 ## Scope
 
-Phase 2 turns the manual stopwatch into a corroborated tracker. Three signal sources feed the existing session model: operating-system activity (idle, lock, sleep, foreground process), agent CLI sessions (Claude Code, Codex, Kimi Code), and user-confirmed timer actions. The primary goal is **project attribution**: every hour on the leaderboard should name the project it belongs to and carry evidence that real work produced it. Manual time entry stays possible, but uncorroborated time is visibly labeled as such, which removes most of the value of padding.
+Phase 2 turns the manual stopwatch into a corroborated tracker. Three signal sources feed the existing session model: operating-system activity (idle, lock, sleep, foreground process), agent CLI sessions (Claude Code, Codex, Kimi Code, Cursor), and user-confirmed timer actions. The primary goal is **project attribution**: every hour on the leaderboard should name the project it belongs to and carry evidence that real work produced it. Manual time entry stays possible, but uncorroborated time is visibly labeled as such, which removes most of the value of padding.
 
 Out of scope, unchanged from Phase 1: keystroke logging, mouse tracking, screenshots, window titles by default, and any content capture.
 
@@ -57,11 +57,12 @@ Per-CLI wiring and capability (verified at implementation time; the contract tre
 - **Claude Code**: `SessionStart` / `SessionEnd` hooks in `settings.json` — true session boundaries; `PostToolUse` optionally acts as an activity heartbeat. Claude Code pipes its own native hook payload to the binary, which translates it (`hook_event_name` SessionStart/SessionEnd/PostToolUse → start/end/heartbeat), so no contract-shaped wrapper script is needed.
 - **Codex CLI**: the `notify` hook fires on turn completion only, so it provides heartbeats, not boundaries; session start/end are synthesized from heartbeat gaps.
 - **Kimi Code**: hooks configured in `config.toml`; exact event coverage must be confirmed against the installed version before wiring.
+- **Cursor**: `sessionStart` / `sessionEnd` hooks in `~/.cursor/hooks.json` (flat schema `{ "version": 1, "hooks": { "sessionStart": [{ "command": "..." }] } }`) — true session boundaries, but IDE-only: Cursor's cloud agents never fire them. The registered commands are argv-disambiguated (`clock-in-hook --source cursor --event session-start|session-end`), so the event kind never depends on Cursor's payload. The session id and cwd are extracted best-effort from the stdin payload (session id from the first present of `conversation_id`/`session_id`/`sessionId`/`sessionID`, cwd from `cwd` or the first of `workspace_roots`/`workspaceRoots`); the exact payload field names are **not yet verified against a real Cursor session**, and a payload without a usable session id is accepted and ignored rather than erroring.
 - Anything else can call the same binary with `--source other`; the contract is the product, not any one CLI.
 
 Because `session-end` is never guaranteed (crash, `kill -9`, or a CLI that cannot emit it), the server reaps agent sessions with no event for a staleness window (default 6 hours) and closes them at the last-seen timestamp. Out-of-order delivery (an end arriving before its start) is tolerated by upsert, not rejected.
 
-Hook registration into each CLI's own config file is performed by an explicit, opt-in setup step in the desktop — the app never rewrites Claude Code/Codex/Kimi configuration silently. Registration merges the hook arrays automatically for Claude Code; Codex and Kimi Code receive a paste-it-yourself snippet instead of a guessed config rewrite.
+Hook registration into each CLI's own config file is performed by an explicit, opt-in setup step in the desktop — the app never rewrites Claude Code/Codex/Kimi/Cursor configuration silently. Registration merges the hook arrays automatically for Claude Code and Cursor (Cursor's `hooks.json` gets `"version": 1` plus entries in `hooks.sessionStart`/`hooks.sessionEnd`, with the same backup-and-atomic-write discipline as the Claude merge); Codex and Kimi Code receive a paste-it-yourself snippet instead of a guessed config rewrite.
 
 ### Project attribution
 
@@ -96,7 +97,7 @@ Tracking that the user cannot see is surveillance; tracking the user can interro
 
 All Phase 2 UI — status surfaces, live session card, personal stats view, settings, prompts — uses the SIQstack brand system already defined in `apps/web/src/styles.css`: body `#03050a`, chromatic glass cards (green/blue gradient fill, `rgba(0,229,155,…)` borders, backdrop blur), accent green `#00e59b` / deep `#00c97f` / mint `#6ee7b7`, secondary text `#a3b3c2`, Inter, pill buttons, uppercase eyebrow labels, tabular numerals for every time figure. The tokens move from `apps/web/src/styles.css` into a shared stylesheet in `packages/shared` that both apps import, so the brand is edited once.
 
-The desktop's Phase 1 "chronometer" theme (graphite/ivory/amber, Bahnschrift, 2px corners) is retired in favor of this single system — desktop and web should read as one product, and two themes inside one tray app would be incoherent. The WebGL sine-wave shader stays web-only: a GPU background in an always-running tray utility violates the lightweight principle. Display conventions for the new data: corroborated time renders in mint, uncorroborated in secondary gray, and agent-linked spans carry a small source badge (Claude Code / Codex / Kimi Code).
+The desktop's Phase 1 "chronometer" theme (graphite/ivory/amber, Bahnschrift, 2px corners) is retired in favor of this single system — desktop and web should read as one product, and two themes inside one tray app would be incoherent. The WebGL sine-wave shader stays web-only: a GPU background in an always-running tray utility violates the lightweight principle. Display conventions for the new data: corroborated time renders in mint, uncorroborated in secondary gray, and agent-linked spans carry a small source badge (Claude Code / Codex / Kimi Code / Cursor).
 
 ### Anti-manipulation stance
 
@@ -157,7 +158,7 @@ Accepted in this design; each is a candidate for a later phase:
 - **Browser-based work** (webmail, GitHub, docs) registers only as "active" — no URLs or titles by design. This is the accepted trade-off for the privacy posture.
 - **Corroboration cost at scale**: overlap computation at report time is fine at Phase 1/2 volumes; large organizations may need materialized per-session corroboration maintained at upload time. The contract carries `corroboratedSeconds` either way, so the storage strategy can change underneath it.
 - **Windows-only**: the `ActivitySource` trait admits macOS/Linux implementations later, but Phase 2 ships Windows only.
-- **Per-CLI hook asymmetry**: only Claude Code has true session boundaries today; Codex contributes heartbeats and Kimi Code's event coverage is to be confirmed. Attribution quality therefore varies by source until those CLIs mature.
+- **Per-CLI hook asymmetry**: only Claude Code and Cursor have true session boundaries today; Codex contributes heartbeats and Kimi Code's event coverage is to be confirmed. Attribution quality therefore varies by source until those CLIs mature.
 - **Shared machines**: two Windows users on one PC produce two device streams; fast-user-switching mid-timer behaves as "locked" for the switched-out session. A shared single sign-on machine is not supported.
 
 ## Deliberate limitations

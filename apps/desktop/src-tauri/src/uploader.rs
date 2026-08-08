@@ -225,6 +225,7 @@ pub fn source_name(source: AgentSource) -> &'static str {
         AgentSource::ClaudeCode => "claude_code",
         AgentSource::Codex => "codex",
         AgentSource::KimiCode => "kimi_code",
+        AgentSource::Cursor => "cursor",
         AgentSource::Other => "other",
     }
 }
