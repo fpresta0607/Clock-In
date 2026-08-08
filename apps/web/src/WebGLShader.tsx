@@ -326,12 +326,12 @@ export function WebGLShader({ contained = false, className }: WebGLShaderProps) 
         if (refs.mesh.material instanceof THREE.Material) refs.mesh.material.dispose();
         refs.mesh = null;
       }
+      // dispose() releases the renderer's GL resources; the canvas keeps its
+      // context. Do NOT force WEBGL_lose_context here: React StrictMode mounts,
+      // cleans up, and remounts on the same canvas in dev, and a lost context
+      // never comes back — the remounted renderer would paint a blank canvas
+      // (white in WebView2). Context slots are reclaimed with the canvas element.
       refs.renderer?.dispose();
-      // Force WebGL context loss so the browser reclaims the slot immediately
-      const ext =
-        canvas.getContext("webgl2")?.getExtension("WEBGL_lose_context") ??
-        canvas.getContext("webgl")?.getExtension("WEBGL_lose_context");
-      ext?.loseContext();
       refs.renderer = null;
       refs.scene = null;
       refs.uniforms = null;
