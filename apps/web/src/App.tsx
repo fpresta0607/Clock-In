@@ -139,20 +139,6 @@ export const App = ({ client }: AppProps) => {
     setAuthError(undefined);
   };
 
-  const downloadCsv = async (): Promise<void> => {
-    try {
-      const blob = await client.exportCsv(rangeQuery(range));
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "clock-in-report.csv";
-      link.click();
-      URL.revokeObjectURL(url);
-    } catch (error: unknown) {
-      setDataError(messageFor(error));
-    }
-  };
-
   const joinWorkspace = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     setJoinBusy(true);
@@ -286,7 +272,6 @@ export const App = ({ client }: AppProps) => {
           >
             ?
           </button>
-          <button className="ghost" type="button" onClick={() => void downloadCsv()}>Export CSV</button>
           <button className="ghost" type="button" onClick={() => void signOut()}>Sign out</button>
         </div>
       </header>

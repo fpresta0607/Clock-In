@@ -199,10 +199,6 @@ export function createClient(config: ClientConfig) {
 
     leaderboard: (query = "") => json<LeaderboardResponse>(`/reports/leaderboard${query}`),
     report: (query = "") => json<ReportResponse>(`/reports${query}`),
-
-    async exportCsv(query = ""): Promise<Blob> {
-      return (await apiRequest(`/reports/export.csv${query}`)).blob();
-    },
   };
 }
 

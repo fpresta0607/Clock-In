@@ -6,7 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::monitor::SegmentRecord;
 use crate::recovery::{PendingStop, RunningTimer, StartIntent};
+use crate::spool::SpoolEvent;
 
 /// Matches the `BridgeErrorKind` union the React bridge narrows on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +96,19 @@ pub fn classify_transport(error: &reqwest::Error) -> BridgeError {
         BridgeError::transient("The server did not respond in time.")
     } else {
         BridgeError::transient("Cannot reach the server. Check your connection.")
+    }
+}
+
+/// Path-mapping failures the user can act on get their own wording; the shared
+/// `classify` 409 message talks about timers, which would mislead here.
+fn classify_mapping(status: u16) -> BridgeError {
+    match status {
+        404 => BridgeError::new(ErrorKind::Validation, "That path mapping no longer exists."),
+        409 => BridgeError::new(
+            ErrorKind::Validation,
+            "That path prefix is already mapped to a project.",
+        ),
+        _ => classify(status),
     }
 }
 
@@ -214,6 +229,113 @@ struct TokenResponse {
     token: String,
 }
 
+/// The server's verdict on an uploaded activity-segment batch. Rejected rows
+/// are dropped, not retried: the reason is a permanent validation failure.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SegmentBatchOutcome {
+    pub accepted: u32,
+    pub rejected: Vec<SegmentRejection>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SegmentRejection {
+    pub client_id: String,
+    pub reason: String,
+}
+
+/// Per-event verdict from `/agent-sessions`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEventOutcome {
+    pub external_session_id: String,
+    pub accepted: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AgentEventBatchResponse {
+    results: Vec<AgentEventOutcome>,
+}
+
+/// A per-user path prefix → project mapping, as `/path-mappings` returns it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathMapping {
+    pub id: String,
+    pub path_prefix: String,
+    #[serde(default)]
+    pub repo_url: Option<String>,
+    pub project_id: String,
+}
+
+#[derive(Deserialize)]
+struct PathMappingListResponse {
+    mappings: Vec<PathMapping>,
+}
+
+/// What `path_mappings_create` sends. `repoUrl` is optional, never null.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathMappingCreateInput {
+    pub path_prefix: String,
+    #[serde(default)]
+    pub repo_url: Option<String>,
+    pub project_id: String,
+}
+
+/// What `path_mappings_update` sends. Only set fields are serialized, so a
+/// missing key leaves the column alone while an explicit `repoUrl: null`
+/// clears it (the update schema treats absent and null differently).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathMappingUpdateInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_url: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+/// The `GET /me/stats` response: the reporting service's corroboration math
+/// scoped to the caller.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeStats {
+    pub filters: MeStatsFilters,
+    pub total_duration_seconds: u64,
+    pub corroborated_seconds: u64,
+    pub projects: Vec<MeStatsProject>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeStatsFilters {
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeStatsProject {
+    pub project: MeStatsProjectRef,
+    pub duration_seconds: u64,
+    pub corroborated_seconds: u64,
+    pub session_count: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeStatsProjectRef {
+    pub id: String,
+    pub name: String,
+}
+
 /// Neon Auth signs its session cookie: the value it honors on `/token` is
 /// `token.signature` from Set-Cookie, not the bare token the JSON body returns
 /// (the bare token gets a 401). Browsers store the Set-Cookie value verbatim —
@@ -242,7 +364,8 @@ fn session_cookie_value(headers: &reqwest::header::HeaderMap) -> ApiResult<Strin
 }
 
 /// Talks to both services. `auth_base_url` is the Neon Auth base URL; `api_base_url`
-/// is the Clock-In API.
+/// is the Clock-In API. Cheap to clone: the inner HTTP client is reference-counted.
+#[derive(Clone)]
 pub struct ApiClient {
     http: reqwest::Client,
     auth_base_url: String,
@@ -499,6 +622,161 @@ impl ApiClient {
         Err(classify(response.status().as_u16()))
     }
 
+    /// Uploads one activity-segment batch (at most 500 rows; the caller chunks).
+    /// Idempotent on `clientId`, so a replayed batch counts as accepted.
+    pub async fn upload_segments(
+        &self,
+        access_token: &str,
+        segments: &[SegmentRecord],
+    ) -> ApiResult<SegmentBatchOutcome> {
+        let response = self
+            .http
+            .post(format!("{}/activity/segments", self.api_base_url))
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({ "segments": segments }))
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+
+        if !response.status().is_success() {
+            return Err(classify(response.status().as_u16()));
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| BridgeError::unknown("The segment upload response could not be read."))
+    }
+
+    /// Uploads one drained agent-event batch (at most 500 rows; the caller chunks).
+    pub async fn upload_agent_events(
+        &self,
+        access_token: &str,
+        events: &[SpoolEvent],
+    ) -> ApiResult<Vec<AgentEventOutcome>> {
+        let response = self
+            .http
+            .post(format!("{}/agent-sessions", self.api_base_url))
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({ "events": events }))
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+
+        if !response.status().is_success() {
+            return Err(classify(response.status().as_u16()));
+        }
+        let body: AgentEventBatchResponse = response.json().await.map_err(|_| {
+            BridgeError::unknown("The agent-event upload response could not be read.")
+        })?;
+        Ok(body.results)
+    }
+
+    /// The caller's own stats for a date range (`YYYY-MM-DD`, either optional).
+    pub async fn me_stats(
+        &self,
+        access_token: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+    ) -> ApiResult<MeStats> {
+        let mut query: Vec<(&str, &str)> = Vec::new();
+        if let Some(from) = from {
+            query.push(("from", from));
+        }
+        if let Some(to) = to {
+            query.push(("to", to));
+        }
+        let response = self
+            .http
+            .get(format!("{}/me/stats", self.api_base_url))
+            .query(&query)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+
+        if !response.status().is_success() {
+            return Err(classify(response.status().as_u16()));
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| BridgeError::unknown("The stats response could not be read."))
+    }
+
+    pub async fn path_mappings(&self, access_token: &str) -> ApiResult<Vec<PathMapping>> {
+        let body: PathMappingListResponse = self.get_json(access_token, "/path-mappings").await?;
+        Ok(body.mappings)
+    }
+
+    pub async fn create_path_mapping(
+        &self,
+        access_token: &str,
+        input: &PathMappingCreateInput,
+    ) -> ApiResult<PathMapping> {
+        let mut body = serde_json::json!({
+            "pathPrefix": input.path_prefix,
+            "projectId": input.project_id,
+        });
+        if let Some(repo_url) = &input.repo_url {
+            body["repoUrl"] = serde_json::json!(repo_url);
+        }
+        let response = self
+            .http
+            .post(format!("{}/path-mappings", self.api_base_url))
+            .bearer_auth(access_token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+
+        if !response.status().is_success() {
+            return Err(classify_mapping(response.status().as_u16()));
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| BridgeError::unknown("The path mapping response could not be read."))
+    }
+
+    pub async fn update_path_mapping(
+        &self,
+        access_token: &str,
+        id: &str,
+        input: &PathMappingUpdateInput,
+    ) -> ApiResult<PathMapping> {
+        let response = self
+            .http
+            .patch(format!("{}/path-mappings/{id}", self.api_base_url))
+            .bearer_auth(access_token)
+            .json(input)
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+
+        if !response.status().is_success() {
+            return Err(classify_mapping(response.status().as_u16()));
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| BridgeError::unknown("The path mapping response could not be read."))
+    }
+
+    pub async fn delete_path_mapping(&self, access_token: &str, id: &str) -> ApiResult<()> {
+        let response = self
+            .http
+            .delete(format!("{}/path-mappings/{id}", self.api_base_url))
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+
+        if response.status().is_success() {
+            return Ok(());
+        }
+        Err(classify_mapping(response.status().as_u16()))
+    }
+
     async fn get_json<T: serde::de::DeserializeOwned>(
         &self,
         access_token: &str,
@@ -684,5 +962,76 @@ mod tests {
             ErrorKind::Transient
         );
         assert_eq!(classify_signup(500, None).kind, ErrorKind::Transient);
+    }
+
+    #[test]
+    fn mapping_404_and_409_say_what_the_user_can_act_on() {
+        assert_eq!(classify_mapping(404).kind, ErrorKind::Validation);
+        assert!(classify_mapping(404).message.contains("no longer exists"));
+        assert!(classify_mapping(409).message.contains("already mapped"));
+        // Anything else keeps the shared wording.
+        assert_eq!(classify_mapping(503).kind, ErrorKind::Transient);
+        assert_eq!(classify_mapping(401).kind, ErrorKind::Auth);
+    }
+
+    #[test]
+    fn a_mapping_update_serializes_only_the_fields_the_user_set() {
+        let patch = PathMappingUpdateInput {
+            path_prefix: Some("C:/dev".to_string()),
+            ..PathMappingUpdateInput::default()
+        };
+        let json = serde_json::to_value(&patch).expect("patch serializes");
+        assert_eq!(json["pathPrefix"], "C:/dev");
+        assert!(json.get("repoUrl").is_none());
+        assert!(json.get("projectId").is_none());
+
+        // An explicit null clears the repo URL; an absent key would not.
+        let clear = PathMappingUpdateInput {
+            repo_url: Some(None),
+            ..PathMappingUpdateInput::default()
+        };
+        let json = serde_json::to_value(&clear).expect("patch serializes");
+        assert!(json["repoUrl"].is_null());
+    }
+
+    #[test]
+    fn reads_the_me_stats_response_shape() {
+        let stats: MeStats = serde_json::from_str(
+            r#"{
+                "filters": {"from": "2026-08-01"},
+                "totalDurationSeconds": 7200,
+                "corroboratedSeconds": 5400,
+                "projects": [{
+                    "project": {"id": "p1", "name": "Clock-In"},
+                    "durationSeconds": 7200,
+                    "corroboratedSeconds": 5400,
+                    "sessionCount": 3
+                }]
+            }"#,
+        )
+        .expect("stats parse");
+
+        assert_eq!(stats.filters.from.as_deref(), Some("2026-08-01"));
+        assert_eq!(stats.filters.to, None);
+        assert_eq!(stats.projects[0].project.name, "Clock-In");
+        assert_eq!(stats.projects[0].corroborated_seconds, 5400);
+    }
+
+    #[test]
+    fn reads_segment_and_agent_event_batch_outcomes() {
+        let segments: SegmentBatchOutcome = serde_json::from_str(
+            r#"{"accepted": 2, "rejected": [{"clientId": "c1", "reason": "endedAt must be after startedAt"}]}"#,
+        )
+        .expect("segment outcome parses");
+        assert_eq!(segments.accepted, 2);
+        assert_eq!(segments.rejected[0].client_id, "c1");
+
+        let events: AgentEventBatchResponse = serde_json::from_str(
+            r#"{"results": [{"externalSessionId": "s1", "accepted": true},
+                            {"externalSessionId": "s2", "accepted": false, "reason": "stale"}]}"#,
+        )
+        .expect("agent outcome parses");
+        assert!(events.results[0].accepted);
+        assert_eq!(events.results[1].reason.as_deref(), Some("stale"));
     }
 }

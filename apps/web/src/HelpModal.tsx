@@ -47,8 +47,8 @@ export const HelpModal = ({ open, onClose }: HelpModalProps) => {
             you work. Press stop when you're done and the session syncs here on its own.
           </li>
           <li>
-            <strong>This dashboard adds it up.</strong> The leaderboard ranks the team, recent
-            sessions list the detail, and Export CSV downloads whatever range you pick.
+            <strong>This dashboard adds it up.</strong> The leaderboard ranks the team and recent
+            sessions list the detail, for whatever range you pick.
           </li>
         </ol>
       </section>

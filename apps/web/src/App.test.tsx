@@ -38,7 +38,6 @@ function clientFor(overrides: Partial<Client> = {}): Client {
     organization: vi.fn().mockResolvedValue({ organization }),
     leaderboard: vi.fn().mockResolvedValue({ entries, totalDurationSeconds: 10_800, filters: {} }),
     report: vi.fn().mockResolvedValue({ rows, totalDurationSeconds: 7_200, filters: {}, pagination: {} }),
-    exportCsv: vi.fn().mockResolvedValue(new Blob(["a,b"], { type: "text/csv" })),
     joinOrganization: vi.fn().mockResolvedValue(undefined),
     restoreSession: vi.fn().mockResolvedValue(false),
     ...overrides,
@@ -217,18 +216,6 @@ describe("dashboard", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Incorrect email or password.");
     expect(screen.getByRole("heading", { name: "Sign in" })).toBeInTheDocument();
-  });
-
-  it("exports the visible range as CSV", async () => {
-    const exportCsv = vi.fn().mockResolvedValue(new Blob(["a,b"], { type: "text/csv" }));
-    URL.createObjectURL = vi.fn().mockReturnValue("blob:csv");
-    URL.revokeObjectURL = vi.fn();
-    const person = await signIn(clientFor({ exportCsv }));
-    await screen.findByRole("heading", { name: "SIQstack" });
-
-    await person.click(screen.getByRole("button", { name: "Export CSV" }));
-
-    await waitFor(() => expect(exportCsv).toHaveBeenCalledWith(expect.stringContaining("from=")));
   });
 
   it("says so plainly when a range has no recorded time", async () => {
