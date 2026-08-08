@@ -787,6 +787,25 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                   </tbody>
                 </table>
               )}
+              <h3 className="stats-subhead">Apps</h3>
+              {stats.apps.length === 0 ? (
+                <p className="subtle">No activity recorded in this range yet. Turn on monitoring to see app usage.</p>
+              ) : (
+                <table>
+                  <thead>
+                    <tr><th>App</th><th className="numeric">Active time</th></tr>
+                  </thead>
+                  <tbody>
+                    {stats.apps.slice(0, 10).map((row) => (
+                      <tr key={row.processName}>
+                        <td>{row.processName}</td>
+                        <td className="numeric corroborated">{formatDuration(row.durationSeconds)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {stats.apps.length > 10 && <p className="subtle">{stats.apps.length - 10} more apps not shown.</p>}
             </>
           )}
         </section>

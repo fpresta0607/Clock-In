@@ -88,6 +88,10 @@ const meStats = {
   projects: [
     { project: { id: project.id, name: project.name }, durationSeconds: 7_200, corroboratedSeconds: 5_400, sessionCount: 3 },
   ],
+  apps: [
+    { processName: "Code.exe", durationSeconds: 4_800 },
+    { processName: "chrome.exe", durationSeconds: 1_200 },
+  ],
 };
 
 const mapping = {
@@ -944,6 +948,33 @@ describe("App", () => {
     const row = within(panel).getByRole("row", { name: /Field work/ });
     expect(row).toHaveTextContent("3");
     expect(row).toHaveTextContent("02:00:00");
+
+    const appRow = within(panel).getByRole("row", { name: /Code\.exe/ });
+    expect(appRow).toHaveTextContent("01:20:00");
+    expect(within(panel).getByRole("row", { name: /chrome\.exe/ })).toHaveTextContent("00:20:00");
+  });
+
+  it("shows the apps empty state when no monitoring activity was recorded", async () => {
+    const bridge = bridgeFor({ meStats: vi.fn().mockResolvedValue({ ...meStats, projects: [], apps: [] }) });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "Stats" }));
+    const panel = screen.getByRole("region", { name: "Your time" });
+    expect(await within(panel).findByText("No activity recorded in this range yet. Turn on monitoring to see app usage.")).toBeInTheDocument();
+  });
+
+  it("caps the apps table at ten rows and counts the remainder", async () => {
+    const apps = Array.from({ length: 12 }, (_, index) => ({ processName: `app-${String(index).padStart(2, "0")}.exe`, durationSeconds: 60 * (12 - index) }));
+    const bridge = bridgeFor({ meStats: vi.fn().mockResolvedValue({ ...meStats, apps }) });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "Stats" }));
+    const panel = screen.getByRole("region", { name: "Your time" });
+    expect(await within(panel).findByRole("row", { name: /app-09\.exe/ })).toBeInTheDocument();
+    expect(within(panel).queryByRole("row", { name: /app-10\.exe/ })).not.toBeInTheDocument();
+    expect(within(panel).getByText("2 more apps not shown.")).toBeInTheDocument();
   });
 
   it("refetches stats for the week range from Monday midnight", async () => {

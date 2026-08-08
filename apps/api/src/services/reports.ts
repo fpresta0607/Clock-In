@@ -11,6 +11,7 @@ import type {
 import type { AuthenticatedSubject } from "../auth.js";
 import { AppError } from "../errors.js";
 import type {
+  AppTotalRecord,
   LeaderboardRowRecord,
   ProjectTotalRecord,
   ReportQuery,
@@ -160,6 +161,13 @@ function asProjectTotal(record: ProjectTotalRecord): MeStatsResponse["projects"]
   };
 }
 
+function asAppTotal(record: AppTotalRecord): MeStatsResponse["apps"][number] {
+  return {
+    processName: record.processName,
+    durationSeconds: safeInteger(record.durationSeconds, "app duration"),
+  };
+}
+
 export function createReportService(dependencies: ReportServiceDependencies): ReportService {
   return {
     async list(subject: AuthenticatedSubject, filters: ReportFilters): Promise<ReportResponse> {
@@ -220,11 +228,13 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       const query: ReportQuery = { ...normalizedQuery({ ...filters, page: 1, pageSize: 1 }), userId: subject.userId };
       await dependencies.reaper.reapStale(subject);
       const projects = (await dependencies.reports.readProjectTotalsForMember(subject, query)).map(asProjectTotal);
+      const apps = (await dependencies.reports.readAppTotalsForMember(subject, query)).map(asAppTotal);
       return {
         filters,
         totalDurationSeconds: projects.reduce((total, project) => total + project.durationSeconds, 0),
         corroboratedSeconds: projects.reduce((total, project) => total + project.corroboratedSeconds, 0),
         projects,
+        apps,
       };
     },
   };

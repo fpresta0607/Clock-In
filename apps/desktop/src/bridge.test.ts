@@ -142,6 +142,10 @@ describe("defaultBridge", () => {
           sessionCount: 3,
         },
       ],
+      apps: [
+        { processName: "Code.exe", durationSeconds: 4_800 },
+        { processName: "chrome.exe", durationSeconds: 1_200 },
+      ],
     };
     invoke.mockResolvedValueOnce(stats);
     await expect(defaultBridge.meStats("2026-08-06T00:00:00.000Z")).resolves.toEqual(stats);
@@ -155,6 +159,12 @@ describe("defaultBridge", () => {
     await expect(defaultBridge.meStats()).rejects.toMatchObject({ kind: "unknown" });
 
     invoke.mockResolvedValueOnce({ ...stats, projects: [{ project: { id: "nope", name: "Field work" }, durationSeconds: 1, corroboratedSeconds: 0, sessionCount: 1 }] });
+    await expect(defaultBridge.meStats()).rejects.toMatchObject({ kind: "unknown" });
+
+    invoke.mockResolvedValueOnce({ ...stats, apps: [{ processName: "Code.exe", durationSeconds: -1 }] });
+    await expect(defaultBridge.meStats()).rejects.toMatchObject({ kind: "unknown" });
+
+    invoke.mockResolvedValueOnce({ ...stats, apps: undefined });
     await expect(defaultBridge.meStats()).rejects.toMatchObject({ kind: "unknown" });
   });
 

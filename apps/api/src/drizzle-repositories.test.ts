@@ -83,6 +83,27 @@ describe("Drizzle report repository", () => {
       sessionCount: 3,
     }]);
   });
+
+  it("maps caller-scoped per-app totals, preserving postgres sum strings", async () => {
+    const rows = {
+      where: () => rows,
+      groupBy: () => rows,
+      orderBy: async () => [
+        { processName: "Code.exe", durationSeconds: "4800" },
+        { processName: "chrome.exe", durationSeconds: "1200" },
+      ],
+    };
+    const db = {
+      select: () => ({ from: () => rows }),
+    } as unknown as DatabaseConnection["db"];
+    const repository = new DrizzleReportRepository(db);
+    const subject = { organizationId: input.organizationId, userId: input.userId };
+
+    await expect(repository.readAppTotalsForMember(subject, {})).resolves.toEqual([
+      { processName: "Code.exe", durationSeconds: "4800" },
+      { processName: "chrome.exe", durationSeconds: "1200" },
+    ]);
+  });
 });
 
 describe("Drizzle path-mapping repository", () => {

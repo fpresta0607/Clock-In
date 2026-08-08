@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import { generateInviteCode, type AgentSource } from "@clock-in/shared";
-import { and, asc, count, desc, eq, gte, lt, or, sql, sum } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, isNotNull, lt, or, sql, sum } from "drizzle-orm";
 import {
   activitySegments,
   agentSessions,
@@ -29,6 +29,7 @@ import {
   type ActivitySegmentRepository,
   type AgentSessionRecord,
   type AgentSessionRepository,
+  type AppTotalRecord,
   type CreatePathMapping,
   type CreateRunningSession,
   type InsertEndedAgentSession,
@@ -590,6 +591,45 @@ export class DrizzleReportRepository implements ReportRepository {
       corroboratedSeconds: row.corroboratedSeconds,
       sessionCount: row.sessionCount,
     }));
+  }
+
+  /**
+   * One row per foreground process the member was active in, heaviest first.
+   * The same freshness window as corroboration applies, and segments are
+   * clamped to the requested range so only in-range time counts.
+   */
+  public async readAppTotalsForMember(
+    subject: AuthenticatedSubject,
+    query: ReportQuery,
+  ): Promise<AppTotalRecord[]> {
+    const rangeStart = query.from === undefined ? sql`${activitySegments.startedAt}` : sql`${query.from}`;
+    const rangeEnd = query.toExclusive === undefined ? sql`${activitySegments.endedAt}` : sql`${query.toExclusive}`;
+    const duration = sql<string | null>`sum(greatest(0, extract(epoch from
+      least(${activitySegments.endedAt}, ${rangeEnd})
+      - greatest(${activitySegments.startedAt}, ${rangeStart}))))`;
+    const rows = await this.db
+      .select({
+        processName: activitySegments.processName,
+        durationSeconds: duration,
+      })
+      .from(activitySegments)
+      .where(and(
+        eq(activitySegments.organizationId, subject.organizationId),
+        eq(activitySegments.userId, subject.userId),
+        eq(activitySegments.kind, "active"),
+        isNotNull(activitySegments.processName),
+        ...(query.from === undefined ? [] : [gt(activitySegments.endedAt, query.from)]),
+        ...(query.toExclusive === undefined ? [] : [lt(activitySegments.startedAt, query.toExclusive)]),
+        sql`${activitySegments.receivedAt} <= ${activitySegments.endedAt} + interval '7 days'`,
+      ))
+      .groupBy(activitySegments.processName)
+      // processName breaks ties so equal totals do not reorder between requests.
+      .orderBy(desc(duration), asc(activitySegments.processName));
+
+    return rows.map((row) => {
+      if (row.processName === null) throw new Error("App totals query returned a null process name.");
+      return { processName: row.processName, durationSeconds: row.durationSeconds };
+    });
   }
 
   private async snapshot<T>(callback: (db: Pick<DatabaseConnection["db"], "select">) => Promise<T>): Promise<T> {

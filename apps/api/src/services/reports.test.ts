@@ -3,6 +3,7 @@ import type { ReportFilters } from "@clock-in/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import type {
+  AppTotalRecord,
   LeaderboardRowRecord,
   ProjectTotalRecord,
   ReportPageOptions,
@@ -53,9 +54,11 @@ class Reports implements ReportRepository {
   public lastPage: { query: Parameters<ReportRepository["readPageForOrganization"]>[1]; options: ReportPageOptions } | null = null;
   public lastLeaderboardQuery: ReportQuery | null = null;
   public lastProjectTotalsQuery: ReportQuery | null = null;
+  public lastAppTotalsQuery: ReportQuery | null = null;
   public exportReads = 0;
   public leaderboardRows: LeaderboardRowRecord[] = [];
   public projectTotals: ProjectTotalRecord[] = [];
+  public appTotals: AppTotalRecord[] = [];
   public constructor(private readonly rows: ReportRowRecord[] = [], private readonly accessible = new Set([ids.project, ids.user])) {}
   public async readLeaderboardForOrganization(_subject: AuthenticatedSubject, query: ReportQuery) {
     this.lastLeaderboardQuery = query;
@@ -64,6 +67,10 @@ class Reports implements ReportRepository {
   public async readProjectTotalsForMember(_subject: AuthenticatedSubject, query: ReportQuery) {
     this.lastProjectTotalsQuery = query;
     return this.projectTotals;
+  }
+  public async readAppTotalsForMember(_subject: AuthenticatedSubject, query: ReportQuery) {
+    this.lastAppTotalsQuery = query;
+    return this.appTotals;
   }
   public async findProjectForOrganization(_subject: AuthenticatedSubject, projectId: string) {
     return this.accessible.has(projectId) && projectId === ids.project ? { id: projectId, name: "Timer" } : null;
@@ -275,6 +282,10 @@ describe("me/stats", () => {
       { project: { id: ids.project, name: "Timer" }, durationSeconds: 7_200, corroboratedSeconds: 5_400, sessionCount: 2 },
       { project: { id: ids.otherProject, name: "Side" }, durationSeconds: "600", corroboratedSeconds: "600", sessionCount: 1 },
     ];
+    reports.appTotals = [
+      { processName: "Code.exe", durationSeconds: "4200" },
+      { processName: "chrome.exe", durationSeconds: 1_800 },
+    ];
     const reaper = new Reaper();
     const service = createReportService({ reports, reaper });
 
@@ -288,6 +299,10 @@ describe("me/stats", () => {
         { project: { id: ids.project, name: "Timer" }, durationSeconds: 7_200, corroboratedSeconds: 5_400, sessionCount: 2 },
         { project: { id: ids.otherProject, name: "Side" }, durationSeconds: 600, corroboratedSeconds: 600, sessionCount: 1 },
       ],
+      apps: [
+        { processName: "Code.exe", durationSeconds: 4_200 },
+        { processName: "chrome.exe", durationSeconds: 1_800 },
+      ],
     });
     // The repository read is pinned to the caller, never to a filter argument.
     expect(reports.lastProjectTotalsQuery).toEqual({
@@ -295,13 +310,14 @@ describe("me/stats", () => {
       toExclusive: new Date("2026-08-07T00:00:00.000Z"),
       userId: ids.user,
     });
+    expect(reports.lastAppTotalsQuery).toEqual(reports.lastProjectTotalsQuery);
     expect(reaper.subjects).toEqual([subject]);
   });
 
   it("returns an empty stats response when the caller recorded nothing", async () => {
     const result = await createReportService({ reports: new Reports(), reaper: silentReaper }).meStats(subject, {});
 
-    expect(result).toEqual({ filters: {}, totalDurationSeconds: 0, corroboratedSeconds: 0, projects: [] });
+    expect(result).toEqual({ filters: {}, totalDurationSeconds: 0, corroboratedSeconds: 0, projects: [], apps: [] });
   });
 
   it("rejects reversed or excessive date ranges like the org reports do", async () => {

@@ -105,6 +105,12 @@ export type MeStats = {
   totalDurationSeconds: number;
   corroboratedSeconds: number;
   projects: readonly MeStatsProject[];
+  apps: readonly MeStatsApp[];
+};
+
+export type MeStatsApp = {
+  processName: string;
+  durationSeconds: number;
 };
 
 export type MeStatsProject = {
@@ -394,11 +400,20 @@ const decodeMeStatsProject = (value: unknown): MeStatsProject => {
   };
 };
 
+const decodeMeStatsApp = (value: unknown): MeStatsApp => {
+  const candidate = record(value);
+  return {
+    processName: string(candidate.processName),
+    durationSeconds: nonnegativeInteger(candidate.durationSeconds),
+  };
+};
+
 export const decodeMeStats = (value: unknown): MeStats => {
   const candidate = record(value);
   const filters = record(candidate.filters);
   const projects = candidate.projects;
-  if (!Array.isArray(projects)) invalidResponse();
+  const apps = candidate.apps;
+  if (!Array.isArray(projects) || !Array.isArray(apps)) invalidResponse();
   const totalDurationSeconds = nonnegativeInteger(candidate.totalDurationSeconds);
   const corroboratedSeconds = nonnegativeInteger(candidate.corroboratedSeconds);
   if (corroboratedSeconds > totalDurationSeconds) invalidResponse();
@@ -407,6 +422,7 @@ export const decodeMeStats = (value: unknown): MeStats => {
     totalDurationSeconds,
     corroboratedSeconds,
     projects: (projects as unknown[]).map(decodeMeStatsProject),
+    apps: (apps as unknown[]).map(decodeMeStatsApp),
   };
 };
 

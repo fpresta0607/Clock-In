@@ -293,12 +293,21 @@ export const meStatsProjectSchema = z
   })
   .strict();
 
+export const meStatsAppSchema = z
+  .object({
+    processName: z.string(),
+    durationSeconds: z.number().int().nonnegative().safe(),
+  })
+  .strict();
+
 export const meStatsResponseSchema = z
   .object({
     filters: meStatsFiltersSchema,
     totalDurationSeconds: z.number().int().nonnegative().safe(),
     corroboratedSeconds: z.number().int().nonnegative().safe(),
     projects: z.array(meStatsProjectSchema),
+    /** Per-foreground-process totals, heaviest first; the producer sorts, the schema only validates. */
+    apps: z.array(meStatsAppSchema),
   })
   .strict();
 
@@ -346,6 +355,7 @@ export type LeaderboardEntry = z.infer<typeof leaderboardEntrySchema>;
 export type LeaderboardFilters = z.infer<typeof leaderboardFiltersSchema>;
 export type LeaderboardResponse = z.infer<typeof leaderboardResponseSchema>;
 export type MeResponse = z.infer<typeof meResponseSchema>;
+export type MeStatsApp = z.infer<typeof meStatsAppSchema>;
 export type MeStatsFilters = z.infer<typeof meStatsFiltersSchema>;
 export type MeStatsProject = z.infer<typeof meStatsProjectSchema>;
 export type MeStatsResponse = z.infer<typeof meStatsResponseSchema>;

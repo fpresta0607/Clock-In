@@ -5,6 +5,7 @@ import type { AuthenticatedSubject } from "../auth.js";
 import { parseEnv } from "../env.js";
 import type {
   AgentSessionRepository,
+  AppTotalRecord,
   PathMappingRepository,
   ProjectRepository,
   ProjectTotalRecord,
@@ -60,6 +61,7 @@ interface StoredSegment {
   organizationId: string;
   userId: string;
   kind: "active" | "idle" | "locked" | "suspended";
+  processName?: string | null;
   startedAt: Date;
   endedAt: Date;
   receivedAt: Date;
@@ -126,6 +128,27 @@ class MemoryReports implements ReportRepository {
     }
     return [...byProject.values()].sort((a, b) =>
       (b.durationSeconds as number) - (a.durationSeconds as number) || a.project.id.localeCompare(b.project.id));
+  }
+
+  /**
+   * Mirrors the app-totals SQL: active segments with a process name, inside the
+   * freshness window, clamped to the requested range, heaviest first.
+   */
+  public async readAppTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<AppTotalRecord[]> {
+    const byProcess = new Map<string, number>();
+    for (const segment of this.segments) {
+      if (segment.organizationId !== subject.organizationId || segment.userId !== subject.userId) continue;
+      if (segment.kind !== "active" || segment.processName == null) continue;
+      if (segment.receivedAt.getTime() > segment.endedAt.getTime() + freshnessWindowMs) continue;
+      const start = query.from === undefined ? segment.startedAt : new Date(Math.max(segment.startedAt.getTime(), query.from.getTime()));
+      const end = query.toExclusive === undefined ? segment.endedAt : new Date(Math.min(segment.endedAt.getTime(), query.toExclusive.getTime()));
+      const seconds = Math.max(0, (end.getTime() - start.getTime()) / 1_000);
+      if (seconds === 0) continue;
+      byProcess.set(segment.processName, (byProcess.get(segment.processName) ?? 0) + seconds);
+    }
+    return [...byProcess.entries()]
+      .map(([processName, durationSeconds]) => ({ processName, durationSeconds }))
+      .sort((a, b) => b.durationSeconds - a.durationSeconds || a.processName.localeCompare(b.processName));
   }
 
   public async findProjectForOrganization(): Promise<never> {
@@ -265,6 +288,8 @@ describe("me/stats routes", () => {
         { project: { id: ids.project, name: "Timer" }, durationSeconds: 7_200, corroboratedSeconds: 5_400, sessionCount: 2 },
         { project: { id: ids.otherProject, name: "Side" }, durationSeconds: 3_600, corroboratedSeconds: 1_800, sessionCount: 1 },
       ],
+      // None of the segments in this test carry a process name.
+      apps: [],
     });
   });
 
@@ -325,7 +350,7 @@ describe("me/stats routes", () => {
     });
 
     const empty = await app.request("http://api.test/me/stats?from=2026-08-01&to=2026-08-02", { headers });
-    await expect(empty.json()).resolves.toEqual({ filters: { from: "2026-08-01", to: "2026-08-02" }, totalDurationSeconds: 0, corroboratedSeconds: 0, projects: [] });
+    await expect(empty.json()).resolves.toEqual({ filters: { from: "2026-08-01", to: "2026-08-02" }, totalDurationSeconds: 0, corroboratedSeconds: 0, projects: [], apps: [] });
   });
 
   it("closes stale agent sessions on the read path before computing stats", async () => {
@@ -362,5 +387,45 @@ describe("me/stats routes", () => {
     // The teammate, in the same organization, sees their own corroborated session instead.
     const teammateResponse = await createTestApp(reports).request("http://api.test/me/stats", { headers: { authorization: teammateBearerHeader } });
     await expect(teammateResponse.json()).resolves.toMatchObject({ totalDurationSeconds: 3_600, corroboratedSeconds: 3_600 });
+  });
+
+  it("breaks down active time per foreground process for the caller only", async () => {
+    const reports = new MemoryReports();
+    const receivedAt = new Date("2026-08-05T15:05:00.000Z");
+    reports.segments.push(
+      // Two segments in the same app merge into one total.
+      { organizationId: ids.organization, userId: ids.user, kind: "active", processName: "Code.exe",
+        startedAt: new Date("2026-08-05T14:00:00.000Z"), endedAt: new Date("2026-08-05T15:00:00.000Z"), receivedAt },
+      { organizationId: ids.organization, userId: ids.user, kind: "active", processName: "Code.exe",
+        startedAt: new Date("2026-08-05T16:00:00.000Z"), endedAt: new Date("2026-08-05T16:30:00.000Z"), receivedAt },
+      { organizationId: ids.organization, userId: ids.user, kind: "active", processName: "chrome.exe",
+        startedAt: new Date("2026-08-05T15:00:00.000Z"), endedAt: new Date("2026-08-05T15:30:00.000Z"), receivedAt },
+      // Idle and unnamed segments never count.
+      { organizationId: ids.organization, userId: ids.user, kind: "idle", processName: "Code.exe",
+        startedAt: new Date("2026-08-05T17:00:00.000Z"), endedAt: new Date("2026-08-05T18:00:00.000Z"), receivedAt },
+      { organizationId: ids.organization, userId: ids.user, kind: "active",
+        startedAt: new Date("2026-08-05T18:00:00.000Z"), endedAt: new Date("2026-08-05T19:00:00.000Z"), receivedAt },
+      // Stale evidence (received eight days after it ended) is stored but excluded.
+      { organizationId: ids.organization, userId: ids.user, kind: "active", processName: "slack.exe",
+        startedAt: new Date("2026-08-05T19:00:00.000Z"), endedAt: new Date("2026-08-05T20:00:00.000Z"),
+        receivedAt: new Date("2026-08-13T20:00:00.000Z") },
+      // A teammate's app time must never surface in the caller's breakdown.
+      { organizationId: ids.organization, userId: ids.teammate, kind: "active", processName: "steam.exe",
+        startedAt: new Date("2026-08-05T14:00:00.000Z"), endedAt: new Date("2026-08-05T16:00:00.000Z"), receivedAt },
+    );
+
+    const response = await createTestApp(reports).request("http://api.test/me/stats", { headers: { authorization: bearerHeader } });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      apps: [
+        { processName: "Code.exe", durationSeconds: 5_400 },
+        { processName: "chrome.exe", durationSeconds: 1_800 },
+      ],
+    });
+
+    // A range covering none of the segments returns no app rows.
+    const empty = await createTestApp(reports).request("http://api.test/me/stats?from=2026-08-06&to=2026-08-06", { headers: { authorization: bearerHeader } });
+    await expect(empty.json()).resolves.toMatchObject({ apps: [] });
   });
 });

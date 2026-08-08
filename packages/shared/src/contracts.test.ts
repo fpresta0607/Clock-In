@@ -473,11 +473,15 @@ describe("personal stats contracts", () => {
         sessionCount: 2,
       },
     ],
+    apps: [
+      { processName: "Code.exe", durationSeconds: 4_800 },
+      { processName: "chrome.exe", durationSeconds: 1_200 },
+    ],
   };
 
-  it("accepts a per-project corroborated/uncorroborated split", () => {
+  it("accepts a per-project corroborated/uncorroborated split with a per-app breakdown", () => {
     expect(meStatsResponseSchema.parse(stats)).toEqual(stats);
-    expect(meStatsResponseSchema.parse({ ...stats, filters: {}, projects: [] })).toEqual({ ...stats, filters: {}, projects: [] });
+    expect(meStatsResponseSchema.parse({ ...stats, filters: {}, projects: [], apps: [] })).toEqual({ ...stats, filters: {}, projects: [], apps: [] });
   });
 
   it("rejects unsafe or negative counters and unknown fields", () => {
@@ -492,6 +496,15 @@ describe("personal stats contracts", () => {
     expect(() => meStatsResponseSchema.parse({
       ...stats,
       projects: [{ ...stats.projects[0], project: { ...stats.projects[0]!.project, color: "#2563eb" } }],
+    })).toThrow();
+    expect(() => meStatsResponseSchema.parse({ ...stats, apps: undefined })).toThrow();
+    expect(() => meStatsResponseSchema.parse({
+      ...stats,
+      apps: [{ processName: "Code.exe", durationSeconds: -1 }],
+    })).toThrow();
+    expect(() => meStatsResponseSchema.parse({
+      ...stats,
+      apps: [{ processName: "Code.exe", durationSeconds: 60, title: "main.ts" }],
     })).toThrow();
   });
 });

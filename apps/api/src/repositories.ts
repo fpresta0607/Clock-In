@@ -122,6 +122,12 @@ export interface ProjectTotalRecord {
   sessionCount: number | string | bigint;
 }
 
+export interface AppTotalRecord {
+  processName: string;
+  /** sql sums surface as string/bigint. */
+  durationSeconds: number | string | bigint | null;
+}
+
 export interface ReportRepository {
   findProjectForOrganization(subject: AuthenticatedSubject, projectId: string): Promise<ReportLookupRecord | null>;
   findUserForOrganization(subject: AuthenticatedSubject, userId: string): Promise<ReportLookupRecord | null>;
@@ -130,6 +136,8 @@ export interface ReportRepository {
   readLeaderboardForOrganization(subject: AuthenticatedSubject, query: ReportQuery): Promise<LeaderboardRowRecord[]>;
   /** Per-project totals for one member — the reporting math scoped to the caller for /me/stats. */
   readProjectTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<ProjectTotalRecord[]>;
+  /** Per-foreground-process totals for one member from active segments, for the /me/stats app breakdown. */
+  readAppTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<AppTotalRecord[]>;
 }
 
 export interface ActivitySegmentInsert {
