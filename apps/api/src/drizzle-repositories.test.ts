@@ -56,6 +56,33 @@ describe("Drizzle report repository", () => {
     await expect(repository.readExportForOrganization(subject, {}, 10_000)).resolves.toMatchObject({ summary: { totalRows: 0 }, rows: [] });
     expect(transactionSelects).toBe(4);
   });
+
+  it("maps caller-scoped per-project totals, preserving postgres sum strings", async () => {
+    const rows = {
+      innerJoin: () => rows,
+      where: () => rows,
+      groupBy: () => rows,
+      orderBy: async () => [{
+        projectId: input.projectId,
+        projectName: "Timer",
+        durationSeconds: "7200",
+        corroboratedSeconds: "5400",
+        sessionCount: 3,
+      }],
+    };
+    const db = {
+      select: () => ({ from: () => rows }),
+    } as unknown as DatabaseConnection["db"];
+    const repository = new DrizzleReportRepository(db);
+    const subject = { organizationId: input.organizationId, userId: input.userId };
+
+    await expect(repository.readProjectTotalsForMember(subject, {})).resolves.toEqual([{
+      project: { id: input.projectId, name: "Timer" },
+      durationSeconds: "7200",
+      corroboratedSeconds: "5400",
+      sessionCount: 3,
+    }]);
+  });
 });
 
 describe("Drizzle path-mapping repository", () => {

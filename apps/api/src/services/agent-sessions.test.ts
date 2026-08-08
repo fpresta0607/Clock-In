@@ -11,7 +11,7 @@ import type {
   SessionRepository,
   UpsertStartedAgentSession,
 } from "../repositories.js";
-import { createAgentSessionService, type AgentSessionEventInput } from "./agent-sessions.js";
+import { createAgentSessionReaper, createAgentSessionService, type AgentSessionEventInput } from "./agent-sessions.js";
 
 const ids = {
   organization: "0e59dfd6-3d1f-4795-9420-3ab65f0df843",
@@ -315,5 +315,17 @@ describe("agent-session service", () => {
     await service.ingest(other, [event({ event: "ended" })]);
     expect(agentSessions.records[0]).toMatchObject({ userId: ids.user, status: "running" });
     expect(agentSessions.records[1]).toMatchObject({ userId: ids.otherUser, status: "ended" });
+  });
+});
+
+describe("agent-session reaper", () => {
+  it("closes stale running sessions at lastEventAt for corroboration read paths", async () => {
+    const { agentSessions, service } = createService();
+    await service.ingest(subject, [event({ occurredAt: new Date("2026-08-06T07:30:00.000Z") })]);
+    const reaper = createAgentSessionReaper({ agentSessions, clock: () => now });
+
+    await expect(reaper.reapStale(subject)).resolves.toBe(1);
+    await expect(reaper.reapStale(subject)).resolves.toBe(0);
+    expect(agentSessions.records[0]).toMatchObject({ status: "ended", endedAt: new Date("2026-08-06T07:30:00.000Z") });
   });
 });

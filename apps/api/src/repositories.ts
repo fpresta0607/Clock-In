@@ -77,6 +77,8 @@ export interface ReportRowRecord {
   stoppedAt: Date;
   idleSeconds: number;
   durationSeconds: number;
+  /** Overlap with fresh evidence, capped at durationSeconds; sql sums surface as string/bigint. */
+  corroboratedSeconds: number | string | bigint | null;
 }
 
 export interface ReportQuery {
@@ -110,6 +112,14 @@ export interface LeaderboardRowRecord {
   user: ReportLookupRecord;
   durationSeconds: number | string | bigint | null;
   sessionCount: number | string | bigint;
+  corroboratedSeconds: number | string | bigint | null;
+}
+
+export interface ProjectTotalRecord {
+  project: ReportLookupRecord;
+  durationSeconds: number | string | bigint | null;
+  corroboratedSeconds: number | string | bigint | null;
+  sessionCount: number | string | bigint;
 }
 
 export interface ReportRepository {
@@ -118,6 +128,8 @@ export interface ReportRepository {
   readPageForOrganization(subject: AuthenticatedSubject, query: ReportQuery, options: ReportPageOptions): Promise<ReportPageRead>;
   readExportForOrganization(subject: AuthenticatedSubject, query: ReportQuery, maxRows: number): Promise<ReportExportRead>;
   readLeaderboardForOrganization(subject: AuthenticatedSubject, query: ReportQuery): Promise<LeaderboardRowRecord[]>;
+  /** Per-project totals for one member — the reporting math scoped to the caller for /me/stats. */
+  readProjectTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<ProjectTotalRecord[]>;
 }
 
 export interface ActivitySegmentInsert {

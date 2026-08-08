@@ -1,5 +1,5 @@
 import { StrictMode } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -56,6 +56,47 @@ const deferred = <Value,>() => {
   return { promise, resolve, reject };
 };
 
+const monitorSettings = {
+  enabled: true,
+  awayThresholdMinutes: 10,
+  hardAwayLimitMinutes: 60,
+  autoStopOnLock: false,
+  agentOverrideEnabled: true,
+  deviceId: "00000000-0000-4000-8000-000000000300",
+};
+
+const idleMonitorStatus = {
+  enabled: true,
+  running: true,
+  lastUploadAt: "2026-08-06T14:55:00.000Z",
+  segmentBacklog: 0,
+  agentBacklog: 0,
+  hooks: [
+    { source: "claude_code", detected: true, configPath: "C:/Users/dev/.claude/settings.json" },
+    { source: "codex", detected: false, configPath: "C:/Users/dev/.codex/config.toml" },
+  ],
+  pendingSuggestion: null,
+  agentActive: null,
+  sessionIdleSeconds: null,
+  away: null,
+};
+
+const meStats = {
+  filters: {},
+  totalDurationSeconds: 7_200,
+  corroboratedSeconds: 5_400,
+  projects: [
+    { project: { id: project.id, name: project.name }, durationSeconds: 7_200, corroboratedSeconds: 5_400, sessionCount: 3 },
+  ],
+};
+
+const mapping = {
+  id: "00000000-0000-4000-8000-000000000400",
+  pathPrefix: "C:/dev/Clock-In",
+  repoUrl: null,
+  projectId: project.id,
+};
+
 const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   bootstrap: vi.fn().mockResolvedValue({ kind: "idle", user, projects: [project] }),
   login: vi.fn().mockResolvedValue({ kind: "idle", user, projects: [project] }),
@@ -77,6 +118,19 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
     organization: { id: "00000000-0000-4000-8000-000000000901", name: "Joined Team", inviteCode: "PQRTU-VWXY3" },
     entries: [{ rank: 1, user: { id: user.id, name: user.name }, durationSeconds: 0, sessionCount: 0 }],
   }),
+  // The default is "monitoring unsupported": every monitor surface stays
+  // hidden, which is what the legacy tests above implicitly rely on.
+  monitorStatus: vi.fn().mockRejectedValue({ kind: "unknown", message: "Monitoring unavailable" }),
+  hookRegister: vi.fn().mockResolvedValue({ status: "registered", configPath: "C:/Users/dev/.claude/settings.json" }),
+  monitorSetEnabled: vi.fn().mockResolvedValue(monitorSettings),
+  monitorDismissSuggestion: vi.fn().mockResolvedValue(undefined),
+  settingsGet: vi.fn().mockResolvedValue(monitorSettings),
+  settingsUpdate: vi.fn().mockResolvedValue(monitorSettings),
+  meStats: vi.fn().mockResolvedValue(meStats),
+  pathMappingsList: vi.fn().mockResolvedValue([mapping]),
+  pathMappingsCreate: vi.fn().mockResolvedValue(mapping),
+  pathMappingsUpdate: vi.fn().mockResolvedValue(mapping),
+  pathMappingsDelete: vi.fn().mockResolvedValue(undefined),
   ...overrides,
 });
 
@@ -144,7 +198,7 @@ describe("App", () => {
     expect(screen.getByTestId("elapsed-time")).toHaveTextContent("00:00:07");
   });
 
-  it("stops with a timestamp and zero idle seconds", async () => {
+  it("stops with a timestamp and no UI-decided idle figure", async () => {
     const bridge = bridgeFor({
       bootstrap: vi.fn().mockResolvedValue({ kind: "running", user, projects: [project], running, source: "server-only" }),
     });
@@ -154,7 +208,7 @@ describe("App", () => {
     await waitFor(() => expect(bridge.stop).toHaveBeenCalledWith({
       sessionId: running.sessionId,
       stoppedAt: expect.stringMatching(/Z$/),
-      idleSeconds: 0,
+      idleSeconds: null,
     }));
     expect(await screen.findByRole("button", { name: "Start timer" })).toBeVisible();
   });
@@ -676,5 +730,320 @@ describe("App", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("does not match a workspace");
     expect(screen.getByRole("heading", { name: "Start a timer" })).toBeInTheDocument();
+  });
+
+  it("shows monitor health with per-CLI hook badges when the host answers", async () => {
+    const bridge = bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(idleMonitorStatus) });
+    render(<App bridge={bridge} />);
+
+    const line = await screen.findByLabelText("Monitoring status");
+    expect(line).toHaveTextContent("Monitoring on");
+    expect(line).toHaveTextContent("Last upload");
+    const detected = screen.getByText("Claude Code");
+    expect(detected).toHaveClass("hook-badge", "is-detected");
+    expect(detected).toHaveAttribute("title", "C:/Users/dev/.claude/settings.json");
+    const missing = screen.getByText("Codex");
+    expect(missing).toHaveClass("hook-badge", "is-missing");
+    expect(missing).toHaveAttribute("title", "C:/Users/dev/.codex/config.toml");
+  });
+
+  it("registers a missing hook from settings and shows a returned manual snippet", async () => {
+    const bridge = bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(idleMonitorStatus),
+      hookRegister: vi.fn().mockResolvedValue({
+        status: "manual",
+        configPath: "C:/Users/dev/.codex/config.toml",
+        snippet: "notify = [\"C:/bin/clock-in-hook.exe\", \"--source\", \"codex\"]",
+      }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "Settings" }));
+    // Only the missing hook (Codex) offers registration; Claude Code is detected.
+    const register = await screen.findByRole("button", { name: "Register" });
+    await person.click(register);
+
+    await waitFor(() => expect(bridge.hookRegister).toHaveBeenCalledWith("codex"));
+    expect(await screen.findByText(/notify =/)).toBeInTheDocument();
+    // The status re-poll keeps the badge state current after registering.
+    const pollsBefore = vi.mocked(bridge.monitorStatus).mock.calls.length;
+    await person.click(register);
+    await waitFor(() => expect(vi.mocked(bridge.monitorStatus).mock.calls.length).toBeGreaterThan(pollsBefore));
+  });
+
+  it("marks a hook as registered in settings once the host reports it", async () => {
+    const bridge = bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(idleMonitorStatus) });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "Settings" }));
+    // Claude Code is detected in the fixture: state, not a Register button.
+    expect(await screen.findByText("Registered")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Register" })).toHaveLength(1);
+  });
+
+  it("says when monitoring is paused or off rather than implying it records", async () => {
+    const bridge = bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue({ ...idleMonitorStatus, running: false }),
+    });
+    const view = render(<App bridge={bridge} />);
+    expect(await screen.findByLabelText("Monitoring status")).toHaveTextContent("Monitoring paused");
+
+    view.rerender(
+      <App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue({ ...idleMonitorStatus, enabled: false, running: false }) })} />,
+    );
+    await waitFor(() => expect(screen.getByLabelText("Monitoring status")).toHaveTextContent("Monitoring off"));
+  });
+
+  it("renders no monitor surfaces when the host cannot report status", async () => {
+    render(<App bridge={bridgeFor()} />);
+    await screen.findByRole("heading", { name: "Start a timer" });
+    await waitFor(() => expect(screen.queryByLabelText("Monitoring status")).not.toBeInTheDocument());
+  });
+
+  const suggestedStatus = {
+    ...idleMonitorStatus,
+    pendingSuggestion: { projectId: project.id, source: "codex", since: "2026-08-06T14:58:00.000Z" },
+  };
+
+  it("offers a suggested start and confirms it with the project preselected", async () => {
+    const bridge = bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(suggestedStatus) });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByText(/Codex active — start tracking/)).toBeInTheDocument();
+    expect(screen.getByText("Field work", { selector: "strong" })).toBeInTheDocument();
+    await person.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(bridge.start).toHaveBeenCalledWith(expect.objectContaining({ projectId: project.id })));
+    expect(await screen.findByRole("button", { name: "Stop timer" })).toBeVisible();
+    expect(screen.queryByText(/Codex active — start tracking/)).not.toBeInTheDocument();
+  });
+
+  it("dismisses a suggested start on the host and in the UI", async () => {
+    let dismissed = false;
+    const bridge = bridgeFor({
+      monitorDismissSuggestion: vi.fn().mockImplementation(() => {
+        dismissed = true;
+        return Promise.resolve();
+      }),
+      monitorStatus: vi.fn().mockImplementation(() => Promise.resolve(dismissed ? idleMonitorStatus : suggestedStatus)),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await screen.findByText(/Codex active — start tracking/);
+    await person.click(screen.getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(bridge.monitorDismissSuggestion).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByText(/Codex active — start tracking/)).not.toBeInTheDocument());
+    expect(bridge.start).not.toHaveBeenCalled();
+  });
+
+  const awayStatus = {
+    ...idleMonitorStatus,
+    sessionIdleSeconds: 2_100,
+    away: { startedAt: "2026-08-06T15:20:00.000Z", seconds: 1_500, ongoing: false, exceedsHardLimit: false },
+  };
+
+  const runningBridge = (overrides: Partial<TimerBridge> = {}): TimerBridge => bridgeFor({
+    bootstrap: vi.fn().mockResolvedValue({ kind: "running", user, projects: [project], running, source: "server-only" }),
+    monitorStatus: vi.fn().mockResolvedValue(awayStatus),
+    ...overrides,
+  });
+
+  it("shows idle trimmed so far on the live session card", async () => {
+    render(<App bridge={runningBridge()} />);
+    expect(await screen.findByTestId("idle-trimmed")).toHaveTextContent("Idle trimmed so far 00:35:00");
+  });
+
+  it("keeps the away span out of the idle trim when the user keeps it", async () => {
+    const bridge = runningBridge();
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByText(/You were away 25 minutes/)).toBeInTheDocument();
+    await person.click(screen.getByRole("button", { name: "Keep" }));
+    expect(screen.getByText("Away time kept — it stays billable.")).toBeInTheDocument();
+    await person.click(screen.getByRole("button", { name: "Stop timer" }));
+    await waitFor(() => expect(bridge.stop).toHaveBeenCalledWith(expect.objectContaining({ idleSeconds: 600 })));
+  });
+
+  it("lets the host measure the idle trim when the user discards the away span", async () => {
+    const bridge = runningBridge();
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByText(/You were away 25 minutes/)).toBeInTheDocument();
+    await person.click(screen.getByRole("button", { name: "Discard" }));
+    expect(screen.getByText("Away time will be trimmed at stop.")).toBeInTheDocument();
+    await person.click(screen.getByRole("button", { name: "Stop timer" }));
+    await waitFor(() => expect(bridge.stop).toHaveBeenCalledWith(expect.objectContaining({ idleSeconds: null })));
+  });
+
+  it("sends an explicit zero when the kept away span is the only idle", async () => {
+    const bridge = runningBridge({
+      monitorStatus: vi.fn().mockResolvedValue({ ...awayStatus, sessionIdleSeconds: 1_500 }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByText(/You were away 25 minutes/)).toBeInTheDocument();
+    await person.click(screen.getByRole("button", { name: "Keep" }));
+    await person.click(screen.getByRole("button", { name: "Stop timer" }));
+    // Authoritative 0: the host must not re-measure and flip keep into discard.
+    await waitFor(() => expect(bridge.stop).toHaveBeenCalledWith(expect.objectContaining({ idleSeconds: 0 })));
+  });
+
+  it("names the active agent session while the override pauses idle trimming", async () => {
+    const bridge = runningBridge({
+      monitorStatus: vi.fn().mockResolvedValue({
+        ...awayStatus,
+        agentActive: { source: "kimi_code", since: "2026-08-06T14:40:00.000Z" },
+      }),
+    });
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByTestId("agent-active")).toHaveTextContent("Kimi Code active — idle trim paused");
+  });
+
+  it("does not raise the away prompt while the user is still away", async () => {
+    const bridge = runningBridge({
+      monitorStatus: vi.fn().mockResolvedValue({ ...awayStatus, away: { ...awayStatus.away, ongoing: true } }),
+    });
+    render(<App bridge={bridge} />);
+    await screen.findByTestId("idle-trimmed");
+    expect(screen.queryByText(/You were away/)).not.toBeInTheDocument();
+  });
+
+  it("shows personal stats with the corroborated split and per-project rows", async () => {
+    const bridge = bridgeFor();
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "Stats" }));
+    await waitFor(() => expect(bridge.meStats).toHaveBeenCalledTimes(1));
+    expect(bridge.meStats).toHaveBeenCalledWith(expect.stringMatching(/T\d{2}:00:00/));
+    const panel = screen.getByRole("region", { name: "Your time" });
+    expect(await within(panel).findByText("02:00:00", { selector: "strong" })).toBeInTheDocument();
+    expect(within(panel).getByText("01:30:00 corroborated")).toHaveClass("corroborated");
+    expect(within(panel).getByText("00:30:00 uncorroborated")).toHaveClass("uncorroborated");
+    const row = within(panel).getByRole("row", { name: /Field work/ });
+    expect(row).toHaveTextContent("3");
+    expect(row).toHaveTextContent("02:00:00");
+  });
+
+  it("refetches stats for the week range from Monday midnight", async () => {
+    const bridge = bridgeFor();
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "Stats" }));
+    await waitFor(() => expect(bridge.meStats).toHaveBeenCalledTimes(1));
+    await person.click(screen.getByRole("button", { name: "This week" }));
+    await waitFor(() => expect(bridge.meStats).toHaveBeenCalledTimes(2));
+    const monday = new Date();
+    monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+    monday.setHours(0, 0, 0, 0);
+    expect(bridge.meStats).toHaveBeenLastCalledWith(monday.toISOString());
+  });
+
+  it("keeps the stats panel readable when the stats request fails", async () => {
+    const bridge = bridgeFor({ meStats: vi.fn().mockRejectedValue({ kind: "transient", message: "Stats unavailable" }) });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "Stats" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Stats unavailable");
+  });
+
+  it("round-trips monitoring settings from the settings view", async () => {
+    const bridge = bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(idleMonitorStatus) });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "Settings" }));
+    await waitFor(() => expect(bridge.settingsGet).toHaveBeenCalledTimes(1));
+    expect(await screen.findByLabelText("Activity monitoring")).toBeChecked();
+
+    await person.click(screen.getByLabelText("Activity monitoring"));
+    await waitFor(() => expect(bridge.monitorSetEnabled).toHaveBeenCalledWith(false));
+
+    await person.click(screen.getByLabelText("Count active agent sessions as work while away"));
+    await waitFor(() => expect(bridge.settingsUpdate).toHaveBeenCalledWith({ agentOverrideEnabled: false }));
+
+    const threshold = screen.getByLabelText("Away threshold (minutes)");
+    await person.clear(threshold);
+    await person.type(threshold, "15");
+    await person.tab();
+    await waitFor(() => expect(bridge.settingsUpdate).toHaveBeenCalledWith({ awayThresholdMinutes: 15 }));
+  });
+
+  it("surfaces a settings failure without leaving the panel", async () => {
+    const bridge = bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(idleMonitorStatus),
+      monitorSetEnabled: vi.fn().mockRejectedValue({ kind: "transient", message: "Settings could not be saved" }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "Settings" }));
+    await person.click(await screen.findByLabelText("Activity monitoring"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Settings could not be saved");
+    expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
+  });
+
+  it("lists, adds, and deletes path mappings with project names", async () => {
+    const created = { ...mapping, id: "00000000-0000-4000-8000-000000000401", pathPrefix: "C:/dev/other" };
+    const bridge = bridgeFor({
+      pathMappingsCreate: vi.fn().mockResolvedValue(created),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "Settings" }));
+    expect(await screen.findByText("C:/dev/Clock-In")).toBeInTheDocument();
+    expect(screen.getByText("C:/dev/Clock-In").closest("li")).toHaveTextContent("Field work");
+
+    await person.type(screen.getByLabelText("Path prefix"), "C:/dev/other");
+    await person.selectOptions(screen.getByLabelText("Project"), project.id);
+    await person.click(screen.getByRole("button", { name: "Add mapping" }));
+    await waitFor(() => expect(bridge.pathMappingsCreate).toHaveBeenCalledWith({ pathPrefix: "C:/dev/other", projectId: project.id }));
+    expect(await screen.findByText("C:/dev/other")).toBeInTheDocument();
+
+    const [firstDelete] = screen.getAllByRole("button", { name: "Delete" });
+    await person.click(firstDelete!);
+    await waitFor(() => expect(bridge.pathMappingsDelete).toHaveBeenCalledWith(mapping.id));
+    expect(screen.queryByText("C:/dev/Clock-In")).not.toBeInTheDocument();
+  });
+
+  it("keeps mappings listed when create or delete is refused", async () => {
+    const bridge = bridgeFor({
+      pathMappingsCreate: vi.fn().mockRejectedValue({ kind: "validation", message: "That path prefix is already mapped." }),
+      pathMappingsDelete: vi.fn().mockRejectedValue({ kind: "transient", message: "Delete failed; try again" }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "Settings" }));
+    await screen.findByText("C:/dev/Clock-In");
+
+    await person.type(screen.getByLabelText("Path prefix"), "C:/dev/Clock-In");
+    await person.selectOptions(screen.getByLabelText("Project"), project.id);
+    await person.click(screen.getByRole("button", { name: "Add mapping" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("already mapped");
+
+    await person.click(screen.getByRole("button", { name: "Delete" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Delete failed; try again");
+    expect(screen.getByText("C:/dev/Clock-In")).toBeInTheDocument();
+  });
+
+  it("states plainly what monitoring records and where evidence waits", async () => {
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor()} />);
+
+    await person.click(await screen.findByRole("button", { name: "Settings" }));
+    const note = await screen.findByText(/samples the foreground process name/);
+    expect(note).toHaveTextContent("never records window titles, URLs, document names, or keystrokes");
+    expect(note).toHaveTextContent("%APPDATA%");
   });
 });

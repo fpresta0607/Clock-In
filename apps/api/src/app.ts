@@ -28,12 +28,13 @@ import type {
 } from "./repositories.js";
 import { createActivityRoutes } from "./routes/activity.js";
 import { createAgentSessionRoutes } from "./routes/agent-sessions.js";
+import { createMeStatsRoutes } from "./routes/me-stats.js";
 import { createPathMappingRoutes } from "./routes/path-mappings.js";
 import { createProjectRoutes } from "./routes/projects.js";
 import { createReportRoutes } from "./routes/reports.js";
 import { createSessionRoutes } from "./routes/sessions.js";
 import { createActivityService } from "./services/activity.js";
-import { createAgentSessionService } from "./services/agent-sessions.js";
+import { createAgentSessionReaper, createAgentSessionService } from "./services/agent-sessions.js";
 import { createPathMappingService } from "./services/path-mappings.js";
 import { createReportService } from "./services/reports.js";
 import { createSessionService } from "./services/sessions.js";
@@ -233,9 +234,19 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
     app.route("/sessions", createSessionRoutes(sessionService));
   }
   if (dependencies.reportRepository !== undefined) {
+    if (dependencies.agentSessionRepository === undefined) {
+      throw new Error("An agent session repository is required for report routes.");
+    }
+    const reportService = createReportService({
+      reports: dependencies.reportRepository,
+      // Corroboration math reads agent sessions, so stale ones close first.
+      reaper: createAgentSessionReaper({ agentSessions: dependencies.agentSessionRepository, clock }),
+    });
     app.use("/reports", authenticate);
     app.use("/reports/*", authenticate);
-    app.route("/reports", createReportRoutes(createReportService({ reports: dependencies.reportRepository })));
+    app.route("/reports", createReportRoutes(reportService));
+    app.use("/me/stats", authenticate);
+    app.route("/me/stats", createMeStatsRoutes(reportService));
   }
   if (dependencies.activitySegmentRepository !== undefined) {
     const activityService = createActivityService({ segments: dependencies.activitySegmentRepository, clock });

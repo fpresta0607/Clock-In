@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import {
   DrizzleAccountStore,
+  DrizzleAgentSessionRepository,
   DrizzleProjectRepository,
   DrizzleReportRepository,
   DrizzleSessionRepository,
@@ -51,6 +52,7 @@ integration(integrationDescription, () => {
       projectRepository: new DrizzleProjectRepository(database.db),
       sessionRepository: new DrizzleSessionRepository(database.db),
       reportRepository: new DrizzleReportRepository(database.db),
+      agentSessionRepository: new DrizzleAgentSessionRepository(database.db),
     });
   }, 60_000);
 
@@ -126,6 +128,7 @@ integration(integrationDescription, () => {
       accounts: new DrizzleAccountStore(database.db),
       projectRepository: new DrizzleProjectRepository(database.db),
       reportRepository: new DrizzleReportRepository(database.db),
+      agentSessionRepository: new DrizzleAgentSessionRepository(database.db),
     });
     const headers = {
       authorization: await other.bearer(randomUUID(), { email: "other@clock-in.test", name: "Other User" }),
@@ -153,6 +156,7 @@ integration(integrationDescription, () => {
       projectRepository: new DrizzleProjectRepository(database.db),
       sessionRepository: new DrizzleSessionRepository(database.db),
       reportRepository: new DrizzleReportRepository(database.db),
+      agentSessionRepository: new DrizzleAgentSessionRepository(database.db),
     });
     const teammateAuth = {
       authorization: await teammate.bearer(teammateId, { email: "teammate@clock-in.test", name: "Teammate" }),
@@ -240,6 +244,7 @@ integration(integrationDescription, () => {
       accounts: new DrizzleAccountStore(database.db),
       projectRepository: new DrizzleProjectRepository(database.db),
       reportRepository: new DrizzleReportRepository(database.db),
+      agentSessionRepository: new DrizzleAgentSessionRepository(database.db),
     });
     const headers = {
       authorization: await latecomer.bearer(latecomerId, { email: "late@clock-in.test", name: "Late Comer" }),
@@ -288,6 +293,7 @@ integration(integrationDescription, () => {
       projectRepository: new DrizzleProjectRepository(database.db),
       sessionRepository: new DrizzleSessionRepository(database.db),
       reportRepository: new DrizzleReportRepository(database.db),
+      agentSessionRepository: new DrizzleAgentSessionRepository(database.db),
     });
     const headers = {
       authorization: await tracked.bearer(randomUUID(), { email: "tracked@clock-in.test", name: "Tracked User" }),

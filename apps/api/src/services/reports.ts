@@ -1,6 +1,8 @@
 import type {
   LeaderboardFilters,
   LeaderboardResponse,
+  MeStatsFilters,
+  MeStatsResponse,
   ReportFilters,
   ReportResponse,
   ReportRow,
@@ -10,16 +12,19 @@ import type { AuthenticatedSubject } from "../auth.js";
 import { AppError } from "../errors.js";
 import type {
   LeaderboardRowRecord,
+  ProjectTotalRecord,
   ReportQuery,
   ReportRepository,
   ReportRowRecord,
   ReportSummaryRecord,
 } from "../repositories.js";
+import type { AgentSessionReaper } from "./agent-sessions.js";
 
 export interface ReportService {
   list(subject: AuthenticatedSubject, filters: ReportFilters): Promise<ReportResponse>;
   export(subject: AuthenticatedSubject, filters: ReportFilters): Promise<ReportExport>;
   leaderboard(subject: AuthenticatedSubject, filters: LeaderboardFilters): Promise<LeaderboardResponse>;
+  meStats(subject: AuthenticatedSubject, filters: MeStatsFilters): Promise<MeStatsResponse>;
 }
 
 export interface ReportExport {
@@ -29,6 +34,8 @@ export interface ReportExport {
 
 export interface ReportServiceDependencies {
   reports: ReportRepository;
+  /** Stale running agent sessions close at lastEventAt before any corroboration read. */
+  reaper: AgentSessionReaper;
 }
 
 const millisecondsPerDay = 24 * 60 * 60 * 1_000;
@@ -63,6 +70,7 @@ function normalizedQuery(filters: ReportFilters): ReportQuery {
 }
 
 function asReportRow(record: ReportRowRecord): ReportRow {
+  const durationSeconds = record.durationSeconds;
   return {
     id: record.id,
     user: record.user,
@@ -72,9 +80,10 @@ function asReportRow(record: ReportRowRecord): ReportRow {
     startedAt: record.startedAt.toISOString(),
     stoppedAt: record.stoppedAt.toISOString(),
     idleSeconds: record.idleSeconds,
-    durationSeconds: record.durationSeconds,
-    // Real corroboration overlap math lands with the reporting changes; until then rows report zero.
-    corroboratedSeconds: 0,
+    durationSeconds,
+    // Overlapping evidence intervals are summed, so the cap keeps corroborated
+    // time from ever exceeding the session it backs.
+    corroboratedSeconds: Math.min(durationSeconds, safeInteger(record.corroboratedSeconds, "corroborated seconds")),
   };
 }
 
@@ -98,8 +107,7 @@ function asLeaderboardEntry(record: LeaderboardRowRecord, index: number, all: Le
     user: record.user,
     durationSeconds,
     sessionCount: safeInteger(record.sessionCount, "leaderboard session count"),
-    // Corroboration is computed by the reporting changes in a later task; zero until then.
-    corroboratedSeconds: 0,
+    corroboratedSeconds: safeInteger(record.corroboratedSeconds, "leaderboard corroborated seconds"),
   };
 }
 
@@ -143,12 +151,22 @@ async function authorizeFilters(repository: ReportRepository, subject: Authentic
   }
 }
 
+function asProjectTotal(record: ProjectTotalRecord): MeStatsResponse["projects"][number] {
+  return {
+    project: record.project,
+    durationSeconds: safeInteger(record.durationSeconds, "project duration"),
+    corroboratedSeconds: safeInteger(record.corroboratedSeconds, "project corroborated seconds"),
+    sessionCount: safeInteger(record.sessionCount, "project session count"),
+  };
+}
+
 export function createReportService(dependencies: ReportServiceDependencies): ReportService {
   return {
     async list(subject: AuthenticatedSubject, filters: ReportFilters): Promise<ReportResponse> {
       validatePagination(filters);
       const query = normalizedQuery(filters);
       await authorizeFilters(dependencies.reports, subject, query);
+      await dependencies.reaper.reapStale(subject);
       const offset = (filters.page - 1) * filters.pageSize;
       if (!Number.isSafeInteger(offset)) throw new AppError("validation_error", "Invalid report pagination.");
       const page = await dependencies.reports.readPageForOrganization(subject, query, { limit: filters.pageSize, offset });
@@ -170,6 +188,7 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       validatePagination(filters);
       const query = normalizedQuery(filters);
       await authorizeFilters(dependencies.reports, subject, query);
+      await dependencies.reaper.reapStale(subject);
       const exportRead = await dependencies.reports.readExportForOrganization(subject, query, reportExportRowCap);
       const summary = summaryValues(exportRead.summary);
       if (summary.totalRows > reportExportRowCap) {
@@ -185,12 +204,27 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
 
     async leaderboard(subject: AuthenticatedSubject, filters: LeaderboardFilters): Promise<LeaderboardResponse> {
       const query = normalizedQuery({ ...filters, page: 1, pageSize: 1 });
+      await dependencies.reaper.reapStale(subject);
       const rows = await dependencies.reports.readLeaderboardForOrganization(subject, query);
       const entries = rows.map(asLeaderboardEntry);
       return {
         filters,
         totalDurationSeconds: entries.reduce((total, entry) => total + entry.durationSeconds, 0),
         entries,
+      };
+    },
+
+    async meStats(subject: AuthenticatedSubject, filters: MeStatsFilters): Promise<MeStatsResponse> {
+      // The same completed-session set and inclusive calendar bounds the org
+      // reports use, pinned to the caller so nobody ever sees another member.
+      const query: ReportQuery = { ...normalizedQuery({ ...filters, page: 1, pageSize: 1 }), userId: subject.userId };
+      await dependencies.reaper.reapStale(subject);
+      const projects = (await dependencies.reports.readProjectTotalsForMember(subject, query)).map(asProjectTotal);
+      return {
+        filters,
+        totalDurationSeconds: projects.reduce((total, project) => total + project.durationSeconds, 0),
+        corroboratedSeconds: projects.reduce((total, project) => total + project.corroboratedSeconds, 0),
+        projects,
       };
     },
   };

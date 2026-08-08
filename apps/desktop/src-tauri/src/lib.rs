@@ -5,9 +5,15 @@
 //! token in it, and stops that fail offline are queued for retry.
 
 mod api;
+mod monitor;
 mod recovery;
+mod uploader;
+// Shared with the `clock-in-hook` binary; the uploader drains it from here.
+pub mod spool;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use serde::Serialize;
 use tauri::{
@@ -18,13 +24,35 @@ use tauri::{
 use tokio::sync::Mutex;
 
 use api::{
-    ApiClient, ApiResult, BridgeError, ErrorKind, LeaderboardEntry, Organization, TimerProject,
-    TimerUser,
+    ApiClient, ApiResult, BridgeError, ErrorKind, LeaderboardEntry, MeStats, Organization,
+    PathMapping, PathMappingCreateInput, PathMappingUpdateInput, TimerProject, TimerUser,
 };
+use monitor::{MonitorSettings, MonitorStatus, SettingsPatch};
 use recovery::{reconcile, PendingStop, Reconciliation, RecoveryState, RunningTimer, StartIntent};
 
 const KEYRING_SERVICE: &str = "clock-in";
 const KEYRING_ACCOUNT: &str = "neon-auth-session";
+
+/// Reads the session token the OS is holding for us, if any. A free function
+/// so the monitor's upload task can mint tokens without borrowing `AppState`.
+pub(crate) fn read_session_token() -> Option<String> {
+    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
+        .ok()
+        .and_then(|entry| entry.get_password().ok())
+}
+
+/// Persists recovery state so an unexpected exit cannot lose a running timer.
+/// Shared with the monitor, whose auto-stop enqueues through the same file.
+pub(crate) fn write_recovery_file(path: &Path, state: &RecoveryState) -> ApiResult<()> {
+    let encoded = serde_json::to_vec(state)
+        .map_err(|_| BridgeError::unknown("Could not record the timer locally."))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|_| BridgeError::unknown("Could not record the timer locally."))?;
+    }
+    std::fs::write(path, encoded)
+        .map_err(|_| BridgeError::unknown("Could not record the timer locally."))
+}
 
 /// Compiled in, not read at runtime. An empty value counts as unset so a CI
 /// variable that was never defined falls back rather than yielding a bad URL;
@@ -92,16 +120,15 @@ struct Account {
 
 pub struct AppState {
     client: ApiClient,
-    recovery: Mutex<RecoveryState>,
+    recovery: Arc<Mutex<RecoveryState>>,
     recovery_path: Mutex<PathBuf>,
+    monitor: monitor::Monitor,
 }
 
 impl AppState {
     /// Reads the session token the OS is holding for us, if any.
     fn session_token(&self) -> Option<String> {
-        keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-            .ok()
-            .and_then(|entry| entry.get_password().ok())
+        read_session_token()
     }
 
     fn store_session_token(&self, token: &str) -> ApiResult<()> {
@@ -141,14 +168,7 @@ impl AppState {
     /// Persists recovery state so an unexpected exit cannot lose a running timer.
     async fn write_recovery(&self, next: RecoveryState) -> ApiResult<()> {
         let path = self.recovery_path.lock().await.clone();
-        let encoded = serde_json::to_vec(&next)
-            .map_err(|_| BridgeError::unknown("Could not record the timer locally."))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|_| BridgeError::unknown("Could not record the timer locally."))?;
-        }
-        std::fs::write(&path, encoded)
-            .map_err(|_| BridgeError::unknown("Could not record the timer locally."))?;
+        write_recovery_file(&path, &next)?;
         *self.recovery.lock().await = next;
         Ok(())
     }
@@ -181,7 +201,11 @@ async fn timer_bootstrap(state: State<'_, AppState>) -> ApiResult<Snapshot> {
         Err(error) if error.kind == ErrorKind::Auth => return Ok(Snapshot::signed_out()),
         Err(error) => return Err(error),
     };
-    state.snapshot(&access_token).await
+    let snapshot = state.snapshot(&access_token).await?;
+    // A signed-in session is what starts the monitor: recording while signed
+    // out would attribute this machine's evidence to whoever signs in next.
+    state.monitor.ensure_running().await;
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -191,7 +215,9 @@ async fn auth_login(state: State<'_, AppState>, input: LoginInput) -> ApiResult<
     // A new sign-in must never inherit the previous account's timers.
     state.write_recovery(RecoveryState::default()).await?;
     let access_token = state.client.fetch_access_token(&session).await?;
-    state.snapshot(&access_token).await
+    let snapshot = state.snapshot(&access_token).await?;
+    state.monitor.ensure_running().await;
+    Ok(snapshot)
 }
 
 #[derive(serde::Deserialize)]
@@ -230,7 +256,9 @@ async fn auth_signup(state: State<'_, AppState>, input: SignupInput) -> ApiResul
         .filter(|code| !code.is_empty());
     state.client.provision_account(&access_token, code).await?;
 
-    state.snapshot(&access_token).await
+    let snapshot = state.snapshot(&access_token).await?;
+    state.monitor.ensure_running().await;
+    Ok(snapshot)
 }
 
 #[derive(Serialize)]
@@ -279,6 +307,9 @@ async fn org_overview(state: State<'_, AppState>) -> ApiResult<OrganizationOverv
 
 #[tauri::command]
 async fn auth_logout(state: State<'_, AppState>) -> ApiResult<()> {
+    // Signing out stops the monitor: nothing is recorded while there is no
+    // account the evidence could belong to.
+    state.monitor.stop().await;
     state.clear_session_token();
     state.write_recovery(RecoveryState::default()).await
 }
@@ -298,13 +329,53 @@ async fn timer_start(state: State<'_, AppState>, input: StartIntent) -> ApiResul
     confirmed.local_start = None;
     confirmed.running = Some(running.clone());
     state.write_recovery(confirmed).await?;
+    // A started timer answers any pending suggested start.
+    state.monitor.clear_suggestion();
     Ok(running)
 }
 
+/// What `timer_stop` accepts. `idleSeconds` is the UI's away-prompt decision:
+/// `null` (or absent) asks the host to measure idle from its own segments,
+/// while any number — including 0 — is authoritative and reaches the server
+/// verbatim. Zero-as-authoritative is how "keep the away time, and there was
+/// no other idle" stops trimming anything.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopInput {
+    session_id: String,
+    stopped_at: String,
+    #[serde(default)]
+    idle_seconds: Option<u32>,
+}
+
 #[tauri::command]
-async fn timer_stop(state: State<'_, AppState>, input: PendingStop) -> ApiResult<()> {
+async fn timer_stop(state: State<'_, AppState>, input: StopInput) -> ApiResult<()> {
     let access_token = state.access_token().await?;
-    match state.client.stop_session(&access_token, &input).await {
+
+    // An explicit idle figure is the UI's away-prompt decision and wins; `null`
+    // means "not decided", so fill it from the monitor's segments when the
+    // monitor was watching this session. The server contract wants a concrete
+    // number either way, so an unmeasurable stop resolves to 0.
+    let idle_seconds = match input.idle_seconds {
+        Some(decided) => decided,
+        None => match monitor::parse_iso8601(&input.stopped_at) {
+            Some(stopped_at) => state
+                .monitor
+                .measured_idle_for_stop(&input.session_id, stopped_at)
+                .await
+                .unwrap_or(0),
+            None => 0,
+        },
+    };
+    let stop = PendingStop {
+        session_id: input.session_id,
+        stopped_at: input.stopped_at,
+        idle_seconds,
+    };
+    // A stop is the natural moment to flush buffered evidence.
+    state.monitor.request_upload();
+
+    match state.client.stop_session(&access_token, &stop).await {
         Ok(()) => {
             let mut next = state.read_recovery().await;
             next.running = None;
@@ -314,7 +385,7 @@ async fn timer_stop(state: State<'_, AppState>, input: PendingStop) -> ApiResult
         // The stop happened; only the report of it failed. Queue the exact payload.
         Err(error) if error.kind == ErrorKind::Transient => {
             let mut next = state.read_recovery().await;
-            next.enqueue_stop(input).map_err(|_| {
+            next.enqueue_stop(stop).map_err(|_| {
                 BridgeError::unknown("Too many unsynced stops are already waiting.")
             })?;
             state.write_recovery(next).await?;
@@ -373,6 +444,140 @@ async fn timer_retry_local_start(
     state.snapshot(&access_token).await
 }
 
+#[tauri::command]
+async fn monitor_status(state: State<'_, AppState>) -> ApiResult<MonitorStatus> {
+    Ok(state.monitor.status().await)
+}
+
+/// Opt-in hook registration for one agent CLI, triggered from the settings
+/// UI. Never silent: the user clicks, and the result says whether the CLI's
+/// config was merged or a paste-it-yourself snippet came back.
+#[tauri::command]
+async fn hook_register(source: String) -> ApiResult<monitor::HookRegisterResult> {
+    monitor::register_hook(&source)
+}
+
+#[tauri::command]
+async fn monitor_set_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> ApiResult<MonitorSettings> {
+    state
+        .monitor
+        .apply_patch(&SettingsPatch {
+            enabled: Some(enabled),
+            ..SettingsPatch::default()
+        })
+        .await
+}
+
+#[tauri::command]
+async fn monitor_dismiss_suggestion(state: State<'_, AppState>) -> ApiResult<()> {
+    state.monitor.clear_suggestion();
+    Ok(())
+}
+
+#[tauri::command]
+async fn settings_get(state: State<'_, AppState>) -> ApiResult<MonitorSettings> {
+    Ok(state.monitor.settings())
+}
+
+#[tauri::command]
+async fn settings_update(
+    state: State<'_, AppState>,
+    input: SettingsPatch,
+) -> ApiResult<MonitorSettings> {
+    state.monitor.apply_patch(&input).await
+}
+
+#[tauri::command]
+async fn me_stats(
+    state: State<'_, AppState>,
+    from: Option<String>,
+    to: Option<String>,
+) -> ApiResult<MeStats> {
+    let access_token = state.access_token().await?;
+    state
+        .client
+        .me_stats(&access_token, from.as_deref(), to.as_deref())
+        .await
+}
+
+#[tauri::command]
+async fn path_mappings_list(state: State<'_, AppState>) -> ApiResult<Vec<PathMapping>> {
+    let access_token = state.access_token().await?;
+    let mappings = state.client.path_mappings(&access_token).await?;
+    state.monitor.cache_mappings(mappings.clone());
+    Ok(mappings)
+}
+
+/// Refreshes the monitor's local mapping cache after a change, so suggested
+/// starts resolve against current data without waiting for the upload tick.
+async fn refresh_mapping_cache(state: &State<'_, AppState>, access_token: &str) {
+    if let Ok(mappings) = state.client.path_mappings(access_token).await {
+        state.monitor.cache_mappings(mappings);
+    }
+}
+
+#[tauri::command]
+async fn path_mappings_create(
+    state: State<'_, AppState>,
+    input: PathMappingCreateInput,
+) -> ApiResult<PathMapping> {
+    let access_token = state.access_token().await?;
+    let mapping = state
+        .client
+        .create_path_mapping(&access_token, &input)
+        .await?;
+    refresh_mapping_cache(&state, &access_token).await;
+    Ok(mapping)
+}
+
+#[tauri::command]
+async fn path_mappings_update(
+    state: State<'_, AppState>,
+    id: String,
+    input: PathMappingUpdateInput,
+) -> ApiResult<PathMapping> {
+    let access_token = state.access_token().await?;
+    let mapping = state
+        .client
+        .update_path_mapping(&access_token, &id, &input)
+        .await?;
+    refresh_mapping_cache(&state, &access_token).await;
+    Ok(mapping)
+}
+
+#[tauri::command]
+async fn path_mappings_delete(state: State<'_, AppState>, id: String) -> ApiResult<()> {
+    let access_token = state.access_token().await?;
+    state.client.delete_path_mapping(&access_token, &id).await?;
+    refresh_mapping_cache(&state, &access_token).await;
+    Ok(())
+}
+
+/// Set once the exit flush starts. `AppHandle::exit` itself re-triggers
+/// `RunEvent::ExitRequested`, and this is what tells that second request —
+/// ours — apart from the user's, so it is let through instead of starting
+/// another flush.
+static EXIT_FLUSH_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Stops the monitor (flushing and spooling the open activity segment) and
+/// only then exits the process. Tauri's tray menu and run-event callbacks are
+/// synchronous and cannot await, so the stop runs on the async runtime and the
+/// exit happens once the segment is safely on disk. Only manually verifiable:
+/// a test would need a live event loop. A force quit (Task Manager kill) still
+/// runs no code at all — durability there is what is already spooled, so at
+/// most the trailing open span since the last transition is lost.
+fn flush_monitor_and_exit(app: &tauri::AppHandle, code: i32) {
+    EXIT_FLUSH_STARTED.store(true, Ordering::SeqCst);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        app.state::<AppState>().monitor.stop().await;
+        app.exit(code);
+    });
+}
+
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show Clock-In", true, None::<&str>)?;
     let hide = MenuItem::with_id(app, "hide", "Hide", true, None::<&str>)?;
@@ -399,7 +604,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 "hide" => {
                     let _ = window.hide();
                 }
-                "quit" => app.exit(0),
+                "quit" => flush_monitor_and_exit(app, 0),
                 _ => {}
             }
         })
@@ -416,13 +621,29 @@ pub fn run() {
                 .app_data_dir()
                 .map(|dir| dir.join("recovery.json"))
                 .unwrap_or_else(|_| PathBuf::from("recovery.json"));
+            let data_dir = recovery_path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
             let client = ApiClient::new(auth_base_url(), api_base_url())
                 .map_err(|error| std::io::Error::other(error.message))?;
+            let recovery = Arc::new(Mutex::new(load_recovery_from_disk(&recovery_path)));
+
+            let monitor = monitor::Monitor::new(monitor::MonitorConfig {
+                client: client.clone(),
+                settings_path: data_dir.join("settings.json"),
+                segments_path: data_dir.join("segments-spool.jsonl"),
+                agent_path: spool::default_spool_path(),
+                recovery: Arc::clone(&recovery),
+                recovery_path: recovery_path.clone(),
+            });
 
             app.manage(AppState {
                 client,
-                recovery: Mutex::new(load_recovery_from_disk(&recovery_path)),
+                recovery,
                 recovery_path: Mutex::new(recovery_path),
+                monitor,
             });
             build_tray(app.handle())?;
             Ok(())
@@ -439,9 +660,34 @@ pub fn run() {
             timer_retry_pending,
             timer_use_server,
             timer_retry_local_start,
+            monitor_status,
+            hook_register,
+            monitor_set_enabled,
+            monitor_dismiss_suggestion,
+            settings_get,
+            settings_update,
+            me_stats,
+            path_mappings_list,
+            path_mappings_create,
+            path_mappings_update,
+            path_mappings_delete,
         ])
-        .run(tauri::generate_context!())
-        .expect("the Clock-In desktop host failed to start");
+        .build(tauri::generate_context!())
+        .expect("the Clock-In desktop host failed to start")
+        .run(|app_handle, event| {
+            // Window close → exit and OS session end (logoff/shutdown) both
+            // arrive here. The exit is held until the monitor's open segment
+            // is flushed to the spool, then the process exits itself. The
+            // `app.exit` that finishes the flush re-triggers this event; the
+            // flag lets that one through instead of looping.
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                if EXIT_FLUSH_STARTED.load(Ordering::SeqCst) {
+                    return;
+                }
+                api.prevent_exit();
+                flush_monitor_and_exit(app_handle, code.unwrap_or(0));
+            }
+        });
 }
 
 #[cfg(test)]
@@ -520,6 +766,34 @@ mod tests {
         assert_eq!(json["kind"], "conflict");
         assert_eq!(json["localStart"]["clientId"], "c1");
         assert_eq!(json["serverRunning"]["sessionId"], "s9");
+    }
+
+    #[test]
+    fn stop_input_reads_null_idle_as_host_measured_and_zero_as_authoritative() {
+        let missing: StopInput =
+            serde_json::from_str(r#"{"sessionId":"s1","stoppedAt":"2026-08-06T15:00:00.000Z"}"#)
+                .expect("a stop without idleSeconds parses");
+        assert_eq!(missing.idle_seconds, None);
+
+        let null: StopInput = serde_json::from_str(
+            r#"{"sessionId":"s1","stoppedAt":"2026-08-06T15:00:00.000Z","idleSeconds":null}"#,
+        )
+        .expect("a stop with null idleSeconds parses");
+        assert_eq!(null.idle_seconds, None);
+
+        // An explicit 0 is a decision ("keep the away time; nothing else was
+        // idle"), not a request to measure.
+        let zero: StopInput = serde_json::from_str(
+            r#"{"sessionId":"s1","stoppedAt":"2026-08-06T15:00:00.000Z","idleSeconds":0}"#,
+        )
+        .expect("a stop with zero idleSeconds parses");
+        assert_eq!(zero.idle_seconds, Some(0));
+
+        let decided: StopInput = serde_json::from_str(
+            r#"{"sessionId":"s1","stoppedAt":"2026-08-06T15:00:00.000Z","idleSeconds":600}"#,
+        )
+        .expect("a stop with an idle figure parses");
+        assert_eq!(decided.idle_seconds, Some(600));
     }
 
     #[test]

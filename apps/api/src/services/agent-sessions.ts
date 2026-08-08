@@ -27,6 +27,28 @@ export interface AgentSessionServiceDependencies {
   staleThresholdMs?: number;
 }
 
+export interface AgentSessionReaper {
+  /** Closes running sessions with no event for the staleness window, ending them at lastEventAt. */
+  reapStale(subject: AuthenticatedSubject): Promise<number>;
+}
+
+/**
+ * Just the staleness reaper, for read paths (reports, stats) that close stale
+ * agent sessions before corroboration math without the full ingestion service.
+ */
+export function createAgentSessionReaper(
+  dependencies: Pick<AgentSessionServiceDependencies, "agentSessions" | "clock" | "staleThresholdMs">,
+): AgentSessionReaper {
+  const clock = dependencies.clock ?? (() => new Date());
+  const staleThresholdMs = dependencies.staleThresholdMs ?? defaultStaleThresholdMs;
+  return {
+    reapStale(subject: AuthenticatedSubject): Promise<number> {
+      const now = clock();
+      return dependencies.agentSessions.reapStale(subject, new Date(now.getTime() - staleThresholdMs), now);
+    },
+  };
+}
+
 export interface AgentSessionService {
   ingest(subject: AuthenticatedSubject, events: AgentSessionEventInput[]): Promise<AgentSessionEventBatchResponse>;
   /** Closes running sessions with no event for the staleness window; also runs before every batch. */
@@ -36,12 +58,10 @@ export interface AgentSessionService {
 export function createAgentSessionService(dependencies: AgentSessionServiceDependencies): AgentSessionService {
   const clock = dependencies.clock ?? (() => new Date());
   const staleThresholdMs = dependencies.staleThresholdMs ?? defaultStaleThresholdMs;
+  const reaper = createAgentSessionReaper(dependencies);
 
   return {
-    async reapStale(subject: AuthenticatedSubject): Promise<number> {
-      const now = clock();
-      return dependencies.agentSessions.reapStale(subject, new Date(now.getTime() - staleThresholdMs), now);
-    },
+    reapStale: (subject) => reaper.reapStale(subject),
 
     async ingest(subject: AuthenticatedSubject, events: AgentSessionEventInput[]): Promise<AgentSessionEventBatchResponse> {
       const now = clock();

@@ -21,6 +21,39 @@ export type RunningTimer = StartIntent & {
   sessionId: string;
 };
 
+/// "An agent started in a mapped directory while no timer runs" — raised from
+/// `monitor_status.pendingSuggestion`; automation proposes, the human confirms.
+export type StartSuggestion = {
+  projectId: string;
+  source: string;
+  since: string;
+};
+
+export type AwayDecision = "keep" | "discard";
+
+/// A completed away span the user has not yet ruled on. `decision` is set by
+/// the away prompt and consulted by the stop flow (see `stopIdleSeconds`).
+export type AwayPrompt = {
+  startedAt: string;
+  seconds: number;
+  exceedsHardLimit: boolean;
+  decision?: AwayDecision | undefined;
+};
+
+/// The stop contract: `idleSeconds: null` tells the host to measure idle
+/// itself; any number — including 0 — is the UI's authoritative decision.
+/// "Discard" lets the host trim everything it measured; "keep" overrides the
+/// measurement so the away span stays billable (other idle is still trimmed),
+/// and a computed zero is now expressible: keep with no other idle trims
+/// nothing at all.
+export const stopIdleSeconds = (
+  away: AwayPrompt | undefined,
+  sessionIdleSeconds: number | null | undefined,
+): number | null => {
+  if (away?.decision !== "keep" || sessionIdleSeconds === null || sessionIdleSeconds === undefined) return null;
+  return Math.max(0, sessionIdleSeconds - away.seconds);
+};
+
 type Account = { user: TimerUser; projects: readonly TimerProject[] };
 
 export type BootstrapSnapshot =
@@ -34,9 +67,9 @@ export type BootstrapSnapshot =
 export type TimerState =
   | { kind: "booting" }
   | { kind: "sign-in"; error?: string | undefined }
-  | ({ kind: "idle"; error?: string | undefined } & Account)
+  | ({ kind: "idle"; error?: string | undefined; suggestion?: StartSuggestion | undefined } & Account)
   | ({ kind: "starting"; start: StartIntent } & Account)
-  | ({ kind: "running"; running: RunningTimer; error?: string } & Account)
+  | ({ kind: "running"; running: RunningTimer; error?: string; away?: AwayPrompt | undefined } & Account)
   | ({ kind: "stopping"; running: RunningTimer; stoppedAt: string } & Account)
   | ({ kind: "pending-sync"; pendingCount: number; message: string; error?: string | undefined } & Account)
   | ({
@@ -58,7 +91,11 @@ export type TimerEvent =
   | { type: "pending-retried"; remaining: number }
   | { type: "pending-retry-failed"; message: string }
   | { type: "auth-failed"; message: string }
-  | { type: "conflict-retry-failed"; message: string };
+  | { type: "conflict-retry-failed"; message: string }
+  | { type: "suggestion-received"; suggestion: StartSuggestion }
+  | { type: "suggestion-cleared" }
+  | { type: "away-detected"; away: Omit<AwayPrompt, "decision"> }
+  | { type: "away-answered"; decision: AwayDecision };
 
 export const initialTimerState: TimerState = { kind: "booting" };
 
@@ -107,6 +144,21 @@ export const timerReducer = (state: TimerState, event: TimerEvent): TimerState =
       return state;
     case "idle":
       if (event.type === "start-requested") return { kind: "starting", ...account(state), start: event.start };
+      if (event.type === "suggestion-received") {
+        const current = state.suggestion;
+        if (
+          current !== undefined
+          && current.projectId === event.suggestion.projectId
+          && current.since === event.suggestion.since
+        ) {
+          return state;
+        }
+        return { ...state, suggestion: event.suggestion };
+      }
+      if (event.type === "suggestion-cleared") {
+        if (state.suggestion === undefined) return state;
+        return { ...state, suggestion: undefined };
+      }
       return state;
     case "starting":
       if (event.type === "start-confirmed") return { kind: "running", ...account(state), running: event.running };
@@ -115,6 +167,16 @@ export const timerReducer = (state: TimerState, event: TimerEvent): TimerState =
     case "running":
       if (event.type === "stop-requested") {
         return { kind: "stopping", ...account(state), running: state.running, stoppedAt: event.stoppedAt };
+      }
+      if (event.type === "away-detected") {
+        // The same span keeps its decision across polls; a new span (the user
+        // went away again) replaces whatever was there, unanswered.
+        if (state.away?.startedAt === event.away.startedAt) return state;
+        return { ...state, away: event.away };
+      }
+      if (event.type === "away-answered") {
+        if (state.away === undefined || state.away.decision !== undefined) return state;
+        return { ...state, away: { ...state.away, decision: event.decision } };
       }
       return state;
     case "stopping":

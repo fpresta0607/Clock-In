@@ -3,7 +3,14 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../app.js";
 import { createTestAuth } from "../test-tokens.js";
 import { parseEnv } from "../env.js";
-import type { ReportRepository, ReportRowRecord } from "../repositories.js";
+import type {
+  AgentSessionRepository,
+  PathMappingRepository,
+  ProjectRepository,
+  ReportRepository,
+  ReportRowRecord,
+  SessionRepository,
+} from "../repositories.js";
 import type { AuthenticatedSubject } from "../auth.js";
 import { createReportRoutes } from "./reports.js";
 
@@ -47,6 +54,7 @@ class Reports implements ReportRepository {
       stoppedAt: new Date("2026-08-06T15:00:00.000Z"),
       idleSeconds: 0,
       durationSeconds: 3_600,
+      corroboratedSeconds: "1800",
     }];
   public async readPageForOrganization(_subject: AuthenticatedSubject, _query: Parameters<ReportRepository["readPageForOrganization"]>[1], _options: Parameters<ReportRepository["readPageForOrganization"]>[2]) {
     return { summary: { totalRows: 1, totalDurationSeconds: "3600" }, rows: this.rows };
@@ -55,15 +63,49 @@ class Reports implements ReportRepository {
     if (this.failExport !== null) throw this.failExport;
     return { summary: { totalRows: 1, totalDurationSeconds: "3600" }, rows: this.rows };
   }
+  public async readLeaderboardForOrganization(): Promise<never> {
+    throw new Error("not used by these routes");
+  }
+  public async readProjectTotalsForMember(): Promise<never> {
+    throw new Error("not used by these routes");
+  }
 }
 
-function app(reports = new Reports()) {
+/** Report routes reap stale agent sessions before corroboration math; nothing else is used. */
+class AgentSessions implements Partial<AgentSessionRepository> {
+  public reapCalls = 0;
+  public async reapStale() {
+    this.reapCalls += 1;
+    return 0;
+  }
+}
+
+// The agent-session route group refuses to mount without its sibling
+// repositories, so the app needs these stubs even though reports never call them.
+class Projects implements Partial<ProjectRepository> {
+  public async listForMember() { return []; }
+  public async findForMember() { return null; }
+}
+
+class Timers implements Partial<SessionRepository> {
+  public async findRunning() { return null; }
+}
+
+class PathMappings implements Partial<PathMappingRepository> {
+  public async listForSubject() { return []; }
+}
+
+function app(reports = new Reports(), agentSessions = new AgentSessions()) {
   return createApp({
     config,
     keys,
     accounts: { resolve: async () => user },
     clock: () => new Date("2026-08-06T14:00:00.000Z"),
     reportRepository: reports,
+    agentSessionRepository: agentSessions as AgentSessionRepository,
+    projectRepository: new Projects() as ProjectRepository,
+    sessionRepository: new Timers() as SessionRepository,
+    pathMappingRepository: new PathMappings() as PathMappingRepository,
   });
 }
 
@@ -87,7 +129,7 @@ describe("report routes", () => {
         const headers = { authorization: bearerHeader };
     const json = await app().request("http://api.test/reports?from=2026-08-06", { headers });
     expect(json.status).toBe(200);
-    await expect(json.json()).resolves.toMatchObject({ filters: { from: "2026-08-06", page: 1, pageSize: 50 }, totalDurationSeconds: 3_600, pagination: { totalRows: 1, totalPages: 1 }, rows: [{ status: "stopped" }] });
+    await expect(json.json()).resolves.toMatchObject({ filters: { from: "2026-08-06", page: 1, pageSize: 50 }, totalDurationSeconds: 3_600, pagination: { totalRows: 1, totalPages: 1 }, rows: [{ status: "stopped", corroboratedSeconds: 1_800 }] });
     const csv = await app().request("http://api.test/reports/export.csv?from=2026-08-06", { headers });
     expect(csv.status).toBe(200);
     expect(csv.headers.get("content-type")).toContain("text/csv; charset=utf-8");
@@ -100,6 +142,14 @@ describe("report routes", () => {
         const response = await app().request("http://api.test/reports?pageSize=201", { headers: { authorization: bearerHeader } });
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({ error: { code: "validation_error", message: "Invalid report filters." } });
+  });
+
+  it("closes stale agent sessions on the read path before reporting", async () => {
+    const agentSessions = new AgentSessions();
+    const response = await app(new Reports(), agentSessions).request("http://api.test/reports", { headers: { authorization: bearerHeader } });
+
+    expect(response.status).toBe(200);
+    expect(agentSessions.reapCalls).toBe(1);
   });
 
   it("returns a stable JSON error before a CSV stream begins when the snapshot read fails", async () => {

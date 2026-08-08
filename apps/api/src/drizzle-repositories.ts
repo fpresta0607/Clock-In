@@ -37,6 +37,7 @@ import {
   type PathMappingRepository,
   type ProjectRecord,
   type ProjectRepository,
+  type ProjectTotalRecord,
   type ReportExportRead,
   type ReportLookupRecord,
   type ReportPageOptions,
@@ -388,6 +389,41 @@ export class DrizzleAccountStore implements AccountStore {
   }
 }
 
+/**
+ * Corroborated seconds for one time session: the overlap of [startedAt, stoppedAt]
+ * with the member's fresh "active" activity segments plus the agent sessions linked
+ * to the session, floored and capped at durationSeconds. Evidence received more than
+ * seven days after it occurred is stored but never corroborates. Overlapping evidence
+ * intervals are summed rather than unioned; the durationSeconds cap absorbs the
+ * double-count, so corroborated time can never exceed the session it backs.
+ */
+function corroboratedSecondsSql() {
+  return sql<string | null>`least(
+    ${timeSessions.durationSeconds},
+    floor(
+      coalesce((
+        select sum(greatest(0, extract(epoch from
+          least(${activitySegments.endedAt}, ${timeSessions.stoppedAt})
+          - greatest(${activitySegments.startedAt}, ${timeSessions.startedAt}))))
+        from ${activitySegments}
+        where ${activitySegments.organizationId} = ${timeSessions.organizationId}
+          and ${activitySegments.userId} = ${timeSessions.userId}
+          and ${activitySegments.kind} = 'active'
+          and ${activitySegments.startedAt} < ${timeSessions.stoppedAt}
+          and ${activitySegments.endedAt} > ${timeSessions.startedAt}
+          and ${activitySegments.receivedAt} <= ${activitySegments.endedAt} + interval '7 days'
+      ), 0) + coalesce((
+        select sum(greatest(0, extract(epoch from
+          least(coalesce(${agentSessions.endedAt}, ${agentSessions.lastEventAt}), ${timeSessions.stoppedAt})
+          - greatest(${agentSessions.startedAt}, ${timeSessions.startedAt}))))
+        from ${agentSessions}
+        where ${agentSessions.linkedSessionId} = ${timeSessions.id}
+          and ${agentSessions.receivedAt} <= coalesce(${agentSessions.endedAt}, ${agentSessions.lastEventAt}) + interval '7 days'
+      ), 0)
+    )
+  )::bigint`;
+}
+
 export class DrizzleReportRepository implements ReportRepository {
   public constructor(private readonly db: DatabaseConnection["db"]) {}
 
@@ -453,6 +489,7 @@ export class DrizzleReportRepository implements ReportRepository {
         stoppedAt: timeSessions.stoppedAt,
         idleSeconds: timeSessions.idleSeconds,
         durationSeconds: timeSessions.durationSeconds,
+        corroboratedSeconds: corroboratedSecondsSql(),
       })
       .from(timeSessions)
       .innerJoin(users, and(
@@ -482,6 +519,7 @@ export class DrizzleReportRepository implements ReportRepository {
         stoppedAt: row.stoppedAt,
         idleSeconds: row.idleSeconds,
         durationSeconds: row.durationSeconds,
+        corroboratedSeconds: row.corroboratedSeconds,
       };
     });
   }
@@ -498,6 +536,7 @@ export class DrizzleReportRepository implements ReportRepository {
         userName: users.name,
         durationSeconds: totalDuration,
         sessionCount: count(timeSessions.id),
+        corroboratedSeconds: sum(corroboratedSecondsSql()),
       })
       .from(timeSessions)
       .innerJoin(users, and(
@@ -512,6 +551,43 @@ export class DrizzleReportRepository implements ReportRepository {
     return rows.map((row) => ({
       user: { id: row.userId, name: row.userName },
       durationSeconds: row.durationSeconds,
+      sessionCount: row.sessionCount,
+      corroboratedSeconds: row.corroboratedSeconds,
+    }));
+  }
+
+  /** One row per project the member recorded time in, heaviest first. */
+  public async readProjectTotalsForMember(
+    subject: AuthenticatedSubject,
+    query: ReportQuery,
+  ): Promise<ProjectTotalRecord[]> {
+    const totalDuration = sum(timeSessions.durationSeconds);
+    const rows = await this.db
+      .select({
+        projectId: projects.id,
+        projectName: projects.name,
+        durationSeconds: totalDuration,
+        corroboratedSeconds: sum(corroboratedSecondsSql()),
+        sessionCount: count(timeSessions.id),
+      })
+      .from(timeSessions)
+      .innerJoin(projects, and(
+        eq(projects.organizationId, timeSessions.organizationId),
+        eq(projects.id, timeSessions.projectId),
+      ))
+      .where(and(
+        ...this.predicates(subject, query),
+        eq(timeSessions.userId, subject.userId),
+        eq(projects.organizationId, subject.organizationId),
+      ))
+      .groupBy(projects.id, projects.name)
+      // id breaks ties so equal totals do not reorder between requests.
+      .orderBy(desc(totalDuration), asc(projects.id));
+
+    return rows.map((row) => ({
+      project: { id: row.projectId, name: row.projectName },
+      durationSeconds: row.durationSeconds,
+      corroboratedSeconds: row.corroboratedSeconds,
       sessionCount: row.sessionCount,
     }));
   }

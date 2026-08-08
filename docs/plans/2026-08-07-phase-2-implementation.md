@@ -133,3 +133,19 @@
 1. Smoke: migrate disposable database → seed → sign in → upload segments and a synthetic `clock-in-hook` event → start/stop a timer with measured idle → verify attribution, linking, corroborated seconds, and `me/stats` agree with the org report.
 2. Full gate: `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`; Rust fmt/test/check; `tauri build` when the toolchain is available.
 3. Review the diff for scope, privacy posture (no titles/URLs/content), secret exposure, and dead code.
+
+## Manual verification checklist (post-build, on a real machine)
+
+Automated gates cannot click a GUI. Run this pass with the installed release
+build (or `pnpm tauri dev`) against a disposable workspace:
+
+1. **Launch + status**: app boots to sign-in; after signing in, the status line shows monitoring state, last upload, and hook badges. Tray icon state matches.
+2. **Monitoring toggle**: Settings → Activity monitoring on; status line flips to "Monitoring on" within a poll cycle; pause → timer still works, time marked uncorroborated.
+3. **Idle trim**: start a timer, leave the machine untouched past the away threshold, return → away prompt appears; Discard trims the span (check `idleSeconds` in the stopped session), Keep leaves it billable.
+4. **Hard auto-stop**: with a short hard away limit configured, leave the machine past it → timer auto-stops at last-active; pending-sync or confirmation surfaces at next launch.
+5. **Agent flow end to end**: Settings → Agent hooks → Register (Claude Code); start a Claude Code session in a mapped directory → suggested-start prompt appears; confirm → timer runs with the project preselected; "agent active — idle trim paused" shows while the agent works; ending the session clears it.
+6. **Overnight agent**: lock the machine with an agent session active → timer keeps running (agent-active override), no away auto-stop.
+7. **Restart resilience**: with a timer running, kill the app from Task Manager → relaunch → timer restored from reconciliation. Repeat with a graceful tray Quit → relaunch → open activity segment was flushed (corroboration has no trailing gap).
+8. **OS shutdown**: timer running, sign out of Windows / reboot → relaunch → same recovery as 7.
+9. **Stats honesty**: Stats view totals and corroborated/uncorroborated split match what the org report shows for the same range.
+10. **Privacy panel**: "What's recorded" copy matches reality (process names only; spool under `%APPDATA%\clock-in`).

@@ -32,11 +32,105 @@ export type OrganizationOverview = {
 export type StopInput = {
   sessionId: string;
   stoppedAt: string;
-  idleSeconds: 0;
+  /// `null` lets the host measure idle from its own segments; any number —
+  /// including 0 — is the UI's authoritative away-prompt decision and wins
+  /// over measurement.
+  idleSeconds: number | null;
 };
 
 export type PendingRetryResult = {
   remaining: number;
+};
+
+export type HookRegistration = {
+  source: string;
+  detected: boolean;
+  configPath: string;
+};
+
+/// The outcome of an opt-in `hookRegister` call: the CLI's config was merged,
+/// the hook was already there, or the host will not rewrite that CLI's config
+/// and hands back the exact snippet to paste.
+export type HookRegisterResult =
+  | { status: "registered"; configPath: string }
+  | { status: "already-registered"; configPath: string }
+  | { status: "manual"; configPath: string; snippet: string };
+
+/// The agent session currently holding the away override open — explains why
+/// `sessionIdleSeconds` is frozen.
+export type AgentActive = {
+  source: string;
+  since: string;
+};
+
+export type PendingSuggestion = {
+  projectId: string;
+  source: string;
+  since: string;
+};
+
+export type AwayInfo = {
+  startedAt: string;
+  seconds: number;
+  ongoing: boolean;
+  exceedsHardLimit: boolean;
+};
+
+export type MonitorStatus = {
+  enabled: boolean;
+  running: boolean;
+  lastUploadAt: string | null;
+  segmentBacklog: number;
+  agentBacklog: number;
+  hooks: readonly HookRegistration[];
+  pendingSuggestion: PendingSuggestion | null;
+  agentActive: AgentActive | null;
+  sessionIdleSeconds: number | null;
+  away: AwayInfo | null;
+};
+
+export type MonitorSettings = {
+  enabled: boolean;
+  awayThresholdMinutes: number;
+  hardAwayLimitMinutes: number;
+  autoStopOnLock: boolean;
+  agentOverrideEnabled: boolean;
+  deviceId: string;
+};
+
+export type SettingsPatch = Partial<Omit<MonitorSettings, "deviceId">>;
+
+export type MeStats = {
+  filters: { from?: string | undefined; to?: string | undefined };
+  totalDurationSeconds: number;
+  corroboratedSeconds: number;
+  projects: readonly MeStatsProject[];
+};
+
+export type MeStatsProject = {
+  project: { id: string; name: string };
+  durationSeconds: number;
+  corroboratedSeconds: number;
+  sessionCount: number;
+};
+
+export type PathMapping = {
+  id: string;
+  pathPrefix: string;
+  repoUrl?: string | null | undefined;
+  projectId: string;
+};
+
+export type PathMappingCreateInput = {
+  pathPrefix: string;
+  repoUrl?: string | undefined;
+  projectId: string;
+};
+
+export type PathMappingUpdateInput = {
+  pathPrefix?: string | undefined;
+  repoUrl?: string | null | undefined;
+  projectId?: string | undefined;
 };
 
 export interface TimerBridge {
@@ -51,6 +145,17 @@ export interface TimerBridge {
   retryLocalStart(input: StartIntent): Promise<BootstrapSnapshot>;
   orgOverview(): Promise<OrganizationOverview>;
   orgJoin(inviteCode: string): Promise<OrganizationOverview>;
+  monitorStatus(): Promise<MonitorStatus>;
+  hookRegister(source: string): Promise<HookRegisterResult>;
+  monitorSetEnabled(enabled: boolean): Promise<MonitorSettings>;
+  monitorDismissSuggestion(): Promise<void>;
+  settingsGet(): Promise<MonitorSettings>;
+  settingsUpdate(input: SettingsPatch): Promise<MonitorSettings>;
+  meStats(from?: string, to?: string): Promise<MeStats>;
+  pathMappingsList(): Promise<readonly PathMapping[]>;
+  pathMappingsCreate(input: PathMappingCreateInput): Promise<PathMapping>;
+  pathMappingsUpdate(id: string, input: PathMappingUpdateInput): Promise<PathMapping>;
+  pathMappingsDelete(id: string): Promise<void>;
 }
 
 type TauriInvoke = <Result>(command: string, args?: Record<string, unknown>) => Promise<Result>;
@@ -180,6 +285,146 @@ export const decodePendingRetryResult = (value: unknown): PendingRetryResult => 
   return { remaining: nonnegativeInteger(candidate.remaining) };
 };
 
+const boolean = (value: unknown): boolean => {
+  if (typeof value !== "boolean") invalidResponse();
+  return value as boolean;
+};
+
+const stringOrNull = (value: unknown): string | null => {
+  if (value === null) return null;
+  return string(value);
+};
+
+const timestampOrNull = (value: unknown): string | null => {
+  if (value === null) return null;
+  return timestamp(value);
+};
+
+const optionalString = (value: unknown): string | undefined => {
+  if (value === undefined || value === null) return undefined;
+  return string(value);
+};
+
+const decodeHookRegistration = (value: unknown): HookRegistration => {
+  const candidate = record(value);
+  return {
+    source: string(candidate.source),
+    detected: boolean(candidate.detected),
+    configPath: string(candidate.configPath),
+  };
+};
+
+export const decodeHookRegisterResult = (value: unknown): HookRegisterResult => {
+  const candidate = record(value);
+  const configPath = string(candidate.configPath);
+  switch (candidate.status) {
+    case "registered":
+      return { status: "registered", configPath };
+    case "already-registered":
+      return { status: "already-registered", configPath };
+    case "manual":
+      return { status: "manual", configPath, snippet: string(candidate.snippet) };
+    default:
+      return invalidResponse();
+  }
+};
+
+const decodeAgentActive = (value: unknown): AgentActive => {
+  const candidate = record(value);
+  return { source: string(candidate.source), since: timestamp(candidate.since) };
+};
+
+const decodePendingSuggestion = (value: unknown): PendingSuggestion => {
+  const candidate = record(value);
+  return {
+    projectId: uuid(candidate.projectId),
+    source: string(candidate.source),
+    since: timestamp(candidate.since),
+  };
+};
+
+const decodeAwayInfo = (value: unknown): AwayInfo => {
+  const candidate = record(value);
+  return {
+    startedAt: timestamp(candidate.startedAt),
+    seconds: nonnegativeInteger(candidate.seconds),
+    ongoing: boolean(candidate.ongoing),
+    exceedsHardLimit: boolean(candidate.exceedsHardLimit),
+  };
+};
+
+export const decodeMonitorStatus = (value: unknown): MonitorStatus => {
+  const candidate = record(value);
+  const hooks = candidate.hooks;
+  if (!Array.isArray(hooks)) invalidResponse();
+  return {
+    enabled: boolean(candidate.enabled),
+    running: boolean(candidate.running),
+    lastUploadAt: timestampOrNull(candidate.lastUploadAt),
+    segmentBacklog: nonnegativeInteger(candidate.segmentBacklog),
+    agentBacklog: nonnegativeInteger(candidate.agentBacklog),
+    hooks: (hooks as unknown[]).map(decodeHookRegistration),
+    pendingSuggestion: candidate.pendingSuggestion === null ? null : decodePendingSuggestion(candidate.pendingSuggestion),
+    agentActive: candidate.agentActive === null ? null : decodeAgentActive(candidate.agentActive),
+    sessionIdleSeconds: candidate.sessionIdleSeconds === null ? null : nonnegativeInteger(candidate.sessionIdleSeconds),
+    away: candidate.away === null ? null : decodeAwayInfo(candidate.away),
+  };
+};
+
+export const decodeMonitorSettings = (value: unknown): MonitorSettings => {
+  const candidate = record(value);
+  return {
+    enabled: boolean(candidate.enabled),
+    awayThresholdMinutes: nonnegativeInteger(candidate.awayThresholdMinutes),
+    hardAwayLimitMinutes: nonnegativeInteger(candidate.hardAwayLimitMinutes),
+    autoStopOnLock: boolean(candidate.autoStopOnLock),
+    agentOverrideEnabled: boolean(candidate.agentOverrideEnabled),
+    deviceId: string(candidate.deviceId),
+  };
+};
+
+const decodeMeStatsProject = (value: unknown): MeStatsProject => {
+  const candidate = record(value);
+  const project = record(candidate.project);
+  return {
+    project: { id: uuid(project.id), name: string(project.name) },
+    durationSeconds: nonnegativeInteger(candidate.durationSeconds),
+    corroboratedSeconds: nonnegativeInteger(candidate.corroboratedSeconds),
+    sessionCount: nonnegativeInteger(candidate.sessionCount),
+  };
+};
+
+export const decodeMeStats = (value: unknown): MeStats => {
+  const candidate = record(value);
+  const filters = record(candidate.filters);
+  const projects = candidate.projects;
+  if (!Array.isArray(projects)) invalidResponse();
+  const totalDurationSeconds = nonnegativeInteger(candidate.totalDurationSeconds);
+  const corroboratedSeconds = nonnegativeInteger(candidate.corroboratedSeconds);
+  if (corroboratedSeconds > totalDurationSeconds) invalidResponse();
+  return {
+    filters: { from: optionalString(filters.from), to: optionalString(filters.to) },
+    totalDurationSeconds,
+    corroboratedSeconds,
+    projects: (projects as unknown[]).map(decodeMeStatsProject),
+  };
+};
+
+export const decodePathMapping = (value: unknown): PathMapping => {
+  const candidate = record(value);
+  return {
+    id: uuid(candidate.id),
+    pathPrefix: string(candidate.pathPrefix),
+    repoUrl: candidate.repoUrl === undefined ? undefined : stringOrNull(candidate.repoUrl),
+    projectId: uuid(candidate.projectId),
+  };
+};
+
+export const decodePathMappings = (value: unknown): readonly PathMapping[] => {
+  if (!Array.isArray(value)) invalidResponse();
+  return (value as unknown[]).map(decodePathMapping);
+};
+
 const decodeVoid = (value: unknown): void => {
   if (value !== undefined && value !== null) invalidResponse();
 };
@@ -207,6 +452,21 @@ export const defaultBridge: TimerBridge = {
   retryLocalStart: (input) => invokeDecoded("timer_retry_local_start", decodeBootstrapSnapshot, { input }),
   orgOverview: () => invokeDecoded("org_overview", decodeOrganizationOverview),
   orgJoin: (inviteCode) => invokeDecoded("org_join", decodeOrganizationOverview, { input: { inviteCode } }),
+  monitorStatus: () => invokeDecoded("monitor_status", decodeMonitorStatus),
+  hookRegister: (source) => invokeDecoded("hook_register", decodeHookRegisterResult, { source }),
+  monitorSetEnabled: (enabled) => invokeDecoded("monitor_set_enabled", decodeMonitorSettings, { enabled }),
+  monitorDismissSuggestion: () => invokeDecoded("monitor_dismiss_suggestion", decodeVoid),
+  settingsGet: () => invokeDecoded("settings_get", decodeMonitorSettings),
+  settingsUpdate: (input) => invokeDecoded("settings_update", decodeMonitorSettings, { input }),
+  meStats: (from, to) =>
+    invokeDecoded("me_stats", decodeMeStats, {
+      ...(from === undefined ? {} : { from }),
+      ...(to === undefined ? {} : { to }),
+    }),
+  pathMappingsList: () => invokeDecoded("path_mappings_list", decodePathMappings),
+  pathMappingsCreate: (input) => invokeDecoded("path_mappings_create", decodePathMapping, { input }),
+  pathMappingsUpdate: (id, input) => invokeDecoded("path_mappings_update", decodePathMapping, { id, input }),
+  pathMappingsDelete: (id) => invokeDecoded("path_mappings_delete", decodeVoid, { id }),
 };
 
 export const bridgeError = (error: unknown): BridgeError => {

@@ -22,12 +22,13 @@ export {
 } from "./drizzle-repositories.js";
 export { createActivityRoutes } from "./routes/activity.js";
 export { createAgentSessionRoutes } from "./routes/agent-sessions.js";
+export { createMeStatsRoutes } from "./routes/me-stats.js";
 export { createPathMappingRoutes } from "./routes/path-mappings.js";
 export { createProjectRoutes } from "./routes/projects.js";
 export { createReportRoutes } from "./routes/reports.js";
 export { createSessionRoutes } from "./routes/sessions.js";
 export { createActivityService } from "./services/activity.js";
-export { createAgentSessionService } from "./services/agent-sessions.js";
+export { createAgentSessionReaper, createAgentSessionService } from "./services/agent-sessions.js";
 export { normalizePath, resolveProjectForCwd } from "./services/attribution.js";
 export { createPathMappingService } from "./services/path-mappings.js";
 export { listProjects } from "./services/projects.js";
@@ -47,6 +48,7 @@ export type {
   PathMappingRepositoryConflict,
   ProjectRecord,
   ProjectRepository,
+  ProjectTotalRecord,
   LeaderboardRowRecord,
   ReportLookupRecord,
   ReportExportRead,
@@ -64,7 +66,7 @@ export type {
   UpsertStartedAgentSession,
 } from "./repositories.js";
 export type { ActivityService, ActivityServiceDependencies, ActivitySegmentInput } from "./services/activity.js";
-export type { AgentSessionEventInput, AgentSessionService, AgentSessionServiceDependencies } from "./services/agent-sessions.js";
+export type { AgentSessionEventInput, AgentSessionReaper, AgentSessionService, AgentSessionServiceDependencies } from "./services/agent-sessions.js";
 export type { PathMappingCandidate } from "./services/attribution.js";
 export type {
   CreatePathMappingInput,

@@ -54,14 +54,14 @@ The binary does one thing — append that line to `%APPDATA%/clock-in/agent-spoo
 
 Per-CLI wiring and capability (verified at implementation time; the contract treats every event as optional per source):
 
-- **Claude Code**: `SessionStart` / `SessionEnd` hooks in `settings.json` — true session boundaries; `PostToolUse` optionally acts as an activity heartbeat.
+- **Claude Code**: `SessionStart` / `SessionEnd` hooks in `settings.json` — true session boundaries; `PostToolUse` optionally acts as an activity heartbeat. Claude Code pipes its own native hook payload to the binary, which translates it (`hook_event_name` SessionStart/SessionEnd/PostToolUse → start/end/heartbeat), so no contract-shaped wrapper script is needed.
 - **Codex CLI**: the `notify` hook fires on turn completion only, so it provides heartbeats, not boundaries; session start/end are synthesized from heartbeat gaps.
 - **Kimi Code**: hooks configured in `config.toml`; exact event coverage must be confirmed against the installed version before wiring.
 - Anything else can call the same binary with `--source other`; the contract is the product, not any one CLI.
 
 Because `session-end` is never guaranteed (crash, `kill -9`, or a CLI that cannot emit it), the server reaps agent sessions with no event for a staleness window (default 6 hours) and closes them at the last-seen timestamp. Out-of-order delivery (an end arriving before its start) is tolerated by upsert, not rejected.
 
-Hook registration into each CLI's own config file is performed by an explicit, opt-in setup step in the desktop — the app never rewrites Claude Code/Codex/Kimi configuration silently.
+Hook registration into each CLI's own config file is performed by an explicit, opt-in setup step in the desktop — the app never rewrites Claude Code/Codex/Kimi configuration silently. Registration merges the hook arrays automatically for Claude Code; Codex and Kimi Code receive a paste-it-yourself snippet instead of a guessed config rewrite.
 
 ### Project attribution
 
@@ -90,7 +90,7 @@ Tracking that the user cannot see is surveillance; tracking the user can interro
 - **Always-on status.** The tray icon encodes the full state — signed out, idle, timer running, timer running with monitoring active, monitoring paused — and its tooltip shows the current session's project and elapsed time. The React header mirrors it. There is no state in which the monitor records without the UI saying so, and no state in which a paused monitor looks active.
 - **Monitor health at a glance.** A status line answers "is it actually working?": last successful upload, spool backlog count, activity-monitor running/paused, and per-CLI hook registration status (detected by the setup wizard and re-checked on launch, so a Claude Code settings update that removed the hook is noticed).
 - **Live session stats.** The current-session card shows elapsed time, idle trimmed so far, corroborated seconds so far, and linked agent sessions with their resolved projects. These numbers are computed locally from the monitor's segment buffer, so they are instant and available offline.
-- **Personal history.** A stats view shows today/this week per project with the corroborated/uncorroborated split, session counts, and the user's own recent session rows. A new `GET /v1/me/stats` endpoint returns per-project totals for a date range; it is the reporting service's corroboration math scoped to the caller, not a separate computation, so the user always sees the same evidence and the same numbers the org's reports will show. Nothing about the user's own data is manager-only.
+- **Personal history.** A stats view shows today/this week per project with the corroborated/uncorroborated split, session counts, and the user's own recent session rows. A new `GET /me/stats` endpoint returns per-project totals for a date range; it is the reporting service's corroboration math scoped to the caller, not a separate computation, so the user always sees the same evidence and the same numbers the org's reports will show. Nothing about the user's own data is manager-only.
 
 ### Design language
 
@@ -118,8 +118,8 @@ The design assumption: a determined user can forge client-side evidence (the spo
 
 - `packages/shared`: contracts for activity-segment batch upload, agent-session events, path-mapping CRUD, the personal stats response, corroboration fields on report rows and leaderboard entries, and the shared SIQstack brand token stylesheet consumed by both frontends.
 - `packages/database`: new tables `activity_segments`, `agent_sessions`, `project_path_mappings`; migrations; no changes to `time_sessions` columns (Phase 2 stores evidence beside sessions, not inside them).
-- `apps/api`: three new route groups (`/v1/activity/segments`, `/v1/agent-sessions`, `/v1/path-mappings`), a `/v1/me/stats` endpoint reusing the reporting service's corroboration math scoped to the caller, prefix-match attribution in a new attribution service, `receivedAt` freshness enforcement.
-- `apps/desktop`: `monitor.rs` (activity traits, segment builder, spool, uploader), the `clock-in-hook` binary target, new timer-machine states for suggested start and away handling, tray icon and tooltip states for timer and monitoring status, a monitor-health status line, live session stats computed from the local segment buffer, a personal stats view backed by `/v1/me/stats`, a settings UI for thresholds, path mappings, and lock/sleep policy, an opt-in hook-registration wizard, and a "what's recorded" privacy panel. All surfaces are restyled on the shared SIQstack tokens, retiring the Phase 1 chronometer theme.
+- `apps/api`: three new route groups (`/activity/segments`, `/agent-sessions`, `/path-mappings`), a `/me/stats` endpoint reusing the reporting service's corroboration math scoped to the caller, prefix-match attribution in a new attribution service, `receivedAt` freshness enforcement.
+- `apps/desktop`: `monitor.rs` (activity traits, segment builder, spool, uploader), the `clock-in-hook` binary target, new timer-machine states for suggested start and away handling, tray icon and tooltip states for timer and monitoring status, a monitor-health status line, live session stats computed from the local segment buffer, a personal stats view backed by `/me/stats`, a settings UI for thresholds, path mappings, and lock/sleep policy (persisted as `settings.json` beside `recovery.json`), an opt-in hook-registration wizard, and a "what's recorded" privacy panel. All surfaces are restyled on the shared SIQstack tokens, retiring the Phase 1 chronometer theme.
 
 ## Data and request flow
 
@@ -127,7 +127,7 @@ The design assumption: a determined user can forge client-side evidence (the spo
 
 **Agent sessions.** `clock-in-hook` appends to the spool; the desktop drains it, raises any start suggestions locally from cached mappings, and uploads. A `session-start` upserts a running agent session keyed on `(organizationId, userId, source, externalSessionId)`; `session-end` closes it. On start, the attribution service resolves `cwd` to a project. If the user has a running timer for that project, the API links the rows.
 
-**Reports.** The reporting service computes corroborated seconds per session as the overlap between `[startedAt, stoppedAt - idle]` and the union of the user's fresh `active` segments and linked agent sessions, capped at duration. Leaderboard entries and report rows gain `corroboratedSeconds`; totals gain a corroborated/uncorroborated split.
+**Reports.** The reporting service computes corroborated seconds per session as the overlap between `[startedAt, stoppedAt]` and the union of the user's fresh `active` segments and linked agent sessions, capped at `durationSeconds`. Leaderboard entries and report rows gain `corroboratedSeconds`; totals gain a corroborated/uncorroborated split.
 
 ## Security and privacy
 
@@ -142,11 +142,11 @@ The privacy posture is tightened, not loosened, and stays user-visible:
 
 ## Error handling
 
-Spool files are append-only and drained transactionally: uploaded lines are acknowledged before truncation, so a crash mid-upload replays rather than loses evidence, and idempotent server keys make the replay safe. A spool line that fails to parse is quarantined, not fatal. Attribution misses are not errors — they produce "needs mapping" entries. Malformed hook invocations exit non-zero with a message the agent CLI surfaces, and never write partial lines.
+Spool files are append-only and drained transactionally: uploaded lines are acknowledged before truncation, so a crash mid-upload replays rather than loses evidence, and idempotent server keys make the replay safe. A spool line that fails to parse is quarantined, not fatal. Attribution misses are not errors — they produce "needs mapping" entries. Malformed hook invocations exit non-zero with a message the agent CLI surfaces, and never write partial lines. Graceful exit paths (tray quit, window close, OS session end) flush the monitor's open activity segment to the spool before the process exits; a force quit runs no code, so it loses at most the trailing open span since the last transition.
 
 ## Testing and verification
 
-Pure-Rust tests cover the segment builder (signal stream in, segments out), spool append under concurrent writers, drain/replay, away-threshold decisions, and the agent-active override, with the clock and activity source injected as traits. Shared-schema tests cover the new contracts. API service tests cover idempotent segment upload, segment validation, prefix-match attribution (longest match wins, normalization, ties rejected), agent-session upsert including out-of-order end-before-start, staleness reaping, `receivedAt` freshness exclusion, and corroboration overlap math. React tests cover the suggested-start prompt, away prompt, tray/status states, live session stats, the personal stats view, hook-registration wizard, and settings UI; API route tests cover `/v1/me/stats` scoping (a user never sees another's numbers). Verification adds the `clock-in-hook` binary to the desktop build and runs a synthetic hook event end to end against a test database.
+Pure-Rust tests cover the segment builder (signal stream in, segments out), spool append under concurrent writers, drain/replay, away-threshold decisions, and the agent-active override, with the clock and activity source injected as traits. Shared-schema tests cover the new contracts. API service tests cover idempotent segment upload, segment validation, prefix-match attribution (longest match wins, normalization, ties rejected), agent-session upsert including out-of-order end-before-start, staleness reaping, `receivedAt` freshness exclusion, and corroboration overlap math. React tests cover the suggested-start prompt, away prompt, tray/status states, live session stats, the personal stats view, hook-registration wizard, and settings UI; API route tests cover `/me/stats` scoping (a user never sees another's numbers). Verification adds the `clock-in-hook` binary to the desktop build and runs a synthetic hook event end to end against a test database.
 
 ## Known gaps and open questions
 

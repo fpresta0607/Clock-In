@@ -2,12 +2,21 @@
 name = "clock-in-desktop"
 version = "0.0.0"
 edition = "2021"
-rust-version = "1.77"
+# 1.89 for `File::try_lock`, the spool's interprocess lock.
+rust-version = "1.89"
 publish = false
+# Two bin targets exist (the app and clock-in-hook); name the app explicitly.
+default-run = "clock-in-desktop"
 
 [lib]
 name = "clock_in_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# The hook agent CLIs fire; deliberately separate from the Tauri app binary so
+# it starts fast and never touches the webview stack.
+[[bin]]
+name = "clock-in-hook"
+path = "src/bin/clock-in-hook.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -17,8 +26,23 @@ tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-tokio = { version = "1", features = ["sync", "macros"] }
+tokio = { version = "1", features = ["sync", "macros", "rt", "time"] }
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
+# Activity-segment clientIds and the per-install device id (upload idempotency).
+uuid = { version = "1", features = ["v4"] }
+
+# The activity monitor's read-only Win32 calls: GetLastInputInfo,
+# GetForegroundWindow process names, and session lock/suspend events.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 strip = true

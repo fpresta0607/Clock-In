@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { initialTimerState, timerReducer } from "./timer-machine.js";
+import { initialTimerState, stopIdleSeconds, timerReducer } from "./timer-machine.js";
 
 const user = {
   id: "00000000-0000-4000-8000-000000000001",
@@ -166,5 +166,101 @@ describe("timerReducer", () => {
       ...pending,
       error: "Still offline",
     });
+  });
+});
+
+describe("suggested start", () => {
+  const suggestion = { projectId: project.id, source: "codex", since: "2026-08-06T14:58:00.000Z" };
+  const idle = { kind: "idle", user, projects: [project] } as const;
+
+  it("raises a suggestion only while the timer is idle", () => {
+    expect(timerReducer(idle, { type: "suggestion-received", suggestion })).toEqual({ ...idle, suggestion });
+
+    const active = { kind: "running", user, projects: [project], running } as const;
+    expect(timerReducer(active, { type: "suggestion-received", suggestion })).toBe(active);
+
+    const starting = { kind: "starting", user, projects: [project], start } as const;
+    expect(timerReducer(starting, { type: "suggestion-received", suggestion })).toBe(starting);
+  });
+
+  it("treats a repeat poll of the same suggestion as a no-op", () => {
+    const raised = timerReducer(idle, { type: "suggestion-received", suggestion });
+    expect(timerReducer(raised, { type: "suggestion-received", suggestion })).toBe(raised);
+
+    const moved = { projectId: project.id, source: "codex", since: "2026-08-06T15:05:00.000Z" };
+    expect(timerReducer(raised, { type: "suggestion-received", suggestion: moved })).toEqual({ ...idle, suggestion: moved });
+  });
+
+  it("dismisses a suggestion and stays dismissed across polls without one", () => {
+    const raised = timerReducer(idle, { type: "suggestion-received", suggestion });
+    expect(timerReducer(raised, { type: "suggestion-cleared" })).toEqual(idle);
+    expect(timerReducer(idle, { type: "suggestion-cleared" })).toBe(idle);
+  });
+
+  it("confirms a suggestion through the normal start flow, dropping the prompt", () => {
+    const raised = timerReducer(idle, { type: "suggestion-received", suggestion });
+    const starting = timerReducer(raised, { type: "start-requested", start });
+    expect(starting).toEqual({ kind: "starting", user, projects: [project], start });
+    expect(timerReducer(starting, { type: "start-confirmed", running })).toEqual({
+      kind: "running",
+      user,
+      projects: [project],
+      running,
+    });
+  });
+});
+
+describe("away prompt", () => {
+  const away = { startedAt: "2026-08-06T15:20:00.000Z", seconds: 1_500, exceedsHardLimit: false };
+  const active = { kind: "running", user, projects: [project], running } as const;
+
+  it("raises an away prompt on return and only while running", () => {
+    expect(timerReducer(active, { type: "away-detected", away })).toEqual({ ...active, away });
+
+    const idle = { kind: "idle", user, projects: [project] } as const;
+    expect(timerReducer(idle, { type: "away-detected", away })).toBe(idle);
+  });
+
+  it("keeps the recorded decision when the same span is polled again", () => {
+    const raised = timerReducer(active, { type: "away-detected", away });
+    const kept = timerReducer(raised, { type: "away-answered", decision: "keep" });
+    expect(kept).toEqual({ ...active, away: { ...away, decision: "keep" } });
+    expect(timerReducer(kept, { type: "away-detected", away })).toBe(kept);
+  });
+
+  it("re-raises unanswered when a new away span completes", () => {
+    const raised = timerReducer(active, { type: "away-detected", away });
+    const discarded = timerReducer(raised, { type: "away-answered", decision: "discard" });
+    const next = { startedAt: "2026-08-06T16:10:00.000Z", seconds: 600, exceedsHardLimit: false };
+    expect(timerReducer(discarded, { type: "away-detected", away: next })).toEqual({ ...active, away: next });
+  });
+
+  it("ignores answers when there is no open prompt or it was already answered", () => {
+    expect(timerReducer(active, { type: "away-answered", decision: "keep" })).toBe(active);
+    const raised = timerReducer(active, { type: "away-detected", away });
+    const answered = timerReducer(raised, { type: "away-answered", decision: "discard" });
+    expect(timerReducer(answered, { type: "away-answered", decision: "keep" })).toBe(answered);
+  });
+});
+
+describe("stopIdleSeconds", () => {
+  const away = { startedAt: "2026-08-06T15:20:00.000Z", seconds: 1_500, exceedsHardLimit: false };
+
+  it("lets the host measure unless the user chose to keep the away span", () => {
+    expect(stopIdleSeconds(undefined, 2_100)).toBeNull();
+    expect(stopIdleSeconds(away, 2_100)).toBeNull();
+    expect(stopIdleSeconds({ ...away, decision: "discard" }, 2_100)).toBeNull();
+  });
+
+  it("excludes the kept away span from the measured idle trim", () => {
+    expect(stopIdleSeconds({ ...away, decision: "keep" }, 2_100)).toBe(600);
+  });
+
+  it("clamps at zero and falls back to host measurement without a reading", () => {
+    // Keep with no other idle: an explicit, authoritative 0 — the host must
+    // not re-measure and flip the decision.
+    expect(stopIdleSeconds({ ...away, decision: "keep" }, 900)).toBe(0);
+    expect(stopIdleSeconds({ ...away, decision: "keep" }, null)).toBeNull();
+    expect(stopIdleSeconds({ ...away, decision: "keep" }, undefined)).toBeNull();
   });
 });
