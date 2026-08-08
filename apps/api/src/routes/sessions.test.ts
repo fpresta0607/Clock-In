@@ -36,6 +36,9 @@ class Projects implements ProjectRepository {
   public async findForMember(_subject: unknown, projectId: string) {
     return projectId === ids.project ? { id: ids.project, organizationId: ids.organization, name: "Alpha", archived: false } : null;
   }
+  public async createForMember(): Promise<never> {
+    throw new Error("not implemented");
+  }
 }
 
 class Sessions implements SessionRepository {

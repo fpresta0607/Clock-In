@@ -56,6 +56,12 @@ const startB = {
   startedAt: "2026-08-06T15:01:00.000Z",
 };
 
+const newProject = {
+  id: "00000000-0000-4000-8000-000000000012",
+  name: "Client work",
+  color: null,
+};
+
 const deferred = <Value,>() => {
   let resolve: (value: Value) => void = () => undefined;
   let reject: (reason: unknown) => void = () => undefined;
@@ -141,6 +147,7 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   settingsGet: vi.fn().mockResolvedValue(monitorSettings),
   settingsUpdate: vi.fn().mockResolvedValue(monitorSettings),
   meStats: vi.fn().mockResolvedValue(meStats),
+  projectCreate: vi.fn().mockResolvedValue(newProject),
   pathMappingsList: vi.fn().mockResolvedValue([mapping]),
   pathMappingsCreate: vi.fn().mockResolvedValue(mapping),
   pathMappingsUpdate: vi.fn().mockResolvedValue(mapping),
@@ -231,6 +238,46 @@ describe("App", () => {
     expect(bridge.start).toHaveBeenCalledTimes(1);
   });
 
+  it("creates a project from the start form and selects it", async () => {
+    const bridge = bridgeFor({
+      bootstrap: vi.fn()
+        .mockResolvedValueOnce({ kind: "idle", user, projects: [project] })
+        .mockResolvedValue({ kind: "idle", user, projects: [project, newProject] }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await screen.findByRole("option", { name: "Field work" });
+    await person.click(screen.getByRole("button", { name: "New project…" }));
+    const nameInput = screen.getByLabelText("New project name");
+    expect(screen.getByRole("button", { name: "Create project" })).toBeDisabled();
+    await person.type(nameInput, "  Client work  ");
+    await person.click(screen.getByRole("button", { name: "Create project" }));
+
+    await waitFor(() => expect(bridge.projectCreate).toHaveBeenCalledWith({ name: "Client work" }));
+    expect(await screen.findByRole("option", { name: "Client work" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue(newProject.id));
+    expect(screen.queryByLabelText("New project name")).not.toBeInTheDocument();
+  });
+
+  it("keeps the start form usable when project creation fails", async () => {
+    const bridge = bridgeFor({
+      projectCreate: vi.fn().mockRejectedValue({ kind: "validation", message: "Project names must be 1 to 80 characters." }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await screen.findByRole("option", { name: "Field work" });
+    await person.click(screen.getByRole("button", { name: "New project…" }));
+    await person.type(screen.getByLabelText("New project name"), "Client work");
+    await person.click(screen.getByRole("button", { name: "Create project" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("1 to 80 characters");
+    // The inline form stays open and no account refresh was attempted.
+    expect(screen.getByLabelText("New project name")).toBeInTheDocument();
+    expect(bridge.bootstrap).toHaveBeenCalledTimes(1);
+  });
+
   it("updates the running elapsed readout from its persisted startedAt basis", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date("2026-08-06T15:00:05.000Z"));
@@ -256,6 +303,49 @@ describe("App", () => {
       idleSeconds: null,
     }));
     expect(await screen.findByRole("button", { name: "Start timer" })).toBeVisible();
+  });
+
+  it("switches projects while running: stops the session, then starts the new project", async () => {
+    const switched = { ...start, projectId: projectB.id, sessionId: "00000000-0000-4000-8000-000000000201" };
+    const bridge = bridgeFor({
+      bootstrap: vi.fn().mockResolvedValue({ kind: "running", user, projects: [project, projectB], running, source: "server-only" }),
+      start: vi.fn().mockResolvedValue(switched),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const picker = await screen.findByLabelText("Project");
+    expect(picker).toHaveValue(project.id);
+    await person.selectOptions(picker, projectB.id);
+
+    await waitFor(() => expect(bridge.start).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: projectB.id,
+      description: "",
+    })));
+    expect(bridge.stop).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: running.sessionId,
+      idleSeconds: null,
+    }));
+    const stopOrder = vi.mocked(bridge.stop).mock.invocationCallOrder[0] ?? 0;
+    const startOrder = vi.mocked(bridge.start).mock.invocationCallOrder[0] ?? 0;
+    expect(stopOrder).toBeLessThan(startOrder);
+    expect(await screen.findByText("Recording · Account B work")).toBeInTheDocument();
+    expect(screen.getByLabelText("Project")).toHaveValue(projectB.id);
+  });
+
+  it("aborts the project switch when the stop fails", async () => {
+    const bridge = bridgeFor({
+      bootstrap: vi.fn().mockResolvedValue({ kind: "running", user, projects: [project, projectB], running, source: "server-only" }),
+      stop: vi.fn().mockRejectedValue({ kind: "unknown", message: "Stop failed" }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.selectOptions(await screen.findByLabelText("Project"), projectB.id);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Stop failed");
+    expect(bridge.start).not.toHaveBeenCalled();
+    expect(screen.getByText("Recording · Field work")).toBeInTheDocument();
   });
 
   it("removes the running timer and exposes pending sync retry after transient stop failure", async () => {

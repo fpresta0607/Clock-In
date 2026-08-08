@@ -7,6 +7,13 @@
 
 body { min-width: 320px; min-height: 100vh; }
 
+/* Thin themed scrollbars: transparent track, glass-border thumb. */
+* { scrollbar-width: thin; scrollbar-color: rgba(0, 229, 155, 0.22) transparent; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(0, 229, 155, 0.22); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0, 229, 155, 0.35); }
+
 /* Kill the brand pill shape: desktop buttons are rounded rectangles. */
 button { border-radius: var(--radius); }
 
@@ -15,7 +22,7 @@ button { border-radius: var(--radius); }
    z-index 0. */
 .shader-bg { position: fixed; inset: 0; z-index: -1; width: 100%; height: 100%; display: block; }
 
-.app-shell { position: relative; display: flex; min-height: 100vh; flex-direction: column; }
+.app-shell { position: relative; display: flex; height: 100vh; flex-direction: column; overflow: hidden; }
 
 /* Frameless-window titlebar: the bar itself is the drag region (the Tauri
    drag script skips clickable elements, so the buttons stay clickable). */
@@ -51,10 +58,10 @@ button { border-radius: var(--radius); }
 .titlebar-button:hover { background: rgba(163, 179, 194, 0.12); color: #ffffff; }
 .titlebar-close:hover { background: rgba(221, 93, 79, 0.25); color: #ffb4aa; }
 
-.center-stage { display: grid; flex: 1; place-items: center; width: 100%; padding: 22px; }
+.center-stage { display: grid; flex: 1; place-items: center; width: 100%; padding: 22px; overflow-y: auto; }
 .boot-message { margin: 0; color: var(--text-secondary); font-size: .75rem; font-weight: 600; letter-spacing: .25em; text-transform: uppercase; }
 
-.screen { display: grid; flex: 1; gap: 14px; align-content: start; width: 100%; max-width: 470px; margin: 0 auto; padding: 14px 22px 24px; }
+.screen { display: grid; flex: 1; gap: 14px; align-content: start; width: 100%; max-width: 470px; margin: 0 auto; padding: 14px 22px 24px; overflow-y: auto; }
 
 h1 { font-size: clamp(1.2rem, 5vw, 1.55rem); }
 h2 { font-size: 1.05rem; font-weight: 800; }
@@ -73,9 +80,28 @@ h2 { font-size: 1.05rem; font-weight: 800; }
 
 .hero { text-align: center; }
 .hero label { margin-top: 14px; text-align: left; }
-.hero input, .hero select, .hero textarea { width: 100%; }
-.hero textarea { min-height: 86px; }
-select { appearance: auto; }
+.hero input, .hero select { width: 100%; }
+
+/* Real <select>, custom skin: brand glass background, chevron, focus ring. */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 32px;
+  background-color: rgba(3, 5, 10, 0.7);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23a3b3c2' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+select:disabled { opacity: .55; }
+
+.hero-project { display: grid; gap: 5px; margin-top: 18px; }
+
+.new-project-trigger { margin-top: 10px; border: 0; padding: 0; background: transparent; color: var(--text-secondary); font-size: .78rem; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; justify-self: start; }
+.new-project-trigger:hover, .new-project-trigger:focus-visible { color: #ffffff; }
+.new-project-form { display: grid; gap: 10px; margin-top: 10px; text-align: left; }
+.new-project-form label { margin-top: 0; }
+.new-project-actions { display: flex; gap: 9px; }
+.new-project-actions button { min-height: 32px; padding: 5px 14px; font-size: .72rem; }
 
 .idle-panel h2 { margin-bottom: 2px; }
 .entry-foot { display: flex; align-items: center; justify-content: flex-end; gap: 14px; margin-top: 14px; color: var(--text-secondary); font-size: .72rem; }
@@ -123,7 +149,9 @@ select { appearance: auto; }
 .today-total { margin: 2px 0 10px; font-size: .95rem; }
 .today-total strong { font-variant-numeric: tabular-nums; }
 
-.app-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+/* Long activity lists scroll inside the card instead of pushing the
+   leaderboard and everything below it off the window. */
+.app-list { display: grid; gap: 2px; max-height: 15rem; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
 .app-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 5px 2px; border-bottom: 1px solid rgba(163, 179, 194, 0.08); font-size: .84rem; }
 .app-row:last-child { border-bottom: 0; }
 .app-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

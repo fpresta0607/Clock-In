@@ -120,6 +120,20 @@ export class DrizzleProjectRepository implements ProjectRepository {
       .limit(1);
     return rows[0] ?? null;
   }
+
+  public async createForMember(subject: AuthenticatedSubject, name: string): Promise<ProjectRecord> {
+    return this.db.transaction(async (tx) => {
+      const [project] = await tx
+        .insert(projects)
+        .values({ organizationId: subject.organizationId, name })
+        .returning({ id: projects.id, organizationId: projects.organizationId, name: projects.name, archived: projects.archived });
+      if (project === undefined) throw new Error("Failed to create the project.");
+      await tx
+        .insert(projectMemberships)
+        .values({ organizationId: subject.organizationId, projectId: project.id, userId: subject.userId });
+      return project;
+    });
+  }
 }
 
 export class DrizzleSessionRepository implements SessionRepository {

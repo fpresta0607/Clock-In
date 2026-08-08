@@ -561,6 +561,32 @@ impl ApiClient {
             .collect())
     }
 
+    /// Creates a project for the signed-in member; the API answers 201 with the
+    /// created list item, the same shape `/projects` returns.
+    pub async fn create_project(&self, access_token: &str, name: &str) -> ApiResult<TimerProject> {
+        let response = self
+            .http
+            .post(format!("{}/projects", self.api_base_url))
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({ "name": name }))
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+
+        if !response.status().is_success() {
+            return Err(classify(response.status().as_u16()));
+        }
+        let body: ProjectListItem = response
+            .json()
+            .await
+            .map_err(|_| BridgeError::unknown("The project response could not be read."))?;
+        Ok(TimerProject {
+            id: body.id,
+            name: body.name,
+            color: body.color,
+        })
+    }
+
     pub async fn current_session(&self, access_token: &str) -> ApiResult<Option<RunningTimer>> {
         let body: SessionEnvelope = self.get_json(access_token, "/sessions/current").await?;
         Ok(body.session.map(RunningTimer::from))
@@ -854,6 +880,18 @@ mod tests {
             .collect();
 
         assert_eq!(visible, vec!["Active".to_string()]);
+    }
+
+    #[test]
+    fn reads_a_created_project_without_a_color() {
+        let body: ProjectListItem = serde_json::from_str(
+            r#"{"id":"p1","name":"Field work","isArchived":false}"#,
+        )
+        .expect("created project parses");
+
+        assert_eq!(body.name, "Field work");
+        assert_eq!(body.color, None);
+        assert!(!body.is_archived);
     }
 
     #[test]

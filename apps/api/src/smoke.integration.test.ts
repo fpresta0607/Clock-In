@@ -83,6 +83,17 @@ integration(integrationDescription, () => {
     expect(listed[0]).toMatchObject({ name: "General", isArchived: false });
     const projectId = listed[0].id;
 
+    const created = await app.request("/projects", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({ name: "Smoke Side Project" }),
+    });
+    expect(created.status).toBe(201);
+    const createdProject = await created.json();
+    expect(createdProject).toMatchObject({ name: "Smoke Side Project", isArchived: false });
+    const relisted = (await (await app.request("/projects", { headers: authorized })).json()).projects;
+    expect(relisted.map((project: { name: string }) => project.name)).toEqual(["General", "Smoke Side Project"]);
+
     const startedAt = new Date(Date.now() - 60_000).toISOString();
     const start = await app.request("/sessions", {
       method: "POST",

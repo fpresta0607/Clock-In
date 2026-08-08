@@ -29,6 +29,7 @@ class MemoryProjects implements ProjectRepository {
   public async findForMember(_subject: AuthenticatedSubject, projectId: string): Promise<ProjectRecord | null> {
     return this.records.find((record) => record.id === projectId) ?? null;
   }
+  public async createForMember(): Promise<ProjectRecord> { throw new Error("not implemented"); }
 }
 
 class MemoryPathMappings implements PathMappingRepository {

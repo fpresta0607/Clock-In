@@ -189,6 +189,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [accountError, setAccountError] = useState<string | undefined>();
   const [projectId, setProjectId] = useState("");
   const [description, setDescription] = useState("");
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [newProjectBusy, setNewProjectBusy] = useState(false);
+  const [newProjectError, setNewProjectError] = useState<string | undefined>();
+  const [switchBusy, setSwitchBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [retryPendingBusy, setRetryPendingBusy] = useState(false);
   const [conflictBusy, setConflictBusy] = useState(false);
@@ -233,6 +238,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const clearAccountFields = (clearEmail = false): void => {
     setProjectId("");
     setDescription("");
+    setNewProjectOpen(false);
+    setNewProjectName("");
+    setNewProjectError(undefined);
+    setSwitchBusy(false);
     setPassword("");
     setName("");
     setInviteCode("");
@@ -364,6 +373,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setRetryPendingBusy(false);
     setConflictBusy(false);
     setLogoutBusy(false);
+    setNewProjectBusy(false);
+    setSwitchBusy(false);
   }, [bridge]);
 
   useEffect(() => {
@@ -557,6 +568,90 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     } catch {
       // A failed dismiss is self-healing: the next status poll re-raises the
       // prompt if the host still holds the suggestion.
+    }
+  };
+
+  /// Creates a project from the start form, then re-bootstraps so the picker
+  /// gains it everywhere (idle form, running hero, mapping form) from one
+  /// authoritative account read. The new project is preselected on success.
+  const createProject = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    const name = newProjectName.trim();
+    if (newProjectBusy || name === "") return;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
+    setNewProjectBusy(true);
+    setNewProjectError(undefined);
+    try {
+      const created = await service.projectCreate({ name });
+      if (!isRequestCurrent()) return;
+      const request = service.bootstrap();
+      bootstrapRequests.current.set(service, request);
+      const snapshot = await request;
+      if (!isRequestCurrent()) return;
+      await applySnapshot(snapshot, service, () => isCurrent(service, generation), epoch);
+      if (!isRequestCurrent()) return;
+      setProjectId(created.id);
+      setNewProjectName("");
+      setNewProjectOpen(false);
+    } catch (error: unknown) {
+      if (isRequestCurrent()) setNewProjectError(bridgeError(error).message);
+    } finally {
+      if (isRequestCurrent()) setNewProjectBusy(false);
+    }
+  };
+
+  /// One-click project switch while running: stop the current session, then
+  /// start a fresh one on the picked project. A failed stop aborts the switch
+  /// and lands on the same error surface as a manual stop.
+  const switchProject = async (nextProjectId: string): Promise<void> => {
+    if (state.kind !== "running" || switchBusy) return;
+    if (nextProjectId === state.running.projectId || !state.projects.some((project) => project.id === nextProjectId)) return;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
+    setSwitchBusy(true);
+    const stopInput = {
+      sessionId: state.running.sessionId,
+      stoppedAt: new Date().toISOString(),
+      idleSeconds: stopIdleSeconds(state.away, monitorStatus?.sessionIdleSeconds),
+    };
+    dispatch({ type: "stop-requested", stoppedAt: stopInput.stoppedAt });
+    try {
+      await service.stop(stopInput);
+    } catch (error: unknown) {
+      if (isRequestCurrent()) {
+        const problem = bridgeError(error);
+        if (problem.kind === "auth") resetToSignIn(problem.message);
+        else if (problem.kind === "transient") dispatch({ type: "stop-pending", message: problem.message });
+        else dispatch({ type: "stop-failed", message: problem.message });
+        setSwitchBusy(false);
+      }
+      return;
+    }
+    if (!isRequestCurrent()) return;
+    dispatch({ type: "stop-confirmed" });
+    const start: StartIntent = {
+      clientId: crypto.randomUUID(),
+      projectId: nextProjectId,
+      description: "",
+      startedAt: new Date().toISOString(),
+    };
+    dispatch({ type: "start-requested", start });
+    setDescription("");
+    try {
+      const running = await service.start(start);
+      if (isRequestCurrent()) dispatch({ type: "start-confirmed", running });
+    } catch (error: unknown) {
+      if (!isRequestCurrent()) return;
+      const problem = bridgeError(error);
+      if (problem.kind === "auth") resetToSignIn(problem.message);
+      else dispatch({ type: "start-failed", message: problem.message });
+    } finally {
+      if (isRequestCurrent()) setSwitchBusy(false);
     }
   };
 
@@ -917,6 +1012,15 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             {awayDecision && (
               <p className="session-meta">{awayDecision === "keep" ? "Away time kept — it stays billable." : "Away time will be trimmed at stop."}</p>
             )}
+            <label className="hero-project">Project
+              <select
+                value={activeRunning.projectId}
+                disabled={state.kind === "stopping" || switchBusy}
+                onChange={(event) => void switchProject(event.target.value)}
+              >
+                {account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              </select>
+            </label>
             <button className="stop-button" type="button" disabled={state.kind === "stopping"} onClick={() => void stopTimer()}>{state.kind === "stopping" ? "Stopping…" : "Stop timer"}</button>
           </section>
         ) : (
@@ -925,6 +1029,18 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             {state.kind === "idle" && state.error && <p className="form-error" role="alert">{state.error}</p>}
             {state.kind === "pending-sync" && <><div className="sync-banner" role="status"><span>{state.message}</span><button type="button" disabled={retryPendingBusy} onClick={() => void retryPending()}>{retryPendingBusy ? "Retrying…" : "Retry sync"}</button></div>{state.error && <p className="form-error" role="alert">{state.error}</p>}</>}
             <label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Select active project</option>{account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+            {newProjectOpen ? (
+              <form className="new-project-form" onSubmit={createProject}>
+                <label>New project name<input value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} maxLength={80} placeholder="e.g. Client work" autoComplete="off" required /></label>
+                {newProjectError && <p className="form-error" role="alert">{newProjectError}</p>}
+                <div className="new-project-actions">
+                  <button className="signal-button" type="submit" disabled={newProjectBusy || newProjectName.trim() === ""}>{newProjectBusy ? "Creating…" : "Create project"}</button>
+                  <button className="outline-button" type="button" disabled={newProjectBusy} onClick={() => { setNewProjectOpen(false); setNewProjectName(""); setNewProjectError(undefined); }}>Cancel</button>
+                </div>
+              </form>
+            ) : (
+              <button className="new-project-trigger" type="button" onClick={() => setNewProjectOpen(true)}>New project…</button>
+            )}
             <label>Description <span className="optional">optional</span><input value={description} onChange={(event) => setDescription(event.target.value)} maxLength={1000} placeholder="What are you working on?" /></label>
             <div className="entry-foot"><button className="signal-button" type="button" disabled={state.kind === "starting" || state.kind === "pending-sync" || !hasSelectedProject} onClick={() => void startTimer()}>{state.kind === "starting" ? "Starting…" : "Start timer"}</button></div>
           </section>

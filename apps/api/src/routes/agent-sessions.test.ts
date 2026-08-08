@@ -150,6 +150,7 @@ class MemoryTimers implements Pick<SessionRepository, "findRunning"> {
 class Projects implements ProjectRepository {
   public async listForMember() { return []; }
   public async findForMember() { return null; }
+  public async createForMember(): Promise<never> { throw new Error("not implemented"); }
 }
 
 function runningTimer() {
