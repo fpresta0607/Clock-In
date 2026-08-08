@@ -78,7 +78,7 @@ h2 { font-size: 1.05rem; font-weight: 800; }
 select { appearance: auto; }
 
 .idle-panel h2 { margin-bottom: 2px; }
-.entry-foot { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 14px; color: var(--text-secondary); font-size: .72rem; }
+.entry-foot { display: flex; align-items: center; justify-content: flex-end; gap: 14px; margin-top: 14px; color: var(--text-secondary); font-size: .72rem; }
 
 .signal-button, .stop-button, .outline-button, .sync-banner button { min-height: 39px; padding: 8px 16px; font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; }
 .signal-button { border: 1px solid var(--accent-green); background: var(--accent-green); color: #03130c; transition: background .15s ease, border-color .15s ease; }

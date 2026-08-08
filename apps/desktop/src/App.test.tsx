@@ -213,7 +213,7 @@ describe("App", () => {
     render(<App bridge={bridge} />);
     await screen.findByRole("option", { name: "Field work" });
     await person.selectOptions(screen.getByLabelText("Project"), project.id);
-    await person.type(screen.getByLabelText("Description"), "Inspect relay");
+    await person.type(screen.getByLabelText(/Description/), "Inspect relay");
     await person.click(screen.getByRole("button", { name: "Start timer" }));
     await waitFor(() => expect(bridge.start).toHaveBeenCalledTimes(1));
     expect(await screen.findByRole("button", { name: "Stop timer" })).toBeVisible();
@@ -544,7 +544,7 @@ describe("App", () => {
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
     await person.selectOptions(await screen.findByLabelText("Project"), project.id);
-    await person.type(screen.getByLabelText("Description"), "Account A work");
+    await person.type(screen.getByLabelText(/Description/), "Account A work");
     const dialog = await openSettings(person);
     await person.click(await within(dialog).findByRole("button", { name: "Log out" }));
     expect(await screen.findByRole("heading", { name: "Clock in" })).toBeVisible();
@@ -554,7 +554,7 @@ describe("App", () => {
     await person.click(screen.getByRole("button", { name: "Sign in" }));
     expect(await screen.findByRole("option", { name: "Account B work" })).toBeVisible();
     expect(screen.getByLabelText("Project")).toHaveValue("");
-    expect(screen.getByLabelText("Description")).toHaveValue("");
+    expect(screen.getByLabelText(/Description/)).toHaveValue("");
     expect(screen.getByRole("button", { name: "Start timer" })).toBeDisabled();
     await person.click(screen.getByRole("button", { name: "Start timer" }));
     expect(bridge.start).not.toHaveBeenCalled();
@@ -995,7 +995,7 @@ describe("App", () => {
     render(<App bridge={bridge} />);
 
     await waitFor(() => expect(bridge.meStats).toHaveBeenCalledTimes(1));
-    expect(bridge.meStats).toHaveBeenCalledWith(expect.stringMatching(/T\d{2}:00:00/));
+    expect(bridge.meStats).toHaveBeenCalledWith(expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
     const panel = await screen.findByRole("region", { name: "Today so far" });
     expect(await within(panel).findByText("2h", { selector: "strong" })).toBeInTheDocument();
     const codeRow = within(panel).getByText("VS Code").closest("li");
@@ -1040,7 +1040,7 @@ describe("App", () => {
     const monday = new Date();
     monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
     monday.setHours(0, 0, 0, 0);
-    expect(bridge.meStats).toHaveBeenLastCalledWith(monday.toISOString());
+    expect(bridge.meStats).toHaveBeenLastCalledWith(monday.toISOString().slice(0, 10));
     expect(screen.getByRole("region", { name: "This week" })).toBeInTheDocument();
   });
 

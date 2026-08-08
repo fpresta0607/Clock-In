@@ -118,6 +118,15 @@ integration(integrationDescription, () => {
     const text = await csv.text();
     expect(text).toContain("General");
     expect(text).toContain("Smoke work");
+
+    // Ranged stats bind the date bounds through raw sql`` interpolation; this
+    // is the only coverage that runs that serialization against a real server.
+    const today = new Date().toISOString().slice(0, 10);
+    const stats = await app.request(`/me/stats?from=${today}&to=${today}`, { headers: authorized });
+    expect(stats.status).toBe(200);
+    const statsBody = await stats.json();
+    expect(statsBody.totalDurationSeconds).toBe(stopped.durationSeconds);
+    expect(statsBody.apps).toEqual([]);
   }, 60_000);
 
   it("keeps another account's data out of this account's projects and reports", async () => {

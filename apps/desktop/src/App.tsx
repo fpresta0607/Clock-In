@@ -145,7 +145,8 @@ const rangeStart = (range: StatsRange): string => {
   const start = new Date();
   if (range === "week") start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
   start.setHours(0, 0, 0, 0);
-  return start.toISOString();
+  // The API reads calendar days, not timestamps: a full ISO datetime is a 400.
+  return start.toISOString().slice(0, 10);
 };
 
 type TitlebarProps = {
@@ -924,8 +925,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             {state.kind === "idle" && state.error && <p className="form-error" role="alert">{state.error}</p>}
             {state.kind === "pending-sync" && <><div className="sync-banner" role="status"><span>{state.message}</span><button type="button" disabled={retryPendingBusy} onClick={() => void retryPending()}>{retryPendingBusy ? "Retrying…" : "Retry sync"}</button></div>{state.error && <p className="form-error" role="alert">{state.error}</p>}</>}
             <label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Select active project</option>{account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-            <label>Description<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={1000} rows={3} placeholder="What are you working on?" /></label>
-            <div className="entry-foot"><span>{description.length}/1000</span><button className="signal-button" type="button" disabled={state.kind === "starting" || state.kind === "pending-sync" || !hasSelectedProject} onClick={() => void startTimer()}>{state.kind === "starting" ? "Starting…" : "Start timer"}</button></div>
+            <label>Description <span className="optional">optional</span><input value={description} onChange={(event) => setDescription(event.target.value)} maxLength={1000} placeholder="What are you working on?" /></label>
+            <div className="entry-foot"><button className="signal-button" type="button" disabled={state.kind === "starting" || state.kind === "pending-sync" || !hasSelectedProject} onClick={() => void startTimer()}>{state.kind === "starting" ? "Starting…" : "Start timer"}</button></div>
           </section>
         )}
 

@@ -602,8 +602,10 @@ export class DrizzleReportRepository implements ReportRepository {
     subject: AuthenticatedSubject,
     query: ReportQuery,
   ): Promise<AppTotalRecord[]> {
-    const rangeStart = query.from === undefined ? sql`${activitySegments.startedAt}` : sql`${query.from}`;
-    const rangeEnd = query.toExclusive === undefined ? sql`${activitySegments.endedAt}` : sql`${query.toExclusive}`;
+    // Raw sql`` interpolation bypasses drizzle's Date mapping, and postgres-js
+    // cannot serialize a bare Date — bind the bounds as ISO strings instead.
+    const rangeStart = query.from === undefined ? sql`${activitySegments.startedAt}` : sql`${query.from.toISOString()}`;
+    const rangeEnd = query.toExclusive === undefined ? sql`${activitySegments.endedAt}` : sql`${query.toExclusive.toISOString()}`;
     const duration = sql<string | null>`sum(greatest(0, extract(epoch from
       least(${activitySegments.endedAt}, ${rangeEnd})
       - greatest(${activitySegments.startedAt}, ${rangeStart}))))`;
