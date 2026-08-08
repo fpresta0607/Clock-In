@@ -309,6 +309,16 @@ pub struct MeStats {
     pub total_duration_seconds: u64,
     pub corroborated_seconds: u64,
     pub projects: Vec<MeStatsProject>,
+    // Without this field serde silently drops the array and the TS bridge
+    // rejects the whole response as invalid.
+    pub apps: Vec<MeStatsApp>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeStatsApp {
+    pub process_name: String,
+    pub duration_seconds: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -884,10 +894,9 @@ mod tests {
 
     #[test]
     fn reads_a_created_project_without_a_color() {
-        let body: ProjectListItem = serde_json::from_str(
-            r#"{"id":"p1","name":"Field work","isArchived":false}"#,
-        )
-        .expect("created project parses");
+        let body: ProjectListItem =
+            serde_json::from_str(r#"{"id":"p1","name":"Field work","isArchived":false}"#)
+                .expect("created project parses");
 
         assert_eq!(body.name, "Field work");
         assert_eq!(body.color, None);
@@ -1044,7 +1053,11 @@ mod tests {
                     "durationSeconds": 7200,
                     "corroboratedSeconds": 5400,
                     "sessionCount": 3
-                }]
+                }],
+                "apps": [
+                    {"processName": "Code.exe", "durationSeconds": 4800},
+                    {"processName": "chrome.exe", "durationSeconds": 1200}
+                ]
             }"#,
         )
         .expect("stats parse");
@@ -1053,6 +1066,8 @@ mod tests {
         assert_eq!(stats.filters.to, None);
         assert_eq!(stats.projects[0].project.name, "Clock-In");
         assert_eq!(stats.projects[0].corroborated_seconds, 5400);
+        assert_eq!(stats.apps[0].process_name, "Code.exe");
+        assert_eq!(stats.apps[0].duration_seconds, 4800);
     }
 
     #[test]
