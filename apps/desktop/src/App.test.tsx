@@ -333,6 +333,23 @@ describe("App", () => {
     expect(screen.getByLabelText("Project")).toHaveValue(projectB.id);
   });
 
+  it("refreshes today's stats and the board after a mid-timer project switch", async () => {
+    const switched = { ...start, projectId: projectB.id, sessionId: "00000000-0000-4000-8000-000000000201" };
+    const bridge = bridgeFor({
+      bootstrap: vi.fn().mockResolvedValue({ kind: "running", user, projects: [project, projectB], running, source: "server-only" }),
+      start: vi.fn().mockResolvedValue(switched),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await waitFor(() => expect(bridge.meStats).toHaveBeenCalledTimes(1));
+    expect(bridge.orgOverview).toHaveBeenCalledTimes(1);
+    await person.selectOptions(await screen.findByLabelText("Project"), projectB.id);
+
+    await waitFor(() => expect(bridge.meStats).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(bridge.orgOverview).toHaveBeenCalledTimes(2));
+  });
+
   it("aborts the project switch when the stop fails", async () => {
     const bridge = bridgeFor({
       bootstrap: vi.fn().mockResolvedValue({ kind: "running", user, projects: [project, projectB], running, source: "server-only" }),

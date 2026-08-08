@@ -203,6 +203,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [statsRange, setStatsRange] = useState<StatsRange>("today");
   const [stats, setStats] = useState<MeStats | undefined>();
   const [statsError, setStatsError] = useState<string | undefined>();
+  const [confirmedStops, setConfirmedStops] = useState(0);
   const [settings, setSettings] = useState<MonitorSettings | undefined>();
   const [settingsError, setSettingsError] = useState<string | undefined>();
   const [awayThresholdDraft, setAwayThresholdDraft] = useState("");
@@ -408,7 +409,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       },
     );
     return () => { active = false; };
-  }, [bridge, state.kind === "idle", state.kind === "sign-in"]);
+  }, [bridge, confirmedStops, state.kind === "idle", state.kind === "booting" || state.kind === "sign-in"]);
 
   // The Today card is always on screen, so stats load with the account and
   // refresh on the same transitions as the board (a stopped timer changes
@@ -433,7 +434,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       },
     );
     return () => { active = false; };
-  }, [bridge, statsRange, state.kind === "idle", state.kind === "sign-in"]);
+  }, [bridge, statsRange, confirmedStops, state.kind === "idle", state.kind === "booting" || state.kind === "sign-in"]);
 
   // Monitor status poll: fires on every state change (so a sign-in, start, or
   // stop refreshes it immediately, and a fresh account epoch is captured after
@@ -634,6 +635,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     }
     if (!isRequestCurrent()) return;
     dispatch({ type: "stop-confirmed" });
+    setConfirmedStops((count) => count + 1);
     const start: StartIntent = {
       clientId: crypto.randomUUID(),
       projectId: nextProjectId,
@@ -673,7 +675,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
     try {
       await service.stop(input);
-      if (isRequestCurrent()) dispatch({ type: "stop-confirmed" });
+      if (isRequestCurrent()) {
+        dispatch({ type: "stop-confirmed" });
+        setConfirmedStops((count) => count + 1);
+      }
     } catch (error: unknown) {
       if (!isRequestCurrent()) return;
       const problem = bridgeError(error);
