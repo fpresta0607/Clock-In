@@ -43,6 +43,9 @@ pub const POLL_INTERVAL_SECONDS: u64 = 30;
 
 /// A poll reads "idle" once the last input is at least this old — one poll
 /// interval, so a single quiet moment between ticks still reads as active.
+// Only the Windows poll source reads this; non-Windows builds keep it for
+// tests and documentation.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 const IDLE_THRESHOLD_SECONDS: u32 = POLL_INTERVAL_SECONDS as u32;
 
 /// How long an open agent session without a fresh event still counts as
