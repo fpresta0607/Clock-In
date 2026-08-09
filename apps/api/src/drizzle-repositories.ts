@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import { generateInviteCode, type AgentSource } from "@clock-in/shared";
-import { and, asc, count, desc, eq, gt, gte, isNotNull, lt, ne, or, sql, sum } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, isNotNull, lt, ne, not, or, sql, sum } from "drizzle-orm";
 import {
   activitySegments,
   agentSessions,
@@ -29,6 +29,7 @@ import {
   type ActivitySegmentRepository,
   type AgentSessionRecord,
   type AgentSessionRepository,
+  type AgentSessionStaleExclusion,
   type AgentSessionStaleCutoffs,
   type AppTotalRecord,
   type CreatePathMapping,
@@ -935,7 +936,18 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
     return rows.length > 0;
   }
 
-  public async reapStale(subject: AuthenticatedSubject, cutoffs: AgentSessionStaleCutoffs, now: Date): Promise<number> {
+  public async reapStale(
+    subject: AuthenticatedSubject,
+    cutoffs: AgentSessionStaleCutoffs,
+    now: Date,
+    excluded: readonly AgentSessionStaleExclusion[] = [],
+  ): Promise<number> {
+    const excludedKeys = excluded.length === 0
+      ? undefined
+      : not(or(...excluded.map((key) => and(
+        eq(agentSessions.source, key.source),
+        eq(agentSessions.externalSessionId, key.externalSessionId),
+      ))));
     const rows = await this.db
       .update(agentSessions)
       .set({ status: "ended", endedAt: sql`${agentSessions.lastEventAt}`, updatedAt: now })
@@ -947,6 +959,7 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
           and(eq(agentSessions.source, "browser"), lt(agentSessions.lastEventAt, cutoffs.browser)),
           and(ne(agentSessions.source, "browser"), lt(agentSessions.lastEventAt, cutoffs.default)),
         ),
+        excludedKeys,
       ))
       .returning({ id: agentSessions.id });
     return rows.length;

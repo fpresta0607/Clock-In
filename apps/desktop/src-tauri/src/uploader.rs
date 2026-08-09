@@ -80,13 +80,17 @@ async fn upload_once(
         Ok(token) => token,
         Err(error) => {
             if error.kind == ErrorKind::Auth {
-                crate::clear_session_token();
-                let _ = crate::browser::revoke_collection(browser_dir);
-                let _ = crate::browser::discard_collection(browser_dir);
+                if crate::browser::revoke_collection(browser_dir).is_ok() {
+                    crate::clear_session_token();
+                    let _ = crate::browser::discard_collection(browser_dir);
+                }
             }
             return;
         }
     };
+    if let Err(error) = crate::browser::renew_collection_authorization(browser_dir) {
+        eprintln!("clock-in: could not renew browser attribution: {}", error.message);
+    }
 
     let mut complete = upload_segments(client, &token, segments_path).await;
 

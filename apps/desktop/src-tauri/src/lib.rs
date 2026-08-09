@@ -38,7 +38,7 @@ const KEYRING_ACCOUNT: &str = "neon-auth-session";
 
 /// Reads the session token the OS is holding for us, if any. A free function
 /// so the monitor's upload task can mint tokens without borrowing `AppState`.
-pub fn read_session_token() -> Option<String> {
+pub(crate) fn read_session_token() -> Option<String> {
     keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
         .ok()
         .and_then(|entry| entry.get_password().ok())

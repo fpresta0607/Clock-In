@@ -4,6 +4,7 @@ import type { AuthenticatedSubject } from "../auth.js";
 import type {
   AgentSessionRecord,
   AgentSessionRepository,
+  AgentSessionStaleExclusion,
   AgentSessionStaleCutoffs,
   InsertEndedAgentSession,
   PathMappingRecord,
@@ -103,10 +104,17 @@ class MemoryAgentSessions implements AgentSessionRepository {
   }
 
   /** Mirrors staleness reaping: running rows older than their source's cutoff end at lastEventAt. */
-  public async reapStale(current: AuthenticatedSubject, cutoffs: AgentSessionStaleCutoffs): Promise<number> {
+  public async reapStale(
+    current: AuthenticatedSubject,
+    cutoffs: AgentSessionStaleCutoffs,
+    _now?: Date,
+    excluded: readonly AgentSessionStaleExclusion[] = [],
+  ): Promise<number> {
+    const excludedKeys = new Set(excluded.map((entry) => `${entry.source}\u0000${entry.externalSessionId}`));
     let reaped = 0;
     for (const record of this.records) {
       if (record.organizationId !== current.organizationId || record.userId !== current.userId) continue;
+      if (excludedKeys.has(`${record.source}\u0000${record.externalSessionId}`)) continue;
       const cutoff = record.source === "browser" ? cutoffs.browser : cutoffs.default;
       if (record.status === "running" && record.lastEventAt < cutoff) {
         record.status = "ended";
@@ -280,7 +288,7 @@ describe("agent-session service", () => {
     expect(agentSessions.records[0]).toMatchObject({ lastEventAt: new Date("2026-08-06T13:40:00.000Z") });
   });
 
-  it("reaps running sessions stale beyond six hours at their lastEventAt before a batch", async () => {
+  it("reaps running sessions stale beyond six hours at their lastEventAt after a batch", async () => {
     const { agentSessions, service } = createService();
     await service.ingest(subject, [event({ occurredAt: new Date("2026-08-06T07:00:00.000Z") })]);
 
@@ -293,6 +301,42 @@ describe("agent-session service", () => {
       endedAt: new Date("2026-08-06T07:00:00.000Z"),
     });
     expect(agentSessions.records[1]).toMatchObject({ externalSessionId: "fresh", status: "running" });
+  });
+
+  it("accepts a delayed browser batch before reaping its stale prior heartbeat", async () => {
+    const { agentSessions, service } = createService({ mappings: [urlRule] });
+    agentSessions.records.push({
+      id: crypto.randomUUID(),
+      organizationId: ids.organization,
+      userId: ids.user,
+      source: "browser",
+      externalSessionId: "span-1",
+      projectId: ids.project,
+      cwd: null,
+      ruleId: urlRule.id,
+      status: "running",
+      startedAt: new Date("2026-08-06T12:00:00.000Z"),
+      endedAt: null,
+      lastEventAt: new Date("2026-08-06T12:02:00.000Z"),
+      linkedSessionId: null,
+    });
+
+    const result = await service.ingest(subject, [
+      browserEvent({ event: "heartbeat", occurredAt: new Date("2026-08-06T12:03:00.000Z") }),
+      browserEvent({ event: "heartbeat", occurredAt: new Date("2026-08-06T12:20:00.000Z") }),
+      browserEvent({ event: "ended", occurredAt: new Date("2026-08-06T12:20:00.000Z") }),
+    ]);
+
+    expect(result.results).toEqual([
+      { externalSessionId: "span-1", accepted: true },
+      { externalSessionId: "span-1", accepted: true },
+      { externalSessionId: "span-1", accepted: true },
+    ]);
+    expect(agentSessions.records[0]).toMatchObject({
+      status: "ended",
+      endedAt: new Date("2026-08-06T12:20:00.000Z"),
+      lastEventAt: new Date("2026-08-06T12:20:00.000Z"),
+    });
   });
 
   it("exposes reaping for read paths", async () => {

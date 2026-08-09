@@ -15,10 +15,12 @@
 //!
 //! Wire shapes (the extension in `apps/browser-extension` is the peer):
 //! - `{"type":"get-rules"}` is answered with
-//!   `{"type":"rules","rules":[{"id":…,"pattern":…}]}`.
-//! - `{"type":"span-event","event":{"event":…,"externalSessionId":…,"ruleId":…,"occurredAt":…}}`
-//!   is appended to the browser spool with `source` stamped here; no reply.
-//! - `{"type":"tally","entries":[…]}` replaces the local tally file; no reply.
+//!   `{"type":"rules","collectionEnabled":…,"collectionId":…, "rules":[{"id":…,"pattern":…}]}`.
+//! - `{"type":"span-event","collectionId":…, "event":{"event":…,"externalSessionId":…,"ruleId":…,"occurredAt":…}}`
+//!   is appended to the browser spool with `source` stamped here and receives
+//!   `span-ack` after the append or `span-retry` when it must remain queued.
+//! - `{"type":"tally","collectionId":…, "weekStart":…, "entries":[…]}` replaces the local tally file
+//!   and receives `collection-state`, with `clear-tally` first when needed.
 //!
 //! Being launched at all is the handshake: startup drops a marker beside the
 //! spools naming the parent browser, which flips that browser's card to
@@ -60,7 +62,6 @@ struct HostPaths {
     spool: PathBuf,
     rules: PathBuf,
     tally: PathBuf,
-    session_authorized: fn() -> bool,
 }
 
 impl HostPaths {
@@ -74,21 +75,8 @@ impl HostPaths {
             spool: dir.join("browser-spool.jsonl"),
             rules: dir.join("browser-rules.json"),
             tally: dir.join("unmatched-tally.json"),
-            session_authorized: current_session_authorized,
         }
     }
-
-    #[cfg(test)]
-    fn authorized_in_dir(dir: &Path) -> Self {
-        Self {
-            session_authorized: || true,
-            ..Self::in_dir(dir)
-        }
-    }
-}
-
-fn current_session_authorized() -> bool {
-    clock_in_desktop_lib::read_session_token().is_some_and(|session| !session.trim().is_empty())
 }
 
 /// The stdin/stdout loop: read frames until the browser closes the port
@@ -174,7 +162,7 @@ fn collection_state(paths: &HostPaths) -> serde_json::Value {
 }
 
 fn admitted_collection_id(paths: &HostPaths) -> Option<String> {
-    browser::admitted_collection_id_with_session(&paths.dir, (paths.session_authorized)())
+    browser::admitted_collection_id(&paths.dir)
 }
 
 fn rules_reply(mut state: serde_json::Value, rules: Vec<Rule>) -> serde_json::Value {
@@ -384,15 +372,13 @@ mod tests {
 
     fn configured_paths(dir: &Path) -> HostPaths {
         browser::enable_collection(dir, "u1").expect("collection enables");
-        HostPaths::authorized_in_dir(dir)
+        HostPaths::in_dir(dir)
     }
 
     fn signed_out_paths(dir: &Path) -> HostPaths {
         browser::enable_collection(dir, "u1").expect("collection enables");
-        HostPaths {
-            session_authorized: || false,
-            ..HostPaths::in_dir(dir)
-        }
+        browser::revoke_collection(dir).expect("collection revokes");
+        HostPaths::in_dir(dir)
     }
 
     fn span_event_message(paths: &HostPaths, session: &str) -> Vec<u8> {

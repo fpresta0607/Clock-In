@@ -518,4 +518,60 @@ integration(integrationDescription, () => {
     expect(zeroStats.status).toBe(200);
     expect((await zeroStats.json()).sites).toEqual([]);
   }, 60_000);
+
+  it("excludes a 500 ms browser intersection from SQL site totals", async () => {
+    const start = new Date(Date.now() - 60_000);
+    const end = new Date(start.getTime() + 500);
+    const externalSessionId = randomUUID();
+    const created = await app.request("/projects", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({ name: "Subsecond Browser Project" }),
+    });
+    expect(created.status).toBe(201);
+    const projectId = (await created.json()).id;
+
+    const rule = await app.request("/path-mappings", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({ kind: "url_rule", pathPrefix: "subsecond.example/*", projectId }),
+    });
+    expect(rule.status).toBe(200);
+    const ruleId = (await rule.json()).id;
+
+    const span = await app.request("/agent-sessions", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({
+        events: [
+          { source: "browser", externalSessionId, event: "started", occurredAt: start.toISOString(), ruleId },
+          { source: "browser", externalSessionId, event: "ended", occurredAt: end.toISOString(), ruleId },
+        ],
+      }),
+    });
+    expect(span.status).toBe(200);
+
+    const activity = await app.request("/activity/segments", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({
+        segments: [{
+          clientId: randomUUID(),
+          deviceId: randomUUID(),
+          kind: "active",
+          processName: "chrome.exe",
+          startedAt: start.toISOString(),
+          endedAt: end.toISOString(),
+        }],
+      }),
+    });
+    expect(activity.status).toBe(200);
+
+    const day = start.toISOString().slice(0, 10);
+    const stats = await app.request(`/me/stats?from=${day}&to=${day}`, { headers: authorized });
+    expect(stats.status).toBe(200);
+    expect((await stats.json()).sites).not.toContainEqual(expect.objectContaining({
+      mapping: expect.objectContaining({ id: ruleId }),
+    }));
+  }, 60_000);
 });
