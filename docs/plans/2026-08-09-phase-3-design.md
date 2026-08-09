@@ -1,0 +1,115 @@
+# Clock-In Phase 3 Design
+
+## Scope
+
+Phase 3 closes the two accuracy gaps Phase 2 accepted: browser-based work registers only as "active (chrome.exe)" with no project, and the activity monitor's 30-second sampling misattributes per-app time. It delivers **browser attribution** — a browser extension that resolves the active tab against user-defined URL rules and reports only the verdict — plus the **monitor precision groundwork** that attribution depends on: event-driven foreground tracking, UWP process resolution, clock-gap sleep detection, and session-disconnect handling.
+
+The privacy posture is unchanged and load-bearing: full URLs, page titles, and browsing history never leave the browser process. What crosses the boundary is "rule N matched from 14:02 to 14:31" — and rules are text the user wrote themselves.
+
+Out of scope, unchanged: keystroke logging, screenshots, window titles, input content, network-level inspection, macOS/Linux monitoring, mobile.
+
+## Chosen approach
+
+### Monitor precision groundwork
+
+Four fixes to `monitor.rs`, all inside the existing trait/test structure. They are in this phase because browser attribution's honesty depends on them: a browser span only counts where it overlaps an `active` segment *whose process is that browser*, so per-process segment boundaries must be real.
+
+1. **Event-driven foreground changes.** `SetWinEventHook(EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS)` registered on the existing hidden-window thread (the hook requires a message loop; we have one). A foreground change closes the open `active` segment and opens a new one, so per-app time stops being "whatever was foreground last before idle". The 30-second poll remains the idle/active authority; the hook only sharpens process boundaries. Out-of-context delivery is not injection — events arrive over our own message loop.
+2. **UWP resolution.** When the foreground process is `ApplicationFrameHost.exe`, enumerate child windows for the `Windows.UI.Core.CoreWindow` and take its PID. Otherwise every Store-packaged app (Calculator, Photos, new Outlook) reports as ApplicationFrameHost.exe.
+3. **Clock-gap sleep and clock-change detection.** Each tick records wall time (`unix_now`) beside a monotonic reading. Both jumping together beyond two poll intervals means the machine slept without delivering `PBT_APMSUSPEND` — the normal case on Modern Standby hardware — and the gap is synthesized as a `Suspended` segment. Wall time jumping alone means the system clock changed: the open segment is split at the jump and the segment is flagged, which also closes the evidence-forging hole of backdating via the system clock (spooled timestamps are wall-clock today).
+4. **Disconnect events.** The window proc gains `WTS_CONSOLE_DISCONNECT` and `WTS_REMOTE_DISCONNECT` arms mapping to `Locked` — fast user switching and RDP takeover, which the Phase 2 design claimed behaved as locked but the code never implemented. Reconnect raises no event; the next poll closes the span, same as unlock.
+
+### Signal 3: browser attribution
+
+A Manifest V3 extension (Chrome and Edge from one build; Firefox from a thin variant) watches `tabs.onActivated`, `tabs.onUpdated` (URL changes in the active tab), `windows.onFocusChanged`, and `idle.onStateChanged`. It talks to a native messaging host — `clock-in-browser-host`, a sibling binary of `clock-in-hook` — over the browser's sanctioned stdio channel (4-byte length-prefixed JSON; ours capped at 64 KB per message). The browser launches the host itself when the extension connects; the host holds no credentials, opens no sockets, and has exactly two jobs: serve the current rule set to the extension, and append verdict events to a browser spool with the same interprocess-lock, rotation, and drain discipline as the agent spool. The desktop drains both spools on the existing uploader cadence.
+
+Registration is the existing opt-in wizard pattern: per-browser HKCU registry keys (no elevation) pointing at a host manifest whose `allowed_origins` pins the extension ID, with the same backup-and-atomic-write discipline as the Claude Code merge. The status line gains per-browser badges beside the per-CLI hook badges, re-checked on launch.
+
+### Match rules are evaluated inside the browser
+
+The one design decision everything else hangs on. The desktop does not receive URLs and match them; the browser receives rules and matches locally:
+
+1. The user defines URL rules in the desktop settings, stored as `project_path_mappings` rows with `kind = 'url_rule'`: a scheme-less, case-insensitive-host pattern over host + path with a single trailing glob (`github.com/acme/*`, `app.linear.app/acme/*`, `*.figma.com/files/*`). Same 500-char bound, same per-user uniqueness, same membership check as path prefixes.
+2. The desktop writes the rule set (rule id + pattern only) to a rules file beside the spools. The extension fetches it through the host on connect and every five minutes. Longest-pattern-wins at match time; creating a duplicate pattern is rejected exactly as duplicate path prefixes are.
+3. The extension emits events only for rule *hits*: `{ source: "browser", event, externalSessionId, ruleId, occurredAt }`. The URL that matched never leaves the browser. A tab that matches nothing produces nothing — unmatched browsing stays exactly as invisible as it is today.
+4. Unmatched-origin suggestions (the "needs mapping" affordance) are a local-only tally: the extension keeps focus-time per unmatched eTLD+1 in extension storage, the desktop reads it through the host on demand and shows it in the needs-mapping list. It is never uploaded, and the user can clear or disable the tally.
+
+If the rules file is unreadable or stale, the extension matches nothing — the failure mode is silence, not leakage.
+
+### Span lifecycle and debounce
+
+A span opens when a matched rule's tab has held focus — browser window focused, machine not idle per `idle.onStateChanged` — for **15 seconds**; gaps shorter than 15 seconds (tab flips, quick look-aways) merge into the surrounding span rather than fragmenting it. The extension generates the span id, emits `started`, heartbeats every **60 seconds**, and emits `ended` on tab switch, window blur, idle, lock, or browser shutdown. A heavy tab-switcher produces dozens of rows a day, not hundreds — transitions, not ticks, same principle as activity segments.
+
+### Contract reuse: browser spans are agent sessions
+
+Browser spans upload as agent-session events with a new `source: "browser"` — the same batch endpoint, upsert key `(organizationId, userId, source, externalSessionId)`, out-of-order tolerance, freshness bound, and timer linking. The event contract gains an optional `ruleId`; `cwd` becomes conditionally required (exactly one of `cwd`/`ruleId`, by source). On ingest the API resolves `ruleId` against the caller's `url_rule` mappings: a live rule attributes the span to its project; a deleted or foreign rule leaves the span unattributed rather than erroring. Attribution is therefore still server-authoritative — the extension proposes, the stored mapping row decides.
+
+Two deliberate divergences from agent-source behavior:
+
+- **Staleness.** Browser spans reap at **10 minutes** of silence (heartbeats are every 60 seconds), not 6 hours. The reaper window becomes per-source.
+- **The agent-active override does not apply.** An open agent session legitimately suppresses away auto-stop — an overnight agent run is unattended work. An open browser span means a tab is focused, which says nothing once the human leaves; browser spans never suppress idle trimming or auto-stop.
+
+### Attribution, not corroboration
+
+Browser spans do not join the corroboration union. Machine-active segments already corroborate the time; the browser span's job is to say **which project** the active time belongs to. Concretely: linking to a running timer, attribution-mismatch surfacing, and suggested start all treat browser spans like agent sessions, but corroborated-seconds math is untouched. This keeps the semantics honest — a focused tab on an idle machine attributes nothing and corroborates nothing — and means the reporting contract does not change shape.
+
+`GET /me/stats` gains a `sites` array beside `apps`: per-rule focus totals, computed from browser spans clipped to the caller's `active` segments. The label shown is the rule pattern — text the user wrote — so the stats view introduces no new data class.
+
+### Suggested start
+
+A browser span opening on a mapped rule while no timer runs raises the existing tray prompt with the project preselected — but only after the span survives **60 seconds**, so glancing at GitHub does not prompt. One click starts an attributed timer; dismissal is remembered for the rest of that span. Same hybrid posture as agent sessions: automation proposes, the human confirms.
+
+## Alternatives considered
+
+1. **UI Automation address-bar reading** (how much commercial tracking software works) was rejected: it captures full URLs for every site rather than verdicts for mapped ones, breaks across browser updates, costs a cross-process query per poll, and the browser fights it. The extension is the only route where the browser cooperates.
+2. **Window titles** (org-gated in Phase 2's posture) were rejected for attribution: titles leak document names and email subjects, and are format-unstable across sites — worse signal, worse privacy.
+3. **Shipping URLs to the desktop and matching there** was rejected even though it is simpler: it moves the entire browsing stream across a process boundary to answer a question the extension can answer in place. Verdict-only crossing is the difference between "tracks my work sites" and "reads my history", and Chrome's permission warning will already say the latter — the architecture should make the honest answer "but only rule verdicts ever leave".
+4. **A localhost port instead of native messaging** was rejected for the same reason as in Phase 2: an open port is attack surface and fails silently; native messaging is browser-launched, extension-pinned, and lifecycle-managed.
+5. **A new evidence stream and tables for browser spans** was rejected: the agent-session model (upsert, reaping, linking, freshness) fits exactly, and one divergent enum value plus a per-source reaper window is cheaper than a parallel pipeline.
+6. **Corroborating from browser spans** was rejected: it would double-count what active segments already prove and would make a focused-but-abandoned tab look like verified work.
+
+## Package architecture
+
+- `packages/shared`: `agentSourceValues` gains `"browser"`; `agentSessionEventSchema` gains optional `ruleId` with a source-conditional refinement; mapping schemas gain `kind: "path_prefix" | "url_rule"` and URL-rule pattern validation; `meStatsResponseSchema` gains `sites`.
+- `packages/database`: `agent_source` enum gains `browser` (Neon is PG15+, so `ALTER TYPE … ADD VALUE` migrates cleanly); `project_path_mappings` gains `kind` (default `path_prefix`, reusing the existing `pathPrefix` column and uniqueness for patterns); no new tables.
+- `apps/api`: attribution service resolves `ruleId` for browser-source events; per-source reaper windows; `sites` aggregation in the report repository clipped to active segments; contract validation for the new shapes.
+- `apps/desktop`: the four monitor fixes; `clock-in-browser-host` as a third bin target over the shared `spool` module plus a small stdio-framing module; rules-file writer; wizard registration per browser (registry + manifest) with health badges; needs-mapping list fed by the local tally; settings UI for URL rules; suggested-start wiring for browser spans (override exclusion).
+- `apps/browser-extension` (new workspace package): MV3 service worker in TypeScript, built with Vite; pure modules for rule matching, debounce/coalescing, and span lifecycle; thin adapters over `chrome.*` APIs. One build for Chrome/Edge, a manifest variant for Firefox.
+
+## Data and request flow
+
+Rules flow outward: desktop settings → `project_path_mappings` (server) → rules file (desktop) → host → extension. Verdicts flow inward: extension → host → browser spool → desktop drain → agent-session batch upload → upsert, `ruleId` resolution, timer linking. The desktop raises suggested-start locally from the drain, as it does for agent events. Reports and `/me/stats` read stored rows; browser spans contribute linking, mismatch review, and `sites` totals, never corroborated seconds.
+
+## Security and privacy
+
+- Full URLs, titles, and history never cross the extension boundary; only rule ids and timestamps do. Unmatched origins exist only in extension storage and the desktop's local needs-mapping view, are never uploaded, and are user-clearable.
+- The extension requires the `tabs` permission, which Chrome surfaces as "read your browsing history". That warning is accurate about capability and wrong about behavior; the extension is open source in this repository, and the store listing and the desktop's "what's recorded" panel state exactly what leaves the browser.
+- `clock-in-browser-host` holds no credentials and opens no sockets; the browser launches it with the extension pinned via `allowed_origins`; registration is per-user (HKCU), no elevation. It enforces message-size caps and ignores unknown message types. It must be code-signed with the desktop's certificate, like `clock-in-hook`.
+- Incognito and guest windows are excluded unless the user flips the browser's own per-extension incognito toggle; Clock-In never asks for it.
+- Rule patterns can contain org and project names; they are redacted from logs like `cwd` and shown only to the owning user and org admins.
+- The whole signal is gated behind the same org-level policy switch as monitoring, off until enabled, and pausing monitoring also stops browser-span upload.
+- Enterprise rollout uses the browsers' own force-install policy (`ExtensionInstallForcelist`); Clock-In does not install extensions itself.
+
+## Error handling
+
+Extension-side: if `connectNative` fails (desktop uninstalled, host missing), events queue in extension storage in a bounded ring (oldest dropped; anything older than the 7-day freshness bound is dead weight anyway) and replay on reconnect with backoff. Host-side: malformed frames are dropped without killing the port; spool discipline is Phase 2's (locked whole-line appends, quarantine on parse failure, ack-before-truncate drain). Desktop-side: a missing or stale rules file fails closed to no matching; wizard health checks distinguish "registry entry present, binary missing" from "never registered" and badge each browser accordingly. Server-side: an event whose `ruleId` no longer resolves lands unattributed, not rejected — deleting a rule must not invalidate honest evidence already in flight.
+
+## Testing and verification
+
+Extension logic ships as pure functions — rule matching (longest-wins, case-insensitive host, glob bounds), the debounce/coalesce state machine, span lifecycle over injected clock and event streams — tested in Vitest with no browser. Host tests cover stdio framing, rules serving, and locked spool appends under concurrent writers. Monitor tests cover segment-close-on-foreground-change, UWP PID resolution shape, clock-gap synthesis (joint jump → `Suspended`, wall-only jump → split + flag), and disconnect mapping, all with injected sources. API tests cover the source-conditional event contract, `ruleId` resolution including deleted-rule fallback, per-source reaping, override exclusion, `sites` clipping, and that corroboration math is byte-for-byte unchanged for non-browser evidence. The manual checklist adds: register in Chrome and Edge, map a rule, verify glance-vs-dwell (14s no span, 20s span), tab-flip merging, idle ends the span, suggested start at 60s, incognito silence, and the needs-mapping tally staying local (network inspector shows no origin upload).
+
+## Known gaps and open questions
+
+- **Firefox** needs its own signed build and native-messaging manifest path; ship Chrome/Edge first, Firefox when demand exists. Safari waits for macOS support entirely.
+- **Store distribution**: Chrome on Windows stable does not sideload, so the extension ships via the Web Store (unlisted) and Edge Add-ons; review latency becomes part of the release cadence.
+- **Multi-profile browsers**: registration is per-user but extension install is per-profile; an unregistered profile is invisible, and the health badge cannot see profiles. Accepted; the monitor still records the browser as active.
+- **Path-bearing SPAs** that rewrite URLs without navigation events are covered by `tabs.onUpdated`, but sites that keep state out of the URL entirely (some editors) can only be matched at origin granularity.
+- **Watching a mapped site's video** with hands off the keyboard is attributed browser time on an idle machine: attributed, uncorroborated, and correctly so. The false-idle rescue signals (mic-in-use, presentation mode, media session) remain a later phase, as does input-density sampling.
+- **Rule quality is user labor**: attribution is only as good as the rules, same as path mappings. The needs-mapping tally is the mitigation.
+
+## Deliberate limitations
+
+- Verdict-only reporting is a ceiling as well as a floor: the server can never retroactively ask "what site was that really?" — the evidence does not exist off the machine, by construction.
+- Browser spans attribute; they never corroborate and never suppress idle handling.
+- One running timer per user is unchanged; concurrent mapped tabs in different projects surface as review flags, not split timers.
+- A determined user can fabricate spool lines here as everywhere; Phase 3 keeps raising the visibility of padding, not attempting proof.
