@@ -49,6 +49,7 @@ import {
   TALLY_STORAGE_KEY,
   tallySnapshot,
   type Tally,
+  weekStartAt,
 } from "./tally.js";
 import { tickCredit } from "./tick.js";
 import {
@@ -82,6 +83,8 @@ let unmatchedOrigin: string | null = null;
 // Chrome window is focused. Tab activations outside this window are ignored.
 let focusedWindowId: number | null = null;
 let tabReadGeneration = 0;
+let attentionGeneration = 0;
+const inFlightSpans = new Set<string>();
 let lastTickAt = Date.now();
 let lastTallyFlushAt = 0;
 
@@ -116,12 +119,11 @@ function emitSpanEvents(events: readonly SpanEvent[]): void {
     return;
   }
   for (const event of events) {
-    if (!sendToHost({ type: "span-event", event, collectionId })) {
-      outbox.push(event);
-    }
+    outbox.push(event);
   }
   if (events.length > 0) {
     persistState();
+    flushOutbox();
   }
 }
 
@@ -142,6 +144,8 @@ function resetLocalCollectionState(now: number = Date.now()): void {
   unmatchedOrigin = null;
   focusedWindowId = null;
   tabReadGeneration += 1;
+  attentionGeneration += 1;
+  inFlightSpans.clear();
   lastTickAt = now;
   lastTallyFlushAt = 0;
 }
@@ -149,7 +153,14 @@ function resetLocalCollectionState(now: number = Date.now()): void {
 function settleTally(now: number): void {
   const { creditMs } = tickCredit(now, lastTickAt, TICK_MS);
   if (collectionEnabled && unmatchedOrigin !== null && machine.windowFocused && machine.idleState === "active") {
-    addFocusMilliseconds(tally, unmatchedOrigin, creditMs, now);
+    const creditStartedAt = now - creditMs;
+    const currentWeekStart = weekStartAt(now);
+    if (creditStartedAt < currentWeekStart) {
+      addFocusMilliseconds(tally, unmatchedOrigin, currentWeekStart - creditStartedAt, currentWeekStart - 1);
+      addFocusMilliseconds(tally, unmatchedOrigin, now - currentWeekStart, now);
+    } else {
+      addFocusMilliseconds(tally, unmatchedOrigin, creditMs, now);
+    }
   }
   lastTickAt = now;
 }
@@ -163,6 +174,7 @@ function fenceUnobservedGap(now: number): boolean {
   currentTabId = null;
   unmatchedOrigin = null;
   tabReadGeneration += 1;
+  attentionGeneration += 1;
   emitSpanEvents([
     ...handleInput(machine, { type: "window-focus", focused: false }, lastProvableAt),
     ...advance(machine, now),
@@ -221,13 +233,38 @@ function flushOutbox(): void {
   if (!collectionEnabled || collectionId === undefined) {
     return;
   }
-  const queued = outbox.drain();
-  for (const event of queued) {
-    if (!sendToHost({ type: "span-event", event, collectionId })) {
-      outbox.push(event);
+  for (const event of outbox.snapshot()) {
+    const key = spanKey(event);
+    if (inFlightSpans.has(key)) {
+      continue;
+    }
+    if (sendToHost({ type: "span-event", event, collectionId })) {
+      inFlightSpans.add(key);
+    } else {
+      scheduleReconnect();
+      break;
     }
   }
   persistState();
+}
+
+function spanKey(event: SpanEvent): string {
+  return `${event.event}\u0000${event.externalSessionId}\u0000${event.ruleId}\u0000${event.occurredAt}`;
+}
+
+function sameSpanEvent(left: SpanEvent, right: SpanEvent): boolean {
+  return spanKey(left) === spanKey(right);
+}
+
+function isSpanEvent(value: unknown): value is SpanEvent {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const event = value as Record<string, unknown>;
+  return (event["event"] === "started" || event["event"] === "heartbeat" || event["event"] === "ended") &&
+    typeof event["externalSessionId"] === "string" &&
+    typeof event["ruleId"] === "string" &&
+    typeof event["occurredAt"] === "string";
 }
 
 function isRule(value: unknown): value is UrlRule {
@@ -294,6 +331,20 @@ function connect(): void {
       return;
     }
     const payload = message as Record<string, unknown>;
+    if (payload["type"] === "span-ack" && payload["collectionId"] === collectionId && isSpanEvent(payload["event"])) {
+      const event = payload["event"];
+      inFlightSpans.delete(spanKey(event));
+      if (outbox.remove((candidate) => sameSpanEvent(candidate, event))) {
+        persistState();
+      }
+      flushOutbox();
+      return;
+    }
+    if (payload["type"] === "span-retry" && payload["collectionId"] === collectionId && isSpanEvent(payload["event"])) {
+      inFlightSpans.delete(spanKey(payload["event"]));
+      scheduleReconnect();
+      return;
+    }
     if (payload["type"] === "clear-tally") {
       clearTally(tally);
       lastTickAt = Date.now();
@@ -327,6 +378,7 @@ function connect(): void {
     if (port === opened) {
       port = null;
     }
+    inFlightSpans.clear();
     scheduleReconnect();
   });
   requestRules();
@@ -402,8 +454,13 @@ function reApplyActiveTab(): void {
  * restart): the remembered idle/focus state may be hours stale.
  */
 function revalidateAttention(): void {
+  const generation = attentionGeneration + 1;
+  attentionGeneration = generation;
   void chrome.idle.queryState(IDLE_DETECTION_SECONDS)
     .then((state) => {
+      if (attentionGeneration !== generation) {
+        return;
+      }
       feedMachine({ type: "idle", state: state as IdleState });
     })
     .catch(() => {
@@ -411,6 +468,9 @@ function revalidateAttention(): void {
     });
   void chrome.windows.getLastFocused()
     .then((win) => {
+      if (attentionGeneration !== generation) {
+        return;
+      }
       const focused = win.focused === true && win.id !== undefined;
       focusedWindowId = focused ? (win.id ?? null) : null;
       feedMachine({ type: "window-focus", focused });
@@ -419,6 +479,9 @@ function revalidateAttention(): void {
       }
     })
     .catch(() => {
+      if (attentionGeneration !== generation) {
+        return;
+      }
       focusedWindowId = null;
       feedMachine({ type: "window-focus", focused: false });
     });
@@ -463,6 +526,7 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
   void initialized.then(() => {
     const focused = windowId !== chrome.windows.WINDOW_ID_NONE;
     tabReadGeneration += 1;
+    attentionGeneration += 1;
     focusedWindowId = focused ? windowId : null;
     feedMachine({ type: "window-focus", focused });
     if (focused) {
@@ -474,6 +538,7 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 chrome.idle.setDetectionInterval(IDLE_DETECTION_SECONDS);
 chrome.idle.onStateChanged.addListener((state) => {
   void initialized.then(() => {
+    attentionGeneration += 1;
     feedMachine({ type: "idle", state: state as IdleState });
   });
 });
@@ -483,11 +548,11 @@ chrome.idle.onStateChanged.addListener((state) => {
 // re-validation, so laptop sleep cannot credit hours to a stale origin.
 function runTick(): void {
   const now = Date.now();
-  if (rollTallyIntoCurrentWeek(tally, now)) {
-    persistState();
-  }
   if (!prepareMachineTransition(now)) {
     return;
+  }
+  if (rollTallyIntoCurrentWeek(tally, now)) {
+    persistState();
   }
   emitSpanEvents(advance(machine, now));
   scheduleMachineAdvance();
@@ -508,7 +573,11 @@ chrome.alarms.onAlarm.addListener((alarm) => {
         requestRules();
         break;
       case RECONNECT_ALARM_NAME:
-        connect();
+        if (port === null) {
+          connect();
+        } else {
+          flushOutbox();
+        }
         break;
       case SPAN_ADVANCE_ALARM_NAME:
         advanceMachine(Date.now());

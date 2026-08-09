@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { SPAN_ADVANCE_ALARM_NAME, TICK_ALARM_NAME } from "./schedule.js";
+import { RECONNECT_ALARM_NAME, SPAN_ADVANCE_ALARM_NAME, TICK_ALARM_NAME } from "./schedule.js";
 
 type Listener = (...args: never[]) => void;
 
@@ -16,7 +16,8 @@ function listeners() {
 
 function backgroundHarness(
   tabs: chrome.tabs.Tab[],
-  queryTabs?: () => Promise<chrome.tabs.Tab[]>,
+  queryTabs?: (query: chrome.tabs.QueryInfo) => Promise<chrome.tabs.Tab[]>,
+  getLastFocused: () => Promise<chrome.windows.Window> = () => Promise.resolve({ focused: true, id: 1 }),
 ) {
   const alarm = listeners();
   const activated = listeners();
@@ -39,9 +40,9 @@ function backgroundHarness(
       onActivated: activated,
       onUpdated: updated,
       get: vi.fn((tabId: number) => Promise.resolve(tabsById.get(tabId))),
-      query: vi.fn(() => queryTabs?.() ?? Promise.resolve(activeTabId === undefined ? [] : [tabsById.get(activeTabId)])),
+      query: vi.fn((query: chrome.tabs.QueryInfo) => queryTabs?.(query) ?? Promise.resolve(activeTabId === undefined ? [] : [tabsById.get(activeTabId)])),
     },
-    windows: { WINDOW_ID_CURRENT: -2, WINDOW_ID_NONE: -1, onFocusChanged: focusChanged, getLastFocused: vi.fn(() => Promise.resolve({ focused: true, id: 1 })) },
+    windows: { WINDOW_ID_CURRENT: -2, WINDOW_ID_NONE: -1, onFocusChanged: focusChanged, getLastFocused: vi.fn(getLastFocused) },
     idle: { setDetectionInterval: vi.fn(), onStateChanged: idleChanged, queryState: vi.fn(() => Promise.resolve("active")) },
     runtime: { connectNative: vi.fn(() => port) },
   });
@@ -268,5 +269,92 @@ describe("background startup", () => {
     await settle();
 
     expect(spanMessages(harness.port)).toHaveLength(0);
+  });
+
+  it("discards a delayed attention revalidation after focus changes", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-09T12:00:00.000Z"));
+    let resolveFocusedWindow: (window: chrome.windows.Window) => void = () => undefined;
+    const harness = backgroundHarness(
+      [
+        { id: 1, windowId: 1, url: "https://github.com/acme/project", incognito: false },
+        { id: 2, windowId: 2, url: "https://example.net", incognito: false },
+      ],
+      (query) => Promise.resolve([
+        query.windowId === 1
+          ? { id: 1, windowId: 1, url: "https://github.com/acme/project", incognito: false }
+          : { id: 2, windowId: 2, url: "https://example.net", incognito: false },
+      ]),
+      () => new Promise((resolve) => { resolveFocusedWindow = resolve; }),
+    );
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      rules: [{ id: "rule-1", pattern: "github.com/acme/*" }],
+    } as never);
+    await settle();
+    harness.focusChanged.emit(2 as never);
+    await settle();
+    resolveFocusedWindow({ focused: true, id: 1 });
+    await settle();
+    await vi.advanceTimersByTimeAsync(15_000);
+    harness.alarm.emit({ name: SPAN_ADVANCE_ALARM_NAME } as never);
+    await settle();
+
+    expect(spanMessages(harness.port)).toHaveLength(0);
+  });
+
+  it("splits unmatched focus time at the UTC week boundary", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-09T23:59:30.000Z"));
+    const harness = backgroundHarness([{ id: 1, url: "https://a.example.com", incognito: false }]);
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({ type: "rules", collectionEnabled: true, collectionId: "collection-one", rules: [] } as never);
+    await settle();
+    await vi.advanceTimersByTimeAsync(60_000);
+    harness.alarm.emit({ name: TICK_ALARM_NAME } as never);
+    await settle();
+
+    const tally = hostMessages(harness.port).findLast((message) => message["type"] === "tally");
+    expect(tally).toEqual(expect.objectContaining({
+      entries: [{ origin: "example.com", seconds: 30 }],
+    }));
+  });
+
+  it("retries span delivery until the host acknowledges its durable append", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-09T12:00:00.000Z"));
+    const harness = backgroundHarness([{ id: 1, url: "https://github.com/acme/project", incognito: false }]);
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      rules: [{ id: "rule-1", pattern: "github.com/acme/*" }],
+    } as never);
+    await settle();
+    await vi.advanceTimersByTimeAsync(15_000);
+    harness.alarm.emit({ name: SPAN_ADVANCE_ALARM_NAME } as never);
+    await settle();
+
+    const first = spanMessages(harness.port)[0];
+    expect(first).toBeDefined();
+    harness.portMessages.emit({ type: "span-retry", collectionId: "collection-one", event: first?.["event"] } as never);
+    harness.alarm.emit({ name: RECONNECT_ALARM_NAME } as never);
+    await settle();
+    expect(spanMessages(harness.port)).toHaveLength(2);
+
+    harness.portMessages.emit({ type: "span-ack", collectionId: "collection-one", event: first?.["event"] } as never);
+    harness.alarm.emit({ name: RECONNECT_ALARM_NAME } as never);
+    await settle();
+    expect(spanMessages(harness.port)).toHaveLength(2);
   });
 });

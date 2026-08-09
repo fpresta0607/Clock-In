@@ -275,7 +275,16 @@ fn collection_is_revoked(dir: &Path) -> bool {
 }
 
 pub fn admitted_collection_id(dir: &Path) -> Option<String> {
-    (!collection_is_revoked(dir)).then(|| collection_id(dir)).flatten()
+    admitted_collection_id_with_session(
+        dir,
+        crate::read_session_token().is_some_and(|session| !session.trim().is_empty()),
+    )
+}
+
+pub fn admitted_collection_id_with_session(dir: &Path, session_authorized: bool) -> Option<String> {
+    session_authorized
+        .then(|| (!collection_is_revoked(dir)).then(|| collection_id(dir)).flatten())
+        .flatten()
 }
 
 fn next_collection_id() -> String {
@@ -1144,6 +1153,20 @@ mod tests {
 
         disable_collection(&dir).expect("logout disables collection");
         assert!(collection_id(&dir).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collection_admission_requires_a_current_session_authorization() {
+        let dir = temp_dir("collection-admission");
+        enable_collection(&dir, "user-one").expect("collection enables");
+        let collection_id = collection_id(&dir).expect("collection id exists");
+
+        assert_eq!(admitted_collection_id_with_session(&dir, false), None);
+        assert_eq!(admitted_collection_id_with_session(&dir, true), Some(collection_id));
+        revoke_collection(&dir).expect("collection revokes");
+        assert_eq!(admitted_collection_id_with_session(&dir, true), None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

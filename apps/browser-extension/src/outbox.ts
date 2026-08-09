@@ -40,6 +40,15 @@ export class Outbox<T> {
     this.items = [];
   }
 
+  remove(predicate: (item: T) => boolean): boolean {
+    const index = this.items.findIndex(predicate);
+    if (index === -1) {
+      return false;
+    }
+    this.items.splice(index, 1);
+    return true;
+  }
+
   /** Storage snapshot, oldest first. */
   snapshot(): T[] {
     return [...this.items];
