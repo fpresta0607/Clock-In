@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  addFocusMilliseconds,
   addFocusSeconds,
   clearTally,
   emptyTally,
@@ -65,6 +66,16 @@ describe("tally accumulation", () => {
     expect(tally.entries).toEqual({});
   });
 
+  it("preserves subsecond remainders across focused verdict fragments", () => {
+    const tally = emptyTally();
+    addFocusMilliseconds(tally, "quickbooks.com", 600);
+    expect(tallySnapshot(tally)).toEqual([]);
+    for (let index = 1; index < 100; index += 1) {
+      addFocusMilliseconds(tally, "quickbooks.com", 600);
+    }
+    expect(tallySnapshot(tally)).toEqual([{ origin: "quickbooks.com", seconds: 60 }]);
+  });
+
   it("snapshots in the host's wire shape, longest first", () => {
     const tally = emptyTally();
     addFocusSeconds(tally, "figma.com", 10);
@@ -90,8 +101,8 @@ describe("tally accumulation", () => {
     addFocusSeconds(tally, "quickbooks.com", 75, sunday);
 
     expect(rollTallyIntoCurrentWeek(tally, monday)).toBe(true);
-    expect(tally).toEqual({ weekStart: weekStartAt(monday), entries: {} });
+    expect(tally).toEqual({ weekStart: weekStartAt(monday), entries: {}, remainderMilliseconds: {} });
     expect(restoreTally({ weekStart: weekStartAt(sunday), entries: { "quickbooks.com": 75 } }, monday))
-      .toEqual({ weekStart: weekStartAt(monday), entries: {} });
+      .toEqual({ weekStart: weekStartAt(monday), entries: {}, remainderMilliseconds: {} });
   });
 });

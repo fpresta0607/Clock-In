@@ -227,6 +227,7 @@ fn host_manifest(browser: Browser, host_binary: &Path) -> String {
 }
 
 const COLLECTION_FILE: &str = "browser-collection.json";
+const COLLECTION_REVOCATION_FILE: &str = "browser-collection-revoked";
 const TALLY_CLEAR_FILE: &str = "browser-tally-clear.json";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -234,10 +235,15 @@ const TALLY_CLEAR_FILE: &str = "browser-tally-clear.json";
 struct BrowserCollection {
     account_id: String,
     collection_id: String,
+    admission_id: String,
 }
 
 fn collection_path(dir: &Path) -> PathBuf {
     dir.join(COLLECTION_FILE)
+}
+
+fn collection_revocation_path(dir: &Path) -> PathBuf {
+    dir.join(COLLECTION_REVOCATION_FILE)
 }
 
 fn tally_clear_path(dir: &Path) -> PathBuf {
@@ -248,13 +254,28 @@ fn browser_spool_path(dir: &Path) -> PathBuf {
     dir.join("browser-spool.jsonl")
 }
 
+fn ensure_browser_dir(dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
 fn read_collection(dir: &Path) -> Option<BrowserCollection> {
     let collection = serde_json::from_slice::<BrowserCollection>(&std::fs::read(collection_path(dir)).ok()?).ok()?;
-    (!collection.account_id.trim().is_empty() && !collection.collection_id.trim().is_empty()).then_some(collection)
+    (!collection.account_id.trim().is_empty() && !collection.collection_id.trim().is_empty() && !collection.admission_id.trim().is_empty()).then_some(collection)
 }
 
 pub fn collection_id(dir: &Path) -> Option<String> {
     read_collection(dir).map(|collection| collection.collection_id)
+}
+
+fn collection_is_revoked(dir: &Path) -> bool {
+    match std::fs::metadata(collection_revocation_path(dir)) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        _ => true,
+    }
+}
+
+pub fn admitted_collection_id(dir: &Path) -> Option<String> {
+    (!collection_is_revoked(dir)).then(|| collection_id(dir)).flatten()
 }
 
 fn next_collection_id() -> String {
@@ -290,9 +311,11 @@ pub fn enable_collection(dir: &Path, account_id: &str) -> ApiResult<()> {
     if account_id.is_empty() {
         return Err(BridgeError::new(crate::api::ErrorKind::Validation, "Could not identify the signed-in account."));
     }
+    ensure_browser_dir(dir)
+        .map_err(|_| BridgeError::unknown("Could not enable browser attribution."))?;
     let spool = browser_spool_path(dir);
     spool::with_lock(&spool, || {
-        if read_collection(dir).is_some_and(|collection| collection.account_id == account_id) {
+        if !collection_is_revoked(dir) && read_collection(dir).is_some_and(|collection| collection.account_id == account_id) {
             return Ok(());
         }
         remove_if_exists(&collection_path(dir))?;
@@ -300,20 +323,35 @@ pub fn enable_collection(dir: &Path, account_id: &str) -> ApiResult<()> {
         let body = serde_json::to_vec(&BrowserCollection {
             account_id: account_id.to_string(),
             collection_id: next_collection_id(),
+            admission_id: next_collection_id(),
         })
         .map_err(io::Error::other)?;
-        write_if_changed(&collection_path(dir), &body)
+        write_if_changed(&collection_path(dir), &body)?;
+        remove_if_exists(&collection_revocation_path(dir))
     })
     .map_err(|_| BridgeError::unknown("Could not enable browser attribution."))
 }
 
-pub fn disable_collection(dir: &Path) -> ApiResult<()> {
+pub fn revoke_collection(dir: &Path) -> ApiResult<()> {
+    ensure_browser_dir(dir)
+        .map_err(|_| BridgeError::unknown("Could not disable browser attribution."))?;
+    let spool = browser_spool_path(dir);
+    spool::with_lock(&spool, || write_if_changed_locked(&collection_revocation_path(dir), b"{}"))
+        .map_err(|_| BridgeError::unknown("Could not disable browser attribution."))
+}
+
+pub fn discard_collection(dir: &Path) -> ApiResult<()> {
     let spool = browser_spool_path(dir);
     spool::with_lock(&spool, || {
         remove_if_exists(&collection_path(dir))?;
         discard_browser_evidence(dir)
     })
     .map_err(|_| BridgeError::unknown("Could not disable browser attribution."))
+}
+
+pub fn disable_collection(dir: &Path) -> ApiResult<()> {
+    revoke_collection(dir)?;
+    discard_collection(dir)
 }
 
 /// Silent first-run-and-every-launch registration: rewrite the manifests and
