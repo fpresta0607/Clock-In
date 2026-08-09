@@ -64,6 +64,13 @@
       "when": 1786246191197,
       "tag": "0008_browser_span_rules",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786287719356,
+      "tag": "0009_mapping_kind_check",
+      "breakpoints": true
     }
   ]
 }

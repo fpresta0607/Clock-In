@@ -220,6 +220,28 @@ describe("path-mapping routes", () => {
     }
   });
 
+  it("rejects a kind flip that would pair a url_rule with a filesystem pattern", async () => {
+    const headers = { authorization: bearerHeader, "content-type": "application/json" };
+    const app = createTestApp();
+
+    const created = await app.request("http://api.test/path-mappings", {
+      method: "POST", headers, body: JSON.stringify({ pathPrefix: "C:/dev/clock-in", projectId: ids.project }),
+    });
+    const mapping = await created.json();
+
+    const flip = await app.request(`http://api.test/path-mappings/${mapping.id}`, {
+      method: "PATCH", headers, body: JSON.stringify({ kind: "url_rule" }),
+    });
+    expect(flip.status).toBe(400);
+    await expect(flip.json()).resolves.toEqual({ error: { code: "validation_error", message: "The resulting path mapping is invalid." } });
+
+    const valid = await app.request(`http://api.test/path-mappings/${mapping.id}`, {
+      method: "PATCH", headers, body: JSON.stringify({ kind: "url_rule", pathPrefix: "github.com/acme/*" }),
+    });
+    expect(valid.status).toBe(200);
+    await expect(valid.json()).resolves.toEqual({ ...mapping, kind: "url_rule", pathPrefix: "github.com/acme/*" });
+  });
+
   it("keeps another organization's mappings invisible", async () => {
     const headers = { authorization: bearerHeader, "content-type": "application/json" };
     const otherHeaders = { authorization: otherBearerHeader, "content-type": "application/json" };

@@ -189,6 +189,23 @@ describe("path-mapping service", () => {
     expect(pathMappings.records[0]).toMatchObject({ pathPrefix: "C:/dev/clock-in" });
   });
 
+  it("validates the merged record when flipping kinds, exactly like the create path", async () => {
+    const { pathMappings, service } = createService([existingMapping()]);
+
+    // Flipping a filesystem prefix to a url rule without fixing the pattern is rejected.
+    await expect(service.update(subject, ids.mapping, { kind: "url_rule" }))
+      .rejects.toMatchObject({ code: "validation_error" });
+    expect(pathMappings.records[0]).toMatchObject({ kind: "path_prefix", pathPrefix: "C:/dev/clock-in" });
+
+    // Flipping kind and pattern together works, and the record round-trips.
+    const flipped = await service.update(subject, ids.mapping, { kind: "url_rule", pathPrefix: "github.com/acme/*" });
+    expect(flipped).toMatchObject({ kind: "url_rule", pathPrefix: "github.com/acme/*" });
+
+    // An invalid pattern for the existing url-rule kind is rejected the same way.
+    await expect(service.update(subject, ids.mapping, { pathPrefix: "C:/dev/clock-in" }))
+      .rejects.toMatchObject({ code: "validation_error" });
+  });
+
   it("deletes only the caller's own mappings", async () => {
     const other: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.otherUser };
     const { pathMappings, service } = createService([existingMapping()]);

@@ -281,19 +281,31 @@ fn health_of(dir: &Path, browser: Browser) -> BrowserHealth {
     match host_binary_path() {
         Ok(binary) if !binary.exists() => health(browser, HealthState::BinaryMissing),
         Err(_) => health(browser, HealthState::BinaryMissing),
-        _ => match handshake_browser(dir) {
+        _ => match handshake_browser(dir, crate::monitor::unix_now()) {
             Some(connected) if connected == browser => health(browser, HealthState::Connected),
             _ => health(browser, HealthState::Registered),
         },
     }
 }
 
+/// A handshake marker proves "connected" only while fresh. The browser
+/// relaunches the host - and re-marks - on every extension connect, so an
+/// active extension refreshes the marker many times a day; a marker older
+/// than a day means the extension (or the browser) is gone, and the card
+/// drops back to "registered" rather than claiming Connected forever.
+const HANDSHAKE_STALE_SECONDS: u64 = 24 * 3_600;
+
 /// Which browser's extension has completed a handshake, if any. The host
 /// drops this marker when the browser launches it (that launch *is* the
-/// handshake), naming the parent process it could see.
-fn handshake_browser(dir: &Path) -> Option<Browser> {
+/// handshake), naming the parent process it could see. `now` is injected so
+/// staleness is testable.
+fn handshake_browser(dir: &Path, now: u64) -> Option<Browser> {
     let bytes = std::fs::read(dir.join("browser-handshake.json")).ok()?;
     let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let at = crate::monitor::parse_iso8601(value.get("at")?.as_str()?)?;
+    if now.saturating_sub(at) > HANDSHAKE_STALE_SECONDS {
+        return None;
+    }
     Browser::from_id(value.get("browser")?.as_str()?)
 }
 
@@ -325,6 +337,30 @@ fn parent_browser() -> Option<Browser> {
     None
 }
 
+/// One process-table row: pid, parent pid, executable name.
+struct ProcessEntry {
+    pid: u32,
+    parent_pid: u32,
+    name: String,
+}
+
+/// Finds the parent process's executable name in a full process-table
+/// snapshot: locate our own row for the parent pid, then that row's name.
+/// Pure over the entries so the lookup is testable without real processes.
+/// Parents usually enumerate *before* their children, so the snapshot must
+/// be collected whole before the lookup; a single forward pass that expects
+/// the parent after the child misses the typical case entirely.
+fn parent_name_from_entries(entries: &[ProcessEntry], self_pid: u32) -> Option<String> {
+    let parent_pid = entries
+        .iter()
+        .find(|entry| entry.pid == self_pid)?
+        .parent_pid;
+    entries
+        .iter()
+        .find(|entry| entry.pid == parent_pid)
+        .map(|entry| entry.name.clone())
+}
+
 #[cfg(windows)]
 fn parent_process_name() -> Option<String> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
@@ -344,26 +380,23 @@ fn parent_process_name() -> Option<String> {
             if Process32FirstW(snapshot, &mut entry) == 0 {
                 return None;
             }
-            let self_pid = std::process::id();
-            let mut parent_pid = None;
+            let mut entries = Vec::new();
             loop {
-                if entry.th32ProcessID == self_pid {
-                    parent_pid = Some(entry.th32ParentProcessID);
-                }
-                if let Some(parent) = parent_pid {
-                    if entry.th32ProcessID == parent {
-                        let end = entry
-                            .szExeFile
-                            .iter()
-                            .position(|unit| *unit == 0)
-                            .unwrap_or(entry.szExeFile.len());
-                        return String::from_utf16(&entry.szExeFile[..end]).ok();
-                    }
-                }
+                let end = entry
+                    .szExeFile
+                    .iter()
+                    .position(|unit| *unit == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                entries.push(ProcessEntry {
+                    pid: entry.th32ProcessID,
+                    parent_pid: entry.th32ParentProcessID,
+                    name: String::from_utf16(&entry.szExeFile[..end]).ok()?,
+                });
                 if Process32NextW(snapshot, &mut entry) == 0 {
-                    return None;
+                    break;
                 }
             }
+            parent_name_from_entries(&entries, std::process::id())
         })();
         let _ = CloseHandle(snapshot);
         result
@@ -881,23 +914,91 @@ mod tests {
     #[test]
     fn the_handshake_marker_drives_the_connected_state() {
         let dir = temp_dir("handshake");
-        assert_eq!(handshake_browser(&dir), None);
+        let marked_at = crate::monitor::parse_iso8601("2026-08-09T12:00:00Z").expect("time parses");
+        assert_eq!(handshake_browser(&dir, marked_at), None);
 
         std::fs::write(
             dir.join("browser-handshake.json"),
             r#"{"browser":"chrome","at":"2026-08-09T12:00:00Z"}"#,
         )
         .expect("marker writes");
-        assert_eq!(handshake_browser(&dir), Some(Browser::Chrome));
+        assert_eq!(handshake_browser(&dir, marked_at), Some(Browser::Chrome));
 
         std::fs::write(dir.join("browser-handshake.json"), "junk").expect("marker writes");
         assert_eq!(
-            handshake_browser(&dir),
+            handshake_browser(&dir, marked_at),
             None,
             "a corrupt marker connects nothing"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stale_handshake_marker_drops_back_to_not_connected() {
+        let dir = temp_dir("handshake-stale");
+        let marked_at = crate::monitor::parse_iso8601("2026-08-09T12:00:00Z").expect("time parses");
+        std::fs::write(
+            dir.join("browser-handshake.json"),
+            r#"{"browser":"chrome","at":"2026-08-09T12:00:00Z"}"#,
+        )
+        .expect("marker writes");
+
+        // Inside the window the marker still proves the connection.
+        let fresh = marked_at + HANDSHAKE_STALE_SECONDS - 1;
+        assert_eq!(handshake_browser(&dir, fresh), Some(Browser::Chrome));
+
+        // Past it, the extension is treated as gone: an active one would have
+        // re-marked by now, because the browser relaunches the host on every
+        // connect.
+        let stale = marked_at + HANDSHAKE_STALE_SECONDS + 1;
+        assert_eq!(handshake_browser(&dir, stale), None);
+
+        // A marker without a readable timestamp connects nothing either.
+        std::fs::write(
+            dir.join("browser-handshake.json"),
+            r#"{"browser":"chrome","at":"not-a-time"}"#,
+        )
+        .expect("marker writes");
+        assert_eq!(handshake_browser(&dir, marked_at), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_parent_lookup_finds_the_parent_wherever_it_enumerates() {
+        let entry = |pid: u32, parent_pid: u32, name: &str| ProcessEntry {
+            pid,
+            parent_pid,
+            name: name.to_string(),
+        };
+
+        // The typical order: the parent enumerates before its child.
+        let parent_first = vec![
+            entry(100, 4, "chrome.exe"),
+            entry(200, 100, "clock-in-browser-host.exe"),
+        ];
+        assert_eq!(
+            parent_name_from_entries(&parent_first, 200).as_deref(),
+            Some("chrome.exe")
+        );
+
+        // The order the old single-pass code depended on.
+        let parent_last = vec![
+            entry(200, 100, "clock-in-browser-host.exe"),
+            entry(100, 4, "msedge.exe"),
+        ];
+        assert_eq!(
+            parent_name_from_entries(&parent_last, 200).as_deref(),
+            Some("msedge.exe")
+        );
+
+        // Unknown pids and a missing parent row resolve to nothing.
+        assert_eq!(parent_name_from_entries(&parent_first, 999), None);
+        assert_eq!(
+            parent_name_from_entries(&[entry(200, 100, "host.exe")], 200),
+            None
+        );
     }
 
     #[test]

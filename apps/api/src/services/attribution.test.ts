@@ -71,6 +71,15 @@ describe("resolveProjectForCwd", () => {
     ];
     expect(resolveProjectForCwd("c:/dev/clock-in", mappings)).toBe(projectB);
   });
+
+  it("ignores shorter matches that arrive after the longest one, in any input order", () => {
+    const longestFirst = [
+      { pathPrefix: "C:/dev/clock-in", projectId: projectB },
+      { pathPrefix: "C:/dev", projectId: projectA },
+    ];
+    expect(resolveProjectForCwd("C:/dev/clock-in/apps", longestFirst)).toBe(projectB);
+    expect(resolveProjectForCwd("C:/dev/clock-in/apps", [...longestFirst].reverse())).toBe(projectB);
+  });
 });
 
 describe("resolveProjectForRuleId", () => {

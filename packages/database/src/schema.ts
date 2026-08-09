@@ -279,5 +279,9 @@ export const projectPathMappings = pgTable(
       "project_path_mappings_path_prefix_length_valid",
       sql`char_length(${table.pathPrefix}) between 1 and 500`,
     ),
+    check(
+      "project_path_mappings_kind_valid",
+      sql`${table.kind} in ('path_prefix', 'url_rule')`,
+    ),
   ],
 );

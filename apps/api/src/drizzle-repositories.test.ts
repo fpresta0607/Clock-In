@@ -106,19 +106,13 @@ describe("Drizzle report repository", () => {
   });
 
   it("maps caller-scoped per-rule browser-span totals, preserving postgres sum strings", async () => {
-    const rows = {
-      innerJoin: () => rows,
-      where: () => rows,
-      groupBy: () => rows,
-      orderBy: async () => [{
+    const db = {
+      execute: async () => [{
         mappingId: "01c7e513-b094-4d4c-ae55-21790ae019a4",
         pattern: "github.com/acme/*",
         projectId: input.projectId,
         durationSeconds: "2400",
       }],
-    };
-    const db = {
-      select: () => ({ from: () => rows }),
     } as unknown as DatabaseConnection["db"];
     const repository = new DrizzleReportRepository(db);
     const subject = { organizationId: input.organizationId, userId: input.userId };
@@ -176,5 +170,24 @@ describe("Drizzle path-mapping repository", () => {
       repoUrl: null,
       projectId: input.projectId,
     })).rejects.toMatchObject({ conflict: "path_prefix" });
+  });
+
+  it("throws on an unrecognized stored kind instead of coercing it", async () => {
+    const row = {
+      id: "d1c7e513-b094-4d4c-ae55-21790ae019a4",
+      organizationId: input.organizationId,
+      userId: input.userId,
+      kind: "glob",
+      pathPrefix: "example.com",
+      repoUrl: null,
+      projectId: input.projectId,
+    };
+    const db = {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => [row] }) }) }),
+    } as unknown as DatabaseConnection["db"];
+    const repository = new DrizzlePathMappingRepository(db);
+    const subject = { organizationId: input.organizationId, userId: input.userId };
+
+    await expect(repository.findById(subject, row.id)).rejects.toThrow(`Path mapping ${row.id} has an unrecognized kind: glob`);
   });
 });

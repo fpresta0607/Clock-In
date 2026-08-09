@@ -1473,6 +1473,48 @@ describe("App", () => {
     expect(await screen.findByRole("button", { name: "Connect Chrome" })).toBeInTheDocument();
   });
 
+  it("lets a persistent Turn on failure be skipped to the main screen", async () => {
+    const bridge = bridgeFor({
+      settingsGet: vi.fn().mockResolvedValue({ ...monitorSettings, onboarded: false }),
+      settingsUpdate: vi.fn().mockResolvedValue(monitorSettings),
+      monitorSetEnabled: vi.fn().mockRejectedValue({ kind: "transient", message: "Could not save the settings." }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "Turn on" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not save the settings");
+    // The failure must not be a dead end: skipping lands on the main app.
+    await person.click(screen.getByRole("button", { name: "Skip for now" }));
+    await waitFor(() => expect(bridge.settingsUpdate).toHaveBeenCalledWith({ onboarded: true }));
+    expect(await screen.findByRole("heading", { name: "What are you working on?" })).toBeInTheDocument();
+  });
+
+  it("returns to sign-in when Turn on hits an auth failure", async () => {
+    const bridge = bridgeFor({
+      settingsGet: vi.fn().mockResolvedValue({ ...monitorSettings, onboarded: false }),
+      monitorSetEnabled: vi.fn().mockRejectedValue({ kind: "auth", message: "Session expired" }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "Turn on" }));
+    expect(await screen.findByRole("heading", { name: "Clock in" })).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent("Session expired");
+  });
+
+  it("offers a sign-out escape from the onboarding screens", async () => {
+    const bridge = bridgeFor({
+      settingsGet: vi.fn().mockResolvedValue({ ...monitorSettings, onboarded: false }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "Sign out" }));
+    await waitFor(() => expect(bridge.logout).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("heading", { name: "Clock in" })).toBeVisible();
+  });
+
   it("answers a site question with Yes and creates the whole-site rule", async () => {
     const bridge = bridgeFor({
       suggestionsList: vi.fn().mockResolvedValue([{ origin: "quickbooks.com", seconds: 10_800 }]),

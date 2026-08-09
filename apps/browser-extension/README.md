@@ -15,8 +15,9 @@ Two things never leave the machine at all:
 - The unmatched-origin tally (focus seconds per unmatched eTLD+1) lives in extension storage and is mirrored to the desktop's local needs-mapping view through the native host.
   It is never uploaded, and it is user-clearable.
 - The queued-verdict outbox (bounded ring, oldest dropped) sits in extension storage until the native host is reachable again.
+- The span machine's in-flight state (open span, dwell candidate, session id) sits in extension storage so an MV3 service-worker eviction cannot strand an open span; a restored span still ends correctly on the next tab switch or idle.
 
-Incognito and guest windows are excluded; Clock-In never asks for the browser's incognito toggle.
+Off-the-record tabs are excluded via `tab.incognito` (Chrome's Guest windows report as off-the-record); Clock-In never asks for the browser's incognito toggle.
 
 ## Permissions and why
 
