@@ -59,6 +59,13 @@ export function parsePattern(pattern: string): ParsedPattern | null {
       if (path.endsWith("/")) {
         path = path.slice(0, -1);
       }
+      // `host/*` is the validator's explicit any-path form. Once the
+      // trailing `/*` is removed its stem is empty, which is equivalent to a
+      // host-only rule rather than an exact match on the bare root.
+      if (path.length === 0) {
+        path = null;
+        pathIsGlob = false;
+      }
     } else {
       path = rawPath;
     }

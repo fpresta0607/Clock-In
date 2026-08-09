@@ -1450,6 +1450,22 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "What are you working on?" })).toBeInTheDocument();
   });
 
+  it("shows a neutral browser check while onboarding status is still loading", async () => {
+    const pendingStatus = deferred<typeof idleMonitorStatus>();
+    const bridge = bridgeFor({
+      settingsGet: vi.fn().mockResolvedValue({ ...monitorSettings, onboarded: false }),
+      monitorSetEnabled: vi.fn().mockResolvedValue({ ...monitorSettings, onboarded: false }),
+      monitorStatus: vi.fn().mockReturnValue(pendingStatus.promise),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "Turn on" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Checking for browsers...");
+    expect(screen.queryByText(/No supported browser found/)).not.toBeInTheDocument();
+  });
+
   it("repairs a broken browser connection with one [Fix] click", async () => {
     const bridge = bridgeFor({
       settingsGet: vi.fn().mockResolvedValue({ ...monitorSettings, onboarded: false }),
@@ -1534,6 +1550,16 @@ describe("App", () => {
     await waitFor(() => expect(screen.queryByText(/Is that work\?/)).not.toBeInTheDocument());
   });
 
+  it("uses singular minute copy in the site question", async () => {
+    const bridge = bridgeFor({
+      suggestionsList: vi.fn().mockResolvedValue([{ origin: "quickbooks.com", seconds: 60 }]),
+    });
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByText(/You spent 1 minute on quickbooks\.com/)).toBeInTheDocument();
+    expect(screen.queryByText(/1 minutes/)).not.toBeInTheDocument();
+  });
+
   it("asks the narrower question for a multi-project host before creating the rule", async () => {
     const bridge = bridgeFor({
       suggestionsList: vi.fn().mockResolvedValue([{ origin: "github.com", seconds: 3_600 }]),
@@ -1555,6 +1581,28 @@ describe("App", () => {
       pathPrefix: "github.com/acme/*",
       projectId: project.id,
     }));
+  });
+
+  it("resets narrowing input when polling changes the suggested origin", async () => {
+    const firstBridge = bridgeFor({
+      suggestionsList: vi.fn().mockResolvedValue([{ origin: "github.com", seconds: 3_600 }]),
+    });
+    const secondBridge = bridgeFor({
+      suggestionsList: vi.fn().mockResolvedValue([{ origin: "gitlab.com", seconds: 3_600 }]),
+    });
+    const person = userEvent.setup();
+    const view = render(<App bridge={firstBridge} />);
+
+    await screen.findByText(/github\.com this week/);
+    await person.click(screen.getByRole("button", { name: "Yes" }));
+    await person.type(await screen.findByLabelText("Organization or team name"), "acme");
+
+    view.rerender(<App bridge={secondBridge} />);
+    expect(await screen.findByText(/gitlab\.com this week/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Organization or team name")).not.toBeInTheDocument();
+
+    await person.click(screen.getByRole("button", { name: "Yes" }));
+    expect(await screen.findByLabelText("Organization or team name")).toHaveValue("");
   });
 
   it("answers a site question with No and never asks again for that origin", async () => {

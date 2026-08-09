@@ -48,12 +48,29 @@ describe("parsePattern", () => {
       pathIsGlob: true,
     });
   });
+
+  it("parses an empty glob stem (host/*) as any-path", () => {
+    expect(parsePattern("github.com/*")).toEqual({
+      host: "github.com",
+      anySubdomain: false,
+      path: null,
+      pathIsGlob: false,
+    });
+  });
 });
 
 describe("match", () => {
   it("matches host-only rules on any path", () => {
     expect(match("https://github.com/", rules)).toBe("github-site");
     expect(match("https://github.com/notifications", rules)).toBe("github-site");
+  });
+
+  it("matches an empty glob stem (host/*) on any path, including deep ones", () => {
+    const star: UrlRule[] = [{ id: "star", pattern: "github.com/*" }];
+    expect(match("https://github.com/", star)).toBe("star");
+    expect(match("https://github.com/acme", star)).toBe("star");
+    expect(match("https://github.com/acme/repo/pull/1", star)).toBe("star");
+    expect(match("https://other.com/acme", star)).toBeNull();
   });
 
   it("matches hosts case-insensitively", () => {

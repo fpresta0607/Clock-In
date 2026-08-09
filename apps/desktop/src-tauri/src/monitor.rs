@@ -30,12 +30,12 @@
 //! - The poll stays the idle/active authority; the foreground hook only
 //!   sharpens process boundaries inside an open `active` span, so per-app time
 //!   stops inheriting whatever was foreground last before idle.
-//! - Each tick pairs wall time with a monotonic reading. Both jumping together
-//!   past two poll intervals means the machine slept without delivering
-//!   `PBT_APMSUSPEND` (the normal case on Modern Standby) and the gap is
-//!   synthesized as `suspended`; wall time jumping alone means the system
-//!   clock changed, so the open segment is split at the jump and a notice is
-//!   surfaced in `MonitorStatus`.
+//! - Each tick pairs wall time with Windows `GetTickCount64`, whose elapsed
+//!   time includes suspend. Both jumping together past two poll intervals
+//!   means the machine slept without delivering `PBT_APMSUSPEND` (the normal
+//!   case on Modern Standby) and the gap is synthesized as `suspended`; wall
+//!   time jumping alone means the system clock changed, so the open segment is
+//!   split at the jump and a notice is surfaced in `MonitorStatus`.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -1506,9 +1506,6 @@ async fn poll_loop(
     upload_now: Arc<Notify>,
 ) {
     let source = platform::Poller::new();
-    // Monotonic baseline for the sleep/clock-change detector; paired with the
-    // wall clock each tick, a missed suspend broadcast becomes visible.
-    let clock_start = std::time::Instant::now();
     let mut previous: Option<TickReading> = None;
     let mut tick = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECONDS));
     // A slept machine replays missed ticks one at a time, not in a burst.
@@ -1517,7 +1514,10 @@ async fn poll_loop(
         tick.tick().await;
         let reading = TickReading {
             wall: unix_now(),
-            mono: clock_start.elapsed().as_secs(),
+            // Unlike std::time::Instant/QueryPerformanceCounter on affected
+            // Modern Standby hardware, this Windows source is documented to
+            // include time spent suspended.
+            mono: platform::suspend_inclusive_seconds(),
         };
         let pushed = events.drain();
         let signal = source.poll();
@@ -1720,7 +1720,7 @@ mod platform {
     use windows_sys::Win32::System::RemoteDesktop::{
         WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
     };
-    use windows_sys::Win32::System::SystemInformation::GetTickCount;
+    use windows_sys::Win32::System::SystemInformation::{GetTickCount, GetTickCount64};
     use windows_sys::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     };
@@ -1765,6 +1765,11 @@ mod platform {
                 },
             }
         }
+    }
+
+    /// Seconds since Windows started, including time spent suspended.
+    pub fn suspend_inclusive_seconds() -> u64 {
+        unsafe { GetTickCount64() / 1_000 }
     }
 
     /// Seconds since the last keyboard or mouse input, per `GetLastInputInfo`.
@@ -2028,6 +2033,11 @@ mod platform {
         fn poll(&self) -> ActivitySignal {
             ActivitySignal::Active { process_name: None }
         }
+    }
+
+    /// The poll loop is Windows-only, so this is a compile-time placeholder.
+    pub fn suspend_inclusive_seconds() -> u64 {
+        0
     }
 }
 

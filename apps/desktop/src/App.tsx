@@ -105,16 +105,6 @@ const formatCompact = (seconds: number): string => {
   return `${total}s`;
 };
 
-/// Plain-language durations for the site question: "3 hours", "45 minutes".
-const formatSiteTally = (seconds: number): string => {
-  if (seconds >= 3_600) {
-    const hours = Math.max(1, Math.round(seconds / 3_600));
-    return `${hours} ${hours === 1 ? "hour" : "hours"}`;
-  }
-  const minutes = Math.max(1, Math.round(seconds / 60));
-  return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
-};
-
 /// The site question's plain time figure: "3 hours", "45 minutes".
 const siteTimeLabel = (seconds: number): string => {
   const hours = seconds / 3_600;
@@ -122,7 +112,8 @@ const siteTimeLabel = (seconds: number): string => {
     const rounded = Math.max(1, Math.round(hours));
     return `${rounded} hour${rounded === 1 ? "" : "s"}`;
   }
-  return `${Math.max(1, Math.round(seconds / 60))} minutes`;
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  return `${minutes} minute${minutes === 1 ? "" : "s"}`;
 };
 
 type AppRow = {
@@ -312,6 +303,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const bridgeGeneration = useRef(0);
   const accountEpoch = useRef(0);
   const currentAccountId = useRef<string | undefined>(undefined);
+  const suggestedOrigin = suggestions.find((entry) => !answeredOrigins.includes(entry.origin))?.origin;
 
   if (latestBridge.current !== bridge) bridgeGeneration.current += 1;
   latestBridge.current = bridge;
@@ -484,6 +476,14 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setNewProjectBusy(false);
     setSwitchBusy(false);
   }, [bridge]);
+
+  // Suggestion polling can reorder the tally while the narrowing question is
+  // open. Never carry a segment typed for one origin into the next origin.
+  useEffect(() => {
+    setSiteNarrowing(false);
+    setSiteSegment("");
+    setSiteError(undefined);
+  }, [suggestedOrigin]);
 
   useEffect(() => {
     if (state.kind !== "running") return undefined;
@@ -1340,7 +1340,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   // Screen 1 is one question and one button; screen 2 is one card per browser
   // plus the finish button. Nothing else.
   if (onboardingActive) {
-    const browsers = monitorStatus?.browsers ?? [];
+    const browsers = monitorStatus?.browsers;
     return (
       <main className="app-shell onboarding">
         <WebGLShader />
@@ -1360,7 +1360,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           ) : (
             <section className="card onboarding-panel" aria-labelledby="onboarding-browsers-title">
               <h1 id="onboarding-browsers-title">Connect your browser</h1>
-              {browsers.length === 0 ? (
+              {browsers === undefined ? (
+                <p className="subtle" role="status">Checking for browsers...</p>
+              ) : browsers.length === 0 ? (
                 <p className="subtle">No supported browser found on this computer - you can connect one later from Settings.</p>
               ) : (
                 <div className="browser-list">
@@ -1406,7 +1408,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const awayDecision = state.kind === "running" ? state.away?.decision : undefined;
   // One site question at a time, and only while no other prompt card is up.
   const siteSuggestion = awayPrompt === undefined && suggestion === undefined
-    ? suggestions.find((entry) => !answeredOrigins.includes(entry.origin))
+    ? suggestions.find((entry) => entry.origin === suggestedOrigin)
     : undefined;
   const siteChoice = siteProjectId !== ""
     ? siteProjectId
