@@ -1,4 +1,4 @@
-import type { PathMappingKind } from "@clock-in/shared";
+import { projectPathMappingSchema, type PathMappingKind } from "@clock-in/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import { AppError } from "../errors.js";
@@ -82,6 +82,18 @@ export function createPathMappingService(dependencies: PathMappingServiceDepende
         && await dependencies.pathMappings.findByPathPrefix(subject, input.pathPrefix) !== null) {
         throw duplicatePrefix();
       }
+      // The request schema validates fields in isolation, but kind and pattern
+      // constrain each other — validate the merged record with the same rule
+      // the create path uses, so a bare kind flip cannot pair a url_rule kind
+      // with a filesystem pattern (silently breaking cwd attribution).
+      const merged = projectPathMappingSchema.safeParse({
+        id: existing.id,
+        kind: input.kind ?? existing.kind,
+        pathPrefix: input.pathPrefix ?? existing.pathPrefix,
+        repoUrl: input.repoUrl === undefined ? existing.repoUrl : input.repoUrl,
+        projectId: input.projectId ?? existing.projectId,
+      });
+      if (!merged.success) throw new AppError("validation_error", "The resulting path mapping is invalid.");
       try {
         const updated = await dependencies.pathMappings.update(subject, mappingId, { ...input, updatedAt: clock() });
         if (updated === null) throw new AppError("not_found", "Path mapping not found.");

@@ -5,8 +5,17 @@
 //! happens in this process; only verdict events (`ruleId`, span id,
 //! timestamps) ever leave. URLs, titles, and history are read for local
 //! matching and the local unmatched-origin tally, and are never transmitted.
-//! Unmatched tabs produce nothing; incognito and guest windows are excluded.
+//! Unmatched tabs produce nothing. Off-the-record tabs are excluded via
+//! `tab.incognito` (Chrome's Guest windows report as off-the-record too);
+//! that flag is the entire exclusion mechanism, and Clock-In never asks for
+//! the browser's per-extension incognito toggle.
+//!
+//! Durability: the span machine's subjects are persisted to extension
+//! storage with the tally and outbox, so an MV3 eviction does not strand an
+//! open span. Restore is conservative (see spans.ts); startup re-derives
+//! attention from focus/idle/tab queries before anything else runs.
 
+import { shouldApplyTabActivation } from "./activation.js";
 import { match, type UrlRule } from "./matching.js";
 import {
   Outbox,
@@ -17,6 +26,8 @@ import {
   advance,
   createSpanMachine,
   handleInput,
+  restoreMachine,
+  snapshotMachine,
   type IdleState,
   type SpanEvent,
   type SpanInput,
@@ -30,6 +41,7 @@ import {
   tallySnapshot,
   type Tally,
 } from "./tally.js";
+import { tickCredit } from "./tick.js";
 
 /** The registered native-messaging host name (the desktop registers it). */
 const HOST_NAME = "com.clock_in.browser_host";
@@ -37,12 +49,13 @@ const RULES_REFRESH_MS = 5 * 60 * 1000;
 const TICK_MS = 5_000;
 const TALLY_FLUSH_MS = 60_000;
 const IDLE_DETECTION_SECONDS = 15;
+const MACHINE_STORAGE_KEY = "spanMachine";
 
 let rules: UrlRule[] = [];
 let port: chrome.runtime.Port | null = null;
 let reconnectAttempt = 0;
 
-const machine: SpanMachine = createSpanMachine();
+let machine: SpanMachine = createSpanMachine();
 const outbox = new Outbox<SpanEvent>();
 let tally: Tally = emptyTally();
 
@@ -50,6 +63,9 @@ let tally: Tally = emptyTally();
 // local tally; it is never part of an emitted event.
 let currentTabId: number | null = null;
 let unmatchedOrigin: string | null = null;
+// The window holding OS focus, per windows.onFocusChanged; null while no
+// Chrome window is focused. Tab activations outside this window are ignored.
+let focusedWindowId: number | null = null;
 let lastTickAt = Date.now();
 let lastTallyFlushAt = 0;
 
@@ -57,6 +73,7 @@ function persistState(): void {
   void chrome.storage.local.set({
     [TALLY_STORAGE_KEY]: tally.entries,
     [OUTBOX_STORAGE_KEY]: outbox.snapshot(),
+    [MACHINE_STORAGE_KEY]: snapshotMachine(machine),
   });
 }
 
@@ -85,6 +102,9 @@ function emitSpanEvents(events: readonly SpanEvent[]): void {
 
 function feedMachine(input: SpanInput): void {
   emitSpanEvents(handleInput(machine, input, Date.now()));
+  // Subject changes (candidate starts, suspensions) emit no events but must
+  // still survive an eviction.
+  persistState();
 }
 
 function requestRules(): void {
@@ -132,6 +152,8 @@ function connect(): void {
       // Fail closed: an unusable rule set matches nothing.
       rules = Array.isArray(list) ? list.filter(isRule) : [];
       reconnectAttempt = 0;
+      // A new rule set changes the verdict of the tab already open.
+      reApplyActiveTab();
     }
   });
   opened.onDisconnect.addListener(() => {
@@ -177,7 +199,43 @@ function watchActiveTab(windowId: number): void {
   });
 }
 
+/** Re-evaluates the tracked tab against the current rule set. */
+function reApplyActiveTab(): void {
+  if (currentTabId === null) {
+    return;
+  }
+  void chrome.tabs
+    .get(currentTabId)
+    .then(applyTab)
+    .catch(() => {
+      // The tab vanished; the next activation re-seats the machine.
+    });
+}
+
+/**
+ * Re-derives attention from the platform after a gap (timer sleep, worker
+ * restart): the remembered idle/focus state may be hours stale.
+ */
+function revalidateAttention(): void {
+  void chrome.idle.queryState(IDLE_DETECTION_SECONDS).then((state) => {
+    feedMachine({ type: "idle", state: state as IdleState });
+  });
+  void chrome.windows.getLastFocused().then((win) => {
+    const focused = win.focused === true && win.id !== undefined;
+    focusedWindowId = focused ? (win.id ?? null) : null;
+    feedMachine({ type: "window-focus", focused });
+    if (focused && win.id !== undefined) {
+      watchActiveTab(win.id);
+    }
+  });
+}
+
 chrome.tabs.onActivated.addListener((activeInfo) => {
+  // A tab switch in a window the user is not looking at must not move the
+  // state machine.
+  if (!shouldApplyTabActivation(activeInfo.windowId, focusedWindowId)) {
+    return;
+  }
   void chrome.tabs
     .get(activeInfo.tabId)
     .then(applyTab)
@@ -196,6 +254,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
 chrome.windows.onFocusChanged.addListener((windowId) => {
   const focused = windowId !== chrome.windows.WINDOW_ID_NONE;
+  focusedWindowId = focused ? windowId : null;
   feedMachine({ type: "window-focus", focused });
   if (focused) {
     watchActiveTab(windowId);
@@ -210,31 +269,38 @@ chrome.idle.onStateChanged.addListener((state) => {
 // Chrome-only; Firefox event pages never fire it, so guard the lookup.
 chrome.runtime.onSuspend?.addListener(() => {
   feedMachine({ type: "shutdown" });
+  persistState();
 });
 
 // Steady tick: time-driven span transitions, heartbeat cadence, tally
-// accumulation, and periodic local persistence.
+// accumulation, and periodic local persistence. The wall-clock delta is
+// clamped and gaps trigger re-validation: a laptop sleep must not credit
+// hours to a stale origin or trust stale focus/idle state.
 setInterval(() => {
   const now = Date.now();
-  emitSpanEvents(advance(machine, now));
-  const elapsedSeconds = Math.max(0, Math.round((now - lastTickAt) / 1000));
+  const { creditMs, gapExceeded } = tickCredit(now, lastTickAt, TICK_MS);
   lastTickAt = now;
+  if (gapExceeded) {
+    revalidateAttention();
+  }
+  emitSpanEvents(advance(machine, now));
   if (unmatchedOrigin !== null && machine.windowFocused && machine.idleState === "active") {
-    addFocusSeconds(tally, unmatchedOrigin, elapsedSeconds);
-    if (now - lastTallyFlushAt >= TALLY_FLUSH_MS) {
-      lastTallyFlushAt = now;
-      persistState();
-      sendTally();
-    }
+    addFocusSeconds(tally, unmatchedOrigin, Math.round(creditMs / 1000));
+  }
+  if (now - lastTallyFlushAt >= TALLY_FLUSH_MS) {
+    lastTallyFlushAt = now;
+    persistState();
+    sendTally();
   }
 }, TICK_MS);
 
 // Rule refresh on the design's five-minute cadence.
 setInterval(requestRules, RULES_REFRESH_MS);
 
-// Startup: restore the local tally and any queued verdicts, then connect.
+// Startup: restore the local tally, queued verdicts, and the span machine;
+// re-derive attention from the platform; then connect.
 void chrome.storage.local
-  .get([TALLY_STORAGE_KEY, OUTBOX_STORAGE_KEY])
+  .get([TALLY_STORAGE_KEY, OUTBOX_STORAGE_KEY, MACHINE_STORAGE_KEY])
   .then((stored) => {
     const entries = stored[TALLY_STORAGE_KEY];
     if (typeof entries === "object" && entries !== null) {
@@ -246,6 +312,7 @@ void chrome.storage.local
         outbox.push(event);
       }
     }
-    watchActiveTab(chrome.windows.WINDOW_ID_CURRENT);
+    machine = restoreMachine(stored[MACHINE_STORAGE_KEY], Date.now());
+    revalidateAttention();
     connect();
   });

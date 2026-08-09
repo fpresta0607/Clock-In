@@ -4,6 +4,8 @@ import {
   advance,
   createSpanMachine,
   handleInput,
+  restoreMachine,
+  snapshotMachine,
   type SpanEvent,
   type SpanMachine,
 } from "./spans.js";
@@ -231,5 +233,114 @@ describe("unmatched browsing", () => {
     emitted.push(...focusTab(machine, null, T0 + 120_000));
     emitted.push(...advance(machine, T0 + 300_000));
     expect(emitted).toEqual([]);
+  });
+});
+
+describe("durability across service-worker restarts", () => {
+  /** Simulates an MV3 eviction: JSON storage round-trip into a fresh machine. */
+  function restart(machine: SpanMachine, at: number): SpanMachine {
+    const stored = JSON.parse(JSON.stringify(snapshotMachine(machine))) as unknown;
+    return restoreMachine(stored, at, { newSessionId: () => "span-restored" });
+  }
+
+  it("a restored open span keeps its session id and ends on a later switch", () => {
+    const machine = makeMachine();
+    focusTab(machine, "rule-a", T0);
+    advance(machine, T0 + 15_000); // span-1 opens
+
+    const restored = restart(machine, T0 + 20_000);
+    // The user switched away while the worker was dead; the switch is the
+    // first event the new worker sees.
+    const emitted: SpanEvent[] = [];
+    emitted.push(...focusTab(restored, null, T0 + 21_000));
+    emitted.push(...advance(restored, T0 + 34_999));
+    expect(emitted).toEqual([]);
+    emitted.push(...advance(restored, T0 + 35_000));
+    expect(emitted).toEqual([
+      {
+        event: "ended",
+        externalSessionId: "span-1",
+        ruleId: "rule-a",
+        // Conservative: the gap is stamped at restore time, the earliest
+        // provable moment attention was unverified.
+        occurredAt: iso(T0 + 20_000),
+      },
+    ]);
+  });
+
+  it("a restored span resumes when the same tab still holds focus", () => {
+    const machine = makeMachine();
+    focusTab(machine, "rule-a", T0);
+    advance(machine, T0 + 15_000); // span-1 opens, heartbeat anchored at T0
+
+    const restored = restart(machine, T0 + 20_000);
+    // Startup re-derivation finds the same tab focused: the span continues.
+    const emitted: SpanEvent[] = [];
+    emitted.push(...focusTab(restored, "rule-a", T0 + 21_000));
+    emitted.push(...advance(restored, T0 + 61_000));
+    expect(emitted).toEqual([
+      {
+        event: "heartbeat",
+        externalSessionId: "span-1",
+        ruleId: "rule-a",
+        occurredAt: iso(T0 + 61_000),
+      },
+    ]);
+  });
+
+  it("a restored dwell candidate still opens, anchored at the original focus", () => {
+    const machine = makeMachine();
+    focusTab(machine, "rule-a", T0);
+    advance(machine, T0 + 10_000); // 10 s into the dwell, nothing emitted
+
+    const restored = restart(machine, T0 + 11_000);
+    const emitted: SpanEvent[] = [];
+    emitted.push(...focusTab(restored, "rule-a", T0 + 12_000)); // re-derivation
+    emitted.push(...advance(restored, T0 + 15_000));
+    expect(emitted).toEqual([
+      {
+        event: "started",
+        externalSessionId: "span-restored",
+        ruleId: "rule-a",
+        occurredAt: iso(T0),
+      },
+    ]);
+  });
+
+  it("a restored suspended span ends at its original gap start", () => {
+    const machine = makeMachine();
+    focusTab(machine, "rule-a", T0);
+    advance(machine, T0 + 15_000); // span-1 opens
+    focusTab(machine, "rule-b", T0 + 30_000); // A suspends, B dwells
+
+    const restored = restart(machine, T0 + 35_000);
+    const emitted: SpanEvent[] = [];
+    // A's gap was already running before the restart and now expires.
+    emitted.push(...advance(restored, T0 + 45_000));
+    expect(emitted).toEqual([
+      {
+        event: "ended",
+        externalSessionId: "span-1",
+        ruleId: "rule-a",
+        occurredAt: iso(T0 + 30_000),
+      },
+    ]);
+    // B, re-confirmed focused after the restart, opens on its original anchor.
+    emitted.push(...focusTab(restored, "rule-b", T0 + 46_000));
+    emitted.push(...advance(restored, T0 + 46_000));
+    expect(emitted.map((e) => e.event)).toEqual(["ended", "started"]);
+    expect(emitted[1]).toMatchObject({
+      ruleId: "rule-b",
+      occurredAt: iso(T0 + 30_000),
+    });
+  });
+
+  it("a corrupt snapshot restores to a fresh, silent machine", () => {
+    for (const stored of [null, 42, "junk", { version: 99 }, { version: 1, active: {} }]) {
+      const restored = restoreMachine(stored, T0, { newSessionId: () => "span-x" });
+      expect(restored.active).toBeNull();
+      expect(restored.suspended).toEqual([]);
+      expect(advance(restored, T0 + 120_000)).toEqual([]);
+    }
   });
 });

@@ -171,10 +171,12 @@ class MemoryReports implements ReportRepository {
   /**
    * Mirrors the site-totals SQL: browser spans joined to the caller's live url
    * rules, clipped to fresh active segments and the requested range, heaviest
-   * first. Spans whose rule was deleted drop out with the mapping row.
+   * first. Spans whose rule was deleted drop out with the mapping row, and
+   * concurrent spans on the same rule merge before summing — two tabs on one
+   * rule never count the same wall-clock second twice.
    */
   public async readSiteTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<SiteTotalRecord[]> {
-    const byRule = new Map<string, SiteTotalRecord>();
+    const spansByRule = new Map<string, { mapping: StoredMapping; intervals: { start: number; end: number }[] }>();
     for (const span of this.agents) {
       if (span.organizationId !== subject.organizationId || span.userId !== subject.userId) continue;
       if (span.source !== "browser" || span.ruleId === null) continue;
@@ -183,23 +185,38 @@ class MemoryReports implements ReportRepository {
       if (mapping === undefined) continue;
       const spanEnd = span.endedAt ?? span.lastEventAt;
       if (span.receivedAt.getTime() > spanEnd.getTime() + freshnessWindowMs) continue;
+      const entry = spansByRule.get(mapping.id) ?? { mapping, intervals: [] };
+      entry.intervals.push({ start: span.startedAt.getTime(), end: spanEnd.getTime() });
+      spansByRule.set(mapping.id, entry);
+    }
+    const totals: SiteTotalRecord[] = [];
+    for (const { mapping, intervals } of spansByRule.values()) {
+      // Merge overlapping and touching intervals per rule before summing.
+      const sorted = [...intervals].sort((a, b) => a.start - b.start || a.end - b.end);
+      const merged: { start: number; end: number }[] = [];
+      for (const interval of sorted) {
+        const last = merged[merged.length - 1];
+        if (last !== undefined && interval.start <= last.end) {
+          last.end = Math.max(last.end, interval.end);
+        } else {
+          merged.push({ ...interval });
+        }
+      }
       let seconds = 0;
-      for (const segment of this.segments) {
-        if (segment.organizationId !== subject.organizationId || segment.userId !== subject.userId) continue;
-        if (segment.kind !== "active") continue;
-        if (segment.receivedAt.getTime() > segment.endedAt.getTime() + freshnessWindowMs) continue;
-        const start = Math.max(span.startedAt.getTime(), segment.startedAt.getTime(), query.from?.getTime() ?? 0);
-        const end = Math.min(spanEnd.getTime(), segment.endedAt.getTime(), query.toExclusive?.getTime() ?? Number.MAX_SAFE_INTEGER);
-        seconds += Math.max(0, end - start) / 1_000;
+      for (const span of merged) {
+        for (const segment of this.segments) {
+          if (segment.organizationId !== subject.organizationId || segment.userId !== subject.userId) continue;
+          if (segment.kind !== "active") continue;
+          if (segment.receivedAt.getTime() > segment.endedAt.getTime() + freshnessWindowMs) continue;
+          const start = Math.max(span.start, segment.startedAt.getTime(), query.from?.getTime() ?? 0);
+          const end = Math.min(span.end, segment.endedAt.getTime(), query.toExclusive?.getTime() ?? Number.MAX_SAFE_INTEGER);
+          seconds += Math.max(0, end - start) / 1_000;
+        }
       }
       if (seconds === 0) continue;
-      const existing = byRule.get(mapping.id)
-        ?? { mapping: { id: mapping.id, pattern: mapping.pattern, projectId: mapping.projectId }, durationSeconds: 0 };
-      existing.durationSeconds = (existing.durationSeconds as number) + seconds;
-      byRule.set(mapping.id, existing);
+      totals.push({ mapping: { id: mapping.id, pattern: mapping.pattern, projectId: mapping.projectId }, durationSeconds: seconds });
     }
-    return [...byRule.values()]
-      .sort((a, b) => (b.durationSeconds as number) - (a.durationSeconds as number) || a.mapping.id.localeCompare(b.mapping.id));
+    return totals.sort((a, b) => (b.durationSeconds as number) - (a.durationSeconds as number) || a.mapping.id.localeCompare(b.mapping.id));
   }
 
   public async findProjectForOrganization(): Promise<never> {
@@ -517,7 +534,12 @@ describe("me/stats routes", () => {
       { organizationId: ids.organization, userId: ids.user, source: "browser", ruleId: githubRule, linkedSessionId: null,
         startedAt: new Date("2026-08-05T14:30:00.000Z"), endedAt: new Date("2026-08-05T15:30:00.000Z"),
         lastEventAt: new Date("2026-08-05T15:30:00.000Z"), receivedAt },
-      // A second span on the same rule merges into one total (14:10-14:20).
+      // A second tab on the same rule, 14:35-14:55, is concurrent with the
+      // first span: wall-clock time must not double count, so this adds nothing.
+      { organizationId: ids.organization, userId: ids.user, source: "browser", ruleId: githubRule, linkedSessionId: null,
+        startedAt: new Date("2026-08-05T14:35:00.000Z"), endedAt: new Date("2026-08-05T14:55:00.000Z"),
+        lastEventAt: new Date("2026-08-05T14:55:00.000Z"), receivedAt },
+      // A disjoint span on the same rule merges into one total (14:10-14:20).
       { organizationId: ids.organization, userId: ids.user, source: "browser", ruleId: githubRule, linkedSessionId: null,
         startedAt: new Date("2026-08-05T14:10:00.000Z"), endedAt: new Date("2026-08-05T14:20:00.000Z"),
         lastEventAt: new Date("2026-08-05T14:20:00.000Z"), receivedAt },

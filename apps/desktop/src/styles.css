@@ -241,3 +241,4 @@ select:disabled { opacity: .55; }
 .site-card .site-narrow-form label { display: grid; gap: 5px; font-size: .8rem; }
 .idle-panel .description-field { color: var(--text-secondary); }
 .idle-panel .description-field input { font-size: .78rem; opacity: .8; }
+.onboarding-sign-out { width: auto; margin-top: 14px; justify-self: center; }

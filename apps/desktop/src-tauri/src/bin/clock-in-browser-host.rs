@@ -97,10 +97,25 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
         return Ok(());
     };
     match message.get("type").and_then(|kind| kind.as_str()) {
-        Some("get-rules") => native_messaging::write_json(
-            writer,
-            &serde_json::json!({ "type": "rules", "rules": load_rules(&paths.rules) }),
-        ),
+        Some("get-rules") => {
+            let reply = serde_json::json!({ "type": "rules", "rules": load_rules(&paths.rules) });
+            match native_messaging::write_json(writer, &reply) {
+                Ok(()) => Ok(()),
+                // A rule set that outgrows the 64 KB frame cap fails closed,
+                // the same as a missing or corrupt rules file: log, answer
+                // with an empty set, and keep serving - never take the port
+                // down (the browser would relaunch us into a crash loop).
+                Err(error) => {
+                    eprintln!(
+                        "clock-in-browser-host: could not send the rules ({error}); failing closed to an empty set"
+                    );
+                    native_messaging::write_json(
+                        writer,
+                        &serde_json::json!({ "type": "rules", "rules": [] }),
+                    )
+                }
+            }
+        }
         Some("span-event") => {
             if let Err(error) = append_span_event(message.get("event"), paths) {
                 // The port stays up; the extension's heartbeats mean the span
@@ -461,6 +476,48 @@ mod tests {
             .as_array()
             .expect("entries is an array")
             .is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_oversize_rule_set_fails_closed_and_the_port_keeps_serving() {
+        let dir = temp_dir("oversize-rules");
+        let paths = HostPaths::in_dir(&dir);
+        // Enough rules that the serialized reply clears the 64 KB frame cap.
+        let rules: Vec<serde_json::Value> = (0..700)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("r{index}"),
+                    "pattern": format!("example-{index:04}.com/{}", "a".repeat(60)),
+                })
+            })
+            .collect();
+        let rules_json =
+            serde_json::to_string(&serde_json::json!({ "rules": rules })).expect("rules serialize");
+        assert!(rules_json.len() > native_messaging::MAX_MESSAGE_BYTES);
+        std::fs::write(&paths.rules, &rules_json).expect("the rules file writes");
+
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&framed(br#"{"type":"get-rules"}"#));
+        // The port must survive and answer the next request too.
+        wire.extend_from_slice(&framed(&span_event_message("s1")));
+
+        let mut reader = &wire[..];
+        let mut out = Vec::new();
+        serve(&mut reader, &mut out, &paths).expect("serve runs to EOF");
+
+        let replies = reply_values(&out);
+        assert_eq!(replies.len(), 1, "one answer, not a dead port");
+        assert_eq!(replies[0]["type"], "rules");
+        assert!(
+            replies[0]["rules"]
+                .as_array()
+                .expect("rules is an array")
+                .is_empty(),
+            "an unsendable rule set fails closed to empty"
+        );
+        assert_eq!(spool_lines(&paths.spool).len(), 1, "serving continues");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

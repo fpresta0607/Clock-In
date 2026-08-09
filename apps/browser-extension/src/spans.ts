@@ -14,6 +14,16 @@
 //! - `ended` fires when a gap outlasts the merge window (tab switch, window
 //!   blur, idle, lock) or immediately on shutdown; its `occurredAt` is the
 //!   moment attention was lost, not when the grace period expired.
+//!
+//! Durability: `snapshotMachine`/`restoreMachine` carry the subjects (open
+//! span, dwell candidate, suspended merge-window entries, session ids) across
+//! MV3 service-worker restarts via extension storage. Restore is
+//! conservative: a restored active subject starts suspended with its gap
+//! stamped at restore time, because attention during the dead period is
+//! unprovable. Startup re-derivation (focus/idle/tab queries) resumes it
+//! inside the merge window when nothing changed, so a surviving span keeps
+//! its session id and heartbeat anchor; otherwise it ends with `occurredAt`
+//! at the restore time - under-counting rather than over-crediting.
 
 export type SpanEventKind = "started" | "heartbeat" | "ended";
 
@@ -215,4 +225,84 @@ export function advance(machine: SpanMachine, now: number): SpanEvent[] {
     });
   }
   return emitted;
+}
+
+/** JSON-safe subject shape for extension storage. */
+interface SubjectSnapshot {
+  ruleId: string;
+  since: number;
+  sessionId: string | null;
+  lastHeartbeatAt: number;
+  gapSince: number | null;
+}
+
+/** The durable machine state; versioned so old snapshots can be rejected. */
+export interface SpanMachineSnapshot {
+  version: 1;
+  active: SubjectSnapshot | null;
+  suspended: SubjectSnapshot[];
+}
+
+function subjectSnapshot(subject: Subject): SubjectSnapshot {
+  return {
+    ruleId: subject.ruleId,
+    since: subject.since,
+    sessionId: subject.sessionId,
+    lastHeartbeatAt: subject.lastHeartbeatAt,
+    gapSince: subject.gapSince,
+  };
+}
+
+/** Serializes the subjects; options and attention inputs are re-derived live. */
+export function snapshotMachine(machine: SpanMachine): SpanMachineSnapshot {
+  return {
+    version: 1,
+    active: machine.active === null ? null : subjectSnapshot(machine.active),
+    suspended: machine.suspended.map(subjectSnapshot),
+  };
+}
+
+function isSubjectSnapshot(value: unknown): value is SubjectSnapshot {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate["ruleId"] === "string" &&
+    typeof candidate["since"] === "number" &&
+    (typeof candidate["sessionId"] === "string" || candidate["sessionId"] === null) &&
+    typeof candidate["lastHeartbeatAt"] === "number" &&
+    (typeof candidate["gapSince"] === "number" || candidate["gapSince"] === null)
+  );
+}
+
+/**
+ * Rebuilds a machine from a storage snapshot. The restored active subject is
+ * suspended with its gap stamped at `now` (see the module header for why);
+ * already-suspended subjects keep their original gap start. Anything
+ * unparseable fails closed to a fresh machine: silence, not leakage.
+ */
+export function restoreMachine(
+  snapshot: unknown,
+  now: number,
+  options: SpanMachineOptions = {},
+): SpanMachine {
+  const machine = createSpanMachine(options);
+  if (typeof snapshot !== "object" || snapshot === null) {
+    return machine;
+  }
+  const candidate = snapshot as Record<string, unknown>;
+  if (candidate["version"] !== 1 || !Array.isArray(candidate["suspended"])) {
+    return machine;
+  }
+  const suspended = candidate["suspended"];
+  const active = candidate["active"];
+  if ((active !== null && !isSubjectSnapshot(active)) || !suspended.every(isSubjectSnapshot)) {
+    return machine;
+  }
+  machine.suspended = suspended.map((subject) => ({ ...subject }));
+  if (isSubjectSnapshot(active)) {
+    machine.suspended.unshift({ ...active, gapSince: now });
+  }
+  return machine;
 }

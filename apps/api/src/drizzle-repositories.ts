@@ -662,57 +662,71 @@ export class DrizzleReportRepository implements ReportRepository {
    * segments, both clamped to the requested range — a focused tab on an idle
    * machine attributes nothing. Both sides keep corroboration's seven-day
    * freshness window, and a deleted rule's spans drop out with its mapping row.
+   * Concurrent spans on the same rule merge into one interval set before the
+   * overlap is summed, so two tabs on one rule never double-count wall-clock
+   * time — the same honesty the durationSeconds cap gives corroboration.
    */
   public async readSiteTotalsForMember(
     subject: AuthenticatedSubject,
     query: ReportQuery,
   ): Promise<SiteTotalRecord[]> {
-    const spanEnd = sql`coalesce(${agentSessions.endedAt}, ${agentSessions.lastEventAt})`;
     // Raw sql`` interpolation bypasses drizzle's Date mapping, and postgres-js
     // cannot serialize a bare Date — bind the bounds as ISO strings instead.
     const windowStart = query.from === undefined
-      ? sql`greatest(${activitySegments.startedAt}, ${agentSessions.startedAt})`
-      : sql`greatest(${activitySegments.startedAt}, ${agentSessions.startedAt}, ${query.from.toISOString()})`;
+      ? sql`greatest(seg.started_at, s.started_at)`
+      : sql`greatest(seg.started_at, s.started_at, ${query.from.toISOString()})`;
     const windowEnd = query.toExclusive === undefined
-      ? sql`least(${activitySegments.endedAt}, ${spanEnd})`
-      : sql`least(${activitySegments.endedAt}, ${spanEnd}, ${query.toExclusive.toISOString()})`;
-    const duration = sql<string | null>`floor(sum(greatest(0, extract(epoch from (${windowEnd} - ${windowStart})))))`;
-    const rows = await this.db
-      .select({
-        mappingId: projectPathMappings.id,
-        pattern: projectPathMappings.pathPrefix,
-        projectId: projectPathMappings.projectId,
-        durationSeconds: duration,
-      })
-      .from(agentSessions)
-      .innerJoin(projectPathMappings, and(
-        eq(projectPathMappings.organizationId, agentSessions.organizationId),
-        eq(projectPathMappings.userId, agentSessions.userId),
-        eq(projectPathMappings.id, agentSessions.ruleId),
-        eq(projectPathMappings.kind, "url_rule"),
-      ))
-      .innerJoin(activitySegments, and(
-        eq(activitySegments.organizationId, agentSessions.organizationId),
-        eq(activitySegments.userId, agentSessions.userId),
-        eq(activitySegments.kind, "active"),
-        sql`${activitySegments.startedAt} < ${spanEnd}`,
-        sql`${activitySegments.endedAt} > ${agentSessions.startedAt}`,
-        sql`${activitySegments.receivedAt} <= ${activitySegments.endedAt} + interval '7 days'`,
-      ))
-      .where(and(
-        eq(agentSessions.organizationId, subject.organizationId),
-        eq(agentSessions.userId, subject.userId),
-        eq(agentSessions.source, "browser"),
-        isNotNull(agentSessions.ruleId),
-        sql`${agentSessions.receivedAt} <= ${spanEnd} + interval '7 days'`,
-        ...(query.from === undefined ? [] : [sql`${spanEnd} > ${query.from.toISOString()}`]),
-        ...(query.toExclusive === undefined ? [] : [lt(agentSessions.startedAt, query.toExclusive)]),
-      ))
-      .groupBy(projectPathMappings.id, projectPathMappings.pathPrefix, projectPathMappings.projectId)
-      // id breaks ties so equal totals do not reorder between requests.
-      .orderBy(desc(duration), asc(projectPathMappings.id));
+      ? sql`least(seg.ended_at, s.ended_at)`
+      : sql`least(seg.ended_at, s.ended_at, ${query.toExclusive.toISOString()})`;
+    // Overlapping and touching spans on one rule collapse into islands via the
+    // running max of previous span ends, so each wall-clock interval counts once.
+    const rows = await this.db.execute(sql`
+      with spans as (
+        select rule_id, started_at, coalesce(ended_at, last_event_at) as ended_at
+        from agent_sessions
+        where organization_id = ${subject.organizationId}
+          and user_id = ${subject.userId}
+          and source = 'browser'
+          and rule_id is not null
+          and received_at <= coalesce(ended_at, last_event_at) + interval '7 days'
+      ),
+      islands as (
+        select rule_id, started_at, ended_at,
+          sum(case when prev_end is null or started_at > prev_end then 1 else 0 end)
+            over (partition by rule_id order by started_at, ended_at) as island
+        from (
+          select rule_id, started_at, ended_at,
+            max(ended_at) over (
+              partition by rule_id order by started_at, ended_at
+              rows between unbounded preceding and 1 preceding
+            ) as prev_end
+          from spans
+        ) ordered_spans
+      ),
+      merged_spans as (
+        select rule_id, min(started_at) as started_at, max(ended_at) as ended_at
+        from islands
+        group by rule_id, island
+      )
+      select m.id as "mappingId", m.path_prefix as "pattern", m.project_id as "projectId",
+        floor(sum(greatest(0, extract(epoch from (${windowEnd} - ${windowStart})))))::bigint as "durationSeconds"
+      from merged_spans s
+      join project_path_mappings m
+        on m.organization_id = ${subject.organizationId} and m.user_id = ${subject.userId}
+        and m.id = s.rule_id and m.kind = 'url_rule'
+      join activity_segments seg
+        on seg.organization_id = ${subject.organizationId} and seg.user_id = ${subject.userId}
+        and seg.kind = 'active'
+        and seg.started_at < s.ended_at and seg.ended_at > s.started_at
+        and seg.received_at <= seg.ended_at + interval '7 days'
+      where true
+        ${query.from === undefined ? sql`` : sql`and s.ended_at > ${query.from.toISOString()}`}
+        ${query.toExclusive === undefined ? sql`` : sql`and s.started_at < ${query.toExclusive.toISOString()}`}
+      group by m.id, m.path_prefix, m.project_id
+      order by "durationSeconds" desc, m.id asc
+    `);
 
-    return rows.map((row) => ({
+    return (rows as unknown as { mappingId: string; pattern: string; projectId: string; durationSeconds: string | null }[]).map((row) => ({
       mapping: { id: row.mappingId, pattern: row.pattern, projectId: row.projectId },
       durationSeconds: row.durationSeconds,
     }));
@@ -911,11 +925,16 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
 }
 
 function asPathMappingRecord(row: typeof projectPathMappings.$inferSelect): PathMappingRecord {
+  // The kind_valid CHECK keeps this closed world honest; an unknown value means
+  // the database and the code disagree, which must surface rather than coerce.
+  if (row.kind !== "path_prefix" && row.kind !== "url_rule") {
+    throw new Error(`Path mapping ${row.id} has an unrecognized kind: ${row.kind}`);
+  }
   return {
     id: row.id,
     organizationId: row.organizationId,
     userId: row.userId,
-    kind: row.kind === "url_rule" ? "url_rule" : "path_prefix",
+    kind: row.kind,
     pathPrefix: row.pathPrefix,
     repoUrl: row.repoUrl,
     projectId: row.projectId,

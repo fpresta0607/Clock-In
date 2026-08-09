@@ -145,5 +145,11 @@ integration(integrationDescription, () => {
       values (${organizationId}, ${userId}, 'url_rule', '*.figma.com/files/*', ${projectId})
       returning kind
     `).resolves.toBeDefined();
+
+    // The kind column rejects anything outside the two known kinds.
+    await expect(database.client`
+      insert into project_path_mappings (organization_id, user_id, kind, path_prefix, project_id)
+      values (${organizationId}, ${userId}, 'glob', 'example.com', ${projectId})
+    `).rejects.toThrow();
   });
 });

@@ -1041,7 +1041,12 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         // The fast poll retries; a missing first read is not worth an error.
       }
     } catch (error: unknown) {
-      if (isRequestCurrent()) setOnboardingError(bridgeError(error).message);
+      if (!isRequestCurrent()) return;
+      const problem = bridgeError(error);
+      // Same contract as every sibling handler: an expired session goes back
+      // to sign-in rather than stranding the user on the question screen.
+      if (problem.kind === "auth") resetToSignIn(problem.message);
+      else setOnboardingError(problem.message);
     } finally {
       if (isRequestCurrent()) setOnboardingBusy(false);
     }
@@ -1059,7 +1064,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       const next = await service.settingsUpdate({ onboarded: true });
       if (isRequestCurrent()) setSettings(next);
     } catch (error: unknown) {
-      if (isRequestCurrent()) setOnboardingError(bridgeError(error).message);
+      if (!isRequestCurrent()) return;
+      const problem = bridgeError(error);
+      if (problem.kind === "auth") resetToSignIn(problem.message);
+      else setOnboardingError(problem.message);
     } finally {
       if (isRequestCurrent()) setOnboardingBusy(false);
     }
@@ -1345,6 +1353,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
               <button className="signal-button" type="button" disabled={onboardingBusy} onClick={() => void turnOnMonitoring()}>
                 {onboardingBusy ? "Turning on…" : "Turn on"}
               </button>
+              <button className="link-button" type="button" disabled={onboardingBusy} onClick={() => void finishOnboarding()}>
+                Skip for now
+              </button>
             </section>
           ) : (
             <section className="card onboarding-panel" aria-labelledby="onboarding-browsers-title">
@@ -1371,6 +1382,14 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
               </button>
             </section>
           )}
+          <button
+            className="link-button onboarding-sign-out"
+            type="button"
+            disabled={logoutBusy}
+            onClick={() => void logout()}
+          >
+            {logoutBusy ? "Signing out…" : "Sign out"}
+          </button>
         </div>
       </main>
     );

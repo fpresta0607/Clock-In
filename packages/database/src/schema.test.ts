@@ -245,8 +245,17 @@ describe("database schema", () => {
       "user_id",
       "path_prefix",
     ]);
-    expect(config.checks.map((constraint) => constraint.name)).toContain(
-      "project_path_mappings_path_prefix_length_valid",
+    expect(config.checks.map((constraint) => constraint.name)).toEqual(
+      expect.arrayContaining([
+        "project_path_mappings_path_prefix_length_valid",
+        "project_path_mappings_kind_valid",
+      ]),
+    );
+    const kindCheck = config.checks.find(
+      (constraint) => constraint.name === "project_path_mappings_kind_valid",
+    );
+    expect(new PgDialect().sqlToQuery(kindCheck!.value).sql).toContain(
+      '"project_path_mappings"."kind" in (\'path_prefix\', \'url_rule\')',
     );
     const prefixCheck = config.checks.find(
       (constraint) => constraint.name === "project_path_mappings_path_prefix_length_valid",

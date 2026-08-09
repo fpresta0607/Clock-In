@@ -51,9 +51,10 @@ export function resolveProjectForCwd(cwd: string, mappings: readonly PathMapping
     if (normalizedPrefix.length > bestLength) {
       bestLength = normalizedPrefix.length;
       best = [mapping];
-    } else {
+    } else if (normalizedPrefix.length === bestLength) {
       best.push(mapping);
     }
+    // Shorter matches never fold into the winners, whatever the input order.
   }
   if (best.length === 0) return null;
   const projectIds = new Set(best.map((mapping) => mapping.projectId));
