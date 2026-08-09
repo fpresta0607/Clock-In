@@ -60,6 +60,7 @@ struct HostPaths {
     spool: PathBuf,
     rules: PathBuf,
     tally: PathBuf,
+    session_authorized: fn() -> bool,
 }
 
 impl HostPaths {
@@ -73,8 +74,21 @@ impl HostPaths {
             spool: dir.join("browser-spool.jsonl"),
             rules: dir.join("browser-rules.json"),
             tally: dir.join("unmatched-tally.json"),
+            session_authorized: current_session_authorized,
         }
     }
+
+    #[cfg(test)]
+    fn authorized_in_dir(dir: &Path) -> Self {
+        Self {
+            session_authorized: || true,
+            ..Self::in_dir(dir)
+        }
+    }
+}
+
+fn current_session_authorized() -> bool {
+    clock_in_desktop_lib::read_session_token().is_some_and(|session| !session.trim().is_empty())
 }
 
 /// The stdin/stdout loop: read frames until the browser closes the port
@@ -124,12 +138,18 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
             }
         }
         Some("span-event") => {
-            if let Err(error) = append_span_event(message.get("event"), message.get("collectionId"), paths) {
-                // The port stays up; the extension's heartbeats mean the span
-                // recovers on the next event.
-                eprintln!("clock-in-browser-host: {error}");
+            match append_span_event(message.get("event"), message.get("collectionId"), paths) {
+                SpanAppendOutcome::Appended => write_span_reply(writer, paths, "span-ack", message.get("event")),
+                SpanAppendOutcome::Dropped => write_collection_state(writer, paths),
+                SpanAppendOutcome::Rejected(error) => {
+                    eprintln!("clock-in-browser-host: {error}");
+                    write_collection_state(writer, paths)
+                }
+                SpanAppendOutcome::Retry(error) => {
+                    eprintln!("clock-in-browser-host: {error}");
+                    write_span_reply(writer, paths, "span-retry", message.get("event"))
+                }
             }
-            write_collection_state(writer, paths)
         }
         Some("tally") => {
             match store_tally(message.get("entries"), message.get("weekStart"), message.get("collectionId"), paths) {
@@ -147,10 +167,14 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
 }
 
 fn collection_state(paths: &HostPaths) -> serde_json::Value {
-    match browser::admitted_collection_id(&paths.dir) {
+    match admitted_collection_id(paths) {
         Some(collection_id) => serde_json::json!({ "collectionEnabled": true, "collectionId": collection_id }),
         None => serde_json::json!({ "collectionEnabled": false }),
     }
+}
+
+fn admitted_collection_id(paths: &HostPaths) -> Option<String> {
+    browser::admitted_collection_id_with_session(&paths.dir, (paths.session_authorized)())
 }
 
 fn rules_reply(mut state: serde_json::Value, rules: Vec<Rule>) -> serde_json::Value {
@@ -163,6 +187,18 @@ fn write_collection_state(writer: &mut impl Write, paths: &HostPaths) -> io::Res
     let mut state = collection_state(paths);
     state["type"] = serde_json::Value::String("collection-state".to_string());
     native_messaging::write_json(writer, &state)
+}
+
+fn write_span_reply(
+    writer: &mut impl Write,
+    paths: &HostPaths,
+    kind: &str,
+    event: Option<&serde_json::Value>,
+) -> io::Result<()> {
+    let mut reply = collection_state(paths);
+    reply["type"] = serde_json::Value::String(kind.to_string());
+    reply["event"] = event.cloned().unwrap_or(serde_json::Value::Null);
+    native_messaging::write_json(writer, &reply)
 }
 
 /// One URL rule as the extension needs it: id for the verdict, pattern for
@@ -232,24 +268,38 @@ fn message_collection_id(value: Option<&serde_json::Value>) -> Option<&str> {
     value.and_then(|value| value.as_str()).filter(|id| !id.trim().is_empty())
 }
 
+enum SpanAppendOutcome {
+    Appended,
+    Dropped,
+    Rejected(String),
+    Retry(String),
+}
+
 fn append_span_event(
     event: Option<&serde_json::Value>,
     collection_id: Option<&serde_json::Value>,
     paths: &HostPaths,
-) -> Result<bool, String> {
-    let event = event.ok_or_else(|| "span-event without an event payload".to_string())?;
-    let input: SpanEventInput = serde_json::from_value(event.clone())
-        .map_err(|error| format!("invalid span event: {error}"))?;
-    input.validate()?;
+) -> SpanAppendOutcome {
+    let Some(event) = event else {
+        return SpanAppendOutcome::Rejected("span-event without an event payload".to_string());
+    };
+    let input: SpanEventInput = match serde_json::from_value(event.clone()) {
+        Ok(input) => input,
+        Err(error) => return SpanAppendOutcome::Rejected(format!("invalid span event: {error}")),
+    };
+    if let Err(error) = input.validate() {
+        return SpanAppendOutcome::Rejected(error);
+    }
     let Some(collection_id) = message_collection_id(collection_id) else {
-        return Ok(false);
+        return SpanAppendOutcome::Dropped;
     };
     let collection_id = collection_id.to_string();
     let event = input.into_event();
     spool::append_if(&paths.spool, &event, || {
-        browser::admitted_collection_id(&paths.dir).as_deref() == Some(collection_id.as_str())
+        admitted_collection_id(paths).as_deref() == Some(collection_id.as_str())
     })
-        .map_err(|error| format!("could not write the browser spool: {error}"))
+    .map(|appended| if appended { SpanAppendOutcome::Appended } else { SpanAppendOutcome::Dropped })
+    .unwrap_or_else(|error| SpanAppendOutcome::Retry(format!("could not write the browser spool: {error}")))
 }
 
 /// The unmatched-origin tally is pass-through: the extension keeps the
@@ -282,7 +332,7 @@ fn store_tally(
     let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "weekStart": week_start, "entries": entries }))
         .map_err(|error| error.to_string())?;
     spool::with_lock(&paths.spool, || {
-        if browser::admitted_collection_id(&paths.dir).as_deref() != Some(collection_id.as_str()) {
+        if admitted_collection_id(paths).as_deref() != Some(collection_id.as_str()) {
             return Ok(TallyOutcome::Dropped);
         }
         match browser::store_tally_snapshot(&paths.dir, &bytes, entries.as_array().is_some_and(Vec::is_empty))? {
@@ -334,7 +384,15 @@ mod tests {
 
     fn configured_paths(dir: &Path) -> HostPaths {
         browser::enable_collection(dir, "u1").expect("collection enables");
-        HostPaths::in_dir(dir)
+        HostPaths::authorized_in_dir(dir)
+    }
+
+    fn signed_out_paths(dir: &Path) -> HostPaths {
+        browser::enable_collection(dir, "u1").expect("collection enables");
+        HostPaths {
+            session_authorized: || false,
+            ..HostPaths::in_dir(dir)
+        }
     }
 
     fn span_event_message(paths: &HostPaths, session: &str) -> Vec<u8> {
@@ -433,7 +491,10 @@ mod tests {
 
         dispatch(&span_event_message(&paths, "s1"), &paths, &mut out).expect("dispatch succeeds");
 
-        assert_eq!(reply_values(&out)[0]["collectionEnabled"], true);
+        let replies = reply_values(&out);
+        assert_eq!(replies[0]["type"], "span-ack");
+        assert_eq!(replies[0]["collectionEnabled"], true);
+        assert_eq!(replies[0]["event"]["externalSessionId"], "s1");
         let lines = spool_lines(&paths.spool);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["source"], "browser");
@@ -442,6 +503,23 @@ mod tests {
         assert_eq!(lines[0]["ruleId"], "r1");
         assert_eq!(lines[0]["occurredAt"], "2026-08-09T12:00:00Z");
         assert!(lines[0].get("cwd").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_spool_write_failure_requests_retry_without_acknowledging_the_event() {
+        let dir = temp_dir("span-retry");
+        let paths = configured_paths(&dir);
+        std::fs::create_dir(&paths.spool).expect("spool path becomes a directory");
+        let mut out = Vec::new();
+        let message = span_event_message(&paths, "s1");
+
+        dispatch(&message, &paths, &mut out).expect("dispatch succeeds");
+
+        let replies = reply_values(&out);
+        assert_eq!(replies[0]["type"], "span-retry");
+        assert_eq!(replies[0]["event"]["externalSessionId"], "s1");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -488,6 +566,28 @@ mod tests {
         out.clear();
         dispatch(&current_message, &paths, &mut out).expect("current message is handled");
         assert_eq!(spool_lines(&paths.spool)[0]["externalSessionId"], "new-span");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_collection_file_without_a_current_session_cannot_admit_any_browser_evidence() {
+        let dir = temp_dir("session-admission");
+        let paths = signed_out_paths(&dir);
+        std::fs::write(&paths.rules, r#"{"rules":[{"id":"r1","pattern":"github.com/acme/*"}]}"#)
+            .expect("rules file writes");
+        let mut out = Vec::new();
+
+        dispatch(br#"{"type":"get-rules"}"#, &paths, &mut out).expect("rules are handled");
+        dispatch(&span_event_message(&paths, "s1"), &paths, &mut out).expect("span is handled");
+        dispatch(&tally_message(&paths, serde_json::json!([{"origin":"quickbooks.com","seconds":60}])), &paths, &mut out)
+            .expect("tally is handled");
+
+        let replies = reply_values(&out);
+        assert!(replies.iter().all(|reply| reply["collectionEnabled"] == false));
+        assert!(replies[0]["rules"].as_array().expect("rules is an array").is_empty());
+        assert!(!paths.spool.exists());
+        assert!(!paths.tally.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
