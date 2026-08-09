@@ -3,6 +3,7 @@
 //! or corrupt), span events land in the browser spool under the interprocess
 //! lock, unknown types and bad frames never kill the port.
 
+use clock_in_desktop_lib::browser;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -39,6 +40,11 @@ fn parse_frames(bytes: &[u8]) -> Vec<serde_json::Value> {
     }
     assert_eq!(offset, bytes.len(), "no trailing bytes after the frames");
     values
+}
+
+fn enable_collection(dir: &Path) -> String {
+    browser::enable_collection(dir, "test-account").expect("collection enables");
+    browser::collection_id(dir).expect("collection id exists")
 }
 
 struct Host {
@@ -79,6 +85,7 @@ impl Host {
 #[test]
 fn get_rules_answers_with_the_rules_file() {
     let dir = temp_dir("get-rules");
+    let collection_id = enable_collection(&dir);
     std::fs::write(
         dir.join("browser-rules.json"),
         r#"{"rules":[{"id":"r1","pattern":"github.com/acme/*"}]}"#,
@@ -94,6 +101,8 @@ fn get_rules_answers_with_the_rules_file() {
     assert_eq!(replies[0]["type"], "rules");
     assert_eq!(replies[0]["rules"][0]["id"], "r1");
     assert_eq!(replies[0]["rules"][0]["pattern"], "github.com/acme/*");
+    assert_eq!(replies[0]["collectionEnabled"], true);
+    assert_eq!(replies[0]["collectionId"], collection_id);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -125,16 +134,21 @@ fn get_rules_fails_closed_when_the_file_is_missing_or_corrupt() {
 #[test]
 fn a_span_event_lands_as_one_canonical_browser_spool_line() {
     let dir = temp_dir("span-event");
+    let collection_id = enable_collection(&dir);
 
     let mut host = Host::spawn(&dir);
     host.send(&[framed(
-        br#"{"type":"span-event","event":{"event":"started","externalSessionId":"s1","ruleId":"r1","occurredAt":"2026-08-09T12:00:00Z"}}"#,
+        format!(
+            r#"{{"type":"span-event","collectionId":"{collection_id}","event":{{"event":"started","externalSessionId":"s1","ruleId":"r1","occurredAt":"2026-08-09T12:00:00Z"}}}}"#
+        )
+        .as_bytes(),
     )]);
     let (output, replies) = host.finish();
 
     assert!(output.status.success());
-    // Appends are fire-and-forget: no reply frame.
-    assert!(replies.is_empty());
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["type"], "collection-state");
+    assert_eq!(replies[0]["collectionId"], collection_id);
     let content =
         std::fs::read_to_string(dir.join("browser-spool.jsonl")).expect("the spool reads");
     let lines: Vec<&str> = content.lines().collect();
@@ -153,20 +167,53 @@ fn a_span_event_lands_as_one_canonical_browser_spool_line() {
 #[test]
 fn a_tally_snapshot_is_stored_locally_and_never_answered() {
     let dir = temp_dir("tally");
+    let collection_id = enable_collection(&dir);
 
     let mut host = Host::spawn(&dir);
     host.send(&[framed(
-        br#"{"type":"tally","entries":[{"origin":"quickbooks.com","seconds":10800}]}"#,
+        format!(
+            r#"{{"type":"tally","collectionId":"{collection_id}","weekStart":1786060800000,"entries":[{{"origin":"quickbooks.com","seconds":10800}}]}}"#
+        )
+        .as_bytes(),
     )]);
     let (output, replies) = host.finish();
 
     assert!(output.status.success());
-    assert!(replies.is_empty());
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["type"], "collection-state");
+    assert_eq!(replies[0]["collectionId"], collection_id);
     let stored: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.join("unmatched-tally.json")).expect("the tally reads"),
     )
     .expect("the tally parses");
     assert_eq!(stored["entries"][0]["origin"], "quickbooks.com");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn signed_out_host_rejects_browser_evidence() {
+    let dir = temp_dir("signed-out");
+
+    let mut host = Host::spawn(&dir);
+    host.send(&[
+        framed(
+            br#"{"type":"span-event","collectionId":"stale","event":{"event":"started","externalSessionId":"s1","ruleId":"r1","occurredAt":"2026-08-09T12:00:00Z"}}"#,
+        ),
+        framed(
+            br#"{"type":"tally","collectionId":"stale","weekStart":1786060800000,"entries":[{"origin":"quickbooks.com","seconds":10800}]}"#,
+        ),
+    ]);
+    let (output, replies) = host.finish();
+
+    assert!(output.status.success());
+    assert_eq!(replies.len(), 2);
+    for reply in replies {
+        assert_eq!(reply["type"], "collection-state");
+        assert_eq!(reply["collectionEnabled"], false);
+    }
+    assert!(!dir.join("browser-spool.jsonl").exists());
+    assert!(!dir.join("unmatched-tally.json").exists());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -197,17 +244,19 @@ fn unknown_types_and_bad_frames_never_kill_the_port() {
 #[test]
 fn concurrent_hosts_append_whole_lines_under_the_interprocess_lock() {
     let dir = temp_dir("concurrent");
+    let collection_id = enable_collection(&dir);
 
     let handles: Vec<_> = (0..3)
         .map(|host_index| {
             let dir = dir.clone();
+            let collection_id = collection_id.clone();
             std::thread::spawn(move || {
                 let mut host = Host::spawn(&dir);
                 let messages: Vec<Vec<u8>> = (0..5)
                     .map(|index| {
                         framed(
                             format!(
-                                r#"{{"type":"span-event","event":{{"event":"heartbeat","externalSessionId":"h{host_index}-{index}","ruleId":"r1","occurredAt":"2026-08-09T12:00:00Z"}}}}"#
+                                r#"{{"type":"span-event","collectionId":"{collection_id}","event":{{"event":"heartbeat","externalSessionId":"h{host_index}-{index}","ruleId":"r1","occurredAt":"2026-08-09T12:00:00Z"}}}}"#
                             )
                             .as_bytes(),
                         )

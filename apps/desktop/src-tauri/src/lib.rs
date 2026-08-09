@@ -222,6 +222,14 @@ async fn timer_bootstrap(state: State<'_, AppState>) -> ApiResult<Snapshot> {
     Ok(snapshot)
 }
 
+fn store_session_before_enabling_collection(
+    store_session: impl FnOnce() -> ApiResult<()>,
+    enable_collection: impl FnOnce() -> ApiResult<()>,
+) -> ApiResult<()> {
+    store_session()?;
+    enable_collection()
+}
+
 #[tauri::command]
 async fn auth_login(state: State<'_, AppState>, input: LoginInput) -> ApiResult<Snapshot> {
     state.monitor.stop().await;
@@ -232,10 +240,15 @@ async fn auth_login(state: State<'_, AppState>, input: LoginInput) -> ApiResult<
     state.write_recovery(RecoveryState::default()).await?;
     let access_token = state.client.fetch_access_token(&session).await?;
     let snapshot = state.snapshot(&access_token).await?;
-    if let Snapshot::Account { user, .. } = &snapshot {
-        browser::enable_collection(&state.monitor.browser_dir(), &user.id)?;
-    }
-    state.store_session_token(&session)?;
+    store_session_before_enabling_collection(
+        || state.store_session_token(&session),
+        || {
+            if let Snapshot::Account { user, .. } = &snapshot {
+                browser::enable_collection(&state.monitor.browser_dir(), &user.id)?;
+            }
+            Ok(())
+        },
+    )?;
     state.monitor.ensure_running().await;
     Ok(snapshot)
 }
@@ -279,10 +292,15 @@ async fn auth_signup(state: State<'_, AppState>, input: SignupInput) -> ApiResul
     state.client.provision_account(&access_token, code).await?;
 
     let snapshot = state.snapshot(&access_token).await?;
-    if let Snapshot::Account { user, .. } = &snapshot {
-        browser::enable_collection(&state.monitor.browser_dir(), &user.id)?;
-    }
-    state.store_session_token(&session)?;
+    store_session_before_enabling_collection(
+        || state.store_session_token(&session),
+        || {
+            if let Snapshot::Account { user, .. } = &snapshot {
+                browser::enable_collection(&state.monitor.browser_dir(), &user.id)?;
+            }
+            Ok(())
+        },
+    )?;
     state.monitor.ensure_running().await;
     Ok(snapshot)
 }
@@ -833,6 +851,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
     fn account() -> Account {
         Account {
@@ -983,5 +1002,36 @@ mod tests {
             ),
             "https://api.clock-in.example"
         );
+    }
+
+    #[test]
+    fn session_persistence_precedes_browser_collection_authorization() {
+        let effects = RefCell::new(Vec::new());
+        store_session_before_enabling_collection(
+            || {
+                effects.borrow_mut().push("store");
+                Ok(())
+            },
+            || {
+                effects.borrow_mut().push("enable");
+                Ok(())
+            },
+        )
+        .expect("both steps succeed");
+        assert_eq!(*effects.borrow(), ["store", "enable"]);
+
+        let blocked = RefCell::new(Vec::new());
+        let result = store_session_before_enabling_collection(
+            || {
+                blocked.borrow_mut().push("store");
+                Err(BridgeError::unknown("store failed"))
+            },
+            || {
+                blocked.borrow_mut().push("enable");
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(*blocked.borrow(), ["store"]);
     }
 }
