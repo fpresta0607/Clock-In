@@ -35,6 +35,13 @@ describe("timerReducer", () => {
     });
   });
 
+  it("keeps bootstrap blocked when authorization revocation cannot complete", () => {
+    expect(timerReducer(initialTimerState, {
+      type: "bootstrap-failed",
+      message: "Could not disable browser attribution.",
+    })).toEqual({ kind: "booting", error: "Could not disable browser attribution." });
+  });
+
   it("moves a signed-in bootstrap response to idle with active projects", () => {
     const state = timerReducer(initialTimerState, {
       type: "bootstrapped",

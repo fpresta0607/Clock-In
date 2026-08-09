@@ -7,6 +7,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
+use clock_in_desktop_lib::browser;
+
 fn temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "clock-in-browser-host-cli-{}-{tag}",
@@ -39,6 +41,11 @@ fn parse_frames(bytes: &[u8]) -> Vec<serde_json::Value> {
     }
     assert_eq!(offset, bytes.len(), "no trailing bytes after the frames");
     values
+}
+
+fn enable_collection(dir: &Path) -> String {
+    browser::enable_collection(dir, "cli-user").expect("collection enables");
+    browser::collection_id(dir).expect("collection id exists")
 }
 
 struct Host {
@@ -77,7 +84,7 @@ impl Host {
 }
 
 #[test]
-fn host_without_a_durable_session_fails_closed_to_empty_rules() {
+fn host_without_a_durable_authorization_fails_closed_to_empty_rules() {
     let dir = temp_dir("get-rules");
     std::fs::write(
         dir.join("browser-rules.json"),
@@ -102,6 +109,7 @@ fn host_without_a_durable_session_fails_closed_to_empty_rules() {
 fn get_rules_fails_closed_when_the_file_is_missing_or_corrupt() {
     for (tag, contents) in [("missing", None), ("corrupt", Some("{not json"))] {
         let dir = temp_dir(tag);
+        enable_collection(&dir);
         if let Some(contents) = contents {
             std::fs::write(dir.join("browser-rules.json"), contents).expect("rules file writes");
         }
@@ -123,13 +131,14 @@ fn get_rules_fails_closed_when_the_file_is_missing_or_corrupt() {
 }
 
 #[test]
-fn a_host_without_a_durable_session_rejects_span_events() {
+fn an_authorized_host_acknowledges_span_events() {
     let dir = temp_dir("span-event");
+    let collection_id = enable_collection(&dir);
 
     let mut host = Host::spawn(&dir);
     host.send(&[framed(
         format!(
-            r#"{{"type":"span-event","collectionId":"stale","event":{{"event":"started","externalSessionId":"s1","ruleId":"r1","occurredAt":"2026-08-09T12:00:00Z"}}}}"#
+            r#"{{"type":"span-event","collectionId":"{collection_id}","event":{{"event":"started","externalSessionId":"s1","ruleId":"r1","occurredAt":"2026-08-09T12:00:00Z"}}}}"#
         )
         .as_bytes(),
     )]);
@@ -137,21 +146,27 @@ fn a_host_without_a_durable_session_rejects_span_events() {
 
     assert!(output.status.success());
     assert_eq!(replies.len(), 1);
-    assert_eq!(replies[0]["type"], "collection-state");
-    assert_eq!(replies[0]["collectionEnabled"], false);
-    assert!(!dir.join("browser-spool.jsonl").exists());
+    assert_eq!(replies[0]["type"], "span-ack");
+    assert_eq!(replies[0]["collectionEnabled"], true);
+    assert_eq!(replies[0]["event"]["externalSessionId"], "s1");
+    let spool: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("browser-spool.jsonl")).expect("span is spooled"),
+    )
+    .expect("spooled event parses");
+    assert_eq!(spool["externalSessionId"], "s1");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn a_host_without_a_durable_session_rejects_tallies() {
+fn an_authorized_host_stores_tallies() {
     let dir = temp_dir("tally");
+    let collection_id = enable_collection(&dir);
 
     let mut host = Host::spawn(&dir);
     host.send(&[framed(
         format!(
-            r#"{{"type":"tally","collectionId":"stale","weekStart":1786060800000,"entries":[{{"origin":"quickbooks.com","seconds":10800}}]}}"#
+            r#"{{"type":"tally","collectionId":"{collection_id}","weekStart":1786060800000,"entries":[{{"origin":"quickbooks.com","seconds":10800}}]}}"#
         )
         .as_bytes(),
     )]);
@@ -160,8 +175,10 @@ fn a_host_without_a_durable_session_rejects_tallies() {
     assert!(output.status.success());
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0]["type"], "collection-state");
-    assert_eq!(replies[0]["collectionEnabled"], false);
-    assert!(!dir.join("unmatched-tally.json").exists());
+    assert_eq!(replies[0]["collectionEnabled"], true);
+    let tally: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("unmatched-tally.json")).expect("tally is stored"))
+        .expect("tally parses");
+    assert_eq!(tally["entries"][0]["origin"], "quickbooks.com");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -169,14 +186,16 @@ fn a_host_without_a_durable_session_rejects_tallies() {
 #[test]
 fn signed_out_host_rejects_browser_evidence() {
     let dir = temp_dir("signed-out");
+    let collection_id = enable_collection(&dir);
+    browser::revoke_collection(&dir).expect("collection revokes");
 
     let mut host = Host::spawn(&dir);
     host.send(&[
         framed(
-            br#"{"type":"span-event","collectionId":"stale","event":{"event":"started","externalSessionId":"s1","ruleId":"r1","occurredAt":"2026-08-09T12:00:00Z"}}"#,
+            format!(r#"{{"type":"span-event","collectionId":"{collection_id}","event":{{"event":"started","externalSessionId":"s1","ruleId":"r1","occurredAt":"2026-08-09T12:00:00Z"}}}}"#).as_bytes(),
         ),
         framed(
-            br#"{"type":"tally","collectionId":"stale","weekStart":1786060800000,"entries":[{"origin":"quickbooks.com","seconds":10800}]}"#,
+            format!(r#"{{"type":"tally","collectionId":"{collection_id}","weekStart":1786060800000,"entries":[{{"origin":"quickbooks.com","seconds":10800}}]}}"#).as_bytes(),
         ),
     ]);
     let (output, replies) = host.finish();
@@ -217,19 +236,21 @@ fn unknown_types_and_bad_frames_never_kill_the_port() {
 }
 
 #[test]
-fn concurrent_signed_out_hosts_reject_every_span() {
+fn concurrent_authorized_hosts_append_every_span() {
     let dir = temp_dir("concurrent");
+    let collection_id = enable_collection(&dir);
 
     let handles: Vec<_> = (0..3)
         .map(|host_index| {
             let dir = dir.clone();
+            let collection_id = collection_id.clone();
             std::thread::spawn(move || {
                 let mut host = Host::spawn(&dir);
                 let messages: Vec<Vec<u8>> = (0..5)
                     .map(|index| {
                         framed(
                             format!(
-                                r#"{{"type":"span-event","collectionId":"stale","event":{{"event":"heartbeat","externalSessionId":"h{host_index}-{index}","ruleId":"r1","occurredAt":"2026-08-09T12:00:00Z"}}}}"#
+                                r#"{{"type":"span-event","collectionId":"{collection_id}","event":{{"event":"heartbeat","externalSessionId":"h{host_index}-{index}","ruleId":"r1","occurredAt":"2026-08-09T12:00:00Z"}}}}"#
                             )
                             .as_bytes(),
                         )
@@ -245,7 +266,8 @@ fn concurrent_signed_out_hosts_reject_every_span() {
         handle.join().expect("host thread finishes");
     }
 
-    assert!(!dir.join("browser-spool.jsonl").exists());
+    let lines = std::fs::read_to_string(dir.join("browser-spool.jsonl")).expect("spans are spooled");
+    assert_eq!(lines.lines().count(), 15);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -416,6 +416,15 @@ describe("App", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("Session expired");
   });
 
+  it("keeps authorization recovery blocked instead of showing signed-out state", async () => {
+    render(<App bridge={bridgeFor({
+      bootstrap: vi.fn().mockRejectedValue({ kind: "unknown", message: "Could not disable browser attribution." }),
+    })} />);
+
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Could not disable browser attribution."));
+    expect(screen.queryByRole("heading", { name: "Clock in" })).not.toBeInTheDocument();
+  });
+
   it("automatically retries a bootstrap local start and adopts the returned snapshot", async () => {
     const bridge = bridgeFor({
       bootstrap: vi.fn().mockResolvedValue({ kind: "retry-local-start", user, projects: [project], start }),

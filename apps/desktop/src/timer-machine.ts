@@ -65,7 +65,7 @@ export type BootstrapSnapshot =
   | ({ kind: "conflict"; localStart: StartIntent; serverRunning: RunningTimer } & Account);
 
 export type TimerState =
-  | { kind: "booting" }
+  | { kind: "booting"; error?: string | undefined }
   | { kind: "sign-in"; error?: string | undefined }
   | ({ kind: "idle"; error?: string | undefined; suggestion?: StartSuggestion | undefined } & Account)
   | ({ kind: "starting"; start: StartIntent } & Account)
@@ -81,6 +81,7 @@ export type TimerState =
 
 export type TimerEvent =
   | { type: "bootstrapped"; snapshot: BootstrapSnapshot }
+  | { type: "bootstrap-failed"; message: string }
   | { type: "start-requested"; start: StartIntent }
   | { type: "start-confirmed"; running: RunningTimer }
   | { type: "start-failed"; message: string }
@@ -137,6 +138,9 @@ const fromSnapshot = (snapshot: BootstrapSnapshot): TimerState => {
 export const timerReducer = (state: TimerState, event: TimerEvent): TimerState => {
   if (event.type === "bootstrapped") return fromSnapshot(event.snapshot);
   if (event.type === "auth-failed") return { kind: "sign-in", error: event.message };
+  if (state.kind === "booting" && event.type === "bootstrap-failed") {
+    return { kind: "booting", error: event.message };
+  }
 
   switch (state.kind) {
     case "booting":

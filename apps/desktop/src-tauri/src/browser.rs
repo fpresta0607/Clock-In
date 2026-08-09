@@ -228,7 +228,9 @@ fn host_manifest(browser: Browser, host_binary: &Path) -> String {
 
 const COLLECTION_FILE: &str = "browser-collection.json";
 const COLLECTION_REVOCATION_FILE: &str = "browser-collection-revoked";
+const COLLECTION_AUTHORIZATION_FILE: &str = "browser-collection-authorization.json";
 const TALLY_CLEAR_FILE: &str = "browser-tally-clear.json";
+const COLLECTION_AUTHORIZATION_SECONDS: u64 = 10 * 60;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -238,12 +240,23 @@ struct BrowserCollection {
     admission_id: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserCollectionAuthorization {
+    admission_id: String,
+    expires_at: u64,
+}
+
 fn collection_path(dir: &Path) -> PathBuf {
     dir.join(COLLECTION_FILE)
 }
 
 fn collection_revocation_path(dir: &Path) -> PathBuf {
     dir.join(COLLECTION_REVOCATION_FILE)
+}
+
+fn collection_authorization_path(dir: &Path) -> PathBuf {
+    dir.join(COLLECTION_AUTHORIZATION_FILE)
 }
 
 fn tally_clear_path(dir: &Path) -> PathBuf {
@@ -267,6 +280,14 @@ pub fn collection_id(dir: &Path) -> Option<String> {
     read_collection(dir).map(|collection| collection.collection_id)
 }
 
+fn read_collection_authorization(dir: &Path) -> Option<BrowserCollectionAuthorization> {
+    let authorization = serde_json::from_slice::<BrowserCollectionAuthorization>(
+        &std::fs::read(collection_authorization_path(dir)).ok()?,
+    )
+    .ok()?;
+    (!authorization.admission_id.trim().is_empty() && authorization.expires_at > 0).then_some(authorization)
+}
+
 fn collection_is_revoked(dir: &Path) -> bool {
     match std::fs::metadata(collection_revocation_path(dir)) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => false,
@@ -275,16 +296,17 @@ fn collection_is_revoked(dir: &Path) -> bool {
 }
 
 pub fn admitted_collection_id(dir: &Path) -> Option<String> {
-    admitted_collection_id_with_session(
-        dir,
-        crate::read_session_token().is_some_and(|session| !session.trim().is_empty()),
-    )
+    admitted_collection_id_at(dir, crate::monitor::unix_now())
 }
 
-pub fn admitted_collection_id_with_session(dir: &Path, session_authorized: bool) -> Option<String> {
-    session_authorized
-        .then(|| (!collection_is_revoked(dir)).then(|| collection_id(dir)).flatten())
-        .flatten()
+fn admitted_collection_id_at(dir: &Path, now: u64) -> Option<String> {
+    if collection_is_revoked(dir) {
+        return None;
+    }
+    let collection = read_collection(dir)?;
+    let authorization = read_collection_authorization(dir)?;
+    (authorization.admission_id == collection.admission_id && authorization.expires_at > now)
+        .then_some(collection.collection_id)
 }
 
 fn next_collection_id() -> String {
@@ -315,6 +337,15 @@ fn discard_browser_evidence(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn authorize_collection_locked(dir: &Path, collection: &BrowserCollection) -> io::Result<()> {
+    let body = serde_json::to_vec(&BrowserCollectionAuthorization {
+        admission_id: collection.admission_id.clone(),
+        expires_at: crate::monitor::unix_now().saturating_add(COLLECTION_AUTHORIZATION_SECONDS),
+    })
+    .map_err(io::Error::other)?;
+    write_if_changed_locked(&collection_authorization_path(dir), &body)
+}
+
 pub fn enable_collection(dir: &Path, account_id: &str) -> ApiResult<()> {
     let account_id = account_id.trim();
     if account_id.is_empty() {
@@ -324,18 +355,22 @@ pub fn enable_collection(dir: &Path, account_id: &str) -> ApiResult<()> {
         .map_err(|_| BridgeError::unknown("Could not enable browser attribution."))?;
     let spool = browser_spool_path(dir);
     spool::with_lock(&spool, || {
-        if !collection_is_revoked(dir) && read_collection(dir).is_some_and(|collection| collection.account_id == account_id) {
-            return Ok(());
+        if !collection_is_revoked(dir) {
+            if let Some(collection) = read_collection(dir).filter(|collection| collection.account_id == account_id) {
+                return authorize_collection_locked(dir, &collection);
+            }
         }
         remove_if_exists(&collection_path(dir))?;
+        remove_if_exists(&collection_authorization_path(dir))?;
         discard_browser_evidence(dir)?;
-        let body = serde_json::to_vec(&BrowserCollection {
+        let collection = BrowserCollection {
             account_id: account_id.to_string(),
             collection_id: next_collection_id(),
             admission_id: next_collection_id(),
-        })
-        .map_err(io::Error::other)?;
-        write_if_changed(&collection_path(dir), &body)?;
+        };
+        let body = serde_json::to_vec(&collection).map_err(io::Error::other)?;
+        write_if_changed_locked(&collection_path(dir), &body)?;
+        authorize_collection_locked(dir, &collection)?;
         remove_if_exists(&collection_revocation_path(dir))
     })
     .map_err(|_| BridgeError::unknown("Could not enable browser attribution."))
@@ -353,6 +388,7 @@ pub fn discard_collection(dir: &Path) -> ApiResult<()> {
     let spool = browser_spool_path(dir);
     spool::with_lock(&spool, || {
         remove_if_exists(&collection_path(dir))?;
+        remove_if_exists(&collection_authorization_path(dir))?;
         discard_browser_evidence(dir)
     })
     .map_err(|_| BridgeError::unknown("Could not disable browser attribution."))
@@ -361,6 +397,20 @@ pub fn discard_collection(dir: &Path) -> ApiResult<()> {
 pub fn disable_collection(dir: &Path) -> ApiResult<()> {
     revoke_collection(dir)?;
     discard_collection(dir)
+}
+
+pub fn renew_collection_authorization(dir: &Path) -> ApiResult<()> {
+    let spool = browser_spool_path(dir);
+    spool::with_lock(&spool, || {
+        if collection_is_revoked(dir) {
+            return Ok(());
+        }
+        let Some(collection) = read_collection(dir) else {
+            return Ok(());
+        };
+        authorize_collection_locked(dir, &collection)
+    })
+    .map_err(|_| BridgeError::unknown("Could not renew browser attribution."))
 }
 
 /// Silent first-run-and-every-launch registration: rewrite the manifests and
@@ -1158,15 +1208,18 @@ mod tests {
     }
 
     #[test]
-    fn collection_admission_requires_a_current_session_authorization() {
+    fn collection_admission_requires_a_current_unrevoked_authorization() {
         let dir = temp_dir("collection-admission");
         enable_collection(&dir, "user-one").expect("collection enables");
         let collection_id = collection_id(&dir).expect("collection id exists");
+        let expires_at = read_collection_authorization(&dir)
+            .expect("authorization exists")
+            .expires_at;
 
-        assert_eq!(admitted_collection_id_with_session(&dir, false), None);
-        assert_eq!(admitted_collection_id_with_session(&dir, true), Some(collection_id));
+        assert_eq!(admitted_collection_id_at(&dir, expires_at.saturating_sub(1)), Some(collection_id));
+        assert_eq!(admitted_collection_id_at(&dir, expires_at), None);
         revoke_collection(&dir).expect("collection revokes");
-        assert_eq!(admitted_collection_id_with_session(&dir, true), None);
+        assert_eq!(admitted_collection_id(&dir), None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

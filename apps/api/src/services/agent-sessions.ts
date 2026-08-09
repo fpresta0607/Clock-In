@@ -3,6 +3,7 @@ import type { AgentSessionEventBatchResponse, AgentSource } from "@clock-in/shar
 import type { AuthenticatedSubject } from "../auth.js";
 import type {
   AgentSessionRepository,
+  AgentSessionStaleExclusion,
   PathMappingRecord,
   PathMappingRepository,
   SessionRepository,
@@ -40,6 +41,21 @@ export interface AgentSessionReaper {
   reapStale(subject: AuthenticatedSubject): Promise<number>;
 }
 
+function createReapStale(
+  dependencies: Pick<AgentSessionServiceDependencies, "agentSessions" | "clock" | "staleThresholdMs" | "browserStaleThresholdMs">,
+): (subject: AuthenticatedSubject, excluded?: readonly AgentSessionStaleExclusion[]) => Promise<number> {
+  const clock = dependencies.clock ?? (() => new Date());
+  const staleThresholdMs = dependencies.staleThresholdMs ?? defaultStaleThresholdMs;
+  const browserStaleThresholdMs = dependencies.browserStaleThresholdMs ?? defaultBrowserStaleThresholdMs;
+  return (subject, excluded = []) => {
+    const now = clock();
+    return dependencies.agentSessions.reapStale(subject, {
+      default: new Date(now.getTime() - staleThresholdMs),
+      browser: new Date(now.getTime() - browserStaleThresholdMs),
+    }, now, excluded);
+  };
+}
+
 /**
  * Just the staleness reaper, for read paths (reports, stats) that close stale
  * agent sessions before corroboration math without the full ingestion service.
@@ -47,36 +63,28 @@ export interface AgentSessionReaper {
 export function createAgentSessionReaper(
   dependencies: Pick<AgentSessionServiceDependencies, "agentSessions" | "clock" | "staleThresholdMs" | "browserStaleThresholdMs">,
 ): AgentSessionReaper {
-  const clock = dependencies.clock ?? (() => new Date());
-  const staleThresholdMs = dependencies.staleThresholdMs ?? defaultStaleThresholdMs;
-  const browserStaleThresholdMs = dependencies.browserStaleThresholdMs ?? defaultBrowserStaleThresholdMs;
+  const reapStale = createReapStale(dependencies);
   return {
-    reapStale(subject: AuthenticatedSubject): Promise<number> {
-      const now = clock();
-      return dependencies.agentSessions.reapStale(subject, {
-        default: new Date(now.getTime() - staleThresholdMs),
-        browser: new Date(now.getTime() - browserStaleThresholdMs),
-      }, now);
-    },
+    reapStale: (subject) => reapStale(subject),
   };
 }
 
 export interface AgentSessionService {
   ingest(subject: AuthenticatedSubject, events: AgentSessionEventInput[]): Promise<AgentSessionEventBatchResponse>;
-  /** Closes running sessions with no event for the staleness window; also runs before every batch. */
+  /** Closes running sessions with no event for the staleness window; also runs after every batch. */
   reapStale(subject: AuthenticatedSubject): Promise<number>;
 }
 
 export function createAgentSessionService(dependencies: AgentSessionServiceDependencies): AgentSessionService {
   const clock = dependencies.clock ?? (() => new Date());
-  const reaper = createAgentSessionReaper(dependencies);
+  const reapStale = createReapStale(dependencies);
 
   return {
-    reapStale: (subject) => reaper.reapStale(subject),
+    reapStale: (subject) => reapStale(subject),
 
     async ingest(subject: AuthenticatedSubject, events: AgentSessionEventInput[]): Promise<AgentSessionEventBatchResponse> {
       const now = clock();
-      await reaper.reapStale(subject);
+      const batchKeys = new Map<string, AgentSessionStaleExclusion>();
 
       // Mappings rarely change; one lookup per batch attributes every event in it.
       let mappings: Promise<PathMappingRecord[]> | null = null;
@@ -151,7 +159,12 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
           await dependencies.agentSessions.advanceLastEvent(subject, event.source, event.externalSessionId, event.occurredAt, now);
         }
         results.push({ externalSessionId: event.externalSessionId, accepted: true });
+        batchKeys.set(`${event.source}\u0000${event.externalSessionId}`, {
+          source: event.source,
+          externalSessionId: event.externalSessionId,
+        });
       }
+      await reapStale(subject, [...batchKeys.values()]);
       return { results };
     },
   };

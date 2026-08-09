@@ -32,10 +32,10 @@ Off-the-record tabs are excluded via `tab.incognito` (Chrome's Guest windows rep
 The extension speaks Chrome native messaging to the host registered as `com.clock_in.browser_host` (the desktop registers it silently per browser).
 Framing (4-byte little-endian length-prefixed JSON) is handled by `chrome.runtime.connectNative`; the JSON shapes are:
 
-- `{"type":"get-rules"}` -> `{"type":"rules","rules":[{"id","pattern"}]}`; fetched on connect and every five minutes.
+- `{"type":"get-rules"}` -> `{"type":"rules","collectionEnabled","collectionId","rules":[{"id","pattern"}]}`; fetched on connect and every five minutes.
   An empty rule set matches nothing (fail closed).
-- `{"type":"span-event","event":{"event","externalSessionId","ruleId","occurredAt"}}` - appended to the desktop's local browser spool; no reply.
-- `{"type":"tally","entries":[{"origin","seconds"}]}` - a snapshot of the local unmatched-origin tally; read-only passthrough, never uploaded.
+- `{"type":"span-event","collectionId","event":{"event","externalSessionId","ruleId","occurredAt"}}` - appended to the desktop's local browser spool. A `span-ack` returns the acknowledged event; `span-retry` keeps it queued, and `collection-state` means collection is unavailable.
+- `{"type":"tally","collectionId","weekStart","entries":[{"origin","seconds"}]}` - a snapshot of the local unmatched-origin tally; read-only passthrough, never uploaded. The host returns `collection-state` and may send `clear-tally` before it.
 
 When the host is unreachable, span events queue in a 1000-entry ring in extension storage and replay on reconnect (1 s backoff doubling to 60 s).
 

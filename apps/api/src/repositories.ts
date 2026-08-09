@@ -223,6 +223,11 @@ export interface AgentSessionStaleCutoffs {
   browser: Date;
 }
 
+export interface AgentSessionStaleExclusion {
+  source: AgentSource;
+  externalSessionId: string;
+}
+
 export interface AgentSessionRepository {
   findByExternalKey(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string): Promise<AgentSessionRecord | null>;
   /** Inserts a running row; a replayed start only refreshes lastEventAt and never reopens an ended row. */
@@ -234,7 +239,7 @@ export interface AgentSessionRepository {
   /** Advances lastEventAt on a running row; false when nothing matched (unknown or already ended). */
   advanceLastEvent(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, occurredAt: Date, now: Date): Promise<boolean>;
   /** Closes running rows whose lastEventAt is older than their source's cutoff, ending them at lastEventAt. Returns the reaped count. */
-  reapStale(subject: AuthenticatedSubject, cutoffs: AgentSessionStaleCutoffs, now: Date): Promise<number>;
+  reapStale(subject: AuthenticatedSubject, cutoffs: AgentSessionStaleCutoffs, now: Date, excluded?: readonly AgentSessionStaleExclusion[]): Promise<number>;
 }
 
 export interface PathMappingRecord {

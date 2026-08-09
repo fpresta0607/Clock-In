@@ -462,7 +462,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       (error: unknown) => {
         if (!isRequestCurrent() || accountEpoch.current !== epoch) return;
         const problem = bridgeError(error);
-        resetToSignIn(problem.message);
+        if (problem.kind === "auth") {
+          resetToSignIn(problem.message);
+          return;
+        }
+        dispatch({ type: "bootstrap-failed", message: problem.message });
       },
     );
     return () => { active = false; };
@@ -1264,8 +1268,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       <main className="app-shell">
         <WebGLShader />
         <Titlebar />
-        <div className="center-stage" aria-busy="true">
-          <p className="boot-message" role="status">Connecting to clock service…</p>
+        <div className="center-stage" aria-busy={state.error === undefined}>
+          <p className="boot-message" role="status">{state.error ?? "Connecting to clock service…"}</p>
         </div>
       </main>
     );
