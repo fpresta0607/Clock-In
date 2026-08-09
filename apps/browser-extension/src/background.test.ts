@@ -14,7 +14,10 @@ function listeners() {
   };
 }
 
-function backgroundHarness(tabs: chrome.tabs.Tab[]) {
+function backgroundHarness(
+  tabs: chrome.tabs.Tab[],
+  queryTabs?: () => Promise<chrome.tabs.Tab[]>,
+) {
   const alarm = listeners();
   const activated = listeners();
   const updated = listeners();
@@ -22,7 +25,7 @@ function backgroundHarness(tabs: chrome.tabs.Tab[]) {
   const idleChanged = listeners();
   const portMessages = listeners();
   const portDisconnect = listeners();
-  const tabsById = new Map(tabs.map((tab) => [tab.id, tab]));
+  const tabsById = new Map(tabs.map((tab) => [tab.id, { ...tab, windowId: tab.windowId ?? 1 }]));
   let activeTabId = tabs[0]?.id;
   const port = {
     postMessage: vi.fn(),
@@ -36,7 +39,7 @@ function backgroundHarness(tabs: chrome.tabs.Tab[]) {
       onActivated: activated,
       onUpdated: updated,
       get: vi.fn((tabId: number) => Promise.resolve(tabsById.get(tabId))),
-      query: vi.fn(() => Promise.resolve(activeTabId === undefined ? [] : [tabsById.get(activeTabId)])),
+      query: vi.fn(() => queryTabs?.() ?? Promise.resolve(activeTabId === undefined ? [] : [tabsById.get(activeTabId)])),
     },
     windows: { WINDOW_ID_CURRENT: -2, WINDOW_ID_NONE: -1, onFocusChanged: focusChanged, getLastFocused: vi.fn(() => Promise.resolve({ focused: true, id: 1 })) },
     idle: { setDetectionInterval: vi.fn(), onStateChanged: idleChanged, queryState: vi.fn(() => Promise.resolve("active")) },
@@ -45,6 +48,7 @@ function backgroundHarness(tabs: chrome.tabs.Tab[]) {
   return {
     alarm,
     activated,
+    focusChanged,
     port,
     portMessages,
     setActiveTab: (tabId: number) => { activeTabId = tabId; },
@@ -228,5 +232,41 @@ describe("background startup", () => {
         { origin: "example.net", seconds: 20 },
       ]),
     }));
+  });
+
+  it("ignores a stale tab query after focus moves to another window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-09T12:00:00.000Z"));
+    const pendingQueries: Array<(tabs: chrome.tabs.Tab[]) => void> = [];
+    const harness = backgroundHarness(
+      [
+        { id: 1, windowId: 1, url: "https://github.com/acme/project", incognito: false },
+        { id: 2, windowId: 2, url: "https://example.net", incognito: false },
+      ],
+      () => new Promise((resolve) => { pendingQueries.push(resolve); }),
+    );
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      rules: [{ id: "rule-1", pattern: "github.com/acme/*" }],
+    } as never);
+    await settle();
+    harness.focusChanged.emit(2 as never);
+    await settle();
+    expect(pendingQueries).toHaveLength(3);
+
+    pendingQueries[2]?.([{ id: 2, windowId: 2, url: "https://example.net", incognito: false }]);
+    pendingQueries[0]?.([{ id: 1, windowId: 1, url: "https://github.com/acme/project", incognito: false }]);
+    pendingQueries[1]?.([{ id: 1, windowId: 1, url: "https://github.com/acme/project", incognito: false }]);
+    await settle();
+    await vi.advanceTimersByTimeAsync(15_000);
+    harness.alarm.emit({ name: SPAN_ADVANCE_ALARM_NAME } as never);
+    await settle();
+
+    expect(spanMessages(harness.port)).toHaveLength(0);
   });
 });

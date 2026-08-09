@@ -44,6 +44,12 @@ pub(crate) fn read_session_token() -> Option<String> {
         .and_then(|entry| entry.get_password().ok())
 }
 
+pub(crate) fn clear_session_token() {
+    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT) {
+        let _ = entry.delete_credential();
+    }
+}
+
 /// Persists recovery state so an unexpected exit cannot lose a running timer.
 /// Shared with the monitor, whose auto-stop enqueues through the same file.
 pub(crate) fn write_recovery_file(path: &Path, state: &RecoveryState) -> ApiResult<()> {
@@ -145,9 +151,7 @@ impl AppState {
     }
 
     fn clear_session_token(&self) {
-        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT) {
-            let _ = entry.delete_credential();
-        }
+        clear_session_token();
     }
 
     /// Every command mints a fresh access token.
@@ -207,7 +211,9 @@ async fn timer_bootstrap(state: State<'_, AppState>) -> ApiResult<Snapshot> {
         // rather than an error the user cannot act on.
         Err(error) if error.kind == ErrorKind::Auth => {
             state.monitor.stop().await;
-            let _ = browser::disable_collection(&state.monitor.browser_dir());
+            browser::revoke_collection(&state.monitor.browser_dir())?;
+            state.clear_session_token();
+            let _ = browser::discard_collection(&state.monitor.browser_dir());
             return Ok(Snapshot::signed_out());
         }
         Err(error) => return Err(error),
@@ -353,11 +359,11 @@ async fn org_overview(state: State<'_, AppState>) -> ApiResult<OrganizationOverv
 async fn auth_logout(state: State<'_, AppState>) -> ApiResult<()> {
     // Signing out stops the monitor: nothing is recorded while there is no
     // account the evidence could belong to.
-    let collection_result = browser::disable_collection(&state.monitor.browser_dir());
+    browser::revoke_collection(&state.monitor.browser_dir())?;
     state.monitor.stop().await;
     state.clear_session_token();
     state.write_recovery(RecoveryState::default()).await?;
-    collection_result
+    browser::discard_collection(&state.monitor.browser_dir())
 }
 
 #[tauri::command]

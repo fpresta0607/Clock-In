@@ -15,7 +15,7 @@ const VALID_EVENT = {
 describe("parseStartupStorage", () => {
   it("returns fresh empty state when storage is unavailable", () => {
     expect(parseStartupStorage(undefined, NOW)).toEqual({
-      tally: { weekStart: WEEK_START, entries: {} },
+      tally: { weekStart: WEEK_START, entries: {}, remainderMilliseconds: {} },
       queuedEvents: [],
       machineSnapshot: undefined,
       lastTickAt: undefined,
@@ -30,21 +30,21 @@ describe("parseStartupStorage", () => {
         spanOutbox: 42,
         spanMachine: null,
       }, NOW),
-    ).toEqual({ tally: { weekStart: WEEK_START, entries: {} }, queuedEvents: [], machineSnapshot: null, lastTickAt: undefined, collectionId: undefined });
+    ).toEqual({ tally: { weekStart: WEEK_START, entries: {}, remainderMilliseconds: {} }, queuedEvents: [], machineSnapshot: null, lastTickAt: undefined, collectionId: undefined });
   });
 
   it("keeps valid tally entries and drops malformed ones", () => {
     const parsed = parseStartupStorage({
       unmatchedTally: { weekStart: WEEK_START, entries: { "quickbooks.com": 75, bad: "x", negative: -3 } },
     }, NOW);
-    expect(parsed.tally).toEqual({ weekStart: WEEK_START, entries: { "quickbooks.com": 75 } });
+    expect(parsed.tally).toEqual({ weekStart: WEEK_START, entries: { "quickbooks.com": 75 }, remainderMilliseconds: {} });
   });
 
   it("drops a tally carried over from a prior week", () => {
     const parsed = parseStartupStorage({
       unmatchedTally: { weekStart: WEEK_START - 7 * 86_400_000, entries: { "quickbooks.com": 75 } },
     }, NOW);
-    expect(parsed.tally).toEqual({ weekStart: WEEK_START, entries: {} });
+    expect(parsed.tally).toEqual({ weekStart: WEEK_START, entries: {}, remainderMilliseconds: {} });
   });
 
   it("keeps valid queued events and drops malformed ones", () => {

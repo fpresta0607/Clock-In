@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use crate::api::{ApiClient, MappingKind, PathMapping};
+use crate::api::{ApiClient, ErrorKind, MappingKind, PathMapping};
 use crate::monitor::{
     iso8601, lock, parse_iso8601, unix_now, ActiveAgent, AgentTracking, BrowserSpan,
     BrowserTracking, MonitorShared, PendingSuggestion, SegmentRecord,
@@ -72,11 +72,20 @@ async fn upload_once(
     recovery: &Arc<tokio::sync::Mutex<RecoveryState>>,
 ) {
     let Some(session) = crate::read_session_token() else {
-        let _ = crate::browser::disable_collection(browser_dir);
+        let _ = crate::browser::revoke_collection(browser_dir);
+        let _ = crate::browser::discard_collection(browser_dir);
         return;
     };
-    let Ok(token) = client.fetch_access_token(&session).await else {
-        return;
+    let token = match client.fetch_access_token(&session).await {
+        Ok(token) => token,
+        Err(error) => {
+            if error.kind == ErrorKind::Auth {
+                crate::clear_session_token();
+                let _ = crate::browser::revoke_collection(browser_dir);
+                let _ = crate::browser::discard_collection(browser_dir);
+            }
+            return;
+        }
     };
 
     let mut complete = upload_segments(client, &token, segments_path).await;

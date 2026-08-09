@@ -41,7 +41,7 @@ import {
   type SpanMachine,
 } from "./spans.js";
 import {
-  addFocusSeconds,
+  addFocusMilliseconds,
   clearTally,
   emptyTally,
   originFor,
@@ -81,6 +81,7 @@ let unmatchedOrigin: string | null = null;
 // The window holding OS focus, per windows.onFocusChanged; null while no
 // Chrome window is focused. Tab activations outside this window are ignored.
 let focusedWindowId: number | null = null;
+let tabReadGeneration = 0;
 let lastTickAt = Date.now();
 let lastTallyFlushAt = 0;
 
@@ -140,6 +141,7 @@ function resetLocalCollectionState(now: number = Date.now()): void {
   currentTabId = null;
   unmatchedOrigin = null;
   focusedWindowId = null;
+  tabReadGeneration += 1;
   lastTickAt = now;
   lastTallyFlushAt = 0;
 }
@@ -147,7 +149,7 @@ function resetLocalCollectionState(now: number = Date.now()): void {
 function settleTally(now: number): void {
   const { creditMs } = tickCredit(now, lastTickAt, TICK_MS);
   if (collectionEnabled && unmatchedOrigin !== null && machine.windowFocused && machine.idleState === "active") {
-    addFocusSeconds(tally, unmatchedOrigin, Math.round(creditMs / 1000), now);
+    addFocusMilliseconds(tally, unmatchedOrigin, creditMs, now);
   }
   lastTickAt = now;
 }
@@ -160,6 +162,7 @@ function fenceUnobservedGap(now: number): boolean {
   lastTickAt = now;
   currentTabId = null;
   unmatchedOrigin = null;
+  tabReadGeneration += 1;
   emitSpanEvents([
     ...handleInput(machine, { type: "window-focus", focused: false }, lastProvableAt),
     ...advance(machine, now),
@@ -352,14 +355,19 @@ function applyTab(tab: chrome.tabs.Tab): void {
   feedMachine({ type: "active-tab", ruleId }, now, false);
 }
 
+function canApplyTabRead(tab: chrome.tabs.Tab, windowId: number, generation: number): boolean {
+  return tabReadGeneration === generation &&
+    focusedWindowId === windowId &&
+    tab.windowId === windowId;
+}
+
 function watchActiveTab(windowId: number): void {
-  const query: chrome.tabs.QueryInfo =
-    windowId === chrome.windows.WINDOW_ID_CURRENT
-      ? { active: true, lastFocusedWindow: true }
-      : { active: true, windowId };
+  const generation = tabReadGeneration + 1;
+  tabReadGeneration = generation;
+  const query: chrome.tabs.QueryInfo = { active: true, windowId };
   void chrome.tabs.query(query).then((tabs) => {
     const tab = tabs[0];
-    if (tab !== undefined) {
+    if (tab !== undefined && canApplyTabRead(tab, windowId, generation)) {
       applyTab(tab);
     }
   });
@@ -370,9 +378,20 @@ function reApplyActiveTab(): void {
   if (currentTabId === null) {
     return;
   }
+  const tabId = currentTabId;
+  const windowId = focusedWindowId;
+  if (windowId === null) {
+    return;
+  }
+  const generation = tabReadGeneration + 1;
+  tabReadGeneration = generation;
   void chrome.tabs
-    .get(currentTabId)
-    .then(applyTab)
+    .get(tabId)
+    .then((tab) => {
+      if (tab.id === tabId && canApplyTabRead(tab, windowId, generation)) {
+        applyTab(tab);
+      }
+    })
     .catch(() => {
       // The tab vanished; the next activation re-seats the machine.
     });
@@ -412,12 +431,20 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
     if (!shouldApplyTabActivation(activeInfo.windowId, focusedWindowId)) {
       return;
     }
+    const generation = tabReadGeneration + 1;
+    tabReadGeneration = generation;
     void chrome.tabs
       .get(activeInfo.tabId)
-      .then(applyTab)
+      .then((tab) => {
+        if (tab.id === activeInfo.tabId && canApplyTabRead(tab, activeInfo.windowId, generation)) {
+          applyTab(tab);
+        }
+      })
       .catch(() => {
         // The tab vanished between the event and the lookup; treat as no match.
-        feedMachine({ type: "active-tab", ruleId: null });
+        if (tabReadGeneration === generation && focusedWindowId === activeInfo.windowId) {
+          feedMachine({ type: "active-tab", ruleId: null });
+        }
       });
   });
 });
@@ -425,7 +452,8 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   void initialized.then(() => {
     // Only URL changes in the active tab re-seat the state machine.
-    if (tabId === currentTabId && changeInfo.url !== undefined) {
+    if (tabId === currentTabId && changeInfo.url !== undefined && tab.windowId === focusedWindowId) {
+      tabReadGeneration += 1;
       applyTab(tab);
     }
   });
@@ -434,6 +462,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 chrome.windows.onFocusChanged.addListener((windowId) => {
   void initialized.then(() => {
     const focused = windowId !== chrome.windows.WINDOW_ID_NONE;
+    tabReadGeneration += 1;
     focusedWindowId = focused ? windowId : null;
     feedMachine({ type: "window-focus", focused });
     if (focused) {

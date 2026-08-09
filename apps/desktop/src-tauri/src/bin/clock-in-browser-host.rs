@@ -147,7 +147,7 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
 }
 
 fn collection_state(paths: &HostPaths) -> serde_json::Value {
-    match browser::collection_id(&paths.dir) {
+    match browser::admitted_collection_id(&paths.dir) {
         Some(collection_id) => serde_json::json!({ "collectionEnabled": true, "collectionId": collection_id }),
         None => serde_json::json!({ "collectionEnabled": false }),
     }
@@ -247,7 +247,7 @@ fn append_span_event(
     let collection_id = collection_id.to_string();
     let event = input.into_event();
     spool::append_if(&paths.spool, &event, || {
-        browser::collection_id(&paths.dir).as_deref() == Some(collection_id.as_str())
+        browser::admitted_collection_id(&paths.dir).as_deref() == Some(collection_id.as_str())
     })
         .map_err(|error| format!("could not write the browser spool: {error}"))
 }
@@ -282,7 +282,7 @@ fn store_tally(
     let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "weekStart": week_start, "entries": entries }))
         .map_err(|error| error.to_string())?;
     spool::with_lock(&paths.spool, || {
-        if browser::collection_id(&paths.dir).as_deref() != Some(collection_id.as_str()) {
+        if browser::admitted_collection_id(&paths.dir).as_deref() != Some(collection_id.as_str()) {
             return Ok(TallyOutcome::Dropped);
         }
         match browser::store_tally_snapshot(&paths.dir, &bytes, entries.as_array().is_some_and(Vec::is_empty))? {
@@ -488,6 +488,27 @@ mod tests {
         out.clear();
         dispatch(&current_message, &paths, &mut out).expect("current message is handled");
         assert_eq!(spool_lines(&paths.spool)[0]["externalSessionId"], "new-span");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn revoked_collection_cannot_admit_spans_or_tallies_before_cleanup() {
+        let dir = temp_dir("revoked-collection");
+        let paths = configured_paths(&dir);
+        let span = span_event_message(&paths, "s1");
+        let tally = tally_message(&paths, serde_json::json!([{"origin":"quickbooks.com","seconds":60}]));
+        browser::revoke_collection(&dir).expect("collection revokes");
+        let mut out = Vec::new();
+
+        dispatch(&span, &paths, &mut out).expect("span is handled");
+        dispatch(&tally, &paths, &mut out).expect("tally is handled");
+
+        assert!(!paths.spool.exists());
+        assert!(!paths.tally.exists());
+        for reply in reply_values(&out) {
+            assert_eq!(reply["collectionEnabled"], false);
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

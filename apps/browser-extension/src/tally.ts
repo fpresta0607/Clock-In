@@ -7,6 +7,7 @@
 export interface Tally {
   weekStart: number;
   entries: Record<string, number>;
+  remainderMilliseconds: Record<string, number>;
 }
 
 export const TALLY_STORAGE_KEY = "unmatchedTally";
@@ -20,7 +21,7 @@ export function weekStartAt(now: number): number {
 }
 
 export function emptyTally(now: number = Date.now()): Tally {
-  return { weekStart: weekStartAt(now), entries: {} };
+  return { weekStart: weekStartAt(now), entries: {}, remainderMilliseconds: {} };
 }
 
 export function restoreTally(value: unknown, now: number = Date.now()): Tally {
@@ -34,11 +35,20 @@ export function restoreTally(value: unknown, now: number = Date.now()): Tally {
   }
   const entries: Record<string, number> = {};
   for (const [origin, seconds] of Object.entries(stored["entries"] as Record<string, unknown>)) {
-    if (typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0) {
+    if (typeof seconds === "number" && Number.isSafeInteger(seconds) && seconds >= 0) {
       entries[origin] = seconds;
     }
   }
-  return { weekStart, entries };
+  const remainderMilliseconds: Record<string, number> = {};
+  const storedRemainders = stored["remainderMilliseconds"];
+  if (typeof storedRemainders === "object" && storedRemainders !== null && !Array.isArray(storedRemainders)) {
+    for (const [origin, milliseconds] of Object.entries(storedRemainders as Record<string, unknown>)) {
+      if (typeof milliseconds === "number" && Number.isSafeInteger(milliseconds) && milliseconds > 0 && milliseconds < 1_000) {
+        remainderMilliseconds[origin] = milliseconds;
+      }
+    }
+  }
+  return { weekStart, entries, remainderMilliseconds };
 }
 
 export function rollTallyIntoCurrentWeek(tally: Tally, now: number = Date.now()): boolean {
@@ -48,6 +58,7 @@ export function rollTallyIntoCurrentWeek(tally: Tally, now: number = Date.now())
   }
   tally.weekStart = weekStart;
   tally.entries = {};
+  tally.remainderMilliseconds = {};
   return true;
 }
 
@@ -108,11 +119,26 @@ export function originFor(url: string): string | null {
 
 /** Adds focused seconds to one unmatched origin. Mutates and returns the tally. */
 export function addFocusSeconds(tally: Tally, origin: string, seconds: number, now: number = Date.now()): Tally {
+  return addFocusMilliseconds(tally, origin, seconds * 1_000, now);
+}
+
+export function addFocusMilliseconds(tally: Tally, origin: string, milliseconds: number, now: number = Date.now()): Tally {
   rollTallyIntoCurrentWeek(tally, now);
-  if (seconds <= 0) {
+  const wholeMilliseconds = Math.floor(milliseconds);
+  if (wholeMilliseconds <= 0) {
     return tally;
   }
-  tally.entries[origin] = (tally.entries[origin] ?? 0) + seconds;
+  const accumulated = (tally.remainderMilliseconds[origin] ?? 0) + wholeMilliseconds;
+  const wholeSeconds = Math.floor(accumulated / 1_000);
+  if (wholeSeconds > 0) {
+    tally.entries[origin] = (tally.entries[origin] ?? 0) + wholeSeconds;
+  }
+  const remainder = accumulated % 1_000;
+  if (remainder === 0) {
+    delete tally.remainderMilliseconds[origin];
+  } else {
+    tally.remainderMilliseconds[origin] = remainder;
+  }
   return tally;
 }
 
@@ -120,10 +146,12 @@ export function addFocusSeconds(tally: Tally, origin: string, seconds: number, n
 export function tallySnapshot(tally: Tally): Array<{ origin: string; seconds: number }> {
   return Object.entries(tally.entries)
     .map(([origin, seconds]) => ({ origin, seconds }))
+    .filter((entry) => entry.seconds > 0)
     .sort((a, b) => b.seconds - a.seconds);
 }
 
 /** User-clearable: wipes the local tally. */
 export function clearTally(tally: Tally): void {
   tally.entries = {};
+  tally.remainderMilliseconds = {};
 }
