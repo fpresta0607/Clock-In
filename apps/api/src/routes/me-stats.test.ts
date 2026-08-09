@@ -222,8 +222,9 @@ class MemoryReports implements ReportRepository {
           seconds += Math.max(0, end - start) / 1_000;
         }
       }
-      if (seconds === 0) continue;
-      totals.push({ mapping: { id: mapping.id, pattern: mapping.pattern, projectId: mapping.projectId }, durationSeconds: seconds });
+      const durationSeconds = Math.floor(seconds);
+      if (durationSeconds <= 0) continue;
+      totals.push({ mapping: { id: mapping.id, pattern: mapping.pattern, projectId: mapping.projectId }, durationSeconds });
     }
     return totals.sort((a, b) => (b.durationSeconds as number) - (a.durationSeconds as number) || a.mapping.id.localeCompare(b.mapping.id));
   }
@@ -646,5 +647,28 @@ describe("me/stats routes", () => {
     await expect(unranged.json()).resolves.toMatchObject({
       sites: [{ mapping: { id: githubRule }, durationSeconds: 900 }],
     });
+  });
+
+  it("excludes subsecond site intersections after flooring their total", async () => {
+    const reports = new MemoryReports();
+    const githubRule = "01c7e513-b094-4d4c-ae55-21790ae019a4";
+    reports.mappings.push(
+      { id: githubRule, organizationId: ids.organization, userId: ids.user, kind: "url_rule", pattern: "github.com/acme/*", projectId: ids.project },
+    );
+    const receivedAt = new Date("2026-08-05T14:00:01.000Z");
+    reports.segments.push({
+      organizationId: ids.organization, userId: ids.user, kind: "active", processName: "chrome.exe",
+      startedAt: new Date("2026-08-05T14:00:00.000Z"), endedAt: new Date("2026-08-05T14:00:00.500Z"), receivedAt,
+    });
+    reports.agents.push({
+      organizationId: ids.organization, userId: ids.user, source: "browser", ruleId: githubRule, linkedSessionId: null,
+      startedAt: new Date("2026-08-05T14:00:00.000Z"), endedAt: new Date("2026-08-05T14:00:00.500Z"),
+      lastEventAt: new Date("2026-08-05T14:00:00.500Z"), receivedAt,
+    });
+
+    const response = await createTestApp(reports).request("http://api.test/me/stats", { headers: { authorization: bearerHeader } });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ sites: [] });
   });
 });

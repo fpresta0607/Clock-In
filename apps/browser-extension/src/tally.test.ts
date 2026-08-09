@@ -6,7 +6,10 @@ import {
   emptyTally,
   originFor,
   registrableDomain,
+  restoreTally,
+  rollTallyIntoCurrentWeek,
   tallySnapshot,
+  weekStartAt,
 } from "./tally.js";
 
 describe("registrableDomain", () => {
@@ -78,5 +81,17 @@ describe("tally accumulation", () => {
     clearTally(tally);
     expect(tally.entries).toEqual({});
     expect(tallySnapshot(tally)).toEqual([]);
+  });
+
+  it("keeps only the current UTC week's tally", () => {
+    const sunday = Date.UTC(2026, 7, 9, 23, 59, 0);
+    const monday = Date.UTC(2026, 7, 10, 0, 1, 0);
+    const tally = emptyTally(sunday);
+    addFocusSeconds(tally, "quickbooks.com", 75, sunday);
+
+    expect(rollTallyIntoCurrentWeek(tally, monday)).toBe(true);
+    expect(tally).toEqual({ weekStart: weekStartAt(monday), entries: {} });
+    expect(restoreTally({ weekStart: weekStartAt(sunday), entries: { "quickbooks.com": 75 } }, monday))
+      .toEqual({ weekStart: weekStartAt(monday), entries: {} });
   });
 });

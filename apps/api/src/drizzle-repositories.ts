@@ -734,21 +734,25 @@ export class DrizzleReportRepository implements ReportRepository {
         select min(started_at) as started_at, max(ended_at) as ended_at
         from active_islands
         group by island
+      ),
+      site_totals as (
+        select m.id as "mappingId", m.path_prefix as "pattern", m.project_id as "projectId",
+          floor(sum(greatest(0, extract(epoch from (${windowEnd} - ${windowStart})))))::bigint as "durationSeconds"
+        from merged_spans s
+        join project_path_mappings m
+          on m.organization_id = ${subject.organizationId} and m.user_id = ${subject.userId}
+          and m.id = s.rule_id and m.kind = 'url_rule'
+        join merged_active_segments seg
+          on seg.started_at < s.ended_at and seg.ended_at > s.started_at
+        where true
+          ${query.from === undefined ? sql`` : sql`and s.ended_at > ${query.from.toISOString()}`}
+          ${query.toExclusive === undefined ? sql`` : sql`and s.started_at < ${query.toExclusive.toISOString()}`}
+        group by m.id, m.path_prefix, m.project_id
       )
-      select m.id as "mappingId", m.path_prefix as "pattern", m.project_id as "projectId",
-        floor(sum(greatest(0, extract(epoch from (${windowEnd} - ${windowStart})))))::bigint as "durationSeconds"
-      from merged_spans s
-      join project_path_mappings m
-        on m.organization_id = ${subject.organizationId} and m.user_id = ${subject.userId}
-        and m.id = s.rule_id and m.kind = 'url_rule'
-      join merged_active_segments seg
-        on seg.started_at < s.ended_at and seg.ended_at > s.started_at
-      where true
-        ${query.from === undefined ? sql`` : sql`and s.ended_at > ${query.from.toISOString()}`}
-        ${query.toExclusive === undefined ? sql`` : sql`and s.started_at < ${query.toExclusive.toISOString()}`}
-      group by m.id, m.path_prefix, m.project_id
-      having sum(greatest(0, extract(epoch from (${windowEnd} - ${windowStart})))) > 0
-      order by "durationSeconds" desc, m.id asc
+      select "mappingId", "pattern", "projectId", "durationSeconds"
+      from site_totals
+      where "durationSeconds" > 0
+      order by "durationSeconds" desc, "mappingId" asc
     `);
 
     return (rows as unknown as { mappingId: string; pattern: string; projectId: string | null; durationSeconds: string | null }[]).map((row) => ({

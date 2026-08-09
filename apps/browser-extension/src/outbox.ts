@@ -36,6 +36,10 @@ export class Outbox<T> {
     return drained;
   }
 
+  clear(): void {
+    this.items = [];
+  }
+
   /** Storage snapshot, oldest first. */
   snapshot(): T[] {
     return [...this.items];

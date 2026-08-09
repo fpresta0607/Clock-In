@@ -205,10 +205,17 @@ async fn timer_bootstrap(state: State<'_, AppState>) -> ApiResult<Snapshot> {
         Ok(token) => token,
         // No stored session, or the stored one no longer works: show sign-in
         // rather than an error the user cannot act on.
-        Err(error) if error.kind == ErrorKind::Auth => return Ok(Snapshot::signed_out()),
+        Err(error) if error.kind == ErrorKind::Auth => {
+            state.monitor.stop().await;
+            let _ = browser::disable_collection(&state.monitor.browser_dir());
+            return Ok(Snapshot::signed_out());
+        }
         Err(error) => return Err(error),
     };
     let snapshot = state.snapshot(&access_token).await?;
+    if let Snapshot::Account { user, .. } = &snapshot {
+        browser::enable_collection(&state.monitor.browser_dir(), &user.id)?;
+    }
     // A signed-in session is what starts the monitor: recording while signed
     // out would attribute this machine's evidence to whoever signs in next.
     state.monitor.ensure_running().await;
@@ -217,12 +224,18 @@ async fn timer_bootstrap(state: State<'_, AppState>) -> ApiResult<Snapshot> {
 
 #[tauri::command]
 async fn auth_login(state: State<'_, AppState>, input: LoginInput) -> ApiResult<Snapshot> {
+    state.monitor.stop().await;
+    browser::disable_collection(&state.monitor.browser_dir())?;
+    state.clear_session_token();
     let session = state.client.sign_in(&input.email, &input.password).await?;
-    state.store_session_token(&session)?;
     // A new sign-in must never inherit the previous account's timers.
     state.write_recovery(RecoveryState::default()).await?;
     let access_token = state.client.fetch_access_token(&session).await?;
     let snapshot = state.snapshot(&access_token).await?;
+    if let Snapshot::Account { user, .. } = &snapshot {
+        browser::enable_collection(&state.monitor.browser_dir(), &user.id)?;
+    }
+    state.store_session_token(&session)?;
     state.monitor.ensure_running().await;
     Ok(snapshot)
 }
@@ -246,11 +259,13 @@ pub struct SignupInput {
 
 #[tauri::command]
 async fn auth_signup(state: State<'_, AppState>, input: SignupInput) -> ApiResult<Snapshot> {
+    state.monitor.stop().await;
+    browser::disable_collection(&state.monitor.browser_dir())?;
+    state.clear_session_token();
     let session = state
         .client
         .sign_up(&input.email, &input.password, &input.name)
         .await?;
-    state.store_session_token(&session)?;
     state.write_recovery(RecoveryState::default()).await?;
     let access_token = state.client.fetch_access_token(&session).await?;
 
@@ -264,6 +279,10 @@ async fn auth_signup(state: State<'_, AppState>, input: SignupInput) -> ApiResul
     state.client.provision_account(&access_token, code).await?;
 
     let snapshot = state.snapshot(&access_token).await?;
+    if let Snapshot::Account { user, .. } = &snapshot {
+        browser::enable_collection(&state.monitor.browser_dir(), &user.id)?;
+    }
+    state.store_session_token(&session)?;
     state.monitor.ensure_running().await;
     Ok(snapshot)
 }
@@ -316,9 +335,11 @@ async fn org_overview(state: State<'_, AppState>) -> ApiResult<OrganizationOverv
 async fn auth_logout(state: State<'_, AppState>) -> ApiResult<()> {
     // Signing out stops the monitor: nothing is recorded while there is no
     // account the evidence could belong to.
+    let collection_result = browser::disable_collection(&state.monitor.browser_dir());
     state.monitor.stop().await;
     state.clear_session_token();
-    state.write_recovery(RecoveryState::default()).await
+    state.write_recovery(RecoveryState::default()).await?;
+    collection_result
 }
 
 #[tauri::command]

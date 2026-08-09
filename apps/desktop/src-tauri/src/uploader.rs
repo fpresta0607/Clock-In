@@ -71,8 +71,8 @@ async fn upload_once(
     browser_path: &Path,
     recovery: &Arc<tokio::sync::Mutex<RecoveryState>>,
 ) {
-    // Signed out: leave both spools for a session that can upload them.
     let Some(session) = crate::read_session_token() else {
+        let _ = crate::browser::disable_collection(browser_dir);
         return;
     };
     let Ok(token) = client.fetch_access_token(&session).await else {
@@ -243,7 +243,7 @@ pub fn track_browser_events(
     events: &[SpoolEvent],
     mappings: &[PathMapping],
     timer_running: bool,
-    now: u64,
+    _now: u64,
     tracking: &mut BrowserTracking,
     suggestion: &mut Option<PendingSuggestion>,
 ) {
@@ -288,8 +288,7 @@ pub fn track_browser_events(
     }
 
     // The suggestion question: the newest open mapped span old enough to not
-    // be a glance. Heartbeats prove age across replays; `now` covers a span
-    // whose first drain arrives after the threshold.
+    // be a glance, based only on lifecycle evidence observed from the browser.
     if timer_running {
         return;
     }
@@ -298,7 +297,7 @@ pub fn track_browser_events(
         .iter()
         .filter(|(span_id, span)| {
             tracking.dismissed_span.as_ref() != Some(*span_id)
-                && span.last_seen.max(now).saturating_sub(span.started_at)
+                && span.last_seen.saturating_sub(span.started_at)
                     >= BROWSER_SUGGESTION_MIN_AGE_SECONDS
         })
         .max_by_key(|(_, span)| span.started_at);
@@ -824,12 +823,11 @@ mod tests {
     }
 
     #[test]
-    fn a_span_seen_first_at_drain_ages_against_the_clock() {
+    fn a_lone_stale_start_does_not_prove_browser_dwell() {
         let mappings = vec![rule("r1", "quickbooks.com", "p-books")];
         let mut tracking = BrowserTracking::default();
         let mut suggestion = None;
 
-        // The started event reached the drain over a minute after it happened.
         track_browser_events(
             &[browser_event(
                 AgentEventKind::Started,
@@ -843,10 +841,7 @@ mod tests {
             &mut tracking,
             &mut suggestion,
         );
-        assert!(
-            suggestion.is_some(),
-            "the span is provably older than a glance"
-        );
+        assert!(suggestion.is_none());
     }
 
     #[test]

@@ -3,16 +3,18 @@
 
 import type { SpanEvent } from "./spans.js";
 import { OUTBOX_STORAGE_KEY } from "./outbox.js";
-import { TALLY_STORAGE_KEY } from "./tally.js";
+import { restoreTally, TALLY_STORAGE_KEY, type Tally } from "./tally.js";
 
 export const MACHINE_STORAGE_KEY = "spanMachine";
 export const LAST_TICK_STORAGE_KEY = "lastTickAt";
+export const COLLECTION_ID_STORAGE_KEY = "browserCollectionId";
 
 export interface StartupStorage {
-  tallyEntries: Record<string, number>;
+  tally: Tally;
   queuedEvents: SpanEvent[];
   machineSnapshot: unknown;
   lastTickAt: number | undefined;
+  collectionId: string | undefined;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -30,29 +32,21 @@ function isSpanEvent(value: unknown): value is SpanEvent {
     typeof candidate["occurredAt"] === "string" && Number.isFinite(Date.parse(candidate["occurredAt"]));
 }
 
-export function parseStartupStorage(value: unknown): StartupStorage {
+export function parseStartupStorage(value: unknown, now: number = Date.now()): StartupStorage {
   const stored = record(value);
   if (stored === null) {
-    return { tallyEntries: {}, queuedEvents: [], machineSnapshot: undefined, lastTickAt: undefined };
-  }
-
-  const tallyEntries: Record<string, number> = {};
-  const rawTally = record(stored[TALLY_STORAGE_KEY]);
-  if (rawTally !== null) {
-    for (const [origin, seconds] of Object.entries(rawTally)) {
-      if (typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0) {
-        tallyEntries[origin] = seconds;
-      }
-    }
+    return { tally: restoreTally(undefined, now), queuedEvents: [], machineSnapshot: undefined, lastTickAt: undefined, collectionId: undefined };
   }
 
   const queued = stored[OUTBOX_STORAGE_KEY];
   const lastTickAt = stored[LAST_TICK_STORAGE_KEY];
+  const collectionId = stored[COLLECTION_ID_STORAGE_KEY];
   return {
-    tallyEntries,
+    tally: restoreTally(stored[TALLY_STORAGE_KEY], now),
     queuedEvents: Array.isArray(queued) ? queued.filter(isSpanEvent) : [],
     machineSnapshot: stored[MACHINE_STORAGE_KEY],
     lastTickAt: isTimestamp(lastTickAt) ? lastTickAt : undefined,
+    collectionId: typeof collectionId === "string" && collectionId.length > 0 ? collectionId : undefined,
   };
 }
 

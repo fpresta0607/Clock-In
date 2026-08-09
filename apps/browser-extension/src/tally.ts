@@ -3,15 +3,52 @@
 //! the local needs-mapping view. Nothing in this module is ever uploaded;
 //! the desktop's copy is a read-only passthrough.
 
-/** Extension-storage shape: origin -> accumulated focused seconds. */
+/** Extension-storage shape: the current UTC week and its origin totals. */
 export interface Tally {
+  weekStart: number;
   entries: Record<string, number>;
 }
 
 export const TALLY_STORAGE_KEY = "unmatchedTally";
 
-export function emptyTally(): Tally {
-  return { entries: {} };
+export function weekStartAt(now: number): number {
+  const date = new Date(now);
+  const daysSinceMonday = (date.getUTCDay() + 6) % 7;
+  date.setUTCDate(date.getUTCDate() - daysSinceMonday);
+  date.setUTCHours(0, 0, 0, 0);
+  return date.getTime();
+}
+
+export function emptyTally(now: number = Date.now()): Tally {
+  return { weekStart: weekStartAt(now), entries: {} };
+}
+
+export function restoreTally(value: unknown, now: number = Date.now()): Tally {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return emptyTally(now);
+  }
+  const stored = value as Record<string, unknown>;
+  const weekStart = weekStartAt(now);
+  if (stored["weekStart"] !== weekStart || typeof stored["entries"] !== "object" || stored["entries"] === null || Array.isArray(stored["entries"])) {
+    return emptyTally(now);
+  }
+  const entries: Record<string, number> = {};
+  for (const [origin, seconds] of Object.entries(stored["entries"] as Record<string, unknown>)) {
+    if (typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0) {
+      entries[origin] = seconds;
+    }
+  }
+  return { weekStart, entries };
+}
+
+export function rollTallyIntoCurrentWeek(tally: Tally, now: number = Date.now()): boolean {
+  const weekStart = weekStartAt(now);
+  if (tally.weekStart === weekStart) {
+    return false;
+  }
+  tally.weekStart = weekStart;
+  tally.entries = {};
+  return true;
 }
 
 // Common compound public suffixes, so `foo.bar.co.uk` tallies as `bar.co.uk`.
@@ -70,7 +107,8 @@ export function originFor(url: string): string | null {
 }
 
 /** Adds focused seconds to one unmatched origin. Mutates and returns the tally. */
-export function addFocusSeconds(tally: Tally, origin: string, seconds: number): Tally {
+export function addFocusSeconds(tally: Tally, origin: string, seconds: number, now: number = Date.now()): Tally {
+  rollTallyIntoCurrentWeek(tally, now);
   if (seconds <= 0) {
     return tally;
   }

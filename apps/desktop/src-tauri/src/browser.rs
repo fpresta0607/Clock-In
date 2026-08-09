@@ -17,7 +17,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::api::{ApiResult, BridgeError, MappingKind, PathMapping};
 use crate::spool;
@@ -226,6 +226,96 @@ fn host_manifest(browser: Browser, host_binary: &Path) -> String {
     )
 }
 
+const COLLECTION_FILE: &str = "browser-collection.json";
+const TALLY_CLEAR_FILE: &str = "browser-tally-clear.json";
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserCollection {
+    account_id: String,
+    collection_id: String,
+}
+
+fn collection_path(dir: &Path) -> PathBuf {
+    dir.join(COLLECTION_FILE)
+}
+
+fn tally_clear_path(dir: &Path) -> PathBuf {
+    dir.join(TALLY_CLEAR_FILE)
+}
+
+fn browser_spool_path(dir: &Path) -> PathBuf {
+    dir.join("browser-spool.jsonl")
+}
+
+fn read_collection(dir: &Path) -> Option<BrowserCollection> {
+    let collection = serde_json::from_slice::<BrowserCollection>(&std::fs::read(collection_path(dir)).ok()?).ok()?;
+    (!collection.account_id.trim().is_empty() && !collection.collection_id.trim().is_empty()).then_some(collection)
+}
+
+pub fn collection_id(dir: &Path) -> Option<String> {
+    read_collection(dir).map(|collection| collection.collection_id)
+}
+
+fn next_collection_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    format!("{}-{}-{}", crate::monitor::unix_now(), std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+fn remove_if_exists(path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn discard_browser_evidence(dir: &Path) -> io::Result<()> {
+    let spool = browser_spool_path(dir);
+    for path in [
+        spool.clone(),
+        spool.with_extension("old.jsonl"),
+        dir.join("unmatched-tally.json"),
+        dir.join("never-suggest.json"),
+        tally_clear_path(dir),
+    ] {
+        remove_if_exists(&path)?;
+    }
+    Ok(())
+}
+
+pub fn enable_collection(dir: &Path, account_id: &str) -> ApiResult<()> {
+    let account_id = account_id.trim();
+    if account_id.is_empty() {
+        return Err(BridgeError::new(crate::api::ErrorKind::Validation, "Could not identify the signed-in account."));
+    }
+    let spool = browser_spool_path(dir);
+    spool::with_lock(&spool, || {
+        if read_collection(dir).is_some_and(|collection| collection.account_id == account_id) {
+            return Ok(());
+        }
+        remove_if_exists(&collection_path(dir))?;
+        discard_browser_evidence(dir)?;
+        let body = serde_json::to_vec(&BrowserCollection {
+            account_id: account_id.to_string(),
+            collection_id: next_collection_id(),
+        })
+        .map_err(io::Error::other)?;
+        write_if_changed(&collection_path(dir), &body)
+    })
+    .map_err(|_| BridgeError::unknown("Could not enable browser attribution."))
+}
+
+pub fn disable_collection(dir: &Path) -> ApiResult<()> {
+    let spool = browser_spool_path(dir);
+    spool::with_lock(&spool, || {
+        remove_if_exists(&collection_path(dir))?;
+        discard_browser_evidence(dir)
+    })
+    .map_err(|_| BridgeError::unknown("Could not disable browser attribution."))
+}
+
 /// Silent first-run-and-every-launch registration: rewrite the manifests and
 /// repair any missing registry keys for the browsers on the machine. Nothing
 /// here may fail the app - a broken registration surfaces on the browser card
@@ -281,10 +371,8 @@ fn health_of(dir: &Path, browser: Browser) -> BrowserHealth {
     match host_binary_path() {
         Ok(binary) if !binary.exists() => health(browser, HealthState::BinaryMissing),
         Err(_) => health(browser, HealthState::BinaryMissing),
-        _ => match handshake_browser(dir, crate::monitor::unix_now()) {
-            Some(connected) if connected == browser => health(browser, HealthState::Connected),
-            _ => health(browser, HealthState::Registered),
-        },
+        _ if handshake_is_fresh(dir, browser, crate::monitor::unix_now()) => health(browser, HealthState::Connected),
+        _ => health(browser, HealthState::Registered),
     }
 }
 
@@ -299,23 +387,45 @@ const HANDSHAKE_STALE_SECONDS: u64 = 24 * 3_600;
 /// drops this marker when the browser launches it (that launch *is* the
 /// handshake), naming the parent process it could see. `now` is injected so
 /// staleness is testable.
-fn handshake_browser(dir: &Path, now: u64) -> Option<Browser> {
-    let bytes = std::fs::read(dir.join("browser-handshake.json")).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let at = crate::monitor::parse_iso8601(value.get("at")?.as_str()?)?;
+fn handshake_is_fresh(dir: &Path, browser: Browser, now: u64) -> bool {
+    let bytes = match std::fs::read(handshake_path(dir, browser)) {
+        Ok(bytes) => bytes,
+        Err(_) => return false,
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    let Some(at) = value
+        .get("at")
+        .and_then(|value| value.as_str())
+        .and_then(crate::monitor::parse_iso8601)
+    else {
+        return false;
+    };
     if now.saturating_sub(at) > HANDSHAKE_STALE_SECONDS {
-        return None;
+        return false;
     }
-    Browser::from_id(value.get("browser")?.as_str()?)
+    value.get("browser").and_then(|value| value.as_str()) == Some(browser.id())
+}
+
+fn handshake_path(dir: &Path, browser: Browser) -> PathBuf {
+    dir.join(format!("browser-handshake-{}.json", browser.id()))
 }
 
 /// Called by `clock-in-browser-host` at startup: the browser launched it, so
 /// the extension is connected. Best-effort - the marker feeds a UI badge and
 /// nothing else.
 pub fn record_handshake(dir: &Path) {
-    let marker = dir.join("browser-handshake.json");
+    let Some(browser) = parent_browser() else {
+        return;
+    };
+    record_handshake_for(dir, browser);
+}
+
+fn record_handshake_for(dir: &Path, browser: Browser) {
+    let marker = handshake_path(dir, browser);
     let body = serde_json::json!({
-        "browser": parent_browser().map(|browser| browser.id()),
+        "browser": browser.id(),
         "at": spool::now_iso8601(),
     });
     let Ok(bytes) = serde_json::to_vec(&body) else {
@@ -425,26 +535,26 @@ pub fn write_rules_file(dir: &Path, mappings: &[PathMapping]) -> io::Result<()> 
 /// mapping commands share the rules file, and browser host processes share
 /// the tally and handshake files.
 pub fn write_if_changed(path: &Path, content: &[u8]) -> io::Result<()> {
-    spool::with_lock(path, || {
-        if std::fs::read(path).is_ok_and(|existing| existing == content) {
-            return Ok(());
+    spool::with_lock(path, || write_if_changed_locked(path, content))
+}
+
+fn write_if_changed_locked(path: &Path, content: &[u8]) -> io::Result<()> {
+    if std::fs::read(path).is_ok_and(|existing| existing == content) {
+        return Ok(());
+    }
+    let tmp = unique_temp(path);
+    let outcome = std::fs::write(&tmp, content).and_then(|()| {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
-        let tmp = unique_temp(path);
-        let outcome = std::fs::write(&tmp, content).and_then(|()| {
-            // Windows cannot rename over an existing file. This replacement
-            // is safe because the target-specific lock is still held.
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-            std::fs::rename(&tmp, path)
-        });
-        if outcome.is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-        outcome
-    })
+        std::fs::rename(&tmp, path)
+    });
+    if outcome.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    outcome
 }
 
 /// The per-writer temp name for `path`: same directory, unique to this
@@ -461,6 +571,12 @@ fn unique_temp(path: &Path) -> PathBuf {
 pub struct TallyEntry {
     pub origin: String,
     pub seconds: u64,
+}
+
+fn tally_week_start(now: u64) -> u64 {
+    let days = now / 86_400;
+    let days_since_monday = (days + 3) % 7;
+    (days - days_since_monday) * 86_400_000
 }
 
 /// The tally minus anything already answered: never-suggest origins and
@@ -480,6 +596,9 @@ pub fn read_suggestions(dir: &Path, mappings: &[PathMapping]) -> Vec<TallyEntry>
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return Vec::new();
     };
+    if value.get("weekStart").and_then(|value| value.as_u64()) != Some(tally_week_start(crate::monitor::unix_now())) {
+        return Vec::new();
+    }
     value
         .get("entries")
         .and_then(|entries| entries.as_array())
@@ -530,14 +649,35 @@ pub fn never_suggest(dir: &Path, origin: &str) -> ApiResult<()> {
 /// Clears the local suggestion data from settings: the tally copy and the
 /// never-suggest list. Both are local-only; nothing here was ever uploaded.
 pub fn clear_suggestion_data(dir: &Path) -> ApiResult<()> {
-    for name in ["unmatched-tally.json", "never-suggest.json"] {
-        match std::fs::remove_file(dir.join(name)) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => return Err(BridgeError::unknown("Could not clear the saved answers.")),
+    let tally = dir.join("unmatched-tally.json");
+    spool::with_lock(&browser_spool_path(dir), || {
+        spool::with_lock(&tally, || {
+            write_if_changed_locked(&tally_clear_path(dir), b"{}")?;
+            remove_if_exists(&tally)?;
+            remove_if_exists(&dir.join("never-suggest.json"))
+        })
+    })
+    .map_err(|_| BridgeError::unknown("Could not clear the saved answers."))
+}
+
+pub enum TallyStoreOutcome {
+    Stored,
+    ClearRequested,
+}
+
+pub fn store_tally_snapshot(dir: &Path, content: &[u8], is_empty: bool) -> io::Result<TallyStoreOutcome> {
+    let tally = dir.join("unmatched-tally.json");
+    spool::with_lock(&tally, || {
+        let clear = tally_clear_path(dir);
+        if clear.exists() {
+            if !is_empty {
+                return Ok(TallyStoreOutcome::ClearRequested);
+            }
+            remove_if_exists(&clear)?;
         }
-    }
-    Ok(())
+        write_if_changed_locked(&tally, content)?;
+        Ok(TallyStoreOutcome::Stored)
+    })
 }
 
 fn read_origin_set(path: &Path) -> std::collections::BTreeSet<String> {
@@ -850,7 +990,10 @@ mod tests {
         let dir = temp_dir("suggestions");
         std::fs::write(
             dir.join("unmatched-tally.json"),
-            r#"{"entries":[{"origin":"quickbooks.com","seconds":10800},{"origin":"github.com","seconds":600},{"origin":"figma.com","seconds":300}]}"#,
+            format!(
+                r#"{{"weekStart":{},"entries":[{{"origin":"quickbooks.com","seconds":10800}},{{"origin":"github.com","seconds":600}},{{"origin":"figma.com","seconds":300}}]}}"#,
+                tally_week_start(crate::monitor::unix_now()),
+            ),
         )
         .expect("tally writes");
         std::fs::write(
@@ -877,6 +1020,23 @@ mod tests {
         let dir = temp_dir("suggestions-empty");
         assert!(read_suggestions(&dir, &[]).is_empty());
         std::fs::write(dir.join("unmatched-tally.json"), "{not json").expect("tally writes");
+        assert!(read_suggestions(&dir, &[]).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_previous_weeks_mirrored_tally_suggests_nothing() {
+        let dir = temp_dir("stale-tally");
+        std::fs::write(
+            dir.join("unmatched-tally.json"),
+            format!(
+                r#"{{"weekStart":{},"entries":[{{"origin":"quickbooks.com","seconds":10800}}]}}"#,
+                tally_week_start(crate::monitor::unix_now()).saturating_sub(7 * 86_400_000),
+            ),
+        )
+        .expect("tally writes");
+
         assert!(read_suggestions(&dir, &[]).is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -916,7 +1076,7 @@ mod tests {
     }
 
     #[test]
-    fn clearing_suggestion_data_removes_both_files_and_tolerates_their_absence() {
+    fn clearing_suggestion_data_removes_local_files_and_queues_an_extension_clear() {
         let dir = temp_dir("clear");
         clear_suggestion_data(&dir).expect("clearing nothing succeeds");
 
@@ -925,29 +1085,46 @@ mod tests {
         clear_suggestion_data(&dir).expect("clear succeeds");
         assert!(!dir.join("unmatched-tally.json").exists());
         assert!(!dir.join("never-suggest.json").exists());
+        assert!(dir.join(TALLY_CLEAR_FILE).exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn the_handshake_marker_drives_the_connected_state() {
+    fn collection_changes_discard_browser_evidence_and_disable_future_collection() {
+        let dir = temp_dir("collection");
+        enable_collection(&dir, "user-one").expect("first account enables collection");
+        let first_id = collection_id(&dir).expect("collection id exists");
+        std::fs::write(dir.join("browser-spool.jsonl"), "old evidence\n").expect("spool writes");
+        std::fs::write(dir.join("unmatched-tally.json"), "old tally").expect("tally writes");
+
+        enable_collection(&dir, "user-two").expect("second account enables collection");
+        let second_id = collection_id(&dir).expect("new collection id exists");
+        assert_ne!(first_id, second_id);
+        assert!(!dir.join("browser-spool.jsonl").exists());
+        assert!(!dir.join("unmatched-tally.json").exists());
+
+        disable_collection(&dir).expect("logout disables collection");
+        assert!(collection_id(&dir).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn independent_handshake_markers_drive_each_browsers_connected_state() {
         let dir = temp_dir("handshake");
         let marked_at = crate::monitor::parse_iso8601("2026-08-09T12:00:00Z").expect("time parses");
-        assert_eq!(handshake_browser(&dir, marked_at), None);
+        assert!(!handshake_is_fresh(&dir, Browser::Chrome, marked_at));
+        assert!(!handshake_is_fresh(&dir, Browser::Edge, marked_at));
 
-        std::fs::write(
-            dir.join("browser-handshake.json"),
-            r#"{"browser":"chrome","at":"2026-08-09T12:00:00Z"}"#,
-        )
-        .expect("marker writes");
-        assert_eq!(handshake_browser(&dir, marked_at), Some(Browser::Chrome));
+        record_handshake_for(&dir, Browser::Chrome);
+        record_handshake_for(&dir, Browser::Edge);
+        assert!(handshake_is_fresh(&dir, Browser::Chrome, crate::monitor::unix_now()));
+        assert!(handshake_is_fresh(&dir, Browser::Edge, crate::monitor::unix_now()));
 
-        std::fs::write(dir.join("browser-handshake.json"), "junk").expect("marker writes");
-        assert_eq!(
-            handshake_browser(&dir, marked_at),
-            None,
-            "a corrupt marker connects nothing"
-        );
+        std::fs::write(handshake_path(&dir, Browser::Chrome), "junk").expect("marker writes");
+        assert!(!handshake_is_fresh(&dir, Browser::Chrome, marked_at));
+        assert!(handshake_is_fresh(&dir, Browser::Edge, crate::monitor::unix_now()));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -957,28 +1134,28 @@ mod tests {
         let dir = temp_dir("handshake-stale");
         let marked_at = crate::monitor::parse_iso8601("2026-08-09T12:00:00Z").expect("time parses");
         std::fs::write(
-            dir.join("browser-handshake.json"),
+            handshake_path(&dir, Browser::Chrome),
             r#"{"browser":"chrome","at":"2026-08-09T12:00:00Z"}"#,
         )
         .expect("marker writes");
 
         // Inside the window the marker still proves the connection.
         let fresh = marked_at + HANDSHAKE_STALE_SECONDS - 1;
-        assert_eq!(handshake_browser(&dir, fresh), Some(Browser::Chrome));
+        assert!(handshake_is_fresh(&dir, Browser::Chrome, fresh));
 
         // Past it, the extension is treated as gone: an active one would have
         // re-marked by now, because the browser relaunches the host on every
         // connect.
         let stale = marked_at + HANDSHAKE_STALE_SECONDS + 1;
-        assert_eq!(handshake_browser(&dir, stale), None);
+        assert!(!handshake_is_fresh(&dir, Browser::Chrome, stale));
 
         // A marker without a readable timestamp connects nothing either.
         std::fs::write(
-            dir.join("browser-handshake.json"),
+            handshake_path(&dir, Browser::Chrome),
             r#"{"browser":"chrome","at":"not-a-time"}"#,
         )
         .expect("marker writes");
-        assert_eq!(handshake_browser(&dir, marked_at), None);
+        assert!(!handshake_is_fresh(&dir, Browser::Chrome, marked_at));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
