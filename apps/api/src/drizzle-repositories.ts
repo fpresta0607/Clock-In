@@ -120,6 +120,20 @@ export class DrizzleProjectRepository implements ProjectRepository {
       .limit(1);
     return rows[0] ?? null;
   }
+
+  public async createForMember(subject: AuthenticatedSubject, name: string): Promise<ProjectRecord> {
+    return this.db.transaction(async (tx) => {
+      const [project] = await tx
+        .insert(projects)
+        .values({ organizationId: subject.organizationId, name })
+        .returning({ id: projects.id, organizationId: projects.organizationId, name: projects.name, archived: projects.archived });
+      if (project === undefined) throw new Error("Failed to create the project.");
+      await tx
+        .insert(projectMemberships)
+        .values({ organizationId: subject.organizationId, projectId: project.id, userId: subject.userId });
+      return project;
+    });
+  }
 }
 
 export class DrizzleSessionRepository implements SessionRepository {
@@ -602,8 +616,10 @@ export class DrizzleReportRepository implements ReportRepository {
     subject: AuthenticatedSubject,
     query: ReportQuery,
   ): Promise<AppTotalRecord[]> {
-    const rangeStart = query.from === undefined ? sql`${activitySegments.startedAt}` : sql`${query.from}`;
-    const rangeEnd = query.toExclusive === undefined ? sql`${activitySegments.endedAt}` : sql`${query.toExclusive}`;
+    // Raw sql`` interpolation bypasses drizzle's Date mapping, and postgres-js
+    // cannot serialize a bare Date — bind the bounds as ISO strings instead.
+    const rangeStart = query.from === undefined ? sql`${activitySegments.startedAt}` : sql`${query.from.toISOString()}`;
+    const rangeEnd = query.toExclusive === undefined ? sql`${activitySegments.endedAt}` : sql`${query.toExclusive.toISOString()}`;
     const duration = sql<string | null>`sum(greatest(0, extract(epoch from
       least(${activitySegments.endedAt}, ${rangeEnd})
       - greatest(${activitySegments.startedAt}, ${rangeStart}))))`;

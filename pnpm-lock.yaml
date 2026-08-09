@@ -60,6 +60,9 @@ importers:
       react-dom:
         specifier: ^19.1.1
         version: 19.2.8(react@19.2.8)
+      three:
+        specifier: ^0.185.1
+        version: 0.185.1
     devDependencies:
       '@tauri-apps/cli':
         specifier: ^2.8.0
@@ -79,6 +82,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.1.9
         version: 19.2.4(@types/react@19.2.18)
+      '@types/three':
+        specifier: ^0.185.4
+        version: 0.185.4
       jsdom:
         specifier: ^26.1.0
         version: 26.1.0

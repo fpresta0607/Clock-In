@@ -8,3 +8,6 @@ coverage/
 *.log
 
 apps/desktop/src-tauri/gen/
+
+# Local lavish review artifacts
+.lavish/

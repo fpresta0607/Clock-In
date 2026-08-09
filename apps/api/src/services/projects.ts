@@ -19,3 +19,14 @@ export async function listProjects(repository: ProjectRepository, subject: Authe
       .map((project) => ({ id: project.id, name: project.name, isArchived: project.archived })),
   };
 }
+
+// Project names carry no uniqueness constraint, so duplicates are allowed:
+// the list response disambiguates them by id, matching the existing ordering.
+export async function createProject(repository: ProjectRepository, subject: AuthenticatedSubject, name: string): Promise<{
+  id: string;
+  name: string;
+  isArchived: boolean;
+}> {
+  const project = await repository.createForMember(subject, name);
+  return { id: project.id, name: project.name, isArchived: project.archived };
+}

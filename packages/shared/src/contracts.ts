@@ -87,6 +87,13 @@ export const projectListItemSchema = z
 
 export const projectListResponseSchema = z.object({ projects: z.array(projectListItemSchema) }).strict();
 
+/** Desktop "New project…" affordance; the response reuses the list-item shape. */
+export const projectCreateRequestSchema = z
+  .object({
+    name: z.string().trim().min(1).max(80),
+  })
+  .strict();
+
 const sessionBaseSchema = z
   .object({
     id: idSchema,
@@ -364,6 +371,7 @@ export type OrganizationResponse = z.infer<typeof organizationResponseSchema>;
 export type PathMappingCreateRequest = z.infer<typeof pathMappingCreateRequestSchema>;
 export type PathMappingListResponse = z.infer<typeof pathMappingListResponseSchema>;
 export type PathMappingUpdateRequest = z.infer<typeof pathMappingUpdateRequestSchema>;
+export type ProjectCreateRequest = z.infer<typeof projectCreateRequestSchema>;
 export type ProjectListItem = z.infer<typeof projectListItemSchema>;
 export type ProjectListResponse = z.infer<typeof projectListResponseSchema>;
 export type ProjectPathMapping = z.infer<typeof projectPathMappingSchema>;

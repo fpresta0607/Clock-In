@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import type { DatabaseConnection } from "@clock-in/database";
+import { projectMemberships, projects, type DatabaseConnection } from "@clock-in/database";
 
-import { DrizzlePathMappingRepository, DrizzleReportRepository, DrizzleSessionRepository } from "./drizzle-repositories.js";
+import { DrizzlePathMappingRepository, DrizzleProjectRepository, DrizzleReportRepository, DrizzleSessionRepository } from "./drizzle-repositories.js";
 
 const input = {
   organizationId: "0e59dfd6-3d1f-4795-9420-3ab65f0df843",
@@ -103,6 +103,37 @@ describe("Drizzle report repository", () => {
       { processName: "Code.exe", durationSeconds: "4800" },
       { processName: "chrome.exe", durationSeconds: "1200" },
     ]);
+  });
+});
+
+describe("Drizzle project repository", () => {
+  it("creates the project and the creator's membership in one transaction", async () => {
+    const subject = { organizationId: input.organizationId, userId: input.userId };
+    const row = { id: input.projectId, organizationId: subject.organizationId, name: "Field work", archived: false };
+    const inserted: Array<{ table: unknown; values: unknown }> = [];
+    const db = {
+      transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback({
+        insert: (table: unknown) => ({
+          values: (values: unknown) => {
+            inserted.push({ table, values });
+            // Awaiting the statement runs the insert; only the project row is read back.
+            return Object.assign(Promise.resolve(undefined), { returning: async () => [row] });
+          },
+        }),
+      }),
+    } as unknown as DatabaseConnection["db"];
+    const repository = new DrizzleProjectRepository(db);
+
+    await expect(repository.createForMember(subject, "Field work")).resolves.toEqual(row);
+    expect(inserted).toHaveLength(2);
+    expect(inserted[0]?.table).toBe(projects);
+    expect(inserted[0]?.values).toEqual({ organizationId: subject.organizationId, name: "Field work" });
+    expect(inserted[1]?.table).toBe(projectMemberships);
+    expect(inserted[1]?.values).toEqual({
+      organizationId: subject.organizationId,
+      projectId: input.projectId,
+      userId: subject.userId,
+    });
   });
 });
 

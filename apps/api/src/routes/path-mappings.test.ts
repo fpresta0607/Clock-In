@@ -50,6 +50,7 @@ class MemoryProjects implements ProjectRepository {
   public async findForMember(subject: { organizationId: string }, projectId: string) {
     return this.records.find((record) => record.id === projectId && record.organizationId === subject.organizationId) ?? null;
   }
+  public async createForMember(): Promise<never> { throw new Error("not implemented"); }
 }
 
 class MemoryPathMappings implements PathMappingRepository {

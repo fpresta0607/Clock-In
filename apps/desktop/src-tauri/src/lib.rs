@@ -503,6 +503,28 @@ async fn me_stats(
         .await
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectCreateInput {
+    name: String,
+}
+
+#[tauri::command]
+async fn project_create(
+    state: State<'_, AppState>,
+    input: ProjectCreateInput,
+) -> ApiResult<TimerProject> {
+    let name = input.name.trim();
+    if name.is_empty() || name.chars().count() > 80 {
+        return Err(BridgeError::new(
+            ErrorKind::Validation,
+            "Project names must be 1 to 80 characters.",
+        ));
+    }
+    let access_token = state.access_token().await?;
+    state.client.create_project(&access_token, name).await
+}
+
 #[tauri::command]
 async fn path_mappings_list(state: State<'_, AppState>) -> ApiResult<Vec<PathMapping>> {
     let access_token = state.access_token().await?;
@@ -667,6 +689,7 @@ pub fn run() {
             settings_get,
             settings_update,
             me_stats,
+            project_create,
             path_mappings_list,
             path_mappings_create,
             path_mappings_update,

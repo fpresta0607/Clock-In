@@ -26,6 +26,8 @@ export interface SessionRecord {
 export interface ProjectRepository {
   listForMember(subject: AuthenticatedSubject): Promise<ProjectRecord[]>;
   findForMember(subject: AuthenticatedSubject, projectId: string): Promise<ProjectRecord | null>;
+  /** Creates the project and the creator's membership in one transaction. */
+  createForMember(subject: AuthenticatedSubject, name: string): Promise<ProjectRecord>;
 }
 
 export interface CreateRunningSession {

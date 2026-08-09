@@ -133,6 +133,10 @@ export type PathMappingCreateInput = {
   projectId: string;
 };
 
+export type ProjectCreateInput = {
+  name: string;
+};
+
 export type PathMappingUpdateInput = {
   pathPrefix?: string | undefined;
   repoUrl?: string | null | undefined;
@@ -158,6 +162,7 @@ export interface TimerBridge {
   settingsGet(): Promise<MonitorSettings>;
   settingsUpdate(input: SettingsPatch): Promise<MonitorSettings>;
   meStats(from?: string, to?: string): Promise<MeStats>;
+  projectCreate(input: ProjectCreateInput): Promise<TimerProject>;
   pathMappingsList(): Promise<readonly PathMapping[]>;
   pathMappingsCreate(input: PathMappingCreateInput): Promise<PathMapping>;
   pathMappingsUpdate(id: string, input: PathMappingUpdateInput): Promise<PathMapping>;
@@ -479,6 +484,7 @@ export const defaultBridge: TimerBridge = {
       ...(from === undefined ? {} : { from }),
       ...(to === undefined ? {} : { to }),
     }),
+  projectCreate: (input) => invokeDecoded("project_create", decodeProject, { input }),
   pathMappingsList: () => invokeDecoded("path_mappings_list", decodePathMappings),
   pathMappingsCreate: (input) => invokeDecoded("path_mappings_create", decodePathMapping, { input }),
   pathMappingsUpdate: (id, input) => invokeDecoded("path_mappings_update", decodePathMapping, { id, input }),

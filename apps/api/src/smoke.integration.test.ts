@@ -83,6 +83,17 @@ integration(integrationDescription, () => {
     expect(listed[0]).toMatchObject({ name: "General", isArchived: false });
     const projectId = listed[0].id;
 
+    const created = await app.request("/projects", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({ name: "Smoke Side Project" }),
+    });
+    expect(created.status).toBe(201);
+    const createdProject = await created.json();
+    expect(createdProject).toMatchObject({ name: "Smoke Side Project", isArchived: false });
+    const relisted = (await (await app.request("/projects", { headers: authorized })).json()).projects;
+    expect(relisted.map((project: { name: string }) => project.name)).toEqual(["General", "Smoke Side Project"]);
+
     const startedAt = new Date(Date.now() - 60_000).toISOString();
     const start = await app.request("/sessions", {
       method: "POST",
@@ -118,6 +129,15 @@ integration(integrationDescription, () => {
     const text = await csv.text();
     expect(text).toContain("General");
     expect(text).toContain("Smoke work");
+
+    // Ranged stats bind the date bounds through raw sql`` interpolation; this
+    // is the only coverage that runs that serialization against a real server.
+    const today = new Date().toISOString().slice(0, 10);
+    const stats = await app.request(`/me/stats?from=${today}&to=${today}`, { headers: authorized });
+    expect(stats.status).toBe(200);
+    const statsBody = await stats.json();
+    expect(statsBody.totalDurationSeconds).toBe(stopped.durationSeconds);
+    expect(statsBody.apps).toEqual([]);
   }, 60_000);
 
   it("keeps another account's data out of this account's projects and reports", async () => {

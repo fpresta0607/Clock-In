@@ -15,8 +15,9 @@
 //! them to the API. Everything above the `platform` module is pure logic with
 //! an injected clock; the Win32 calls never run in tests.
 //!
-//! Monitoring is off by default and gated behind `MonitorSettings.enabled`;
-//! disabling it aborts both tasks, so a paused monitor records nothing.
+//! Monitoring is gated behind `MonitorSettings.enabled` (on by default for
+//! new installs); disabling it aborts both tasks, so a paused monitor records
+//! nothing.
 //!
 //! Tradeoff, documented: the event thread uses a real hidden top-level window
 //! rather than a message-only one because Windows does not broadcast
@@ -267,7 +268,7 @@ impl SegmentRecord {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MonitorSettings {
-    /// Master switch. Off by default, and off means no polling at all.
+    /// Master switch. Off means no polling at all.
     pub enabled: bool,
     pub away_threshold_minutes: u32,
     pub hard_away_limit_minutes: u32,
@@ -282,10 +283,10 @@ pub struct MonitorSettings {
 impl Default for MonitorSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             away_threshold_minutes: 10,
             hard_away_limit_minutes: 60,
-            auto_stop_on_lock: false,
+            auto_stop_on_lock: true,
             agent_override_enabled: true,
             device_id: String::new(),
         }
@@ -1886,17 +1887,19 @@ mod tests {
     }
 
     #[test]
-    fn settings_default_to_off_and_survive_partial_files() {
+    fn settings_default_to_the_recommended_config_and_survive_partial_files() {
+        // These defaults only reach NEW installs: the first launch persists the
+        // full struct, so a saved file always carries its own explicit values.
         let defaults = MonitorSettings::default();
-        assert!(!defaults.enabled);
+        assert!(defaults.enabled);
         assert_eq!(defaults.away_threshold_minutes, 10);
         assert_eq!(defaults.hard_away_limit_minutes, 60);
-        assert!(!defaults.auto_stop_on_lock);
+        assert!(defaults.auto_stop_on_lock);
         assert!(defaults.agent_override_enabled);
 
         let parsed: MonitorSettings =
-            serde_json::from_str(r#"{"enabled": true}"#).expect("partial settings parse");
-        assert!(parsed.enabled);
+            serde_json::from_str(r#"{"enabled": false}"#).expect("partial settings parse");
+        assert!(!parsed.enabled);
         assert_eq!(parsed.away_threshold_minutes, 10);
     }
 
@@ -1926,7 +1929,7 @@ mod tests {
         });
         assert_eq!(patched.away_threshold_minutes, 15);
         assert_eq!(patched.hard_away_limit_minutes, 60);
-        assert!(!patched.enabled);
+        assert!(patched.enabled);
         assert_eq!(patched.device_id, "device-1");
     }
 
@@ -1939,7 +1942,7 @@ mod tests {
 
         let first = load_settings(&path);
         assert!(!first.device_id.is_empty());
-        assert!(!first.enabled, "monitoring defaults to off");
+        assert!(first.enabled, "monitoring defaults to on");
 
         let second = load_settings(&path);
         assert_eq!(first.device_id, second.device_id, "the id is stable");
@@ -2035,11 +2038,11 @@ mod tests {
         });
 
         assert!(!monitor.is_running().await);
-        assert!(!monitor.is_enabled(), "monitoring defaults to off");
+        assert!(monitor.is_enabled(), "monitoring defaults to on");
         assert_eq!(monitor.measured_idle_for_stop("s1", 1_000).await, None);
 
         let status = monitor.status().await;
-        assert!(!status.enabled);
+        assert!(status.enabled);
         assert!(!status.running);
         assert_eq!(status.session_idle_seconds, None);
         assert!(status.away.is_none());

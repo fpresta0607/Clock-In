@@ -309,6 +309,16 @@ pub struct MeStats {
     pub total_duration_seconds: u64,
     pub corroborated_seconds: u64,
     pub projects: Vec<MeStatsProject>,
+    // Without this field serde silently drops the array and the TS bridge
+    // rejects the whole response as invalid.
+    pub apps: Vec<MeStatsApp>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeStatsApp {
+    pub process_name: String,
+    pub duration_seconds: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -559,6 +569,32 @@ impl ApiClient {
                 color: project.color,
             })
             .collect())
+    }
+
+    /// Creates a project for the signed-in member; the API answers 201 with the
+    /// created list item, the same shape `/projects` returns.
+    pub async fn create_project(&self, access_token: &str, name: &str) -> ApiResult<TimerProject> {
+        let response = self
+            .http
+            .post(format!("{}/projects", self.api_base_url))
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({ "name": name }))
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+
+        if !response.status().is_success() {
+            return Err(classify(response.status().as_u16()));
+        }
+        let body: ProjectListItem = response
+            .json()
+            .await
+            .map_err(|_| BridgeError::unknown("The project response could not be read."))?;
+        Ok(TimerProject {
+            id: body.id,
+            name: body.name,
+            color: body.color,
+        })
     }
 
     pub async fn current_session(&self, access_token: &str) -> ApiResult<Option<RunningTimer>> {
@@ -857,6 +893,17 @@ mod tests {
     }
 
     #[test]
+    fn reads_a_created_project_without_a_color() {
+        let body: ProjectListItem =
+            serde_json::from_str(r#"{"id":"p1","name":"Field work","isArchived":false}"#)
+                .expect("created project parses");
+
+        assert_eq!(body.name, "Field work");
+        assert_eq!(body.color, None);
+        assert!(!body.is_archived);
+    }
+
+    #[test]
     fn reads_a_running_session_and_defaults_a_null_description() {
         let body: SessionEnvelope = serde_json::from_str(
             r#"{"session":{"id":"s1","clientId":"c1","projectId":"p1","description":null,
@@ -1006,7 +1053,11 @@ mod tests {
                     "durationSeconds": 7200,
                     "corroboratedSeconds": 5400,
                     "sessionCount": 3
-                }]
+                }],
+                "apps": [
+                    {"processName": "Code.exe", "durationSeconds": 4800},
+                    {"processName": "chrome.exe", "durationSeconds": 1200}
+                ]
             }"#,
         )
         .expect("stats parse");
@@ -1015,6 +1066,8 @@ mod tests {
         assert_eq!(stats.filters.to, None);
         assert_eq!(stats.projects[0].project.name, "Clock-In");
         assert_eq!(stats.projects[0].corroborated_seconds, 5400);
+        assert_eq!(stats.apps[0].process_name, "Code.exe");
+        assert_eq!(stats.apps[0].duration_seconds, 4800);
     }
 
     #[test]
