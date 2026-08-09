@@ -539,7 +539,10 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn with_lock<T>(path: &Path, action: impl FnOnce() -> SpoolResult<T>) -> SpoolResult<T> {
+/// Runs `action` under the spool's interprocess lock. Shared with writers
+/// outside the append path (the browser files' temp-and-rename writes), which
+/// face the same multi-process races as the spool itself.
+pub fn with_lock<T>(path: &Path, action: impl FnOnce() -> SpoolResult<T>) -> SpoolResult<T> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

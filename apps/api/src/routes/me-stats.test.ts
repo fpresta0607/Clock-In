@@ -171,11 +171,27 @@ class MemoryReports implements ReportRepository {
   /**
    * Mirrors the site-totals SQL: browser spans joined to the caller's live url
    * rules, clipped to fresh active segments and the requested range, heaviest
-   * first. Spans whose rule was deleted drop out with the mapping row, and
-   * concurrent spans on the same rule merge before summing — two tabs on one
-   * rule never count the same wall-clock second twice.
+   * first. Spans whose rule was deleted drop out with the mapping row.
+   * Concurrent spans on the same rule merge before summing: two tabs on one
+   * rule never count the same wall-clock second twice. Overlapping active
+   * segments (two devices at once) merge the same way, so a rule total never
+   * exceeds actual focused wall-clock time. Empty totals return no row.
    */
   public async readSiteTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<SiteTotalRecord[]> {
+    const mergeIntervals = (intervals: { start: number; end: number }[]): { start: number; end: number }[] => {
+      const sorted = [...intervals].sort((a, b) => a.start - b.start || a.end - b.end);
+      const merged: { start: number; end: number }[] = [];
+      for (const interval of sorted) {
+        const last = merged[merged.length - 1];
+        if (last !== undefined && interval.start <= last.end) {
+          last.end = Math.max(last.end, interval.end);
+        } else {
+          merged.push({ ...interval });
+        }
+      }
+      return merged;
+    };
+
     const spansByRule = new Map<string, { mapping: StoredMapping; intervals: { start: number; end: number }[] }>();
     for (const span of this.agents) {
       if (span.organizationId !== subject.organizationId || span.userId !== subject.userId) continue;
@@ -189,27 +205,20 @@ class MemoryReports implements ReportRepository {
       entry.intervals.push({ start: span.startedAt.getTime(), end: spanEnd.getTime() });
       spansByRule.set(mapping.id, entry);
     }
+    const activeSegments = mergeIntervals(this.segments
+      .filter((segment) => segment.organizationId === subject.organizationId
+        && segment.userId === subject.userId
+        && segment.kind === "active"
+        && segment.receivedAt.getTime() <= segment.endedAt.getTime() + freshnessWindowMs)
+      .map((segment) => ({ start: segment.startedAt.getTime(), end: segment.endedAt.getTime() })));
+
     const totals: SiteTotalRecord[] = [];
     for (const { mapping, intervals } of spansByRule.values()) {
-      // Merge overlapping and touching intervals per rule before summing.
-      const sorted = [...intervals].sort((a, b) => a.start - b.start || a.end - b.end);
-      const merged: { start: number; end: number }[] = [];
-      for (const interval of sorted) {
-        const last = merged[merged.length - 1];
-        if (last !== undefined && interval.start <= last.end) {
-          last.end = Math.max(last.end, interval.end);
-        } else {
-          merged.push({ ...interval });
-        }
-      }
       let seconds = 0;
-      for (const span of merged) {
-        for (const segment of this.segments) {
-          if (segment.organizationId !== subject.organizationId || segment.userId !== subject.userId) continue;
-          if (segment.kind !== "active") continue;
-          if (segment.receivedAt.getTime() > segment.endedAt.getTime() + freshnessWindowMs) continue;
-          const start = Math.max(span.start, segment.startedAt.getTime(), query.from?.getTime() ?? 0);
-          const end = Math.min(span.end, segment.endedAt.getTime(), query.toExclusive?.getTime() ?? Number.MAX_SAFE_INTEGER);
+      for (const span of mergeIntervals(intervals)) {
+        for (const segment of activeSegments) {
+          const start = Math.max(span.start, segment.start, query.from?.getTime() ?? 0);
+          const end = Math.min(span.end, segment.end, query.toExclusive?.getTime() ?? Number.MAX_SAFE_INTEGER);
           seconds += Math.max(0, end - start) / 1_000;
         }
       }
@@ -575,5 +584,67 @@ describe("me/stats routes", () => {
     // A range covering none of the spans returns no site rows.
     const outside = await createTestApp(reports).request("http://api.test/me/stats?from=2026-08-06&to=2026-08-06", { headers: { authorization: bearerHeader } });
     await expect(outside.json()).resolves.toMatchObject({ sites: [] });
+  });
+
+  it("unions overlapping active segments so a rule total never exceeds wall-clock time", async () => {
+    const reports = new MemoryReports();
+    const githubRule = "01c7e513-b094-4d4c-ae55-21790ae019a4";
+    reports.mappings.push(
+      { id: githubRule, organizationId: ids.organization, userId: ids.user, kind: "url_rule", pattern: "github.com/acme/*", projectId: ids.project },
+    );
+    const receivedAt = new Date("2026-08-05T15:05:00.000Z");
+    // Two devices active simultaneously: the segments overlap 14:15-14:45.
+    reports.segments.push(
+      { organizationId: ids.organization, userId: ids.user, kind: "active", processName: "chrome.exe",
+        startedAt: new Date("2026-08-05T14:00:00.000Z"), endedAt: new Date("2026-08-05T14:45:00.000Z"), receivedAt },
+      { organizationId: ids.organization, userId: ids.user, kind: "active", processName: "chrome.exe",
+        startedAt: new Date("2026-08-05T14:15:00.000Z"), endedAt: new Date("2026-08-05T15:00:00.000Z"), receivedAt },
+    );
+    // One span covers the whole hour; unioned segments corroborate 60 minutes,
+    // not the 75 the per-segment pairwise sum would produce.
+    reports.agents.push(
+      { organizationId: ids.organization, userId: ids.user, source: "browser", ruleId: githubRule, linkedSessionId: null,
+        startedAt: new Date("2026-08-05T14:00:00.000Z"), endedAt: new Date("2026-08-05T15:00:00.000Z"),
+        lastEventAt: new Date("2026-08-05T15:00:00.000Z"), receivedAt },
+    );
+
+    const response = await createTestApp(reports).request("http://api.test/me/stats", { headers: { authorization: bearerHeader } });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      sites: [
+        { mapping: { id: githubRule, pattern: "github.com/acme/*", projectId: ids.project }, durationSeconds: 3_600 },
+      ],
+    });
+  });
+
+  it("returns no site row when the span and segment overlap each other but not the requested range", async () => {
+    const reports = new MemoryReports();
+    const githubRule = "01c7e513-b094-4d4c-ae55-21790ae019a4";
+    reports.mappings.push(
+      { id: githubRule, organizationId: ids.organization, userId: ids.user, kind: "url_rule", pattern: "github.com/acme/*", projectId: ids.project },
+    );
+    const receivedAt = new Date("2026-08-06T01:05:00.000Z");
+    // The span crosses into the 6th and overlaps the segment pairwise, but the
+    // three-way intersection with the requested day (the 6th) is empty.
+    reports.segments.push(
+      { organizationId: ids.organization, userId: ids.user, kind: "active", processName: "chrome.exe",
+        startedAt: new Date("2026-08-05T23:30:00.000Z"), endedAt: new Date("2026-08-05T23:45:00.000Z"), receivedAt },
+    );
+    reports.agents.push(
+      { organizationId: ids.organization, userId: ids.user, source: "browser", ruleId: githubRule, linkedSessionId: null,
+        startedAt: new Date("2026-08-05T23:00:00.000Z"), endedAt: new Date("2026-08-07T01:00:00.000Z"),
+        lastEventAt: new Date("2026-08-07T01:00:00.000Z"), receivedAt },
+    );
+
+    const response = await createTestApp(reports).request("http://api.test/me/stats?from=2026-08-06&to=2026-08-06", { headers: { authorization: bearerHeader } });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ sites: [] });
+    // Without the range clamp the overlap counts normally.
+    const unranged = await createTestApp(reports).request("http://api.test/me/stats", { headers: { authorization: bearerHeader } });
+    await expect(unranged.json()).resolves.toMatchObject({
+      sites: [{ mapping: { id: githubRule }, durationSeconds: 900 }],
+    });
   });
 });

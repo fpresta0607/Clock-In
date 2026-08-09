@@ -17,15 +17,22 @@
 
 import { shouldApplyTabActivation } from "./activation.js";
 import { match, type UrlRule } from "./matching.js";
+import { Outbox, OUTBOX_STORAGE_KEY } from "./outbox.js";
 import {
-  Outbox,
-  OUTBOX_STORAGE_KEY,
-  reconnectBackoffMs,
-} from "./outbox.js";
+  MIN_ALARM_MINUTES,
+  reconnectDelayMinutes,
+  RECONNECT_ALARM_NAME,
+  RULES_REFRESH_ALARM_NAME,
+  RULES_REFRESH_PERIOD_MINUTES,
+  SPAN_ADVANCE_ALARM_NAME,
+  TICK_ALARM_NAME,
+  TICK_ALARM_PERIOD_MINUTES,
+} from "./schedule.js";
 import {
   advance,
   createSpanMachine,
   handleInput,
+  nextAdvanceAt,
   restoreMachine,
   snapshotMachine,
   type IdleState,
@@ -42,14 +49,13 @@ import {
   type Tally,
 } from "./tally.js";
 import { tickCredit } from "./tick.js";
+import { LAST_TICK_STORAGE_KEY, MACHINE_STORAGE_KEY, parseStartupStorage } from "./startup.js";
 
 /** The registered native-messaging host name (the desktop registers it). */
 const HOST_NAME = "com.clock_in.browser_host";
-const RULES_REFRESH_MS = 5 * 60 * 1000;
-const TICK_MS = 5_000;
+const TICK_MS = TICK_ALARM_PERIOD_MINUTES * 60_000;
 const TALLY_FLUSH_MS = 60_000;
 const IDLE_DETECTION_SECONDS = 15;
-const MACHINE_STORAGE_KEY = "spanMachine";
 
 let rules: UrlRule[] = [];
 let port: chrome.runtime.Port | null = null;
@@ -70,10 +76,15 @@ let lastTickAt = Date.now();
 let lastTallyFlushAt = 0;
 
 function persistState(): void {
+  const savedAt = Date.now();
   void chrome.storage.local.set({
     [TALLY_STORAGE_KEY]: tally.entries,
     [OUTBOX_STORAGE_KEY]: outbox.snapshot(),
-    [MACHINE_STORAGE_KEY]: snapshotMachine(machine),
+    [MACHINE_STORAGE_KEY]: snapshotMachine(machine, savedAt),
+    [LAST_TICK_STORAGE_KEY]: lastTickAt,
+  }).catch(() => {
+    // A later alarm or browser event retries. The in-memory state remains
+    // authoritative for this worker lifetime.
   });
 }
 
@@ -100,11 +111,30 @@ function emitSpanEvents(events: readonly SpanEvent[]): void {
   }
 }
 
+function scheduleMachineAdvance(): void {
+  const deadline = nextAdvanceAt(machine);
+  if (deadline === null) {
+    void chrome.alarms.clear(SPAN_ADVANCE_ALARM_NAME);
+    return;
+  }
+  chrome.alarms.create(SPAN_ADVANCE_ALARM_NAME, {
+    when: Math.max(Date.now() + 1, deadline),
+  });
+}
+
+function advanceMachine(now: number): void {
+  emitSpanEvents(advance(machine, now));
+  scheduleMachineAdvance();
+}
+
 function feedMachine(input: SpanInput): void {
-  emitSpanEvents(handleInput(machine, input, Date.now()));
+  const now = Date.now();
+  // Expire stale merge windows before a newly observed tab can resume them.
+  emitSpanEvents([...advance(machine, now), ...handleInput(machine, input, now)]);
   // Subject changes (candidate starts, suspensions) emit no events but must
   // still survive an eviction.
   persistState();
+  scheduleMachineAdvance();
 }
 
 function requestRules(): void {
@@ -134,6 +164,9 @@ function isRule(value: unknown): value is UrlRule {
 }
 
 function connect(): void {
+  if (port !== null) {
+    return;
+  }
   let opened: chrome.runtime.Port;
   try {
     opened = chrome.runtime.connectNative(HOST_NAME);
@@ -142,6 +175,7 @@ function connect(): void {
     return;
   }
   port = opened;
+  void chrome.alarms.clear(RECONNECT_ALARM_NAME);
   opened.onMessage.addListener((message: unknown) => {
     if (
       typeof message === "object" &&
@@ -168,9 +202,9 @@ function connect(): void {
 }
 
 function scheduleReconnect(): void {
-  const delay = reconnectBackoffMs(reconnectAttempt);
+  const delayInMinutes = reconnectDelayMinutes(reconnectAttempt);
   reconnectAttempt += 1;
-  setTimeout(connect, delay);
+  chrome.alarms.create(RECONNECT_ALARM_NAME, { delayInMinutes });
 }
 
 /** The local verdict for a tab: rule hit, or the origin for the local tally. */
@@ -217,17 +251,26 @@ function reApplyActiveTab(): void {
  * restart): the remembered idle/focus state may be hours stale.
  */
 function revalidateAttention(): void {
-  void chrome.idle.queryState(IDLE_DETECTION_SECONDS).then((state) => {
-    feedMachine({ type: "idle", state: state as IdleState });
-  });
-  void chrome.windows.getLastFocused().then((win) => {
-    const focused = win.focused === true && win.id !== undefined;
-    focusedWindowId = focused ? (win.id ?? null) : null;
-    feedMachine({ type: "window-focus", focused });
-    if (focused && win.id !== undefined) {
-      watchActiveTab(win.id);
-    }
-  });
+  void chrome.idle.queryState(IDLE_DETECTION_SECONDS)
+    .then((state) => {
+      feedMachine({ type: "idle", state: state as IdleState });
+    })
+    .catch(() => {
+      // Keep the restored state suspended; expiry closes it at savedAt.
+    });
+  void chrome.windows.getLastFocused()
+    .then((win) => {
+      const focused = win.focused === true && win.id !== undefined;
+      focusedWindowId = focused ? (win.id ?? null) : null;
+      feedMachine({ type: "window-focus", focused });
+      if (focused && win.id !== undefined) {
+        watchActiveTab(win.id);
+      }
+    })
+    .catch(() => {
+      focusedWindowId = null;
+      feedMachine({ type: "window-focus", focused: false });
+    });
 }
 
 chrome.tabs.onActivated.addListener((activeInfo) => {
@@ -266,24 +309,17 @@ chrome.idle.onStateChanged.addListener((state) => {
   feedMachine({ type: "idle", state: state as IdleState });
 });
 
-// Chrome-only; Firefox event pages never fire it, so guard the lookup.
-chrome.runtime.onSuspend?.addListener(() => {
-  feedMachine({ type: "shutdown" });
-  persistState();
-});
-
-// Steady tick: time-driven span transitions, heartbeat cadence, tally
-// accumulation, and periodic local persistence. The wall-clock delta is
-// clamped and gaps trigger re-validation: a laptop sleep must not credit
-// hours to a stale origin or trust stale focus/idle state.
-setInterval(() => {
+// Alarm-driven tick: unlike an in-memory interval, this survives routine MV3
+// worker eviction. The wall-clock delta is clamped and gaps trigger
+// re-validation, so laptop sleep cannot credit hours to a stale origin.
+function runTick(): void {
   const now = Date.now();
   const { creditMs, gapExceeded } = tickCredit(now, lastTickAt, TICK_MS);
   lastTickAt = now;
   if (gapExceeded) {
     revalidateAttention();
   }
-  emitSpanEvents(advance(machine, now));
+  advanceMachine(now);
   if (unmatchedOrigin !== null && machine.windowFocused && machine.idleState === "active") {
     addFocusSeconds(tally, unmatchedOrigin, Math.round(creditMs / 1000));
   }
@@ -292,27 +328,58 @@ setInterval(() => {
     persistState();
     sendTally();
   }
-}, TICK_MS);
+}
 
-// Rule refresh on the design's five-minute cadence.
-setInterval(requestRules, RULES_REFRESH_MS);
+chrome.alarms.onAlarm.addListener((alarm) => {
+  switch (alarm.name) {
+    case TICK_ALARM_NAME:
+      runTick();
+      break;
+    case RULES_REFRESH_ALARM_NAME:
+      requestRules();
+      break;
+    case RECONNECT_ALARM_NAME:
+      connect();
+      break;
+    case SPAN_ADVANCE_ALARM_NAME:
+      advanceMachine(Date.now());
+      break;
+  }
+});
+
+function ensurePeriodicAlarm(name: string, periodInMinutes: number): void {
+  void chrome.alarms.get(name).then((existing) => {
+    if (existing === undefined) {
+      chrome.alarms.create(name, {
+        delayInMinutes: Math.max(MIN_ALARM_MINUTES, periodInMinutes),
+        periodInMinutes,
+      });
+    }
+  });
+}
+
+ensurePeriodicAlarm(TICK_ALARM_NAME, TICK_ALARM_PERIOD_MINUTES);
+ensurePeriodicAlarm(RULES_REFRESH_ALARM_NAME, RULES_REFRESH_PERIOD_MINUTES);
 
 // Startup: restore the local tally, queued verdicts, and the span machine;
 // re-derive attention from the platform; then connect.
 void chrome.storage.local
-  .get([TALLY_STORAGE_KEY, OUTBOX_STORAGE_KEY, MACHINE_STORAGE_KEY])
+  .get([TALLY_STORAGE_KEY, OUTBOX_STORAGE_KEY, MACHINE_STORAGE_KEY, LAST_TICK_STORAGE_KEY])
+  .catch(() => undefined)
   .then((stored) => {
-    const entries = stored[TALLY_STORAGE_KEY];
-    if (typeof entries === "object" && entries !== null) {
-      tally = { entries: entries as Record<string, number> };
+    const startup = parseStartupStorage(stored);
+    tally = { entries: startup.tallyEntries };
+    for (const event of startup.queuedEvents) {
+      outbox.push(event);
     }
-    const queued = stored[OUTBOX_STORAGE_KEY];
-    if (Array.isArray(queued)) {
-      for (const event of queued as SpanEvent[]) {
-        outbox.push(event);
-      }
-    }
-    machine = restoreMachine(stored[MACHINE_STORAGE_KEY], Date.now());
+    const now = Date.now();
+    // A persisted tick keeps local focus totals honest across routine worker
+    // eviction. Future values from a wall-clock change fail toward zero.
+    lastTickAt = Math.min(now, startup.lastTickAt ?? now);
+    const restored = restoreMachine(startup.machineSnapshot, now);
+    machine = restored.machine;
+    emitSpanEvents(restored.emitted);
+    scheduleMachineAdvance();
     revalidateAttention();
     connect();
   });

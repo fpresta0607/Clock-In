@@ -16,14 +16,12 @@
 //!   moment attention was lost, not when the grace period expired.
 //!
 //! Durability: `snapshotMachine`/`restoreMachine` carry the subjects (open
-//! span, dwell candidate, suspended merge-window entries, session ids) across
-//! MV3 service-worker restarts via extension storage. Restore is
-//! conservative: a restored active subject starts suspended with its gap
-//! stamped at restore time, because attention during the dead period is
-//! unprovable. Startup re-derivation (focus/idle/tab queries) resumes it
-//! inside the merge window when nothing changed, so a surviving span keeps
-//! its session id and heartbeat anchor; otherwise it ends with `occurredAt`
-//! at the restore time - under-counting rather than over-crediting.
+//! span, dwell candidate, suspended merge-window entries, session ids) and
+//! the snapshot's `savedAt` across MV3 service-worker restarts. A restored
+//! active subject starts suspended at `savedAt`, the last time attention was
+//! provable. Startup re-derivation can resume it only inside the normal merge
+//! window; a longer shutdown or eviction closes it at `savedAt`, so dead time
+//! is never credited to a project.
 
 export type SpanEventKind = "started" | "heartbeat" | "ended";
 
@@ -227,6 +225,20 @@ export function advance(machine: SpanMachine, now: number): SpanEvent[] {
   return emitted;
 }
 
+/** The next time a dwell, gap expiry, or heartbeat needs `advance`. */
+export function nextAdvanceAt(machine: SpanMachine): number | null {
+  const deadlines: number[] = machine.suspended
+    .flatMap((subject) => subject.gapSince === null ? [] : [subject.gapSince + machine.gapMergeMs]);
+  if (machine.active !== null) {
+    deadlines.push(
+      machine.active.sessionId === null
+        ? machine.active.since + machine.dwellMs
+        : machine.active.lastHeartbeatAt + machine.heartbeatMs,
+    );
+  }
+  return deadlines.length === 0 ? null : Math.min(...deadlines);
+}
+
 /** JSON-safe subject shape for extension storage. */
 interface SubjectSnapshot {
   ruleId: string;
@@ -238,7 +250,9 @@ interface SubjectSnapshot {
 
 /** The durable machine state; versioned so old snapshots can be rejected. */
 export interface SpanMachineSnapshot {
-  version: 1;
+  version: 2;
+  /** Wall-clock time when this exact state was last durably written. */
+  savedAt: number;
   active: SubjectSnapshot | null;
   suspended: SubjectSnapshot[];
 }
@@ -254,12 +268,17 @@ function subjectSnapshot(subject: Subject): SubjectSnapshot {
 }
 
 /** Serializes the subjects; options and attention inputs are re-derived live. */
-export function snapshotMachine(machine: SpanMachine): SpanMachineSnapshot {
+export function snapshotMachine(machine: SpanMachine, savedAt: number): SpanMachineSnapshot {
   return {
-    version: 1,
+    version: 2,
+    savedAt,
     active: machine.active === null ? null : subjectSnapshot(machine.active),
     suspended: machine.suspended.map(subjectSnapshot),
   };
+}
+
+function isTimestamp(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isSubjectSnapshot(value: unknown): value is SubjectSnapshot {
@@ -269,40 +288,61 @@ function isSubjectSnapshot(value: unknown): value is SubjectSnapshot {
   const candidate = value as Record<string, unknown>;
   return (
     typeof candidate["ruleId"] === "string" &&
-    typeof candidate["since"] === "number" &&
+    isTimestamp(candidate["since"]) &&
     (typeof candidate["sessionId"] === "string" || candidate["sessionId"] === null) &&
-    typeof candidate["lastHeartbeatAt"] === "number" &&
-    (typeof candidate["gapSince"] === "number" || candidate["gapSince"] === null)
+    isTimestamp(candidate["lastHeartbeatAt"]) &&
+    (isTimestamp(candidate["gapSince"]) || candidate["gapSince"] === null)
   );
+}
+
+export interface RestoreResult {
+  machine: SpanMachine;
+  /** Honest closures discovered while evaluating snapshot age. */
+  emitted: SpanEvent[];
 }
 
 /**
  * Rebuilds a machine from a storage snapshot. The restored active subject is
- * suspended with its gap stamped at `now` (see the module header for why);
- * already-suspended subjects keep their original gap start. Anything
- * unparseable fails closed to a fresh machine: silence, not leakage.
+ * suspended with its gap stamped at the persisted `savedAt`; already-
+ * suspended subjects keep their original gap start. `advance` immediately
+ * closes anything older than the normal merge window. Anything unparseable
+ * fails closed to a fresh machine: silence, not leakage.
  */
 export function restoreMachine(
   snapshot: unknown,
   now: number,
   options: SpanMachineOptions = {},
-): SpanMachine {
+): RestoreResult {
   const machine = createSpanMachine(options);
+  const fresh = (): RestoreResult => ({ machine, emitted: [] });
   if (typeof snapshot !== "object" || snapshot === null) {
-    return machine;
+    return fresh();
   }
   const candidate = snapshot as Record<string, unknown>;
-  if (candidate["version"] !== 1 || !Array.isArray(candidate["suspended"])) {
-    return machine;
+  if (
+    candidate["version"] !== 2 ||
+    !isTimestamp(candidate["savedAt"]) ||
+    candidate["savedAt"] > now ||
+    !Array.isArray(candidate["suspended"])
+  ) {
+    return fresh();
   }
+  const savedAt = candidate["savedAt"];
   const suspended = candidate["suspended"];
   const active = candidate["active"];
-  if ((active !== null && !isSubjectSnapshot(active)) || !suspended.every(isSubjectSnapshot)) {
-    return machine;
+  if (
+    (active !== null && (!isSubjectSnapshot(active) || active.gapSince !== null || active.since > savedAt)) ||
+    !suspended.every((subject) =>
+      isSubjectSnapshot(subject) &&
+      subject.gapSince !== null &&
+      subject.since <= savedAt &&
+      subject.gapSince <= savedAt)
+  ) {
+    return fresh();
   }
   machine.suspended = suspended.map((subject) => ({ ...subject }));
   if (isSubjectSnapshot(active)) {
-    machine.suspended.unshift({ ...active, gapSince: now });
+    machine.suspended.unshift({ ...active, gapSince: savedAt });
   }
-  return machine;
+  return { machine, emitted: advance(machine, now) };
 }

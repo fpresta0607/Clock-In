@@ -662,9 +662,9 @@ export class DrizzleReportRepository implements ReportRepository {
    * segments, both clamped to the requested range — a focused tab on an idle
    * machine attributes nothing. Both sides keep corroboration's seven-day
    * freshness window, and a deleted rule's spans drop out with its mapping row.
-   * Concurrent spans on the same rule merge into one interval set before the
-   * overlap is summed, so two tabs on one rule never double-count wall-clock
-   * time — the same honesty the durationSeconds cap gives corroboration.
+   * Concurrent spans on the same rule and concurrent active segments across
+   * devices each merge into interval sets before their overlap is summed, so
+   * neither side can count one focused wall-clock second twice.
    */
   public async readSiteTotalsForMember(
     subject: AuthenticatedSubject,
@@ -678,8 +678,9 @@ export class DrizzleReportRepository implements ReportRepository {
     const windowEnd = query.toExclusive === undefined
       ? sql`least(seg.ended_at, s.ended_at)`
       : sql`least(seg.ended_at, s.ended_at, ${query.toExclusive.toISOString()})`;
-    // Overlapping and touching spans on one rule collapse into islands via the
-    // running max of previous span ends, so each wall-clock interval counts once.
+    // Overlapping and touching intervals collapse into islands via the running
+    // max of previous ends. Spans partition by rule; active segments union
+    // across devices because site totals represent focused wall-clock time.
     const rows = await this.db.execute(sql`
       with spans as (
         select rule_id, started_at, coalesce(ended_at, last_event_at) as ended_at
@@ -707,6 +708,32 @@ export class DrizzleReportRepository implements ReportRepository {
         select rule_id, min(started_at) as started_at, max(ended_at) as ended_at
         from islands
         group by rule_id, island
+      ),
+      active_segments as (
+        select started_at, ended_at
+        from activity_segments
+        where organization_id = ${subject.organizationId}
+          and user_id = ${subject.userId}
+          and kind = 'active'
+          and received_at <= ended_at + interval '7 days'
+      ),
+      active_islands as (
+        select started_at, ended_at,
+          sum(case when prev_end is null or started_at > prev_end then 1 else 0 end)
+            over (order by started_at, ended_at) as island
+        from (
+          select started_at, ended_at,
+            max(ended_at) over (
+              order by started_at, ended_at
+              rows between unbounded preceding and 1 preceding
+            ) as prev_end
+          from active_segments
+        ) ordered_segments
+      ),
+      merged_active_segments as (
+        select min(started_at) as started_at, max(ended_at) as ended_at
+        from active_islands
+        group by island
       )
       select m.id as "mappingId", m.path_prefix as "pattern", m.project_id as "projectId",
         floor(sum(greatest(0, extract(epoch from (${windowEnd} - ${windowStart})))))::bigint as "durationSeconds"
@@ -714,19 +741,17 @@ export class DrizzleReportRepository implements ReportRepository {
       join project_path_mappings m
         on m.organization_id = ${subject.organizationId} and m.user_id = ${subject.userId}
         and m.id = s.rule_id and m.kind = 'url_rule'
-      join activity_segments seg
-        on seg.organization_id = ${subject.organizationId} and seg.user_id = ${subject.userId}
-        and seg.kind = 'active'
-        and seg.started_at < s.ended_at and seg.ended_at > s.started_at
-        and seg.received_at <= seg.ended_at + interval '7 days'
+      join merged_active_segments seg
+        on seg.started_at < s.ended_at and seg.ended_at > s.started_at
       where true
         ${query.from === undefined ? sql`` : sql`and s.ended_at > ${query.from.toISOString()}`}
         ${query.toExclusive === undefined ? sql`` : sql`and s.started_at < ${query.toExclusive.toISOString()}`}
       group by m.id, m.path_prefix, m.project_id
+      having sum(greatest(0, extract(epoch from (${windowEnd} - ${windowStart})))) > 0
       order by "durationSeconds" desc, m.id asc
     `);
 
-    return (rows as unknown as { mappingId: string; pattern: string; projectId: string; durationSeconds: string | null }[]).map((row) => ({
+    return (rows as unknown as { mappingId: string; pattern: string; projectId: string | null; durationSeconds: string | null }[]).map((row) => ({
       mapping: { id: row.mappingId, pattern: row.pattern, projectId: row.projectId },
       durationSeconds: row.durationSeconds,
     }));

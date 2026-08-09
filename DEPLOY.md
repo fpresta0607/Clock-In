@@ -190,12 +190,15 @@ Set these under Settings → Secrets and variables → Actions → **Secrets**:
 | `TAURI_SIGNING_PRIVATE_KEY` | The updater private key from `pnpm tauri signer generate` |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The password chosen when generating that key |
 
-With `TAURI_SIGNING_PRIVATE_KEY` set, the release also carries the updater
-signatures and `latest.json` beside the installers, which is what the in-app
-updater verifies against. The matching public key goes into the updater
-config in `apps/desktop/src-tauri/tauri.conf.json`. Back the private key up
-somewhere durable: losing it means existing installs can never verify an
-update again.
+With `TAURI_SIGNING_PRIVATE_KEY` set, the workflow enables
+`bundle.createUpdaterArtifacts` for that build only, so the release also
+carries the updater signatures and `latest.json` beside the installers, which
+is what the in-app updater verifies against. The override is conditional on
+purpose: `createUpdaterArtifacts` makes `tauri build` fail when the key is
+absent, and the unsigned fallback has to keep working while certificates are
+being procured. The matching public key goes into the updater config in
+`apps/desktop/src-tauri/tauri.conf.json`. Back the private key up somewhere
+durable: losing it means existing installs can never verify an update again.
 
 ---
 
@@ -205,7 +208,7 @@ Chrome on Windows stable does not sideload extensions, so the extension ships
 through the stores: Chrome Web Store (unlisted) and Edge Add-ons. Every CI
 run attaches the built packages as the `browser-extension-store-zips`
 artifact (the Chrome/Edge zip and the Firefox variant zip from
-`apps/browser-extension/dist/`); download it from the run page to submit.
+`apps/browser-extension/release/`); download it from the run page to submit.
 
 **Chrome Web Store (unlisted):**
 

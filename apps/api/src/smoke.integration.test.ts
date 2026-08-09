@@ -428,19 +428,30 @@ integration(integrationDescription, () => {
     });
     expect(spanEnd.status).toBe(200);
 
-    // The machine was active in the browser for only the first five minutes.
+    // Two devices were active over the same five-minute wall-clock window.
+    // Their overlap must be unioned before clipping the browser span.
     const activity = await app.request("/activity/segments", {
       method: "POST",
       headers: authorized,
       body: JSON.stringify({
-        segments: [{
-          clientId: randomUUID(),
-          deviceId: randomUUID(),
-          kind: "active",
-          processName: "chrome.exe",
-          startedAt: at(0),
-          endedAt: at(300_000),
-        }],
+        segments: [
+          {
+            clientId: randomUUID(),
+            deviceId: randomUUID(),
+            kind: "active",
+            processName: "chrome.exe",
+            startedAt: at(0),
+            endedAt: at(210_000),
+          },
+          {
+            clientId: randomUUID(),
+            deviceId: randomUUID(),
+            kind: "active",
+            processName: "chrome.exe",
+            startedAt: at(120_000),
+            endedAt: at(300_000),
+          },
+        ],
       }),
     });
     expect(activity.status).toBe(200);
@@ -465,5 +476,46 @@ integration(integrationDescription, () => {
     // Corroboration is the active-segment overlap only; the linked browser span adds nothing.
     const project = body.projects.find((entry: { project: { id: string } }) => entry.project.id === projectId);
     expect(project).toMatchObject({ durationSeconds: 600, corroboratedSeconds: 300, sessionCount: 1 });
+
+    // A span can cross a requested range while its only active overlap lies
+    // before that range. The SQL repository must omit the resulting zero row.
+    const zeroDay = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
+    const zeroBoundary = Date.parse(`${zeroDay}T00:00:00.000Z`);
+    const zeroAt = (offsetMs: number) => new Date(zeroBoundary + offsetMs).toISOString();
+    const zeroRule = await app.request("/path-mappings", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({ kind: "url_rule", pathPrefix: "example.com/*", projectId }),
+    });
+    const zeroRuleId = (await zeroRule.json()).id;
+    const zeroSpan = await app.request("/agent-sessions", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({
+        events: [
+          { source: "browser", externalSessionId: "smoke-span-zero", event: "started", occurredAt: zeroAt(-3_600_000), ruleId: zeroRuleId },
+          { source: "browser", externalSessionId: "smoke-span-zero", event: "ended", occurredAt: zeroAt(3_600_000), ruleId: zeroRuleId },
+        ],
+      }),
+    });
+    expect(zeroSpan.status).toBe(200);
+    const zeroActivity = await app.request("/activity/segments", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({
+        segments: [{
+          clientId: randomUUID(),
+          deviceId: randomUUID(),
+          kind: "active",
+          processName: "chrome.exe",
+          startedAt: zeroAt(-1_800_000),
+          endedAt: zeroAt(-900_000),
+        }],
+      }),
+    });
+    expect(zeroActivity.status).toBe(200);
+    const zeroStats = await app.request(`/me/stats?from=${zeroDay}&to=${zeroDay}`, { headers: authorized });
+    expect(zeroStats.status).toBe(200);
+    expect((await zeroStats.json()).sites).toEqual([]);
   }, 60_000);
 });
