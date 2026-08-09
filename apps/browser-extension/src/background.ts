@@ -135,13 +135,61 @@ function scheduleMachineAdvance(): void {
   });
 }
 
+function resetLocalCollectionState(now: number = Date.now()): void {
+  machine = createSpanMachine();
+  currentTabId = null;
+  unmatchedOrigin = null;
+  focusedWindowId = null;
+  lastTickAt = now;
+  lastTallyFlushAt = 0;
+}
+
+function settleTally(now: number): void {
+  const { creditMs } = tickCredit(now, lastTickAt, TICK_MS);
+  if (collectionEnabled && unmatchedOrigin !== null && machine.windowFocused && machine.idleState === "active") {
+    addFocusSeconds(tally, unmatchedOrigin, Math.round(creditMs / 1000), now);
+  }
+  lastTickAt = now;
+}
+
+function fenceUnobservedGap(now: number): boolean {
+  if (!tickCredit(now, lastTickAt, TICK_MS).gapExceeded) {
+    return false;
+  }
+  const lastProvableAt = Math.min(lastTickAt, now);
+  lastTickAt = now;
+  currentTabId = null;
+  unmatchedOrigin = null;
+  emitSpanEvents([
+    ...handleInput(machine, { type: "window-focus", focused: false }, lastProvableAt),
+    ...advance(machine, now),
+  ]);
+  persistState();
+  scheduleMachineAdvance();
+  revalidateAttention();
+  return true;
+}
+
+function prepareMachineTransition(now: number): boolean {
+  if (fenceUnobservedGap(now)) {
+    return false;
+  }
+  settleTally(now);
+  return true;
+}
+
 function advanceMachine(now: number): void {
+  if (!prepareMachineTransition(now)) {
+    return;
+  }
   emitSpanEvents(advance(machine, now));
   scheduleMachineAdvance();
 }
 
-function feedMachine(input: SpanInput): void {
-  const now = Date.now();
+function feedMachine(input: SpanInput, now: number = Date.now(), settle: boolean = true): void {
+  if (settle && !prepareMachineTransition(now)) {
+    return;
+  }
   // Expire stale merge windows before a newly observed tab can resume them.
   emitSpanEvents([...advance(machine, now), ...handleInput(machine, input, now)]);
   // Subject changes (candidate starts, suspensions) emit no events but must
@@ -195,27 +243,34 @@ function collectionDetails(message: Record<string, unknown>): { enabled: boolean
   };
 }
 
-function applyCollectionState(message: Record<string, unknown>): void {
+function applyCollectionState(message: Record<string, unknown>): boolean {
   const { enabled, id } = collectionDetails(message);
   if (!enabled || id === undefined) {
+    const changed = collectionEnabled || collectionId !== undefined;
     collectionEnabled = false;
     collectionId = undefined;
     rules = [];
-    unmatchedOrigin = null;
+    resetLocalCollectionState();
     outbox.clear();
     clearTally(tally);
-    feedMachine({ type: "active-tab", ruleId: null });
     persistState();
-    return;
+    return changed;
   }
   const changed = collectionId !== id;
+  if (changed) {
+    collectionEnabled = false;
+    collectionId = undefined;
+    rules = [];
+    resetLocalCollectionState();
+    outbox.clear();
+    clearTally(tally);
+  }
   collectionEnabled = true;
   collectionId = id;
   if (changed) {
-    outbox.clear();
-    clearTally(tally);
     persistState();
   }
+  return changed;
 }
 
 function connect(): void {
@@ -238,22 +293,29 @@ function connect(): void {
     const payload = message as Record<string, unknown>;
     if (payload["type"] === "clear-tally") {
       clearTally(tally);
+      lastTickAt = Date.now();
       persistState();
       sendTally();
       return;
     }
     if (payload["type"] === "collection-state") {
-      applyCollectionState(payload);
+      if (applyCollectionState(payload) && collectionEnabled) {
+        requestRules();
+      }
       return;
     }
     if (payload["type"] === "rules") {
-      applyCollectionState(payload);
+      const collectionChanged = applyCollectionState(payload);
       const list = payload["rules"];
       // Fail closed: an unusable rule set matches nothing.
       rules = collectionEnabled && Array.isArray(list) ? list.filter(isRule) : [];
       reconnectAttempt = 0;
       // A new rule set changes the verdict of the tab already open.
-      reApplyActiveTab();
+      if (collectionChanged) {
+        revalidateAttention();
+      } else {
+        reApplyActiveTab();
+      }
       flushOutbox();
       sendTally();
     }
@@ -275,6 +337,10 @@ function scheduleReconnect(): void {
 
 /** The local verdict for a tab: rule hit, or the origin for the local tally. */
 function applyTab(tab: chrome.tabs.Tab): void {
+  const now = Date.now();
+  if (!prepareMachineTransition(now)) {
+    return;
+  }
   currentTabId = tab.id ?? null;
   unmatchedOrigin = null;
   let ruleId: string | null = null;
@@ -283,7 +349,7 @@ function applyTab(tab: chrome.tabs.Tab): void {
     ruleId = match(url, rules);
     unmatchedOrigin = ruleId === null ? originFor(url) : null;
   }
-  feedMachine({ type: "active-tab", ruleId });
+  feedMachine({ type: "active-tab", ruleId }, now, false);
 }
 
 function watchActiveTab(windowId: number): void {
@@ -391,15 +457,11 @@ function runTick(): void {
   if (rollTallyIntoCurrentWeek(tally, now)) {
     persistState();
   }
-  const { creditMs, gapExceeded } = tickCredit(now, lastTickAt, TICK_MS);
-  lastTickAt = now;
-  if (gapExceeded) {
-    revalidateAttention();
+  if (!prepareMachineTransition(now)) {
+    return;
   }
-  advanceMachine(now);
-  if (collectionEnabled && unmatchedOrigin !== null && machine.windowFocused && machine.idleState === "active") {
-    addFocusSeconds(tally, unmatchedOrigin, Math.round(creditMs / 1000), now);
-  }
+  emitSpanEvents(advance(machine, now));
+  scheduleMachineAdvance();
   if (now - lastTallyFlushAt >= TALLY_FLUSH_MS) {
     lastTallyFlushAt = now;
     persistState();
