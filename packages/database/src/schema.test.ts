@@ -168,11 +168,14 @@ describe("database schema", () => {
     expect(agentSessions.organizationId.notNull).toBe(true);
     expect(agentSessions.userId.notNull).toBe(true);
     expect(agentSessions.source.notNull).toBe(true);
-    expect(agentSessions.source.enumValues).toEqual(["claude_code", "codex", "kimi_code", "cursor", "other"]);
+    expect(agentSessions.source.enumValues).toEqual(["claude_code", "codex", "kimi_code", "cursor", "browser", "other"]);
     expect(agentSessions.externalSessionId.notNull).toBe(true);
     expect(agentSessions.externalSessionId.columnType).toBe("PgText");
     expect(agentSessions.projectId.notNull).toBe(false);
-    expect(agentSessions.cwd.notNull).toBe(true);
+    // Browser spans carry no cwd; their matched url-rule id attributes them instead.
+    expect(agentSessions.cwd.notNull).toBe(false);
+    expect(agentSessions.ruleId.notNull).toBe(false);
+    expect(agentSessions.ruleId.columnType).toBe("PgUUID");
     expect(agentSessions.status.notNull).toBe(true);
     expect(agentSessions.status.enumValues).toEqual(["running", "ended"]);
     expect(agentSessions.startedAt.notNull).toBe(true);
@@ -206,7 +209,7 @@ describe("database schema", () => {
     );
     const cwdCheck = config.checks.find((constraint) => constraint.name === "agent_sessions_cwd_length_valid");
     expect(new PgDialect().sqlToQuery(cwdCheck!.value).sql).toContain(
-      'char_length("agent_sessions"."cwd") between 1 and 1000',
+      '"agent_sessions"."cwd" is null or char_length("agent_sessions"."cwd") between 1 and 1000',
     );
     const userTimelineIndex = config.indexes.find(
       (index) => index.config.name === "agent_sessions_organization_user_started_at_idx",
@@ -219,6 +222,10 @@ describe("database schema", () => {
     expect(projectPathMappings.id.primary).toBe(true);
     expect(projectPathMappings.organizationId.notNull).toBe(true);
     expect(projectPathMappings.userId.notNull).toBe(true);
+    expect(projectPathMappings.kind.notNull).toBe(true);
+    expect(projectPathMappings.kind.columnType).toBe("PgText");
+    expect(projectPathMappings.kind.hasDefault).toBe(true);
+    expect(projectPathMappings.kind.default).toBe("path_prefix");
     expect(projectPathMappings.pathPrefix.notNull).toBe(true);
     expect(projectPathMappings.pathPrefix.columnType).toBe("PgText");
     expect(projectPathMappings.repoUrl.notNull).toBe(false);
@@ -228,9 +235,16 @@ describe("database schema", () => {
 
     const config = getTableConfig(projectPathMappings);
     expect(config.foreignKeys).toHaveLength(2);
-    expect(config.uniqueConstraints.map((constraint) => constraint.name)).toContain(
-      "project_path_mappings_organization_user_prefix_unique",
+    // The (org, user, prefix) uniqueness spans both path prefixes and url rules.
+    const prefixUnique = config.uniqueConstraints.find(
+      (constraint) => constraint.name === "project_path_mappings_organization_user_prefix_unique",
     );
+    expect(prefixUnique).toBeDefined();
+    expect(prefixUnique!.columns.map((column) => column.name)).toEqual([
+      "organization_id",
+      "user_id",
+      "path_prefix",
+    ]);
     expect(config.checks.map((constraint) => constraint.name)).toContain(
       "project_path_mappings_path_prefix_length_valid",
     );

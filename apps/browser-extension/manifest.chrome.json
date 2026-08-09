@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Clock-In",
+  "version": "0.1.0",
+  "description": "Attributes focused time on your approved work sites to Clock-In projects. Only rule verdicts ever leave the browser: never URLs, titles, or history.",
+  "permissions": ["tabs", "idle", "storage", "nativeMessaging"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "minimum_chrome_version": "116"
+}

@@ -11,3 +11,4 @@ apps/desktop/src-tauri/gen/
 
 # Local lavish review artifacts
 .lavish/
+apps/desktop/src-tauri/binaries/

@@ -1,6 +1,13 @@
 name: Release desktop
 
 # Tag a release to publish installers:  git tag v0.1.0 && git push origin v0.1.0
+#
+# Signing: when the signing secrets documented in DEPLOY.md ("Code signing and
+# auto-update") are absent, this workflow still builds and publishes UNSIGNED
+# installers and just annotates the run with warnings, so the pipeline works
+# while the certificates are being procured. Shipping to non-engineers is
+# blocked until signing is on - SmartScreen and Gatekeeper are where a
+# novice's setup ends.
 on:
   push:
     tags: ["v*"]
@@ -32,6 +39,78 @@ jobs:
           workspaces: apps/desktop/src-tauri
       - run: pnpm install --frozen-lockfile
 
+      # secrets.* is not allowed in step `if:` conditions, so sniff them once
+      # into step outputs. Empty secret = build unsigned.
+      - name: Detect signing configuration
+        id: signing
+        shell: bash
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          {
+            echo "windows=$([ -n "$WINDOWS_CERTIFICATE" ] && echo true || echo false)"
+            echo "macos=$([ -n "$APPLE_CERTIFICATE" ] && echo true || echo false)"
+            echo "updater=$([ -n "$TAURI_SIGNING_PRIVATE_KEY" ] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+
+      # tauri-action signs the app binary and the installers itself, but the
+      # helper binaries (clock-in-hook, clock-in-browser-host) are ours to
+      # sign. Build them first and sign them with the same certificate; the
+      # subsequent tauri-action build reuses the untouched cargo artifacts,
+      # so the signed binaries are what end up in the installer. The build is
+      # unconditional: both helpers ship inside the installer as externalBin
+      # siblings of the app, signed or not.
+      - name: Build helper binaries
+        env:
+          CLOCK_IN_AUTH_URL: ${{ vars.CLOCK_IN_AUTH_URL }}
+          CLOCK_IN_API_URL: ${{ vars.CLOCK_IN_API_URL }}
+        run: cargo build --release --manifest-path apps/desktop/src-tauri/Cargo.toml
+
+      - name: Sign helper binaries (Authenticode)
+        if: matrix.target == 'windows' && steps.signing.outputs.windows == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pfx = Join-Path $env:RUNNER_TEMP 'clock-in-codesign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object { $_.VersionInfo.ProductVersion } -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          $ts = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
+          foreach ($bin in 'clock-in-hook.exe', 'clock-in-browser-host.exe') {
+            $path = Join-Path 'apps/desktop/src-tauri/target/release' $bin
+            & $signtool sign /fd sha256 /td sha256 /tr $ts /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD $path
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed for $bin" }
+          }
+          Remove-Item $pfx -Force
+
+      # externalBin resolves `binaries/<name>-<target-triple>`; stage the
+      # (signed, on Windows) helpers under those names for the bundler.
+      - name: Stage helper binaries for bundling (Windows)
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force 'apps/desktop/src-tauri/binaries' | Out-Null
+          foreach ($bin in 'clock-in-hook', 'clock-in-browser-host') {
+            Copy-Item "apps/desktop/src-tauri/target/release/$bin.exe" "apps/desktop/src-tauri/binaries/$bin-x86_64-pc-windows-msvc.exe" -Force
+          }
+
+      - name: Stage helper binaries for bundling (macOS)
+        if: matrix.target == 'macos'
+        run: |
+          set -euo pipefail
+          mkdir -p apps/desktop/src-tauri/binaries
+          for bin in clock-in-hook clock-in-browser-host; do
+            cp "apps/desktop/src-tauri/target/release/$bin" "apps/desktop/src-tauri/binaries/$bin-aarch64-apple-darwin"
+          done
+
       # These are read at compile time, so they must be set before the build.
       # Without them the installer ships pointing at localhost.
       - uses: tauri-apps/tauri-action@v0
@@ -39,6 +118,26 @@ jobs:
           CLOCK_IN_AUTH_URL: ${{ vars.CLOCK_IN_AUTH_URL }}
           CLOCK_IN_API_URL: ${{ vars.CLOCK_IN_API_URL }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Windows Authenticode. Empty values mean an unsigned build.
+          # The .pfx pair or, for a certificate already in the runner's store
+          # (Azure Key Vault / SafeNet flow), the thumbprint alone.
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+          # macOS signing and notarization. Empty values mean an unsigned,
+          # unnotarized build.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Updater signing. When set, tauri-action also publishes the .sig
+          # files and latest.json beside the installers, which the in-app
+          # updater verifies against.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: apps/desktop
           tagName: ${{ github.ref_name }}
@@ -46,3 +145,30 @@ jobs:
           # Published (not draft) so the web app's download links work immediately.
           releaseDraft: false
           prerelease: false
+
+      # Ship the helper binaries beside the installers as well, for anyone
+      # who needs them outside the installer (managed fleets, debugging).
+      - name: Publish helper binaries to the release
+        if: matrix.target == 'windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Compress-Archive `
+            -Path 'apps/desktop/src-tauri/target/release/clock-in-hook.exe', 'apps/desktop/src-tauri/target/release/clock-in-browser-host.exe' `
+            -DestinationPath 'clock-in-helpers-windows.zip' -Force
+          gh release upload $env:GITHUB_REF_NAME 'clock-in-helpers-windows.zip' --clobber
+
+      - name: Report unsigned build
+        shell: bash
+        run: |
+          if [ "${{ matrix.target }}" = windows ] && [ "${{ steps.signing.outputs.windows }}" != true ]; then
+            echo "::warning::WINDOWS_CERTIFICATE is not set; shipping an UNSIGNED installer. Fine for internal testing, blocked for non-engineer distribution (SmartScreen). See DEPLOY.md."
+          fi
+          if [ "${{ matrix.target }}" = macos ] && [ "${{ steps.signing.outputs.macos }}" != true ]; then
+            echo "::warning::APPLE_CERTIFICATE is not set; shipping an UNSIGNED, unnotarized app. Gatekeeper will refuse to open it normally. See DEPLOY.md."
+          fi
+          if [ "${{ steps.signing.outputs.updater }}" != true ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not set; no updater artifacts (.sig / latest.json) are published, so auto-update has nothing to verify against. See DEPLOY.md."
+          fi

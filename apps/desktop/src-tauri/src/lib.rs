@@ -5,11 +5,14 @@
 //! token in it, and stops that fail offline are queued for retry.
 
 mod api;
+pub mod browser;
 mod monitor;
 mod recovery;
 mod uploader;
 // Shared with the `clock-in-hook` binary; the uploader drains it from here.
 pub mod spool;
+// Shared with the `clock-in-browser-host` binary: the stdio framing it serves.
+pub mod native_messaging;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -123,6 +126,10 @@ pub struct AppState {
     recovery: Arc<Mutex<RecoveryState>>,
     recovery_path: Mutex<PathBuf>,
     monitor: monitor::Monitor,
+    /// An update downloaded in the background, waiting to install on quit.
+    /// Auto-update is silent end to end: a failed check or download leaves
+    /// this empty and the user on the status quo.
+    pending_update: std::sync::Mutex<Option<(tauri_plugin_updater::Update, Vec<u8>)>>,
 }
 
 impl AppState {
@@ -490,6 +497,46 @@ async fn settings_update(
     state.monitor.apply_patch(&input).await
 }
 
+/// The [Fix] button on a browser card: re-run registration for that browser
+/// and answer with the resulting health so the card updates immediately.
+#[tauri::command]
+fn browser_repair(
+    state: State<'_, AppState>,
+    browser: String,
+) -> ApiResult<browser::BrowserHealth> {
+    browser::repair(&state.monitor.browser_dir(), &browser)
+}
+
+/// [Connect Chrome] opens the browser's own store page in the default
+/// browser; the install and its confirmation are the browser's floor.
+#[tauri::command]
+fn browser_open_store_page(browser: String) -> ApiResult<()> {
+    browser::open_store_page(&browser)
+}
+
+/// The local suggestion tally: unmatched origins with their focused seconds,
+/// minus never-suggest answers and origins a current rule already covers.
+/// Local-only — none of this is ever uploaded.
+#[tauri::command]
+fn suggestions_list(state: State<'_, AppState>) -> Vec<browser::TallyEntry> {
+    browser::read_suggestions(
+        &state.monitor.browser_dir(),
+        &state.monitor.cached_mappings(),
+    )
+}
+
+/// "No - don't ask again" for one origin.
+#[tauri::command]
+fn suggestion_never_suggest(state: State<'_, AppState>, origin: String) -> ApiResult<()> {
+    browser::never_suggest(&state.monitor.browser_dir(), &origin)
+}
+
+/// Clears the local tally and the never-suggest list, from settings.
+#[tauri::command]
+fn suggestions_clear(state: State<'_, AppState>) -> ApiResult<()> {
+    browser::clear_suggestion_data(&state.monitor.browser_dir())
+}
+
 #[tauri::command]
 async fn me_stats(
     state: State<'_, AppState>,
@@ -591,11 +638,25 @@ static EXIT_FLUSH_STARTED: AtomicBool = AtomicBool::new(false);
 /// a test would need a live event loop. A force quit (Task Manager kill) still
 /// runs no code at all — durability there is what is already spooled, so at
 /// most the trailing open span since the last transition is lost.
+///
+/// This is also where a downloaded update installs: quit is the one moment
+/// replacing the binary never interrupts anything.
 fn flush_monitor_and_exit(app: &tauri::AppHandle, code: i32) {
     EXIT_FLUSH_STARTED.store(true, Ordering::SeqCst);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        app.state::<AppState>().monitor.stop().await;
+        let state = app.state::<AppState>();
+        state.monitor.stop().await;
+        let pending = state
+            .pending_update
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some((update, bytes)) = pending {
+            // A failed install is silent: the user keeps the current version
+            // and the next launch's check starts over.
+            let _ = update.install(bytes);
+        }
         app.exit(code);
     });
 }
@@ -637,6 +698,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let recovery_path = app
                 .path()
@@ -657,17 +719,46 @@ pub fn run() {
                 settings_path: data_dir.join("settings.json"),
                 segments_path: data_dir.join("segments-spool.jsonl"),
                 agent_path: spool::default_spool_path(),
+                browser_dir: spool::default_browser_dir(),
                 recovery: Arc::clone(&recovery),
                 recovery_path: recovery_path.clone(),
             });
+
+            // Silent, idempotent native-messaging registration for every
+            // detected browser: the manifests and HKCU keys are Clock-In's own
+            // and inert until the user installs the extension, so a broken
+            // registration is repaired here before any card could show it.
+            browser::ensure_registered(&spool::default_browser_dir());
 
             app.manage(AppState {
                 client,
                 recovery,
                 recovery_path: Mutex::new(recovery_path),
                 monitor,
+                pending_update: std::sync::Mutex::new(None),
             });
             build_tray(app.handle())?;
+
+            // Auto-update: check and download in the background now, install
+            // on quit (see flush_monitor_and_exit). Every failure is silent.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                use tauri_plugin_updater::UpdaterExt;
+                let Ok(updater) = handle.updater() else {
+                    return;
+                };
+                let Ok(Some(update)) = updater.check().await else {
+                    return;
+                };
+                let Ok(bytes) = update.download(|_, _| {}, || {}).await else {
+                    return;
+                };
+                let state = handle.state::<AppState>();
+                *state
+                    .pending_update
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((update, bytes));
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -688,6 +779,11 @@ pub fn run() {
             monitor_dismiss_suggestion,
             settings_get,
             settings_update,
+            browser_repair,
+            browser_open_store_page,
+            suggestions_list,
+            suggestion_never_suggest,
+            suggestions_clear,
             me_stats,
             project_create,
             path_mappings_list,

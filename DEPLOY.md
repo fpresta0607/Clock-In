@@ -143,17 +143,108 @@ If those variables are missing, the build **fails** rather than shipping an
 installer that points at localhost — `apps/desktop/src-tauri/build.rs` enforces
 that.
 
-### Code signing
+### Code signing and auto-update
 
-Installers are unsigned, so Windows SmartScreen warns on download and macOS
-refuses to open the app without right-click → Open. Fixing that needs paid
-certificates:
+The release workflow still builds and publishes installers when the signing
+secrets are absent; it just annotates the run with warnings. That keeps the
+pipeline usable while the certificates are being procured, but shipping to
+non-engineers is blocked until signing is on: an unsigned installer greets a
+novice with "Windows protected your PC", and macOS refuses to open an
+unnotarized app without right-click → Open.
 
-- **Windows:** an OV/EV code-signing certificate (~$200–600/yr)
+The certificates have days-to-weeks of identity-verification lead time, so
+start procurement before the release, not after:
+
+- **Windows:** an OV/EV code-signing certificate (~$200-600/yr)
 - **macOS:** Apple Developer Program ($99/yr) for signing and notarization
 
-Both plug into `tauri-apps/tauri-action` via secrets. Worth doing before you
-distribute widely; not required to install internally.
+All three desktop binaries (the app, `clock-in-hook`, and
+`clock-in-browser-host`) sign with the same certificate. On Windows the
+workflow builds the helper binaries, signs them with `signtool`, and lets
+`tauri-action` sign the app and the installers with the same `.pfx`; on macOS
+the bundler deep-signs everything inside the `.app` and notarizes it.
+
+Both helpers ship inside the installer via `externalBin` in
+`apps/desktop/src-tauri/tauri.conf.json`: the workflow stages them as
+`src-tauri/binaries/<name>-<target-triple>` before the bundler runs, and the
+bundler installs them beside the app executable. That sibling rule is how the
+app finds them at runtime - hook registration quotes the `clock-in-hook`
+path beside the running app, and browser native-messaging registration writes
+the `clock-in-browser-host` path beside the running app into each browser's
+HKCU manifest.
+
+Set these under Settings → Secrets and variables → Actions → **Secrets**:
+
+| Secret | Value |
+|---|---|
+| `WINDOWS_CERTIFICATE` | Base64 of the exported `.pfx` (`[Convert]::ToBase64String([IO.File]::ReadAllBytes('cert.pfx'))`) |
+| `WINDOWS_CERTIFICATE_PASSWORD` | The `.pfx` export password |
+| `WINDOWS_TIMESTAMP_URL` | Optional RFC 3161 timestamp server; defaults to `http://timestamp.digicert.com` |
+| `WINDOWS_CERTIFICATE_THUMBPRINT` | Optional; use instead of the `.pfx` pair when the certificate already lives in the runner's store (Azure Key Vault / SafeNet flow) |
+| `APPLE_CERTIFICATE` | Base64 of the exported Developer ID Application `.p12` |
+| `APPLE_CERTIFICATE_PASSWORD` | The `.p12` export password |
+| `APPLE_SIGNING_IDENTITY` | Optional; the certificate's identity is used when omitted |
+| `APPLE_ID` | Apple ID email used for notarization |
+| `APPLE_PASSWORD` | App-specific password for that Apple ID (from appleid.apple.com) |
+| `APPLE_TEAM_ID` | The 10-character team id |
+| `TAURI_SIGNING_PRIVATE_KEY` | The updater private key from `pnpm tauri signer generate` |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The password chosen when generating that key |
+
+With `TAURI_SIGNING_PRIVATE_KEY` set, the release also carries the updater
+signatures and `latest.json` beside the installers, which is what the in-app
+updater verifies against. The matching public key goes into the updater
+config in `apps/desktop/src-tauri/tauri.conf.json`. Back the private key up
+somewhere durable: losing it means existing installs can never verify an
+update again.
+
+---
+
+## 5. Browser extension stores
+
+Chrome on Windows stable does not sideload extensions, so the extension ships
+through the stores: Chrome Web Store (unlisted) and Edge Add-ons. Every CI
+run attaches the built packages as the `browser-extension-store-zips`
+artifact (the Chrome/Edge zip and the Firefox variant zip from
+`apps/browser-extension/dist/`); download it from the run page to submit.
+
+**Chrome Web Store (unlisted):**
+
+1. Create a developer account at the Chrome Web Store dashboard ($5 one-time).
+2. Add a new item and upload the Chrome/Edge zip from the CI artifact.
+3. Set visibility to **Unlisted**, so only people with the link can install.
+4. The `tabs` permission shows as "read your browsing history" in the install
+   warning, so the listing text must state plainly what leaves the browser:
+   rule verdicts and timestamps only, never URLs or history.
+5. Submit for review. Once approved, the store assigns the extension id;
+   that id is what the desktop's store links and the native-messaging
+   manifest's `allowed_origins` pin against.
+
+**Edge Add-ons:**
+
+1. Create a Microsoft Partner Center developer account.
+2. Submit the same Chrome/Edge zip under Edge Add-ons with the same listing
+   copy; Edge runs the same engine and accepts the same package.
+3. Same id step as Chrome once approved.
+
+**Review latency is part of the release cadence.** Every submission queues
+for human review, from hours to days for Chrome and up to a week for Edge,
+and a rejected listing restarts the clock. Submit the extension before or
+alongside tagging a desktop release that depends on it, and never announce a
+feature that is still in review.
+
+**Firefox** needs its own signed build and its own native-messaging manifest
+path; ship Chrome/Edge first and submit Firefox when demand exists.
+
+**Managed fleets** skip the two store clicks entirely via the browsers' own
+force-install policy. Add
+`<extension-id>;https://clients2.google.com/service/update2/crx` to
+`ExtensionInstallForcelist` in the registry:
+
+- Chrome: `HKLM\SOFTWARE\Policies\Google\Chrome\ExtensionInstallForcelist`
+- Edge: `HKLM\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist`
+
+Force-install still pulls the package from the store update URL, so the
+listing must exist and stay published even when every install is managed.
 
 ---
 

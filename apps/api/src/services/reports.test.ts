@@ -10,6 +10,7 @@ import type {
   ReportQuery,
   ReportRepository,
   ReportRowRecord,
+  SiteTotalRecord,
 } from "../repositories.js";
 import { createReportService } from "./reports.js";
 
@@ -55,10 +56,12 @@ class Reports implements ReportRepository {
   public lastLeaderboardQuery: ReportQuery | null = null;
   public lastProjectTotalsQuery: ReportQuery | null = null;
   public lastAppTotalsQuery: ReportQuery | null = null;
+  public lastSiteTotalsQuery: ReportQuery | null = null;
   public exportReads = 0;
   public leaderboardRows: LeaderboardRowRecord[] = [];
   public projectTotals: ProjectTotalRecord[] = [];
   public appTotals: AppTotalRecord[] = [];
+  public siteTotals: SiteTotalRecord[] = [];
   public constructor(private readonly rows: ReportRowRecord[] = [], private readonly accessible = new Set([ids.project, ids.user])) {}
   public async readLeaderboardForOrganization(_subject: AuthenticatedSubject, query: ReportQuery) {
     this.lastLeaderboardQuery = query;
@@ -71,6 +74,10 @@ class Reports implements ReportRepository {
   public async readAppTotalsForMember(_subject: AuthenticatedSubject, query: ReportQuery) {
     this.lastAppTotalsQuery = query;
     return this.appTotals;
+  }
+  public async readSiteTotalsForMember(_subject: AuthenticatedSubject, query: ReportQuery) {
+    this.lastSiteTotalsQuery = query;
+    return this.siteTotals;
   }
   public async findProjectForOrganization(_subject: AuthenticatedSubject, projectId: string) {
     return this.accessible.has(projectId) && projectId === ids.project ? { id: projectId, name: "Timer" } : null;
@@ -286,6 +293,9 @@ describe("me/stats", () => {
       { processName: "Code.exe", durationSeconds: "4200" },
       { processName: "chrome.exe", durationSeconds: 1_800 },
     ];
+    reports.siteTotals = [
+      { mapping: { id: "01c7e513-b094-4d4c-ae55-21790ae019a4", pattern: "github.com/acme/*", projectId: ids.project }, durationSeconds: "900" },
+    ];
     const reaper = new Reaper();
     const service = createReportService({ reports, reaper });
 
@@ -303,6 +313,9 @@ describe("me/stats", () => {
         { processName: "Code.exe", durationSeconds: 4_200 },
         { processName: "chrome.exe", durationSeconds: 1_800 },
       ],
+      sites: [
+        { mapping: { id: "01c7e513-b094-4d4c-ae55-21790ae019a4", pattern: "github.com/acme/*", projectId: ids.project }, durationSeconds: 900 },
+      ],
     });
     // The repository read is pinned to the caller, never to a filter argument.
     expect(reports.lastProjectTotalsQuery).toEqual({
@@ -311,13 +324,14 @@ describe("me/stats", () => {
       userId: ids.user,
     });
     expect(reports.lastAppTotalsQuery).toEqual(reports.lastProjectTotalsQuery);
+    expect(reports.lastSiteTotalsQuery).toEqual(reports.lastProjectTotalsQuery);
     expect(reaper.subjects).toEqual([subject]);
   });
 
   it("returns an empty stats response when the caller recorded nothing", async () => {
     const result = await createReportService({ reports: new Reports(), reaper: silentReaper }).meStats(subject, {});
 
-    expect(result).toEqual({ filters: {}, totalDurationSeconds: 0, corroboratedSeconds: 0, projects: [], apps: [] });
+    expect(result).toEqual({ filters: {}, totalDurationSeconds: 0, corroboratedSeconds: 0, projects: [], apps: [], sites: [] });
   });
 
   it("rejects reversed or excessive date ranges like the org reports do", async () => {

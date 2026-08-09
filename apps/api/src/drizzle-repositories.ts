@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import { generateInviteCode, type AgentSource } from "@clock-in/shared";
-import { and, asc, count, desc, eq, gt, gte, isNotNull, lt, or, sql, sum } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, isNotNull, lt, ne, or, sql, sum } from "drizzle-orm";
 import {
   activitySegments,
   agentSessions,
@@ -29,6 +29,7 @@ import {
   type ActivitySegmentRepository,
   type AgentSessionRecord,
   type AgentSessionRepository,
+  type AgentSessionStaleCutoffs,
   type AppTotalRecord,
   type CreatePathMapping,
   type CreateRunningSession,
@@ -49,6 +50,7 @@ import {
   type ReportSummaryRecord,
   type SessionRecord,
   type SessionRepository,
+  type SiteTotalRecord,
   type StopRunningSession,
   type UpdatePathMapping,
   type UpsertStartedAgentSession,
@@ -407,10 +409,11 @@ export class DrizzleAccountStore implements AccountStore {
 /**
  * Corroborated seconds for one time session: the overlap of [startedAt, stoppedAt]
  * with the member's fresh "active" activity segments plus the agent sessions linked
- * to the session, floored and capped at durationSeconds. Evidence received more than
- * seven days after it occurred is stored but never corroborates. Overlapping evidence
- * intervals are summed rather than unioned; the durationSeconds cap absorbs the
- * double-count, so corroborated time can never exceed the session it backs.
+ * to the session, floored and capped at durationSeconds. Browser spans are excluded:
+ * they attribute active time to a project but never corroborate it. Evidence received
+ * more than seven days after it occurred is stored but never corroborates. Overlapping
+ * evidence intervals are summed rather than unioned; the durationSeconds cap absorbs
+ * the double-count, so corroborated time can never exceed the session it backs.
  */
 function corroboratedSecondsSql() {
   return sql<string | null>`least(
@@ -433,6 +436,7 @@ function corroboratedSecondsSql() {
           - greatest(${agentSessions.startedAt}, ${timeSessions.startedAt}))))
         from ${agentSessions}
         where ${agentSessions.linkedSessionId} = ${timeSessions.id}
+          and ${agentSessions.source} <> 'browser'
           and ${agentSessions.receivedAt} <= coalesce(${agentSessions.endedAt}, ${agentSessions.lastEventAt}) + interval '7 days'
       ), 0)
     )
@@ -620,9 +624,13 @@ export class DrizzleReportRepository implements ReportRepository {
     // cannot serialize a bare Date — bind the bounds as ISO strings instead.
     const rangeStart = query.from === undefined ? sql`${activitySegments.startedAt}` : sql`${query.from.toISOString()}`;
     const rangeEnd = query.toExclusive === undefined ? sql`${activitySegments.endedAt}` : sql`${query.toExclusive.toISOString()}`;
-    const duration = sql<string | null>`sum(greatest(0, extract(epoch from
+    // The subtraction inside extract() is parenthesized on purpose: with bound
+    // parameters inside nested calls Postgres mis-parses the unwrapped form and
+    // rejects the query at the table FROM.
+    const duration = sql<string | null>`floor(sum(greatest(0, extract(epoch from (
       least(${activitySegments.endedAt}, ${rangeEnd})
-      - greatest(${activitySegments.startedAt}, ${rangeStart}))))`;
+      - greatest(${activitySegments.startedAt}, ${rangeStart})
+    )))))`;
     const rows = await this.db
       .select({
         processName: activitySegments.processName,
@@ -646,6 +654,68 @@ export class DrizzleReportRepository implements ReportRepository {
       if (row.processName === null) throw new Error("App totals query returned a null process name.");
       return { processName: row.processName, durationSeconds: row.durationSeconds };
     });
+  }
+
+  /**
+   * One row per url rule the member's browser spans matched, heaviest first.
+   * Span time counts only where it overlaps the member's fresh "active"
+   * segments, both clamped to the requested range — a focused tab on an idle
+   * machine attributes nothing. Both sides keep corroboration's seven-day
+   * freshness window, and a deleted rule's spans drop out with its mapping row.
+   */
+  public async readSiteTotalsForMember(
+    subject: AuthenticatedSubject,
+    query: ReportQuery,
+  ): Promise<SiteTotalRecord[]> {
+    const spanEnd = sql`coalesce(${agentSessions.endedAt}, ${agentSessions.lastEventAt})`;
+    // Raw sql`` interpolation bypasses drizzle's Date mapping, and postgres-js
+    // cannot serialize a bare Date — bind the bounds as ISO strings instead.
+    const windowStart = query.from === undefined
+      ? sql`greatest(${activitySegments.startedAt}, ${agentSessions.startedAt})`
+      : sql`greatest(${activitySegments.startedAt}, ${agentSessions.startedAt}, ${query.from.toISOString()})`;
+    const windowEnd = query.toExclusive === undefined
+      ? sql`least(${activitySegments.endedAt}, ${spanEnd})`
+      : sql`least(${activitySegments.endedAt}, ${spanEnd}, ${query.toExclusive.toISOString()})`;
+    const duration = sql<string | null>`floor(sum(greatest(0, extract(epoch from (${windowEnd} - ${windowStart})))))`;
+    const rows = await this.db
+      .select({
+        mappingId: projectPathMappings.id,
+        pattern: projectPathMappings.pathPrefix,
+        projectId: projectPathMappings.projectId,
+        durationSeconds: duration,
+      })
+      .from(agentSessions)
+      .innerJoin(projectPathMappings, and(
+        eq(projectPathMappings.organizationId, agentSessions.organizationId),
+        eq(projectPathMappings.userId, agentSessions.userId),
+        eq(projectPathMappings.id, agentSessions.ruleId),
+        eq(projectPathMappings.kind, "url_rule"),
+      ))
+      .innerJoin(activitySegments, and(
+        eq(activitySegments.organizationId, agentSessions.organizationId),
+        eq(activitySegments.userId, agentSessions.userId),
+        eq(activitySegments.kind, "active"),
+        sql`${activitySegments.startedAt} < ${spanEnd}`,
+        sql`${activitySegments.endedAt} > ${agentSessions.startedAt}`,
+        sql`${activitySegments.receivedAt} <= ${activitySegments.endedAt} + interval '7 days'`,
+      ))
+      .where(and(
+        eq(agentSessions.organizationId, subject.organizationId),
+        eq(agentSessions.userId, subject.userId),
+        eq(agentSessions.source, "browser"),
+        isNotNull(agentSessions.ruleId),
+        sql`${agentSessions.receivedAt} <= ${spanEnd} + interval '7 days'`,
+        ...(query.from === undefined ? [] : [sql`${spanEnd} > ${query.from.toISOString()}`]),
+        ...(query.toExclusive === undefined ? [] : [lt(agentSessions.startedAt, query.toExclusive)]),
+      ))
+      .groupBy(projectPathMappings.id, projectPathMappings.pathPrefix, projectPathMappings.projectId)
+      // id breaks ties so equal totals do not reorder between requests.
+      .orderBy(desc(duration), asc(projectPathMappings.id));
+
+    return rows.map((row) => ({
+      mapping: { id: row.mappingId, pattern: row.pattern, projectId: row.projectId },
+      durationSeconds: row.durationSeconds,
+    }));
   }
 
   private async snapshot<T>(callback: (db: Pick<DatabaseConnection["db"], "select">) => Promise<T>): Promise<T> {
@@ -703,6 +773,7 @@ function asAgentSessionRecord(row: typeof agentSessions.$inferSelect): AgentSess
     externalSessionId: row.externalSessionId,
     projectId: row.projectId,
     cwd: row.cwd,
+    ruleId: row.ruleId,
     status: row.status,
     startedAt: row.startedAt,
     endedAt: row.endedAt,
@@ -740,6 +811,7 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         source: input.source,
         externalSessionId: input.externalSessionId,
         cwd: input.cwd,
+        ruleId: input.ruleId,
         projectId: input.projectId,
         linkedSessionId: input.linkedSessionId,
         status: "running",
@@ -751,9 +823,11 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
       .onConflictDoUpdate({
         target: agentSessionKey,
         // A replayed start refreshes lastEventAt only; an ended row stays ended.
+        // Drizzle does not run onConflictDoUpdate set values through the column
+        // serializer, so bind an ISO string - a raw Date crashes postgres-js.
         set: {
-          lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${input.occurredAt})`,
-          updatedAt: input.receivedAt,
+          lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${input.occurredAt.toISOString()})`,
+          updatedAt: sql`${input.receivedAt.toISOString()}`,
         },
       })
       .returning();
@@ -766,7 +840,7 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
       .set({
         status: "ended",
         endedAt,
-        lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${endedAt})`,
+        lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${endedAt.toISOString()})`,
         updatedAt: now,
       })
       .where(and(
@@ -789,6 +863,7 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         source: input.source,
         externalSessionId: input.externalSessionId,
         cwd: input.cwd,
+        ruleId: input.ruleId,
         projectId: input.projectId,
         status: "ended",
         startedAt: input.occurredAt,
@@ -803,7 +878,7 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
     const rows = await this.db
       .update(agentSessions)
       .set({
-        lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${occurredAt})`,
+        lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${occurredAt.toISOString()})`,
         updatedAt: now,
       })
       .where(and(
@@ -817,7 +892,7 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
     return rows.length > 0;
   }
 
-  public async reapStale(subject: AuthenticatedSubject, cutoff: Date, now: Date): Promise<number> {
+  public async reapStale(subject: AuthenticatedSubject, cutoffs: AgentSessionStaleCutoffs, now: Date): Promise<number> {
     const rows = await this.db
       .update(agentSessions)
       .set({ status: "ended", endedAt: sql`${agentSessions.lastEventAt}`, updatedAt: now })
@@ -825,7 +900,10 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         eq(agentSessions.organizationId, subject.organizationId),
         eq(agentSessions.userId, subject.userId),
         eq(agentSessions.status, "running"),
-        lt(agentSessions.lastEventAt, cutoff),
+        or(
+          and(eq(agentSessions.source, "browser"), lt(agentSessions.lastEventAt, cutoffs.browser)),
+          and(ne(agentSessions.source, "browser"), lt(agentSessions.lastEventAt, cutoffs.default)),
+        ),
       ))
       .returning({ id: agentSessions.id });
     return rows.length;
@@ -837,6 +915,7 @@ function asPathMappingRecord(row: typeof projectPathMappings.$inferSelect): Path
     id: row.id,
     organizationId: row.organizationId,
     userId: row.userId,
+    kind: row.kind === "url_rule" ? "url_rule" : "path_prefix",
     pathPrefix: row.pathPrefix,
     repoUrl: row.repoUrl,
     projectId: row.projectId,

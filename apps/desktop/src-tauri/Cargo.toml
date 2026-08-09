@@ -5,7 +5,8 @@ edition = "2021"
 # 1.89 for `File::try_lock`, the spool's interprocess lock.
 rust-version = "1.89"
 publish = false
-# Two bin targets exist (the app and clock-in-hook); name the app explicitly.
+# Three bin targets exist (the app, clock-in-hook, clock-in-browser-host);
+# name the app explicitly.
 default-run = "clock-in-desktop"
 
 [lib]
@@ -17,6 +18,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [[bin]]
 name = "clock-in-hook"
 path = "src/bin/clock-in-hook.rs"
+
+# The browser extension's native-messaging host; the same deliberate separation
+# as the hook — the browser launches it, it starts fast, and it holds no
+# credentials and opens no sockets.
+[[bin]]
+name = "clock-in-browser-host"
+path = "src/bin/clock-in-browser-host.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -30,16 +38,20 @@ tokio = { version = "1", features = ["sync", "macros", "rt", "time"] }
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
 # Activity-segment clientIds and the per-install device id (upload idempotency).
 uuid = { version = "1", features = ["v4"] }
+tauri-plugin-updater = "2"
 
 # The activity monitor's read-only Win32 calls: GetLastInputInfo,
 # GetForegroundWindow process names, and session lock/suspend events.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
     "Win32_System_RemoteDesktop",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_UI_Accessibility",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }

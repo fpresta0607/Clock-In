@@ -15,10 +15,10 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use crate::api::{ApiClient, PathMapping};
+use crate::api::{ApiClient, MappingKind, PathMapping};
 use crate::monitor::{
-    iso8601, lock, parse_iso8601, unix_now, ActiveAgent, AgentTracking, MonitorShared,
-    PendingSuggestion, SegmentRecord,
+    iso8601, lock, parse_iso8601, unix_now, ActiveAgent, AgentTracking, BrowserSpan,
+    BrowserTracking, MonitorShared, PendingSuggestion, SegmentRecord,
 };
 use crate::recovery::RecoveryState;
 use crate::spool::{self, AgentEventKind, AgentSource, SpoolEvent};
@@ -35,9 +35,11 @@ pub async fn upload_loop(
     client: ApiClient,
     segments_path: PathBuf,
     agent_path: PathBuf,
+    browser_dir: PathBuf,
     recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
     upload_now: Arc<Notify>,
 ) {
+    let browser_path = browser_dir.join("browser-spool.jsonl");
     let mut tick = tokio::time::interval(Duration::from_secs(UPLOAD_INTERVAL_SECONDS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -45,7 +47,16 @@ pub async fn upload_loop(
             _ = tick.tick() => {}
             _ = upload_now.notified() => {}
         }
-        upload_once(&shared, &client, &segments_path, &agent_path, &recovery).await;
+        upload_once(
+            &shared,
+            &client,
+            &segments_path,
+            &agent_path,
+            &browser_dir,
+            &browser_path,
+            &recovery,
+        )
+        .await;
     }
 }
 
@@ -56,6 +67,8 @@ async fn upload_once(
     client: &ApiClient,
     segments_path: &Path,
     agent_path: &Path,
+    browser_dir: &Path,
+    browser_path: &Path,
     recovery: &Arc<tokio::sync::Mutex<RecoveryState>>,
 ) {
     // Signed out: leave both spools for a session that can upload them.
@@ -71,13 +84,27 @@ async fn upload_once(
     // Refresh the local mapping cache before the drain resolves suggestions.
     // A failed refresh keeps last pass's cache — stale mappings beat none.
     if let Ok(mappings) = client.path_mappings(&token).await {
-        lock(shared).mappings = mappings;
+        let changed = {
+            let mut shared = lock(shared);
+            let changed = shared.mappings != mappings;
+            shared.mappings = mappings;
+            changed
+        };
+        // The extension matches against the rules file, so a changed url_rule
+        // set lands on disk here too (the writer skips unchanged content).
+        if changed {
+            let mappings = lock(shared).mappings.clone();
+            if let Err(error) = crate::browser::write_rules_file(browser_dir, &mappings) {
+                eprintln!("clock-in: could not write the browser rules file: {error}");
+            }
+        }
     } else {
         complete = false;
     }
 
     let timer_running = recovery.lock().await.running.is_some();
     complete &= drain_agent_spool(shared, client, &token, agent_path, timer_running).await;
+    complete &= drain_browser_spool(shared, client, &token, browser_path, timer_running).await;
 
     if complete {
         lock(shared).last_upload_at = Some(iso8601(unix_now()));
@@ -151,6 +178,170 @@ async fn drain_agent_spool(
     spool::truncate_acked(path, pending.acked_bytes).is_ok()
 }
 
+/// Drains the browser spool on the same cadence and with the same
+/// ack-before-truncate discipline as the agent spool. Browser spans feed the
+/// suggested-start prompt, but never the away override — a focused tab says
+/// nothing once the human leaves, so they bypass `AgentTracking` entirely.
+async fn drain_browser_spool(
+    shared: &Arc<Mutex<MonitorShared>>,
+    client: &ApiClient,
+    token: &str,
+    path: &Path,
+    timer_running: bool,
+) -> bool {
+    let pending = match spool::read_pending(path) {
+        Ok(pending) => pending,
+        Err(_) => return false,
+    };
+    if pending.events.is_empty() {
+        return true;
+    }
+
+    {
+        let mut shared = lock(shared);
+        let MonitorShared {
+            mappings,
+            agent,
+            browser,
+            ..
+        } = &mut *shared;
+        track_browser_events(
+            &pending.events,
+            mappings,
+            timer_running,
+            unix_now(),
+            browser,
+            &mut agent.suggestion,
+        );
+    }
+
+    for chunk in pending.events.chunks(UPLOAD_BATCH_SIZE) {
+        match client.upload_agent_events(token, chunk).await {
+            Ok(results) => {
+                let rejected = results.iter().filter(|result| !result.accepted).count();
+                if rejected > 0 {
+                    eprintln!("clock-in: the server rejected {rejected} browser event(s)");
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    spool::truncate_acked(path, pending.acked_bytes).is_ok()
+}
+
+/// A mapped browser span must survive a glance before it may prompt: sixty
+/// seconds old, heartbeats included.
+const BROWSER_SUGGESTION_MIN_AGE_SECONDS: u64 = 60;
+
+/// The browser drain's local bookkeeping: resolve each span's `ruleId`
+/// against the cached `url_rule` mappings, and when a mapped span on no
+/// running timer is provably older than the glance threshold, raise the
+/// suggested-start prompt with the project preselected. Pure apart from the
+/// injected `now`; replays are safe because a suggestion is replaced only by
+/// a strictly newer one and a dismissed span is never re-raised.
+pub fn track_browser_events(
+    events: &[SpoolEvent],
+    mappings: &[PathMapping],
+    timer_running: bool,
+    now: u64,
+    tracking: &mut BrowserTracking,
+    suggestion: &mut Option<PendingSuggestion>,
+) {
+    let mut ordered: Vec<(u64, &SpoolEvent)> = events
+        .iter()
+        .filter_map(|event| parse_iso8601(&event.occurred_at).map(|at| (at, event)))
+        .collect();
+    ordered.sort_by_key(|(at, _)| *at);
+
+    for (at, event) in ordered {
+        let span_id = &event.external_session_id;
+        match event.event {
+            AgentEventKind::Started => {
+                let Some(rule_id) = event.rule_id.as_deref() else {
+                    continue;
+                };
+                // A deleted or foreign rule resolves to nothing — the server
+                // leaves the span unattributed, and no suggestion is raised.
+                let Some(project_id) = resolve_rule(rule_id, mappings) else {
+                    continue;
+                };
+                tracking.spans.insert(
+                    span_id.clone(),
+                    BrowserSpan {
+                        started_at: at,
+                        last_seen: at,
+                        project_id,
+                    },
+                );
+            }
+            AgentEventKind::Heartbeat => {
+                if let Some(span) = tracking.spans.get_mut(span_id) {
+                    span.last_seen = span.last_seen.max(at);
+                }
+            }
+            // A closed span cannot prompt: the moment to ask "working on this?"
+            // passed when the user left the site.
+            AgentEventKind::Ended => {
+                tracking.spans.remove(span_id);
+            }
+        }
+    }
+
+    // The suggestion question: the newest open mapped span old enough to not
+    // be a glance. Heartbeats prove age across replays; `now` covers a span
+    // whose first drain arrives after the threshold.
+    if timer_running {
+        return;
+    }
+    let candidate = tracking
+        .spans
+        .iter()
+        .filter(|(span_id, span)| {
+            tracking.dismissed_span.as_ref() != Some(*span_id)
+                && span.last_seen.max(now).saturating_sub(span.started_at)
+                    >= BROWSER_SUGGESTION_MIN_AGE_SECONDS
+        })
+        .max_by_key(|(_, span)| span.started_at);
+    let Some((span_id, span)) = candidate else {
+        return;
+    };
+    let is_newer = suggestion
+        .as_ref()
+        .and_then(|current| parse_iso8601(&current.since))
+        .is_none_or(|since| span.started_at >= since);
+    if is_newer {
+        *suggestion = Some(PendingSuggestion {
+            project_id: span.project_id.clone(),
+            source: source_name(AgentSource::Browser).to_string(),
+            since: iso8601(span.started_at),
+            span_id: Some(span_id.clone()),
+        });
+    }
+
+    // The map is in-memory and spans are short-lived, but cap it anyway so a
+    // pathological spool cannot grow it without bound.
+    while tracking.spans.len() > 64 {
+        let Some(oldest) = tracking
+            .spans
+            .iter()
+            .min_by_key(|(_, span)| span.started_at)
+            .map(|(id, _)| id.clone())
+        else {
+            break;
+        };
+        tracking.spans.remove(&oldest);
+    }
+}
+
+/// A `ruleId` resolves to a project through the caller's own `url_rule`
+/// mappings — the same attribution the server applies on ingest.
+fn resolve_rule(rule_id: &str, mappings: &[PathMapping]) -> Option<String> {
+    mappings
+        .iter()
+        .find(|mapping| mapping.kind == MappingKind::UrlRule && mapping.id == rule_id)
+        .map(|mapping| mapping.project_id.clone())
+}
+
 /// The drain's local bookkeeping. Pure apart from the clocks inside the
 /// timestamps: events are replayed on every failed upload, so everything here
 /// is idempotent — timestamps only ever move forward, and a suggestion is
@@ -168,6 +359,11 @@ pub fn track_agent_events(
     ordered.sort_by_key(|(at, _)| *at);
 
     for (at, event) in ordered {
+        // Browser spans travel their own spool and never open the away
+        // override; a stray one here is skipped rather than trusted.
+        if event.source == AgentSource::Browser {
+            continue;
+        }
         tracking.last_event_at = tracking.last_event_at.max(at);
         match event.event {
             AgentEventKind::Started => {
@@ -202,7 +398,11 @@ pub fn track_agent_events(
         // A started agent in a mapped directory while no timer runs is the one
         // prompt the desktop raises locally; the user confirms or dismisses.
         if event.event == AgentEventKind::Started && !timer_running {
-            if let Some(project_id) = resolve_project(&event.cwd, mappings) {
+            if let Some(project_id) = event
+                .cwd
+                .as_deref()
+                .and_then(|cwd| resolve_project(cwd, mappings))
+            {
                 let is_newer = tracking
                     .suggestion
                     .as_ref()
@@ -213,6 +413,7 @@ pub fn track_agent_events(
                         project_id,
                         source: source_name(event.source).to_string(),
                         since: iso8601(at),
+                        span_id: None,
                     });
                 }
             }
@@ -226,6 +427,7 @@ pub fn source_name(source: AgentSource) -> &'static str {
         AgentSource::Codex => "codex",
         AgentSource::KimiCode => "kimi_code",
         AgentSource::Cursor => "cursor",
+        AgentSource::Browser => "browser",
         AgentSource::Other => "other",
     }
 }
@@ -260,6 +462,10 @@ pub fn resolve_project(cwd: &str, mappings: &[PathMapping]) -> Option<String> {
     let mut best: Vec<&PathMapping> = Vec::new();
     let mut best_length: Option<usize> = None;
     for mapping in mappings {
+        // URL rules match browser hosts, never working directories.
+        if mapping.kind != MappingKind::PathPrefix {
+            continue;
+        }
         let prefix = normalize_path(&mapping.path_prefix);
         if !matches_boundary(&cwd, &prefix) {
             continue;
@@ -292,6 +498,7 @@ mod tests {
     fn mapping(id: &str, prefix: &str, project: &str) -> PathMapping {
         PathMapping {
             id: id.to_string(),
+            kind: MappingKind::PathPrefix,
             path_prefix: prefix.to_string(),
             repo_url: None,
             project_id: project.to_string(),
@@ -304,7 +511,34 @@ mod tests {
             external_session_id: "s1".to_string(),
             event: kind,
             occurred_at: occurred_at.to_string(),
-            cwd: cwd.to_string(),
+            cwd: Some(cwd.to_string()),
+            rule_id: None,
+        }
+    }
+
+    fn browser_event(
+        kind: AgentEventKind,
+        span: &str,
+        rule: &str,
+        occurred_at: &str,
+    ) -> SpoolEvent {
+        SpoolEvent {
+            source: AgentSource::Browser,
+            external_session_id: span.to_string(),
+            event: kind,
+            occurred_at: occurred_at.to_string(),
+            cwd: None,
+            rule_id: Some(rule.to_string()),
+        }
+    }
+
+    fn rule(id: &str, pattern: &str, project: &str) -> PathMapping {
+        PathMapping {
+            id: id.to_string(),
+            kind: MappingKind::UrlRule,
+            path_prefix: pattern.to_string(),
+            repo_url: None,
+            project_id: project.to_string(),
         }
     }
 
@@ -518,5 +752,201 @@ mod tests {
             &mut fresh,
         );
         assert!(!fresh.open, "the end landed after the start in time order");
+    }
+
+    #[test]
+    fn browser_events_never_open_the_agent_away_override() {
+        // A browser line that somehow lands in the agent drain is skipped:
+        // a focused tab must never suppress idle trimming or away auto-stop.
+        let mut tracking = AgentTracking::default();
+        track_agent_events(
+            &[browser_event(
+                AgentEventKind::Started,
+                "span-1",
+                "r1",
+                "2026-08-09T10:00:00Z",
+            )],
+            &[],
+            false,
+            &mut tracking,
+        );
+
+        assert_eq!(tracking, AgentTracking::default());
+    }
+
+    const DRAIN_NOW: &str = "2026-08-09T12:10:00Z";
+
+    fn drain_now() -> u64 {
+        parse_iso8601(DRAIN_NOW).expect("timestamp parses")
+    }
+
+    #[test]
+    fn a_mapped_browser_span_suggests_only_after_sixty_seconds() {
+        let mappings = vec![rule("r1", "github.com/acme/*", "p-clockin")];
+        let mut tracking = BrowserTracking::default();
+        let mut suggestion = None;
+
+        // A fresh span is a glance: no prompt.
+        track_browser_events(
+            &[browser_event(
+                AgentEventKind::Started,
+                "span-1",
+                "r1",
+                "2026-08-09T12:09:30Z",
+            )],
+            &mappings,
+            false,
+            drain_now(),
+            &mut tracking,
+            &mut suggestion,
+        );
+        assert!(suggestion.is_none(), "thirty seconds in is still a glance");
+
+        // A heartbeat at the one-minute mark proves the dwell: prompt.
+        track_browser_events(
+            &[browser_event(
+                AgentEventKind::Heartbeat,
+                "span-1",
+                "r1",
+                "2026-08-09T12:10:30Z",
+            )],
+            &mappings,
+            false,
+            drain_now(),
+            &mut tracking,
+            &mut suggestion,
+        );
+        let raised = suggestion.clone().expect("the suggestion is raised");
+        assert_eq!(raised.project_id, "p-clockin");
+        assert_eq!(raised.source, "browser");
+        assert_eq!(raised.since, "2026-08-09T12:09:30Z");
+        assert_eq!(raised.span_id.as_deref(), Some("span-1"));
+    }
+
+    #[test]
+    fn a_span_seen_first_at_drain_ages_against_the_clock() {
+        let mappings = vec![rule("r1", "quickbooks.com", "p-books")];
+        let mut tracking = BrowserTracking::default();
+        let mut suggestion = None;
+
+        // The started event reached the drain over a minute after it happened.
+        track_browser_events(
+            &[browser_event(
+                AgentEventKind::Started,
+                "span-1",
+                "r1",
+                "2026-08-09T12:08:00Z",
+            )],
+            &mappings,
+            false,
+            drain_now(),
+            &mut tracking,
+            &mut suggestion,
+        );
+        assert!(
+            suggestion.is_some(),
+            "the span is provably older than a glance"
+        );
+    }
+
+    #[test]
+    fn a_running_timer_or_an_ended_span_suppresses_the_browser_suggestion() {
+        let mappings = vec![rule("r1", "quickbooks.com", "p-books")];
+        let mut tracking = BrowserTracking::default();
+        let mut suggestion = None;
+
+        // Timer running: the prompt is for idle moments only.
+        track_browser_events(
+            &[browser_event(
+                AgentEventKind::Started,
+                "span-1",
+                "r1",
+                "2026-08-09T12:08:00Z",
+            )],
+            &mappings,
+            true,
+            drain_now(),
+            &mut tracking,
+            &mut suggestion,
+        );
+        assert!(suggestion.is_none());
+
+        // A span that ended inside the dwell threshold is forgotten entirely.
+        let mut tracking = BrowserTracking::default();
+        track_browser_events(
+            &[
+                browser_event(
+                    AgentEventKind::Started,
+                    "span-2",
+                    "r1",
+                    "2026-08-09T12:09:00Z",
+                ),
+                browser_event(
+                    AgentEventKind::Ended,
+                    "span-2",
+                    "r1",
+                    "2026-08-09T12:09:20Z",
+                ),
+            ],
+            &mappings,
+            false,
+            drain_now(),
+            &mut tracking,
+            &mut suggestion,
+        );
+        assert!(suggestion.is_none(), "a twenty-second visit never prompts");
+        assert!(!tracking.spans.contains_key("span-2"));
+    }
+
+    #[test]
+    fn an_unresolvable_rule_tracks_nothing_and_suggests_nothing() {
+        let mut tracking = BrowserTracking::default();
+        let mut suggestion = None;
+
+        track_browser_events(
+            &[browser_event(
+                AgentEventKind::Started,
+                "span-1",
+                "deleted-rule",
+                "2026-08-09T12:08:00Z",
+            )],
+            &[],
+            false,
+            drain_now(),
+            &mut tracking,
+            &mut suggestion,
+        );
+
+        assert!(tracking.spans.is_empty());
+        assert!(suggestion.is_none());
+    }
+
+    #[test]
+    fn a_dismissed_span_is_never_raised_again() {
+        let mappings = vec![rule("r1", "quickbooks.com", "p-books")];
+        let mut tracking = BrowserTracking {
+            dismissed_span: Some("span-1".to_string()),
+            ..BrowserTracking::default()
+        };
+        let mut suggestion = None;
+
+        track_browser_events(
+            &[browser_event(
+                AgentEventKind::Started,
+                "span-1",
+                "r1",
+                "2026-08-09T12:08:00Z",
+            )],
+            &mappings,
+            false,
+            drain_now(),
+            &mut tracking,
+            &mut suggestion,
+        );
+
+        assert!(
+            suggestion.is_none(),
+            "the dismissal is remembered for the span"
+        );
     }
 }

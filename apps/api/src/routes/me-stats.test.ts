@@ -5,6 +5,7 @@ import type { AuthenticatedSubject } from "../auth.js";
 import { parseEnv } from "../env.js";
 import type {
   AgentSessionRepository,
+  AgentSessionStaleCutoffs,
   AppTotalRecord,
   PathMappingRepository,
   ProjectRepository,
@@ -12,6 +13,7 @@ import type {
   ReportQuery,
   ReportRepository,
   SessionRepository,
+  SiteTotalRecord,
 } from "../repositories.js";
 import { createTestAuth } from "../test-tokens.js";
 
@@ -69,11 +71,23 @@ interface StoredSegment {
 
 interface StoredAgent {
   organizationId: string;
+  userId: string;
+  source: "claude_code" | "codex" | "kimi_code" | "cursor" | "browser" | "other";
   linkedSessionId: string | null;
+  ruleId: string | null;
   startedAt: Date;
   endedAt: Date | null;
   lastEventAt: Date;
   receivedAt: Date;
+}
+
+interface StoredMapping {
+  id: string;
+  organizationId: string;
+  userId: string;
+  kind: "path_prefix" | "url_rule";
+  pattern: string;
+  projectId: string;
 }
 
 const freshnessWindowMs = 7 * 24 * 60 * 60 * 1_000;
@@ -91,6 +105,7 @@ class MemoryReports implements ReportRepository {
   public readonly sessions: StoredSession[] = [];
   public readonly segments: StoredSegment[] = [];
   public readonly agents: StoredAgent[] = [];
+  public readonly mappings: StoredMapping[] = [];
 
   private corroborated(session: StoredSession): number {
     let total = 0;
@@ -100,6 +115,8 @@ class MemoryReports implements ReportRepository {
       total += overlapSeconds(segment.startedAt, segment.endedAt, session.startedAt, session.stoppedAt);
     }
     for (const agent of this.agents) {
+      // Browser spans attribute; they never corroborate.
+      if (agent.source === "browser") continue;
       if (agent.organizationId !== session.organizationId || agent.linkedSessionId !== session.id) continue;
       const occurredAt = agent.endedAt ?? agent.lastEventAt;
       if (agent.receivedAt.getTime() > occurredAt.getTime() + freshnessWindowMs) continue;
@@ -151,6 +168,40 @@ class MemoryReports implements ReportRepository {
       .sort((a, b) => b.durationSeconds - a.durationSeconds || a.processName.localeCompare(b.processName));
   }
 
+  /**
+   * Mirrors the site-totals SQL: browser spans joined to the caller's live url
+   * rules, clipped to fresh active segments and the requested range, heaviest
+   * first. Spans whose rule was deleted drop out with the mapping row.
+   */
+  public async readSiteTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<SiteTotalRecord[]> {
+    const byRule = new Map<string, SiteTotalRecord>();
+    for (const span of this.agents) {
+      if (span.organizationId !== subject.organizationId || span.userId !== subject.userId) continue;
+      if (span.source !== "browser" || span.ruleId === null) continue;
+      const mapping = this.mappings.find((candidate) => candidate.organizationId === subject.organizationId
+        && candidate.userId === subject.userId && candidate.kind === "url_rule" && candidate.id === span.ruleId);
+      if (mapping === undefined) continue;
+      const spanEnd = span.endedAt ?? span.lastEventAt;
+      if (span.receivedAt.getTime() > spanEnd.getTime() + freshnessWindowMs) continue;
+      let seconds = 0;
+      for (const segment of this.segments) {
+        if (segment.organizationId !== subject.organizationId || segment.userId !== subject.userId) continue;
+        if (segment.kind !== "active") continue;
+        if (segment.receivedAt.getTime() > segment.endedAt.getTime() + freshnessWindowMs) continue;
+        const start = Math.max(span.startedAt.getTime(), segment.startedAt.getTime(), query.from?.getTime() ?? 0);
+        const end = Math.min(spanEnd.getTime(), segment.endedAt.getTime(), query.toExclusive?.getTime() ?? Number.MAX_SAFE_INTEGER);
+        seconds += Math.max(0, end - start) / 1_000;
+      }
+      if (seconds === 0) continue;
+      const existing = byRule.get(mapping.id)
+        ?? { mapping: { id: mapping.id, pattern: mapping.pattern, projectId: mapping.projectId }, durationSeconds: 0 };
+      existing.durationSeconds = (existing.durationSeconds as number) + seconds;
+      byRule.set(mapping.id, existing);
+    }
+    return [...byRule.values()]
+      .sort((a, b) => (b.durationSeconds as number) - (a.durationSeconds as number) || a.mapping.id.localeCompare(b.mapping.id));
+  }
+
   public async findProjectForOrganization(): Promise<never> {
     throw new Error("not used by me/stats");
   }
@@ -170,9 +221,9 @@ class MemoryReports implements ReportRepository {
 
 /** Only the reaper runs on this read path; it records every invocation. */
 class ReapRecorder implements Partial<AgentSessionRepository> {
-  public readonly reapCalls: { subject: AuthenticatedSubject; cutoff: Date }[] = [];
-  public async reapStale(subject: AuthenticatedSubject, cutoff: Date) {
-    this.reapCalls.push({ subject, cutoff });
+  public readonly reapCalls: { subject: AuthenticatedSubject; cutoffs: AgentSessionStaleCutoffs }[] = [];
+  public async reapStale(subject: AuthenticatedSubject, cutoffs: AgentSessionStaleCutoffs) {
+    this.reapCalls.push({ subject, cutoffs });
     return 0;
   }
 }
@@ -265,9 +316,17 @@ describe("me/stats routes", () => {
     });
     reports.sessions.push(agentBacked);
     reports.agents.push({
-      organizationId: ids.organization, linkedSessionId: agentBacked.id,
+      organizationId: ids.organization, userId: ids.user, source: "kimi_code", ruleId: null, linkedSessionId: agentBacked.id,
       startedAt: new Date("2026-08-06T11:15:00.000Z"), endedAt: new Date("2026-08-06T11:45:00.000Z"),
       lastEventAt: new Date("2026-08-06T11:45:00.000Z"), receivedAt: new Date("2026-08-06T11:50:00.000Z"),
+    });
+    // A linked browser span covers the rest of the window, but browser spans
+    // attribute — they never corroborate — so the totals stay byte-identical.
+    reports.agents.push({
+      organizationId: ids.organization, userId: ids.user, source: "browser", ruleId: "01c7e513-b094-4d4c-ae55-21790ae019a4",
+      linkedSessionId: agentBacked.id,
+      startedAt: new Date("2026-08-06T11:00:00.000Z"), endedAt: new Date("2026-08-06T12:00:00.000Z"),
+      lastEventAt: new Date("2026-08-06T12:00:00.000Z"), receivedAt: new Date("2026-08-06T12:05:00.000Z"),
     });
     // A teammate's fully corroborated session must never surface here.
     const teammates = session({ userId: ids.teammate });
@@ -288,8 +347,10 @@ describe("me/stats routes", () => {
         { project: { id: ids.project, name: "Timer" }, durationSeconds: 7_200, corroboratedSeconds: 5_400, sessionCount: 2 },
         { project: { id: ids.otherProject, name: "Side" }, durationSeconds: 3_600, corroboratedSeconds: 1_800, sessionCount: 1 },
       ],
-      // None of the segments in this test carry a process name.
+      // None of the segments in this test carry a process name, and the
+      // browser span's rule is not one of the caller's mappings.
       apps: [],
+      sites: [],
     });
   });
 
@@ -306,7 +367,7 @@ describe("me/stats routes", () => {
     const agentLate = session({ project: { id: ids.otherProject, name: "Side" } });
     reports.sessions.push(agentLate);
     reports.agents.push({
-      organizationId: ids.organization, linkedSessionId: agentLate.id,
+      organizationId: ids.organization, userId: ids.user, source: "kimi_code", ruleId: null, linkedSessionId: agentLate.id,
       startedAt: agentLate.startedAt, endedAt: agentLate.stoppedAt, lastEventAt: agentLate.stoppedAt,
       receivedAt: new Date(agentLate.stoppedAt.getTime() + 8 * 24 * 60 * 60 * 1_000),
     });
@@ -350,7 +411,7 @@ describe("me/stats routes", () => {
     });
 
     const empty = await app.request("http://api.test/me/stats?from=2026-08-01&to=2026-08-02", { headers });
-    await expect(empty.json()).resolves.toEqual({ filters: { from: "2026-08-01", to: "2026-08-02" }, totalDurationSeconds: 0, corroboratedSeconds: 0, projects: [], apps: [] });
+    await expect(empty.json()).resolves.toEqual({ filters: { from: "2026-08-01", to: "2026-08-02" }, totalDurationSeconds: 0, corroboratedSeconds: 0, projects: [], apps: [], sites: [] });
   });
 
   it("closes stale agent sessions on the read path before computing stats", async () => {
@@ -360,7 +421,10 @@ describe("me/stats routes", () => {
     expect(response.status).toBe(200);
     expect(agentSessions.reapCalls).toEqual([{
       subject: { organizationId: ids.organization, userId: ids.user },
-      cutoff: new Date(clockNow.getTime() - 6 * 60 * 60 * 1_000),
+      cutoffs: {
+        default: new Date(clockNow.getTime() - 6 * 60 * 60 * 1_000),
+        browser: new Date(clockNow.getTime() - 10 * 60 * 1_000),
+      },
     }]);
   });
 
@@ -375,7 +439,7 @@ describe("me/stats routes", () => {
       startedAt: own.startedAt, endedAt: own.stoppedAt, receivedAt: new Date("2026-08-05T14:25:00.000Z"),
     });
     reports.agents.push({
-      organizationId: ids.organization, linkedSessionId: teammates.id,
+      organizationId: ids.organization, userId: ids.teammate, source: "kimi_code", ruleId: null, linkedSessionId: teammates.id,
       startedAt: teammates.startedAt, endedAt: teammates.stoppedAt, lastEventAt: teammates.stoppedAt,
       receivedAt: new Date("2026-08-05T15:05:00.000Z"),
     });
@@ -427,5 +491,67 @@ describe("me/stats routes", () => {
     // A range covering none of the segments returns no app rows.
     const empty = await createTestApp(reports).request("http://api.test/me/stats?from=2026-08-06&to=2026-08-06", { headers: { authorization: bearerHeader } });
     await expect(empty.json()).resolves.toMatchObject({ apps: [] });
+  });
+
+  it("breaks down browser-span time per url rule, clipped to the caller's fresh active segments", async () => {
+    const reports = new MemoryReports();
+    const githubRule = "01c7e513-b094-4d4c-ae55-21790ae019a4";
+    const figmaRule = "02c7e513-b094-4d4c-ae55-21790ae019a4";
+    const deletedRule = "03c7e513-b094-4d4c-ae55-21790ae019a4";
+    reports.mappings.push(
+      { id: githubRule, organizationId: ids.organization, userId: ids.user, kind: "url_rule", pattern: "github.com/acme/*", projectId: ids.project },
+      { id: figmaRule, organizationId: ids.organization, userId: ids.user, kind: "url_rule", pattern: "*.figma.com/files/*", projectId: ids.otherProject },
+    );
+    const receivedAt = new Date("2026-08-05T15:05:00.000Z");
+    reports.segments.push(
+      // Active in the browser 14:00-15:00; the github span runs longer than
+      // the machine was active, so only the overlap counts.
+      { organizationId: ids.organization, userId: ids.user, kind: "active", processName: "chrome.exe",
+        startedAt: new Date("2026-08-05T14:00:00.000Z"), endedAt: new Date("2026-08-05T15:00:00.000Z"), receivedAt },
+      // Idle time under a focused tab attributes nothing.
+      { organizationId: ids.organization, userId: ids.user, kind: "idle",
+        startedAt: new Date("2026-08-05T15:00:00.000Z"), endedAt: new Date("2026-08-05T16:00:00.000Z"), receivedAt },
+    );
+    reports.agents.push(
+      // 14:30-15:30 on the github rule: only 14:30-15:00 overlaps an active segment.
+      { organizationId: ids.organization, userId: ids.user, source: "browser", ruleId: githubRule, linkedSessionId: null,
+        startedAt: new Date("2026-08-05T14:30:00.000Z"), endedAt: new Date("2026-08-05T15:30:00.000Z"),
+        lastEventAt: new Date("2026-08-05T15:30:00.000Z"), receivedAt },
+      // A second span on the same rule merges into one total (14:10-14:20).
+      { organizationId: ids.organization, userId: ids.user, source: "browser", ruleId: githubRule, linkedSessionId: null,
+        startedAt: new Date("2026-08-05T14:10:00.000Z"), endedAt: new Date("2026-08-05T14:20:00.000Z"),
+        lastEventAt: new Date("2026-08-05T14:20:00.000Z"), receivedAt },
+      // A still-running span counts to its last heartbeat (14:05-14:15 → but
+      // only 5 minutes overlap the figma span below; this one is 14:00-14:05).
+      { organizationId: ids.organization, userId: ids.user, source: "browser", ruleId: figmaRule, linkedSessionId: null,
+        startedAt: new Date("2026-08-05T14:00:00.000Z"), endedAt: null,
+        lastEventAt: new Date("2026-08-05T14:05:00.000Z"), receivedAt },
+      // A span whose rule was deleted drops out with the mapping row.
+      { organizationId: ids.organization, userId: ids.user, source: "browser", ruleId: deletedRule, linkedSessionId: null,
+        startedAt: new Date("2026-08-05T14:00:00.000Z"), endedAt: new Date("2026-08-05T15:00:00.000Z"),
+        lastEventAt: new Date("2026-08-05T15:00:00.000Z"), receivedAt },
+      // Non-browser agent sessions never feed the site breakdown.
+      { organizationId: ids.organization, userId: ids.user, source: "kimi_code", ruleId: null, linkedSessionId: null,
+        startedAt: new Date("2026-08-05T14:00:00.000Z"), endedAt: new Date("2026-08-05T15:00:00.000Z"),
+        lastEventAt: new Date("2026-08-05T15:00:00.000Z"), receivedAt },
+      // A teammate's span on the same rule must never surface here.
+      { organizationId: ids.organization, userId: ids.teammate, source: "browser", ruleId: githubRule, linkedSessionId: null,
+        startedAt: new Date("2026-08-05T14:00:00.000Z"), endedAt: new Date("2026-08-05T15:00:00.000Z"),
+        lastEventAt: new Date("2026-08-05T15:00:00.000Z"), receivedAt },
+    );
+
+    const response = await createTestApp(reports).request("http://api.test/me/stats", { headers: { authorization: bearerHeader } });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      sites: [
+        { mapping: { id: githubRule, pattern: "github.com/acme/*", projectId: ids.project }, durationSeconds: 2_400 },
+        { mapping: { id: figmaRule, pattern: "*.figma.com/files/*", projectId: ids.otherProject }, durationSeconds: 300 },
+      ],
+    });
+
+    // A range covering none of the spans returns no site rows.
+    const outside = await createTestApp(reports).request("http://api.test/me/stats?from=2026-08-06&to=2026-08-06", { headers: { authorization: bearerHeader } });
+    await expect(outside.json()).resolves.toMatchObject({ sites: [] });
   });
 });

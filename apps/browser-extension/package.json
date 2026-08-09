@@ -1,0 +1,15 @@
+{
+  "name": "@clock-in/browser-extension",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build && node scripts/package.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.11",
+    "vite": "^7.1.3"
+  }
+}

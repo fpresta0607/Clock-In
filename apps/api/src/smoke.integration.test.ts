@@ -6,7 +6,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import {
   DrizzleAccountStore,
+  DrizzleActivitySegmentRepository,
   DrizzleAgentSessionRepository,
+  DrizzlePathMappingRepository,
   DrizzleProjectRepository,
   DrizzleReportRepository,
   DrizzleSessionRepository,
@@ -28,7 +30,6 @@ const config = parseEnv({
 });
 
 integration(integrationDescription, () => {
-  const schemaName = `clock_in_smoke_${randomUUID().replaceAll("-", "")}`;
   const database = databaseUrl ? createDatabase(databaseUrl, { max: 1 }) : (undefined as unknown as DatabaseConnection);
   const authUserId = randomUUID();
   let app: ReturnType<typeof createApp>;
@@ -36,9 +37,16 @@ integration(integrationDescription, () => {
 
   beforeAll(async () => {
     if (!databaseUrl) return;
-    await database.client.unsafe(`create schema "${schemaName}"`);
-    await database.client.unsafe(`set search_path to "${schemaName}"`);
-    await runMigrations(database, { migrationsSchema: schemaName });
+    // Migrations hard-reference the public schema (phase-2 enum types and
+    // foreign keys), so the disposable boundary is the database itself, not
+    // a schema. Refuse anything that is not obviously a scratch database.
+    const dbName = new URL(databaseUrl).pathname.replace("/", "");
+    if (!dbName.startsWith("clock_in_")) {
+      throw new Error(
+        `TEST_DATABASE_URL must point at a disposable database whose name starts with "clock_in_", got "${dbName}".`,
+      );
+    }
+    await runMigrations(database);
 
     const auth = await createTestAuth(config, new Date());
     authorized = {
@@ -53,13 +61,18 @@ integration(integrationDescription, () => {
       sessionRepository: new DrizzleSessionRepository(database.db),
       reportRepository: new DrizzleReportRepository(database.db),
       agentSessionRepository: new DrizzleAgentSessionRepository(database.db),
+      pathMappingRepository: new DrizzlePathMappingRepository(database.db),
+      activitySegmentRepository: new DrizzleActivitySegmentRepository(database.db),
     });
   }, 60_000);
 
   afterAll(async () => {
     if (!databaseUrl) return;
     try {
-      await database.client.unsafe(`drop schema if exists "${schemaName}" cascade`);
+      // Reset the scratch database so reruns start empty.
+      await database.client.unsafe(`drop schema public cascade`);
+      await database.client.unsafe(`create schema public`);
+      await database.client.unsafe(`drop schema if exists drizzle cascade`);
     } finally {
       await database.client.end({ timeout: 5 });
     }
@@ -147,8 +160,10 @@ integration(integrationDescription, () => {
       keys: other.keys,
       accounts: new DrizzleAccountStore(database.db),
       projectRepository: new DrizzleProjectRepository(database.db),
+      sessionRepository: new DrizzleSessionRepository(database.db),
       reportRepository: new DrizzleReportRepository(database.db),
       agentSessionRepository: new DrizzleAgentSessionRepository(database.db),
+      pathMappingRepository: new DrizzlePathMappingRepository(database.db),
     });
     const headers = {
       authorization: await other.bearer(randomUUID(), { email: "other@clock-in.test", name: "Other User" }),
@@ -177,6 +192,7 @@ integration(integrationDescription, () => {
       sessionRepository: new DrizzleSessionRepository(database.db),
       reportRepository: new DrizzleReportRepository(database.db),
       agentSessionRepository: new DrizzleAgentSessionRepository(database.db),
+      pathMappingRepository: new DrizzlePathMappingRepository(database.db),
     });
     const teammateAuth = {
       authorization: await teammate.bearer(teammateId, { email: "teammate@clock-in.test", name: "Teammate" }),
@@ -263,8 +279,10 @@ integration(integrationDescription, () => {
       keys: latecomer.keys,
       accounts: new DrizzleAccountStore(database.db),
       projectRepository: new DrizzleProjectRepository(database.db),
+      sessionRepository: new DrizzleSessionRepository(database.db),
       reportRepository: new DrizzleReportRepository(database.db),
       agentSessionRepository: new DrizzleAgentSessionRepository(database.db),
+      pathMappingRepository: new DrizzlePathMappingRepository(database.db),
     });
     const headers = {
       authorization: await latecomer.bearer(latecomerId, { email: "late@clock-in.test", name: "Late Comer" }),
@@ -283,9 +301,9 @@ integration(integrationDescription, () => {
     expect(joined.status).toBe(200);
     expect((await joined.json()).user.organizationId).toBe(organization.id);
 
-    // The move carries project access with it.
+    // The move carries project access with it (the side project from the first test included).
     const projects = await latecomerApp.request("/projects", { headers });
-    expect((await projects.json()).projects.map((project: { name: string }) => project.name)).toEqual(["General"]);
+    expect((await projects.json()).projects.map((project: { name: string }) => project.name)).toEqual(["General", "Smoke Side Project"]);
 
     // The abandoned personal workspace is gone rather than left behind.
     const abandoned = await database.client<{ total: number }[]>`
@@ -314,6 +332,7 @@ integration(integrationDescription, () => {
       sessionRepository: new DrizzleSessionRepository(database.db),
       reportRepository: new DrizzleReportRepository(database.db),
       agentSessionRepository: new DrizzleAgentSessionRepository(database.db),
+      pathMappingRepository: new DrizzlePathMappingRepository(database.db),
     });
     const headers = {
       authorization: await tracked.bearer(randomUUID(), { email: "tracked@clock-in.test", name: "Tracked User" }),
@@ -342,4 +361,109 @@ integration(integrationDescription, () => {
     // The refusal must leave the account exactly where it was.
     expect((await (await trackedApp.request("/me", { headers })).json()).user.organizationId).not.toBe(organization.id);
   }, 90_000);
+
+  it("attributes a browser span through its url rule, links the running timer, and feeds sites without corroborating", async () => {
+    // A fixed ten-minute window ending now keeps every overlap below exact.
+    const t0 = Date.now() - 600_000;
+    const at = (offsetMs: number) => new Date(t0 + offsetMs).toISOString();
+
+    const created = await app.request("/projects", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({ name: "Smoke Browser Project" }),
+    });
+    expect(created.status).toBe(201);
+    const projectId = (await created.json()).id;
+
+    const rule = await app.request("/path-mappings", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({ kind: "url_rule", pathPrefix: "github.com/acme/*", projectId }),
+    });
+    expect(rule.status).toBe(200);
+    const ruleId = (await rule.json()).id;
+
+    const started = await app.request("/sessions", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({ clientId: randomUUID(), projectId, description: "Browser-backed work", startedAt: at(0) }),
+    });
+    expect(started.status).toBe(200);
+    const timerId = (await started.json()).session.id;
+
+    // The span opens one minute into the timer and closes at minute four.
+    const spanStart = await app.request("/agent-sessions", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({
+        events: [{ source: "browser", externalSessionId: "smoke-span-1", event: "started", occurredAt: at(60_000), ruleId }],
+      }),
+    });
+    expect(spanStart.status).toBe(200);
+    expect((await spanStart.json()).results).toEqual([{ externalSessionId: "smoke-span-1", accepted: true }]);
+
+    // Attribution is server-side: the stored row names the rule's project,
+    // links the running timer, and carries no cwd.
+    const rows = await database.client<{
+      project_id: string | null;
+      linked_session_id: string | null;
+      cwd: string | null;
+      rule_id: string | null;
+      status: string;
+    }[]>`select project_id::text, linked_session_id::text, cwd, rule_id::text, status from agent_sessions where source = 'browser'`;
+    expect(rows).toEqual([{
+      project_id: projectId,
+      linked_session_id: timerId,
+      cwd: null,
+      rule_id: ruleId,
+      status: "running",
+    }]);
+
+    const spanEnd = await app.request("/agent-sessions", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({
+        events: [{ source: "browser", externalSessionId: "smoke-span-1", event: "ended", occurredAt: at(240_000), ruleId }],
+      }),
+    });
+    expect(spanEnd.status).toBe(200);
+
+    // The machine was active in the browser for only the first five minutes.
+    const activity = await app.request("/activity/segments", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({
+        segments: [{
+          clientId: randomUUID(),
+          deviceId: randomUUID(),
+          kind: "active",
+          processName: "chrome.exe",
+          startedAt: at(0),
+          endedAt: at(300_000),
+        }],
+      }),
+    });
+    expect(activity.status).toBe(200);
+
+    const stop = await app.request(`/sessions/${timerId}/stop`, {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({ stoppedAt: at(600_000), idleSeconds: 0 }),
+    });
+    expect(stop.status).toBe(200);
+
+    const today = new Date().toISOString().slice(0, 10);
+    const stats = await app.request(`/me/stats?from=${today}&to=${today}`, { headers: authorized });
+    expect(stats.status).toBe(200);
+    const body = await stats.json();
+
+    // The span counts under its rule, clipped to the active segment: minutes 1-4.
+    expect(body.sites).toEqual([
+      { mapping: { id: ruleId, pattern: "github.com/acme/*", projectId }, durationSeconds: 180 },
+    ]);
+
+    // Corroboration is the active-segment overlap only; the linked browser span adds nothing.
+    const project = body.projects.find((entry: { project: { id: string } }) => entry.project.id === projectId);
+    expect(project).toMatchObject({ durationSeconds: 600, corroboratedSeconds: 300, sessionCount: 1 });
+  }, 60_000);
 });

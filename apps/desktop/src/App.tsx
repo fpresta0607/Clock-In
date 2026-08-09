@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   bridgeError,
   defaultBridge,
+  type BrowserHealth,
   type MeStats,
   type MeStatsApp,
   type MonitorSettings,
@@ -11,9 +12,11 @@ import {
   type OrganizationOverview,
   type PathMapping,
   type SettingsPatch,
+  type TallyEntry,
   type TimerBridge,
 } from "./bridge.js";
 import { formatDuration } from "@clock-in/shared";
+import { narrowedPattern, planRule } from "./patterns.js";
 import {
   initialTimerState,
   stopIdleSeconds,
@@ -34,6 +37,10 @@ const elapsedSeconds = (startedAt: string, now: number): number =>
 /// Status polls stay well above the host's own 30-second activity tick; the
 /// prompt latency this buys is fine for a tray utility.
 const MONITOR_POLL_MS = 15_000;
+
+/// Browser cards must flip to "connected" on their own while onboarding is on
+/// screen, so that screen polls faster than the steady-state monitor poll.
+const ONBOARDING_POLL_MS = 2_500;
 
 const AGENT_SOURCE_LABELS: Record<string, string> = {
   claude_code: "Claude Code",
@@ -98,6 +105,26 @@ const formatCompact = (seconds: number): string => {
   return `${total}s`;
 };
 
+/// Plain-language durations for the site question: "3 hours", "45 minutes".
+const formatSiteTally = (seconds: number): string => {
+  if (seconds >= 3_600) {
+    const hours = Math.max(1, Math.round(seconds / 3_600));
+    return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+  }
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+};
+
+/// The site question's plain time figure: "3 hours", "45 minutes".
+const siteTimeLabel = (seconds: number): string => {
+  const hours = seconds / 3_600;
+  if (hours >= 1) {
+    const rounded = Math.max(1, Math.round(hours));
+    return `${rounded} hour${rounded === 1 ? "" : "s"}`;
+  }
+  return `${Math.max(1, Math.round(seconds / 60))} minutes`;
+};
+
 type AppRow = {
   key: string;
   label: string;
@@ -148,6 +175,41 @@ const rangeStart = (range: StatsRange): string => {
   // The API reads calendar days, not timestamps: a full ISO datetime is a 400.
   return start.toISOString().slice(0, 10);
 };
+
+type BrowserCardProps = {
+  health: BrowserHealth;
+  busy: boolean;
+  error?: string | undefined;
+  onRepair: (browser: string) => void;
+  onConnect: (browser: string) => void;
+};
+
+/// One browser's connection state as a single plain sentence plus at most one
+/// button: connected states itself, a registered browser offers the store
+/// page, anything broken offers [Fix]. Shared by onboarding and settings.
+const BrowserCard = ({ health, busy, error, onRepair, onConnect }: BrowserCardProps) => (
+  <div className="browser-card">
+    <p className="browser-name">{health.label}</p>
+    {health.state === "connected" ? (
+      <p className="browser-status is-connected">{health.label} is connected ✓</p>
+    ) : health.state === "registered" ? (
+      <>
+        <p className="subtle">This opens the {health.label} extension page. Click Add to {health.label} there.</p>
+        <button className="signal-button" type="button" disabled={busy} onClick={() => onConnect(health.browser)}>
+          {busy ? "Opening…" : `Connect ${health.label}`}
+        </button>
+      </>
+    ) : (
+      <>
+        <p className="subtle">The {health.label} connection needs a quick repair.</p>
+        <button className="outline-button" type="button" disabled={busy} onClick={() => onRepair(health.browser)}>
+          {busy ? "Fixing…" : "Fix"}
+        </button>
+      </>
+    )}
+    {error && <p className="form-error" role="alert">{error}</p>}
+  </div>
+);
 
 type TitlebarProps = {
   onOpenSettings?: (() => void) | undefined;
@@ -205,6 +267,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [statsError, setStatsError] = useState<string | undefined>();
   const [confirmedStops, setConfirmedStops] = useState(0);
   const [settings, setSettings] = useState<MonitorSettings | undefined>();
+  /// A failed first settings read must not strand a fresh install on the boot
+  /// screen: fail open to the main screen, and the overlay retries on open.
+  const [settingsUnavailable, setSettingsUnavailable] = useState(false);
   const [settingsError, setSettingsError] = useState<string | undefined>();
   const [awayThresholdDraft, setAwayThresholdDraft] = useState("");
   const [hardLimitDraft, setHardLimitDraft] = useState("");
@@ -212,6 +277,32 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [mappingPrefix, setMappingPrefix] = useState("");
   const [mappingProjectId, setMappingProjectId] = useState("");
   const [mappingBusy, setMappingBusy] = useState(false);
+  /// Raw site-rule add form behind the Advanced disclosure.
+  const [rulePattern, setRulePattern] = useState("");
+  const [ruleProjectId, setRuleProjectId] = useState("");
+  const [ruleBusy, setRuleBusy] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  /// First-run flow: "monitor" asks the one tracking question, "browsers"
+  /// shows one card per detected browser. Plain component state; onboarding
+  /// is gated on `settings.onboarded`, not the reducer.
+  const [onboardingStep, setOnboardingStep] = useState<"monitor" | "browsers">("monitor");
+  const [onboardingBusy, setOnboardingBusy] = useState(false);
+  const [onboardingError, setOnboardingError] = useState<string | undefined>();
+  /// The browser key currently repairing/connecting, and per-browser action
+  /// errors shown as one sentence inside the card.
+  const [browserBusy, setBrowserBusy] = useState<string | undefined>();
+  const [browserErrors, setBrowserErrors] = useState<Readonly<Record<string, string>>>({});
+  /// Local site tally from `suggestionsList`; answered origins are removed
+  /// locally so the next entry shows on the next poll.
+  const [suggestions, setSuggestions] = useState<readonly TallyEntry[]>([]);
+  const [answeredOrigins, setAnsweredOrigins] = useState<readonly string[]>([]);
+  const [siteProjectId, setSiteProjectId] = useState("");
+  const [siteNarrowing, setSiteNarrowing] = useState(false);
+  const [siteSegment, setSiteSegment] = useState("");
+  const [siteBusy, setSiteBusy] = useState(false);
+  const [siteError, setSiteError] = useState<string | undefined>();
+  const [clearAnswersBusy, setClearAnswersBusy] = useState(false);
+  const [clearAnswersMessage, setClearAnswersMessage] = useState<string | undefined>();
   /// Manual hook-setup snippets returned by `hookRegister`, keyed by CLI source.
   const [hookSnippets, setHookSnippets] = useState<Readonly<Record<string, string>>>({});
   const latestBridge = useRef(bridge);
@@ -253,10 +344,26 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setStats(undefined);
     setStatsError(undefined);
     setSettings(undefined);
+    setSettingsUnavailable(false);
     setSettingsError(undefined);
     setMappings(undefined);
     setMappingPrefix("");
     setMappingProjectId("");
+    setRulePattern("");
+    setRuleProjectId("");
+    setAdvancedOpen(false);
+    setOnboardingStep("monitor");
+    setOnboardingBusy(false);
+    setOnboardingError(undefined);
+    setBrowserBusy(undefined);
+    setBrowserErrors({});
+    setSuggestions([]);
+    setAnsweredOrigins([]);
+    setSiteProjectId("");
+    setSiteNarrowing(false);
+    setSiteSegment("");
+    setSiteError(undefined);
+    setClearAnswersMessage(undefined);
     setHookSnippets({});
     setSettingsOpen(false);
     if (clearEmail) setEmail("");
@@ -385,10 +492,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     return () => window.clearInterval(timer);
   }, [state.kind]);
 
-  // The board is worth refreshing whenever a timer stops, so a finished session
-  // shows up without the user reopening the app.
+  // The team board lives in settings now, so it loads with the overlay. A
+  // failed read only blanks the team section, never the timer.
   useEffect(() => {
     if (state.kind === "booting" || state.kind === "sign-in") return undefined;
+    if (!settingsOpen) return undefined;
     let active = true;
     const service = bridge;
     const generation = bridgeGeneration.current;
@@ -403,13 +511,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       (error: unknown) => {
         if (!active || !isCurrent(service, generation, epoch)) return;
         const problem = bridgeError(error);
-        // An expired session is handled by whatever the user does next; the board
-        // going stale is not worth throwing them back to sign-in over.
         if (problem.kind !== "auth") setOverviewError(problem.message);
       },
     );
     return () => { active = false; };
-  }, [bridge, confirmedStops, state.kind === "idle", state.kind === "booting" || state.kind === "sign-in"]);
+  }, [bridge, settingsOpen, confirmedStops, state.kind === "booting" || state.kind === "sign-in"]);
 
   // The Today card is always on screen, so stats load with the account and
   // refresh on the same transitions as the board (a stopped timer changes
@@ -464,11 +570,69 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         },
         () => undefined,
       );
+      // The local site tally rides the same cadence; failures leave the
+      // question hidden rather than noisy, same as the status poll.
+      void service.suggestionsList().then(
+        (entries) => {
+          if (active && isCurrent(service, generation, epoch)) setSuggestions(entries);
+        },
+        () => undefined,
+      );
     };
     poll();
     const timer = window.setInterval(poll, MONITOR_POLL_MS);
     return () => { active = false; window.clearInterval(timer); };
   }, [bridge, state]);
+
+  // Settings load with the account, not just with the overlay: the first-run
+  // flow keys off `onboarded`, so a fresh install must know before the main
+  // screen settles. A failure leaves the main screen up (fail-open); the
+  // overlay retries on open.
+  useEffect(() => {
+    if (state.kind === "booting" || state.kind === "sign-in") return undefined;
+    let active = true;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    void service.settingsGet().then(
+      (result) => {
+        if (!active || !isCurrent(service, generation, epoch)) return;
+        setSettings(result);
+        setAwayThresholdDraft(String(result.awayThresholdMinutes));
+        setHardLimitDraft(String(result.hardAwayLimitMinutes));
+      },
+      () => {
+        if (active && isCurrent(service, generation, epoch)) setSettingsUnavailable(true);
+      },
+    );
+    return () => { active = false; };
+  }, [bridge, state.kind === "booting" || state.kind === "sign-in"]);
+
+  const onboardingActive = settings !== undefined
+    && !settings.onboarded
+    && state.kind !== "booting"
+    && state.kind !== "sign-in";
+
+  // While onboarding shows the browser cards, poll fast so a card flips to
+  // connected on its own the moment the extension handshake lands.
+  useEffect(() => {
+    if (!onboardingActive) return undefined;
+    let active = true;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    const poll = (): void => {
+      void service.monitorStatus().then(
+        (status) => {
+          if (active && isCurrent(service, generation, epoch)) setMonitorStatus(status);
+        },
+        () => undefined,
+      );
+    };
+    poll();
+    const timer = window.setInterval(poll, ONBOARDING_POLL_MS);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [bridge, onboardingActive]);
 
   // Settings and path mappings only load while the settings overlay is open.
   useEffect(() => {
@@ -832,6 +996,218 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     }
   };
 
+  /// Raw site-rule add form behind the Advanced disclosure; answers to site
+  /// questions create the same rows through `createSiteRule` below.
+  const addRule = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (ruleBusy || ruleProjectId === "") return;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
+    setRuleBusy(true);
+    setSettingsError(undefined);
+    try {
+      const created = await service.pathMappingsCreate({ kind: "url_rule", pathPrefix: rulePattern.trim(), projectId: ruleProjectId });
+      if (isRequestCurrent()) {
+        setMappings((current) => [...(current ?? []), created]);
+        setRulePattern("");
+      }
+    } catch (error: unknown) {
+      if (isRequestCurrent()) setSettingsError(bridgeError(error).message);
+    } finally {
+      if (isRequestCurrent()) setRuleBusy(false);
+    }
+  };
+
+  const turnOnMonitoring = async (): Promise<void> => {
+    if (onboardingBusy) return;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
+    setOnboardingBusy(true);
+    setOnboardingError(undefined);
+    try {
+      const next = await service.monitorSetEnabled(true);
+      if (!isRequestCurrent()) return;
+      setSettings(next);
+      setOnboardingStep("browsers");
+      // Seed the browser cards immediately; the fast poll keeps them current.
+      try {
+        const status = await service.monitorStatus();
+        if (isRequestCurrent()) setMonitorStatus(status);
+      } catch {
+        // The fast poll retries; a missing first read is not worth an error.
+      }
+    } catch (error: unknown) {
+      if (isRequestCurrent()) setOnboardingError(bridgeError(error).message);
+    } finally {
+      if (isRequestCurrent()) setOnboardingBusy(false);
+    }
+  };
+
+  const finishOnboarding = async (): Promise<void> => {
+    if (onboardingBusy) return;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
+    setOnboardingBusy(true);
+    setOnboardingError(undefined);
+    try {
+      const next = await service.settingsUpdate({ onboarded: true });
+      if (isRequestCurrent()) setSettings(next);
+    } catch (error: unknown) {
+      if (isRequestCurrent()) setOnboardingError(bridgeError(error).message);
+    } finally {
+      if (isRequestCurrent()) setOnboardingBusy(false);
+    }
+  };
+
+  const repairBrowser = async (browser: string): Promise<void> => {
+    if (browserBusy !== undefined) return;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
+    setBrowserBusy(browser);
+    setBrowserErrors((current) => {
+      if (!(browser in current)) return current;
+      const next = { ...current };
+      delete next[browser];
+      return next;
+    });
+    try {
+      const health = await service.browserRepair(browser);
+      if (isRequestCurrent()) {
+        // The repaired health replaces the card's state without waiting for a poll.
+        setMonitorStatus((current) => current === undefined
+          ? current
+          : { ...current, browsers: current.browsers.map((item) => item.browser === browser ? health : item) });
+      }
+    } catch (error: unknown) {
+      if (isRequestCurrent()) setBrowserErrors((current) => ({ ...current, [browser]: bridgeError(error).message }));
+    } finally {
+      if (isRequestCurrent()) setBrowserBusy(undefined);
+    }
+  };
+
+  const connectBrowser = async (browser: string): Promise<void> => {
+    if (browserBusy !== undefined) return;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
+    setBrowserBusy(browser);
+    setBrowserErrors((current) => {
+      if (!(browser in current)) return current;
+      const next = { ...current };
+      delete next[browser];
+      return next;
+    });
+    try {
+      await service.browserOpenStorePage(browser);
+    } catch (error: unknown) {
+      if (isRequestCurrent()) setBrowserErrors((current) => ({ ...current, [browser]: bridgeError(error).message }));
+    } finally {
+      if (isRequestCurrent()) setBrowserBusy(undefined);
+    }
+  };
+
+  /// A "Yes" answer creates the URL rule and drops the origin from the local
+  /// list; the next poll then shows the following entry, if any.
+  const createSiteRule = async (origin: string, pattern: string, chosenProjectId: string): Promise<void> => {
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
+    setSiteBusy(true);
+    setSiteError(undefined);
+    try {
+      const created = await service.pathMappingsCreate({ kind: "url_rule", pathPrefix: pattern, projectId: chosenProjectId });
+      if (!isRequestCurrent()) return;
+      setMappings((current) => current === undefined ? current : [...current, created]);
+      setAnsweredOrigins((current) => [...current, origin]);
+      setSiteNarrowing(false);
+      setSiteSegment("");
+    } catch (error: unknown) {
+      if (isRequestCurrent()) setSiteError(bridgeError(error).message);
+    } finally {
+      if (isRequestCurrent()) setSiteBusy(false);
+    }
+  };
+
+  const answerSiteYes = async (origin: string, chosenProjectId: string): Promise<void> => {
+    if (siteBusy || chosenProjectId === "") return;
+    const plan = planRule(origin);
+    if (plan === null) {
+      setSiteError("That site address could not be turned into a rule.");
+      return;
+    }
+    if (plan.kind === "path-narrowed") {
+      // One site spans many projects here; ask which part before ruling.
+      setSiteNarrowing(true);
+      setSiteError(undefined);
+      return;
+    }
+    await createSiteRule(origin, plan.pattern, chosenProjectId);
+  };
+
+  const submitNarrowedSite = async (event: React.FormEvent<HTMLFormElement>, origin: string, chosenProjectId: string): Promise<void> => {
+    event.preventDefault();
+    if (siteBusy) return;
+    const pattern = narrowedPattern(origin, siteSegment);
+    if (pattern === null) {
+      setSiteError("Use only letters, numbers, and hyphens - like the name in the site's address.");
+      return;
+    }
+    await createSiteRule(origin, pattern, chosenProjectId);
+  };
+
+  const answerSiteNo = async (origin: string): Promise<void> => {
+    if (siteBusy) return;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
+    setSiteBusy(true);
+    setSiteError(undefined);
+    try {
+      await service.suggestionNeverSuggest(origin);
+      if (!isRequestCurrent()) return;
+      setAnsweredOrigins((current) => [...current, origin]);
+      setSiteNarrowing(false);
+      setSiteSegment("");
+    } catch (error: unknown) {
+      if (isRequestCurrent()) setSiteError(bridgeError(error).message);
+    } finally {
+      if (isRequestCurrent()) setSiteBusy(false);
+    }
+  };
+
+  const clearSiteAnswers = async (): Promise<void> => {
+    if (clearAnswersBusy) return;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
+    setClearAnswersBusy(true);
+    setClearAnswersMessage(undefined);
+    setSettingsError(undefined);
+    try {
+      await service.suggestionsClear();
+      if (!isRequestCurrent()) return;
+      setSuggestions([]);
+      setAnsweredOrigins([]);
+      setClearAnswersMessage("Cleared - Clock-In will ask about sites again as you use them.");
+    } catch (error: unknown) {
+      if (isRequestCurrent()) setSettingsError(bridgeError(error).message);
+    } finally {
+      if (isRequestCurrent()) setClearAnswersBusy(false);
+    }
+  };
+
   const joinWorkspace = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     if (joinBusy) return;
@@ -901,7 +1277,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             <p className="subtle">
               {isSignUp
                 ? "Your workspace and first project are set up automatically."
-                : "Connect to your secure workstation session."}
+                : "Sign in with the same email and password as the dashboard."}
             </p>
             {error && <p className="form-error" role="alert">{error}</p>}
             <form onSubmit={submitAuth}>
@@ -938,6 +1314,68 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     );
   }
 
+  // A fresh install must not flash the main screen before the first-run flow
+  // knows whether to appear; a failed settings read fails open instead.
+  if (settings === undefined && !settingsUnavailable) {
+    return (
+      <main className="app-shell">
+        <WebGLShader />
+        <Titlebar />
+        <div className="center-stage" aria-busy="true">
+          <p className="boot-message" role="status">Connecting to clock service…</p>
+        </div>
+      </main>
+    );
+  }
+
+  // First run: two screens replace the main screen until `onboarded` is set.
+  // Screen 1 is one question and one button; screen 2 is one card per browser
+  // plus the finish button. Nothing else.
+  if (onboardingActive) {
+    const browsers = monitorStatus?.browsers ?? [];
+    return (
+      <main className="app-shell onboarding">
+        <WebGLShader />
+        <Titlebar />
+        <div className="center-stage">
+          {onboardingStep === "monitor" ? (
+            <section className="card onboarding-panel" aria-labelledby="onboarding-title">
+              <h1 id="onboarding-title">Track your work time on this computer?</h1>
+              {onboardingError && <p className="form-error" role="alert">{onboardingError}</p>}
+              <button className="signal-button" type="button" disabled={onboardingBusy} onClick={() => void turnOnMonitoring()}>
+                {onboardingBusy ? "Turning on…" : "Turn on"}
+              </button>
+            </section>
+          ) : (
+            <section className="card onboarding-panel" aria-labelledby="onboarding-browsers-title">
+              <h1 id="onboarding-browsers-title">Connect your browser</h1>
+              {browsers.length === 0 ? (
+                <p className="subtle">No supported browser found on this computer - you can connect one later from Settings.</p>
+              ) : (
+                <div className="browser-list">
+                  {browsers.map((health) => (
+                    <BrowserCard
+                      key={health.browser}
+                      health={health}
+                      busy={browserBusy === health.browser}
+                      error={browserErrors[health.browser]}
+                      onRepair={(browser) => void repairBrowser(browser)}
+                      onConnect={(browser) => void connectBrowser(browser)}
+                    />
+                  ))}
+                </div>
+              )}
+              {onboardingError && <p className="form-error" role="alert">{onboardingError}</p>}
+              <button className="signal-button" type="button" disabled={onboardingBusy} onClick={() => void finishOnboarding()}>
+                {onboardingBusy ? "Saving…" : "Start using Clock-In"}
+              </button>
+            </section>
+          )}
+        </div>
+      </main>
+    );
+  }
+
   const account = state;
   const hasSelectedProject = account.projects.some((project) => project.id === projectId);
   const activeRunning = state.kind === "running" || state.kind === "stopping" ? state.running : undefined;
@@ -947,6 +1385,13 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const suggestedProject = suggestion ? account.projects.find((item) => item.id === suggestion.projectId) : undefined;
   const awayPrompt = state.kind === "running" && state.away?.decision === undefined ? state.away : undefined;
   const awayDecision = state.kind === "running" ? state.away?.decision : undefined;
+  // One site question at a time, and only while no other prompt card is up.
+  const siteSuggestion = awayPrompt === undefined && suggestion === undefined
+    ? suggestions.find((entry) => !answeredOrigins.includes(entry.origin))
+    : undefined;
+  const siteChoice = siteProjectId !== ""
+    ? siteProjectId
+    : hasSelectedProject ? projectId : account.projects[0]?.id ?? "";
   const monitorState = monitorStatus === undefined
     ? undefined
     : monitorStatus.enabled
@@ -970,29 +1415,71 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         {awayPrompt && (
           <div className="prompt-card card">
             <p className="eyebrow">Away</p>
-            <p>You were away {Math.max(1, Math.round(awayPrompt.seconds / 60))} minutes — discard or keep?</p>
+            <p>You were away {Math.max(1, Math.round(awayPrompt.seconds / 60))} minutes. Count that time?</p>
             <div className="prompt-actions">
-              <button className="signal-button" type="button" onClick={() => answerAway("discard")}>Discard</button>
-              <button className="outline-button" type="button" onClick={() => answerAway("keep")}>Keep</button>
+              <button className="signal-button" type="button" onClick={() => answerAway("keep")}>Yes</button>
+              <button className="outline-button" type="button" onClick={() => answerAway("discard")}>No</button>
             </div>
           </div>
         )}
         {suggestion && (
           <div className="prompt-card card">
             <p className="eyebrow">Suggested start</p>
-            <p>{sourceLabel(suggestion.source)} active — start tracking <strong>{suggestedProject?.name ?? "the mapped project"}</strong>?</p>
+            {suggestion.source === "browser" ? (
+              <p>Working on <strong>{suggestedProject?.name ?? "the mapped project"}</strong>?</p>
+            ) : (
+              <p>{sourceLabel(suggestion.source)} active - start tracking <strong>{suggestedProject?.name ?? "the mapped project"}</strong>?</p>
+            )}
             <div className="prompt-actions">
               {suggestedProject && (
-                <button className="signal-button" type="button" onClick={() => void startTimer(suggestion.projectId)}>Start</button>
+                <button className="signal-button" type="button" onClick={() => void startTimer(suggestion.projectId)}>
+                  {suggestion.source === "browser" ? "Start timer" : "Start"}
+                </button>
               )}
-              <button className="outline-button" type="button" onClick={() => void dismissSuggestion()}>Dismiss</button>
+              <button className="outline-button" type="button" onClick={() => void dismissSuggestion()}>
+                {suggestion.source === "browser" ? "Not now" : "Dismiss"}
+              </button>
             </div>
+          </div>
+        )}
+        {siteSuggestion && state.kind === "idle" && (
+          <div className="prompt-card card site-card">
+            <p className="eyebrow">New site</p>
+            <p>You spent {siteTimeLabel(siteSuggestion.seconds)} on {siteSuggestion.origin} this week. Is that work?</p>
+            {siteError && <p className="form-error" role="alert">{siteError}</p>}
+            {siteNarrowing ? (
+              <form className="site-narrow-form" onSubmit={(event) => void submitNarrowedSite(event, siteSuggestion.origin, siteChoice)}>
+                <label>Organization or team name
+                  <input value={siteSegment} onChange={(event) => setSiteSegment(event.target.value)} autoComplete="off" spellCheck={false} required />
+                </label>
+                <div className="prompt-actions">
+                  <button className="signal-button" type="submit" disabled={siteBusy}>{siteBusy ? "Saving…" : "Yes, track it"}</button>
+                  <button className="outline-button" type="button" disabled={siteBusy} onClick={() => { setSiteNarrowing(false); setSiteSegment(""); setSiteError(undefined); }}>Back</button>
+                </div>
+              </form>
+            ) : (
+              <>
+                <label className="site-project">Yes, for
+                  <select aria-label="Project for this site" value={siteChoice} onChange={(event) => setSiteProjectId(event.target.value)}>
+                    {account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                  </select>
+                </label>
+                <div className="prompt-actions">
+                  <button className="signal-button" type="button" disabled={siteBusy || siteChoice === ""} onClick={() => void answerSiteYes(siteSuggestion.origin, siteChoice)}>
+                    {siteBusy ? "Saving…" : "Yes"}
+                  </button>
+                  <button className="outline-button" type="button" disabled={siteBusy} onClick={() => void answerSiteNo(siteSuggestion.origin)}>
+                    No - don&apos;t ask again
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
 
         {state.kind === "conflict" ? (
           <section className="hero card conflict-panel" aria-labelledby="conflict-title">
-            <h2 id="conflict-title">We found two timers — pick one to keep</h2>
+            <h2 id="conflict-title">We found two timers - pick one to keep</h2>
             <p>Your device recorded <strong>{state.localStart.description || "a local start"}</strong>; the service has an active timer. Neither record has been discarded.</p>
             {state.error && <p role="alert" className="form-error">{state.error}</p>}
             <div className="action-stack">
@@ -1010,12 +1497,12 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             )}
             {monitorStatus?.enabled && monitorStatus.agentActive && (
               <p className="session-meta agent-active" data-testid="agent-active">
-                {sourceLabel(monitorStatus.agentActive.source)} active — idle trim paused
+                {sourceLabel(monitorStatus.agentActive.source)} active - idle trim paused
               </p>
             )}
             {state.kind === "running" && state.error && <p className="form-error" role="alert">{state.error}</p>}
             {awayDecision && (
-              <p className="session-meta">{awayDecision === "keep" ? "Away time kept — it stays billable." : "Away time will be trimmed at stop."}</p>
+              <p className="session-meta">{awayDecision === "keep" ? "Away time kept - it stays on the timer." : "Away time will be trimmed at stop."}</p>
             )}
             <label className="hero-project">Project
               <select
@@ -1030,10 +1517,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           </section>
         ) : (
           <section className="hero card idle-panel" aria-labelledby="timer-title">
-            <h2 id="timer-title">Start a timer</h2>
+            <h2 id="timer-title">What are you working on?</h2>
             {state.kind === "idle" && state.error && <p className="form-error" role="alert">{state.error}</p>}
             {state.kind === "pending-sync" && <><div className="sync-banner" role="status"><span>{state.message}</span><button type="button" disabled={retryPendingBusy} onClick={() => void retryPending()}>{retryPendingBusy ? "Retrying…" : "Retry sync"}</button></div>{state.error && <p className="form-error" role="alert">{state.error}</p>}</>}
-            <label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Select active project</option>{account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+            <label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Pick a project</option>{account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
             {newProjectOpen ? (
               <form className="new-project-form" onSubmit={createProject}>
                 <label>New project name<input value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} maxLength={80} placeholder="e.g. Client work" autoComplete="off" required /></label>
@@ -1046,7 +1533,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             ) : (
               <button className="new-project-trigger" type="button" onClick={() => setNewProjectOpen(true)}>New project…</button>
             )}
-            <label>Description <span className="optional">optional</span><input value={description} onChange={(event) => setDescription(event.target.value)} maxLength={1000} placeholder="What are you working on?" /></label>
+            <label className="description-field">Description <span className="optional">optional</span><input value={description} onChange={(event) => setDescription(event.target.value)} maxLength={1000} placeholder="One line, if it helps" /></label>
             <div className="entry-foot"><button className="signal-button" type="button" disabled={state.kind === "starting" || state.kind === "pending-sync" || !hasSelectedProject} onClick={() => void startTimer()}>{state.kind === "starting" ? "Starting…" : "Start timer"}</button></div>
           </section>
         )}
@@ -1086,43 +1573,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             </>
           )}
         </section>
-
-        {overview && (
-          <section className="board-panel card" aria-labelledby="board-title">
-            <div className="board-head">
-              <h2 id="board-title">{overview.organization.name}</h2>
-              <span className="invite-code" title="Share this code so teammates join this workspace">
-                {overview.organization.inviteCode}
-              </span>
-            </div>
-            {overviewError && <p className="form-error" role="alert">{overviewError}</p>}
-            {overview.entries.length <= 1 && (
-              <form className="join-form" onSubmit={joinWorkspace}>
-                <label>
-                  <span className="visually-hidden">Invite code to join a teammate</span>
-                  <input value={joinCode} onChange={(event) => setJoinCode(event.target.value)} placeholder="Join a team: ABCDE-FGHJK" autoComplete="off" spellCheck={false} required />
-                </label>
-                <button type="submit" disabled={joinBusy}>{joinBusy ? "Joining…" : "Join"}</button>
-              </form>
-            )}
-            {overview.entries.length === 0 ? (
-              <p className="subtle">No recorded time yet. Stop a timer to appear here.</p>
-            ) : (
-              <ol className="board-list">
-                {overview.entries.slice(0, 5).map((entry) => (
-                  <li key={entry.user.id} className={entry.user.id === account.user.id ? "is-you" : undefined}>
-                    <span className="board-rank">{entry.rank}</span>
-                    <span className="board-name">
-                      {entry.user.name}
-                      {entry.user.id === account.user.id && <span className="you-tag"> you</span>}
-                    </span>
-                    <span className="board-hours">{formatDuration(entry.durationSeconds)}</span>
-                  </li>
-                ))}
-              </ol>
-            )}
-          </section>
-        )}
       </div>
 
       {settingsOpen && (
@@ -1149,104 +1599,228 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                     <span>Activity monitoring</span>
                     <input type="checkbox" checked={settings.enabled} onChange={(event) => void applyMonitoringEnabled(event.target.checked)} />
                   </label>
-                  <label className="setting-field">
-                    <span>Away threshold (minutes)</span>
-                    <input
-                      type="number"
-                      min={1}
-                      value={awayThresholdDraft}
-                      onChange={(event) => setAwayThresholdDraft(event.target.value)}
-                      onBlur={(event) => commitMinutes("awayThresholdMinutes", event.target.value)}
-                    />
-                  </label>
-                  <label className="setting-field">
-                    <span>Hard away limit (minutes)</span>
-                    <input
-                      type="number"
-                      min={1}
-                      value={hardLimitDraft}
-                      onChange={(event) => setHardLimitDraft(event.target.value)}
-                      onBlur={(event) => commitMinutes("hardAwayLimitMinutes", event.target.value)}
-                    />
-                  </label>
                   <label className="toggle-row">
                     <span>Stop the timer when the machine locks</span>
                     <input type="checkbox" checked={settings.autoStopOnLock} onChange={(event) => void applySettings({ autoStopOnLock: event.target.checked })} />
                   </label>
                   <label className="toggle-row">
-                    <span>Count active agent sessions as work while away</span>
+                    <span>Count agent sessions as work while I&apos;m away</span>
                     <input type="checkbox" checked={settings.agentOverrideEnabled} onChange={(event) => void applySettings({ agentOverrideEnabled: event.target.checked })} />
                   </label>
                 </div>
-                <div className="mappings">
-                  <h3>Path mappings</h3>
-                  <p className="subtle">Agent activity in these directories is attributed to the matching project.</p>
-                  {mappings === undefined ? (
-                    <p className="subtle">Loading…</p>
-                  ) : mappings.length === 0 ? (
-                    <p className="subtle">No mappings yet.</p>
-                  ) : (
-                    <ul className="mapping-list">
-                      {mappings.map((mapping) => (
-                        <li key={mapping.id} className="mapping-row">
-                          <span className="mapping-path" title={mapping.pathPrefix}>{mapping.pathPrefix}</span>
-                          <span className="mapping-project">{account.projects.find((item) => item.id === mapping.projectId)?.name ?? "Unknown project"}</span>
-                          <button type="button" onClick={() => void deleteMapping(mapping.id)}>Delete</button>
-                        </li>
+
+                {monitorStatus !== undefined && monitorStatus.browsers.length > 0 && (
+                  <div className="browsers-setup">
+                    <h3>Browsers</h3>
+                    <div className="browser-list">
+                      {monitorStatus.browsers.map((health) => (
+                        <BrowserCard
+                          key={health.browser}
+                          health={health}
+                          busy={browserBusy === health.browser}
+                          error={browserErrors[health.browser]}
+                          onRepair={(browser) => void repairBrowser(browser)}
+                          onConnect={(browser) => void connectBrowser(browser)}
+                        />
                       ))}
-                    </ul>
-                  )}
-                  <form className="mapping-form" onSubmit={addMapping}>
-                    <label>
-                      Path prefix
-                      <input value={mappingPrefix} onChange={(event) => setMappingPrefix(event.target.value)} placeholder="C:/dev/project" spellCheck={false} autoComplete="off" required />
-                    </label>
-                    <label>
-                      Project
-                      <select value={mappingProjectId} onChange={(event) => setMappingProjectId(event.target.value)} required>
-                        <option value="">Select project</option>
-                        {account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                      </select>
-                    </label>
-                    <button className="signal-button" type="submit" disabled={mappingBusy}>{mappingBusy ? "Adding…" : "Add mapping"}</button>
-                  </form>
-                </div>
-                {monitorStatus !== undefined && monitorStatus.hooks.length > 0 && (
-                  <div className="hooks-setup">
-                    <h3>Watch my agent CLIs</h3>
-                    <p className="subtle">
-                      Opt in per tool: Clock-In adds its hook to the tool&apos;s own config, and only when you ask.
-                    </p>
-                    <ul className="hook-list">
-                      {monitorStatus.hooks.map((hook) => (
-                        <li key={hook.source} className="hook-row">
-                          <span
-                            className={`hook-badge ${hook.detected ? "is-detected" : "is-missing"}`}
-                            title={hook.configPath}
-                          >
-                            {sourceLabel(hook.source)}
-                          </span>
-                          {hook.detected ? (
-                            <span className="hook-state">Registered</span>
-                          ) : (
-                            <button type="button" onClick={() => void registerHook(hook.source)}>Register</button>
-                          )}
-                          {hookSnippets[hook.source] !== undefined && (
-                            <pre className="hook-snippet">{hookSnippets[hook.source]}</pre>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
+                    </div>
                   </div>
                 )}
+
+                <div className="team-setup">
+                  <h3>Your team</h3>
+                  {overview === undefined ? (
+                    overviewError
+                      ? <p className="form-error" role="alert">{overviewError}</p>
+                      : <p className="subtle">Loading…</p>
+                  ) : (
+                    <>
+                      <p className="team-line">
+                        <strong>{overview.organization.name}</strong>
+                        {" · invite code "}
+                        <span className="invite-code" title="Share this code so teammates join this workspace">{overview.organization.inviteCode}</span>
+                      </p>
+                      {overviewError && <p className="form-error" role="alert">{overviewError}</p>}
+                      <form className="join-form" onSubmit={joinWorkspace}>
+                        <label>
+                          <span className="visually-hidden">Invite code to join a teammate</span>
+                          <input value={joinCode} onChange={(event) => setJoinCode(event.target.value)} placeholder="Join a team: ABCDE-FGHJK" autoComplete="off" spellCheck={false} required />
+                        </label>
+                        <button type="submit" disabled={joinBusy}>{joinBusy ? "Joining…" : "Join"}</button>
+                      </form>
+                      {overview.entries.length === 0 ? (
+                        <p className="subtle">No recorded time yet. Stop a timer to appear here.</p>
+                      ) : (
+                        <ol className="board-list">
+                          {overview.entries.slice(0, 5).map((entry) => (
+                            <li key={entry.user.id} className={entry.user.id === account.user.id ? "is-you" : undefined}>
+                              <span className="board-rank">{entry.rank}</span>
+                              <span className="board-name">
+                                {entry.user.name}
+                                {entry.user.id === account.user.id && <span className="you-tag"> you</span>}
+                              </span>
+                              <span className="board-hours">{formatDuration(entry.durationSeconds)}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                <div className="answers-setup">
+                  <h3>Saved site answers</h3>
+                  <p className="subtle">Clock-In asks whether a new site is work. Clearing this makes it ask again. Nothing here ever leaves this computer.</p>
+                  {clearAnswersMessage && <p className="subtle" role="status">{clearAnswersMessage}</p>}
+                  <button className="outline-button" type="button" disabled={clearAnswersBusy} onClick={() => void clearSiteAnswers()}>
+                    {clearAnswersBusy ? "Clearing…" : "Clear saved site answers"}
+                  </button>
+                </div>
+
+                <div className="advanced">
+                  <button
+                    type="button"
+                    className="advanced-toggle"
+                    aria-expanded={advancedOpen}
+                    onClick={() => setAdvancedOpen((open) => !open)}
+                  >
+                    Advanced
+                  </button>
+                  {advancedOpen && (
+                    <>
+                      <div className="setting-rows">
+                        <label className="setting-field">
+                          <span>Away threshold (minutes)</span>
+                          <input
+                            type="number"
+                            min={1}
+                            value={awayThresholdDraft}
+                            onChange={(event) => setAwayThresholdDraft(event.target.value)}
+                            onBlur={(event) => commitMinutes("awayThresholdMinutes", event.target.value)}
+                          />
+                        </label>
+                        <label className="setting-field">
+                          <span>Hard away limit (minutes)</span>
+                          <input
+                            type="number"
+                            min={1}
+                            value={hardLimitDraft}
+                            onChange={(event) => setHardLimitDraft(event.target.value)}
+                            onBlur={(event) => commitMinutes("hardAwayLimitMinutes", event.target.value)}
+                          />
+                        </label>
+                      </div>
+
+                      <div className="mappings">
+                        <h3>Path mappings</h3>
+                        <p className="subtle">Agent activity in these directories counts toward the matching project.</p>
+                        {mappings === undefined ? (
+                          <p className="subtle">Loading…</p>
+                        ) : mappings.filter((mapping) => mapping.kind === "path_prefix").length === 0 ? (
+                          <p className="subtle">No path mappings yet.</p>
+                        ) : (
+                          <ul className="mapping-list">
+                            {mappings.filter((mapping) => mapping.kind === "path_prefix").map((mapping) => (
+                              <li key={mapping.id} className="mapping-row">
+                                <span className="mapping-path" title={mapping.pathPrefix}>{mapping.pathPrefix}</span>
+                                <span className="mapping-project">{account.projects.find((item) => item.id === mapping.projectId)?.name ?? "Unknown project"}</span>
+                                <button type="button" onClick={() => void deleteMapping(mapping.id)}>Delete</button>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        <form className="mapping-form" onSubmit={addMapping}>
+                          <label>
+                            Path prefix
+                            <input value={mappingPrefix} onChange={(event) => setMappingPrefix(event.target.value)} placeholder="C:/dev/project" spellCheck={false} autoComplete="off" required />
+                          </label>
+                          <label>
+                            Project
+                            <select value={mappingProjectId} onChange={(event) => setMappingProjectId(event.target.value)} required>
+                              <option value="">Select project</option>
+                              {account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                            </select>
+                          </label>
+                          <button className="signal-button" type="submit" disabled={mappingBusy}>{mappingBusy ? "Adding…" : "Add mapping"}</button>
+                        </form>
+                      </div>
+
+                      <div className="mappings">
+                        <h3>Site rules</h3>
+                        <p className="subtle">Time on these sites counts toward the matching project. Most rules come from answering the site questions; edit patterns here only if you know the syntax.</p>
+                        {mappings === undefined ? (
+                          <p className="subtle">Loading…</p>
+                        ) : mappings.filter((mapping) => mapping.kind === "url_rule").length === 0 ? (
+                          <p className="subtle">No site rules yet.</p>
+                        ) : (
+                          <ul className="mapping-list">
+                            {mappings.filter((mapping) => mapping.kind === "url_rule").map((mapping) => (
+                              <li key={mapping.id} className="mapping-row">
+                                <span className="mapping-path" title={mapping.pathPrefix}>{mapping.pathPrefix}</span>
+                                <span className="mapping-project">{account.projects.find((item) => item.id === mapping.projectId)?.name ?? "Unknown project"}</span>
+                                <button type="button" onClick={() => void deleteMapping(mapping.id)}>Delete</button>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        <form className="mapping-form" onSubmit={addRule}>
+                          <label>
+                            Site pattern
+                            <input value={rulePattern} onChange={(event) => setRulePattern(event.target.value)} placeholder="*.quickbooks.com" spellCheck={false} autoComplete="off" required />
+                          </label>
+                          <label>
+                            Project
+                            <select value={ruleProjectId} onChange={(event) => setRuleProjectId(event.target.value)} required>
+                              <option value="">Select project</option>
+                              {account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                            </select>
+                          </label>
+                          <button className="signal-button" type="submit" disabled={ruleBusy}>{ruleBusy ? "Adding…" : "Add rule"}</button>
+                        </form>
+                      </div>
+
+                      {monitorStatus !== undefined && monitorStatus.hooks.some((hook) => hook.installed) && (
+                        <div className="hooks-setup">
+                          <h3>Watch my agent CLIs</h3>
+                          <p className="subtle">
+                            Opt in per tool: Clock-In adds its hook to the tool&apos;s own config, and only when you ask.
+                          </p>
+                          <ul className="hook-list">
+                            {monitorStatus.hooks.filter((hook) => hook.installed).map((hook) => (
+                              <li key={hook.source} className="hook-row">
+                                <span
+                                  className={`hook-badge ${hook.detected ? "is-detected" : "is-missing"}`}
+                                  title={hook.configPath}
+                                >
+                                  {sourceLabel(hook.source)}
+                                </span>
+                                {hook.detected ? (
+                                  <span className="hook-state">Registered</span>
+                                ) : (
+                                  <button type="button" onClick={() => void registerHook(hook.source)}>Register</button>
+                                )}
+                                {hookSnippets[hook.source] !== undefined && (
+                                  <pre className="hook-snippet">{hookSnippets[hook.source]}</pre>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+
                 <div className="privacy-note">
                   <h3>What&apos;s recorded</h3>
                   <p className="subtle">
                     While monitoring is on, Clock-In samples the foreground process name every 30 seconds and notes idle,
                     lock, and sleep transitions. It never records window titles, URLs, document names, or keystrokes.
-                    Agent tools report only session start and end with their working directory. Evidence waits in a local
-                    spool file under %APPDATA%\clock-in and uploads in batches every few minutes. Pausing monitoring never
-                    stops your timer - time your computer can&apos;t confirm still counts, it&apos;s just not marked verified.
+                    Agent tools report only session start and end with their working directory. The browser extension
+                    reports only which of your approved site rules matched - never addresses or history. Evidence waits
+                    in a local spool file under %APPDATA%\clock-in and uploads in batches every few minutes. Pausing
+                    monitoring never stops your timer - time your computer can&apos;t confirm still counts, it&apos;s
+                    just not marked verified.
                   </p>
                 </div>
                 <button className="link-button" type="button" disabled={logoutBusy} onClick={() => void logout()}>{logoutBusy ? "Logging out…" : "Log out"}</button>

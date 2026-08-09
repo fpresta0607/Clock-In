@@ -16,7 +16,7 @@ import {
 
 export const sessionStatus = pgEnum("session_status", ["running", "stopped", "needs_review"]);
 export const activitySegmentKind = pgEnum("activity_segment_kind", ["active", "idle", "locked", "suspended"]);
-export const agentSource = pgEnum("agent_source", ["claude_code", "codex", "kimi_code", "cursor", "other"]);
+export const agentSource = pgEnum("agent_source", ["claude_code", "codex", "kimi_code", "cursor", "browser", "other"]);
 export const agentSessionStatus = pgEnum("agent_session_status", ["running", "ended"]);
 
 const auditColumns = {
@@ -197,7 +197,10 @@ export const agentSessions = pgTable(
     // Nullable until the attribution service resolves cwd to a project. The composite
     // FK uses MATCH SIMPLE, so a null projectId skips the tenant check entirely.
     projectId: uuid("project_id"),
-    cwd: text("cwd").notNull(),
+    // Null for browser spans, which carry no working directory; the matched
+    // url-rule mapping id below attributes them instead.
+    cwd: text("cwd"),
+    ruleId: uuid("rule_id"),
     status: agentSessionStatus("status").default("running").notNull(),
     startedAt: timestamp("started_at", { mode: "date", withTimezone: true }).notNull(),
     endedAt: timestamp("ended_at", { mode: "date", withTimezone: true }),
@@ -235,19 +238,22 @@ export const agentSessions = pgTable(
       "agent_sessions_external_session_id_length_valid",
       sql`char_length(${table.externalSessionId}) between 1 and 200`,
     ),
-    check("agent_sessions_cwd_length_valid", sql`char_length(${table.cwd}) between 1 and 1000`),
+    check("agent_sessions_cwd_length_valid", sql`${table.cwd} is null or char_length(${table.cwd}) between 1 and 1000`),
     index("agent_sessions_organization_user_started_at_idx").on(table.organizationId, table.userId, table.startedAt),
   ],
 );
 
-// Per-user mapping from a filesystem path prefix (and optional git remote) to a
-// project; the attribution service resolves agent-session cwds against these.
+// Per-user mapping from a filesystem path prefix (kind = 'path_prefix', with an optional
+// git remote) or a URL rule pattern (kind = 'url_rule') to a project; the attribution
+// service resolves agent-session cwds and browser-span rule ids against these. The
+// (organization, user, path_prefix) uniqueness spans both kinds.
 export const projectPathMappings = pgTable(
   "project_path_mappings",
   {
     id: uuid("id").defaultRandom().primaryKey(),
     organizationId: uuid("organization_id").notNull(),
     userId: uuid("user_id").notNull(),
+    kind: text("kind").default("path_prefix").notNull(),
     pathPrefix: text("path_prefix").notNull(),
     repoUrl: text("repo_url"),
     projectId: uuid("project_id").notNull(),

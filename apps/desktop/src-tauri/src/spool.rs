@@ -1,4 +1,5 @@
 //! The append-only spool that `clock-in-hook` writes and the desktop drains.
+//! `clock-in-browser-host` shares the same machinery for its own spool file.
 //!
 //! Several agent CLIs can fire hooks at the same moment, so every append runs
 //! under an interprocess lock: an OS advisory lock (`File::try_lock`) on a
@@ -46,6 +47,9 @@ pub enum AgentSource {
     KimiCode,
     #[serde(rename = "cursor")]
     Cursor,
+    /// Browser-extension span verdicts, written by `clock-in-browser-host`.
+    #[serde(rename = "browser")]
+    Browser,
     #[serde(rename = "other")]
     Other,
 }
@@ -62,7 +66,9 @@ pub enum AgentEventKind {
 }
 
 /// One canonical spool line: exactly the shape `/v1/agent-sessions` accepts, so
-/// the uploader batches drained lines without re-mapping fields.
+/// the uploader batches drained lines without re-mapping fields. Agent events
+/// carry `cwd` and no `ruleId`; browser spans carry `ruleId` and no `cwd` —
+/// exactly one of the two is set, matching the source-conditional contract.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpoolEvent {
@@ -70,7 +76,10 @@ pub struct SpoolEvent {
     pub external_session_id: String,
     pub event: AgentEventKind,
     pub occurred_at: String,
-    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
 }
 
 /// The hook payload as agent CLIs send it (Claude Code pipe convention).
@@ -117,7 +126,8 @@ impl HookInput {
             external_session_id: self.session_id,
             event: self.event,
             occurred_at: self.occurred_at,
-            cwd: self.cwd,
+            cwd: Some(self.cwd),
+            rule_id: None,
         }
     }
 }
@@ -214,7 +224,8 @@ fn translate_claude(input: ClaudeHookInput) -> Result<HookStdin, String> {
         external_session_id: input.session_id,
         event,
         occurred_at: now_iso8601(),
-        cwd: input.cwd,
+        cwd: Some(input.cwd),
+        rule_id: None,
     }))
 }
 
@@ -261,7 +272,8 @@ fn translate_cursor(value: &serde_json::Value, context: ArgvContext) -> HookStdi
         external_session_id: session_id.to_string(),
         event: context.event,
         occurred_at: now_iso8601(),
-        cwd: cwd.to_string(),
+        cwd: Some(cwd.to_string()),
+        rule_id: None,
     })
 }
 
@@ -366,6 +378,17 @@ pub fn default_spool_path() -> PathBuf {
         .join("agent-spool.jsonl")
 }
 
+/// The directory the browser spool, rules file, tally, and handshake marker
+/// live in: beside the agent spool, so the `CLOCK_IN_SPOOL` override relocates
+/// the whole set for tests and support setups.
+pub fn default_browser_dir() -> PathBuf {
+    default_spool_path()
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 #[cfg(windows)]
 fn default_data_dir() -> PathBuf {
     std::env::var_os("APPDATA")
@@ -417,7 +440,10 @@ pub(crate) fn format_iso8601(unix_secs: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
-pub(crate) fn append_line(path: &Path, line: &[u8], max_bytes: u64) -> SpoolResult<()> {
+/// The locked whole-line append core, shared with the segment spool and the
+/// browser host (whose lines are written via `append`, but a raw line is
+/// exposed for writers with their own encoding).
+pub fn append_line(path: &Path, line: &[u8], max_bytes: u64) -> SpoolResult<()> {
     with_lock(path, || {
         let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
         if size > 0 && !ends_with_newline(path)? {
@@ -570,7 +596,8 @@ mod tests {
             external_session_id: session.to_string(),
             event: AgentEventKind::Started,
             occurred_at: "2026-08-07T12:00:00Z".to_string(),
-            cwd: "C:/dev/Clock-In".to_string(),
+            cwd: Some("C:/dev/Clock-In".to_string()),
+            rule_id: None,
         }
     }
 
@@ -607,7 +634,7 @@ mod tests {
         assert_eq!(started.source, AgentSource::ClaudeCode);
         assert_eq!(started.event, AgentEventKind::Started);
         assert_eq!(started.external_session_id, "s1");
-        assert_eq!(started.cwd, "C:/dev/Clock-In");
+        assert_eq!(started.cwd.as_deref(), Some("C:/dev/Clock-In"));
         // Claude's payload has no timestamp; the hook stamps the current time.
         assert!(started.occurred_at.ends_with('Z'));
 
@@ -698,7 +725,7 @@ mod tests {
         assert_eq!(event.source, AgentSource::Cursor);
         assert_eq!(event.event, AgentEventKind::Started);
         assert_eq!(event.external_session_id, "c1");
-        assert_eq!(event.cwd, "/repo");
+        assert_eq!(event.cwd.as_deref(), Some("/repo"));
         // Cursor's payload has no contract timestamp; the hook stamps now.
         assert!(event.occurred_at.ends_with('Z'));
     }
@@ -722,10 +749,10 @@ mod tests {
     fn the_cursor_cwd_falls_back_to_the_first_workspace_root() {
         let snake =
             cursor_event(r#"{"conversation_id":"c1","workspace_roots":["/repo","/other"]}"#);
-        assert_eq!(snake.cwd, "/repo");
+        assert_eq!(snake.cwd.as_deref(), Some("/repo"));
 
         let camel = cursor_event(r#"{"conversation_id":"c1","workspaceRoots":["/repo"]}"#);
-        assert_eq!(camel.cwd, "/repo");
+        assert_eq!(camel.cwd.as_deref(), Some("/repo"));
     }
 
     #[test]
@@ -816,6 +843,34 @@ mod tests {
         assert_eq!(value["event"], "started");
         assert_eq!(value["externalSessionId"], "s1");
         assert!(value.get("sessionId").is_none());
+    }
+
+    #[test]
+    fn a_browser_line_carries_a_rule_id_and_no_cwd() {
+        let line = SpoolEvent {
+            source: AgentSource::Browser,
+            external_session_id: "span-1".to_string(),
+            event: AgentEventKind::Started,
+            occurred_at: "2026-08-09T12:00:00Z".to_string(),
+            cwd: None,
+            rule_id: Some("r1".to_string()),
+        };
+        let encoded = serde_json::to_string(&line).expect("event serializes");
+        let value: serde_json::Value = serde_json::from_str(&encoded).expect("line parses");
+
+        assert_eq!(value["source"], "browser");
+        assert_eq!(value["ruleId"], "r1");
+        assert!(value.get("cwd").is_none());
+
+        // And it reads back losslessly; an agent line gains no ruleId key.
+        assert_eq!(
+            serde_json::from_str::<SpoolEvent>(&encoded).expect("line round-trips"),
+            line
+        );
+        let agent = serde_json::to_string(&event("s1")).expect("event serializes");
+        let agent_value: serde_json::Value = serde_json::from_str(&agent).expect("line parses");
+        assert!(agent_value.get("ruleId").is_none());
+        assert_eq!(agent_value["cwd"], "C:/dev/Clock-In");
     }
 
     #[test]

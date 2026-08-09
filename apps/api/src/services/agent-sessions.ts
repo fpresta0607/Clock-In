@@ -3,20 +3,25 @@ import type { AgentSessionEventBatchResponse, AgentSource } from "@clock-in/shar
 import type { AuthenticatedSubject } from "../auth.js";
 import type {
   AgentSessionRepository,
+  PathMappingRecord,
   PathMappingRepository,
   SessionRepository,
 } from "../repositories.js";
-import { resolveProjectForCwd, type PathMappingCandidate } from "./attribution.js";
+import { resolveProjectForCwd, resolveProjectForRuleId } from "./attribution.js";
 
 const futureEventToleranceMs = 30_000;
 const defaultStaleThresholdMs = 6 * 60 * 60 * 1_000;
+// Browser spans heart beat every 60 seconds, so ten minutes of silence means the tab is gone.
+const defaultBrowserStaleThresholdMs = 10 * 60 * 1_000;
 
 export interface AgentSessionEventInput {
   source: AgentSource;
   externalSessionId: string;
   event: "started" | "ended" | "heartbeat";
   occurredAt: Date;
-  cwd: string;
+  /** Agent sources carry a cwd; browser spans carry a ruleId instead. */
+  cwd?: string;
+  ruleId?: string;
 }
 
 export interface AgentSessionServiceDependencies {
@@ -24,11 +29,14 @@ export interface AgentSessionServiceDependencies {
   pathMappings: PathMappingRepository;
   sessions: SessionRepository;
   clock?: () => Date;
+  /** Staleness window for non-browser sources. */
   staleThresholdMs?: number;
+  /** Staleness window for browser spans, much shorter than the agent window. */
+  browserStaleThresholdMs?: number;
 }
 
 export interface AgentSessionReaper {
-  /** Closes running sessions with no event for the staleness window, ending them at lastEventAt. */
+  /** Closes running sessions with no event for their source's staleness window, ending them at lastEventAt. */
   reapStale(subject: AuthenticatedSubject): Promise<number>;
 }
 
@@ -37,14 +45,18 @@ export interface AgentSessionReaper {
  * agent sessions before corroboration math without the full ingestion service.
  */
 export function createAgentSessionReaper(
-  dependencies: Pick<AgentSessionServiceDependencies, "agentSessions" | "clock" | "staleThresholdMs">,
+  dependencies: Pick<AgentSessionServiceDependencies, "agentSessions" | "clock" | "staleThresholdMs" | "browserStaleThresholdMs">,
 ): AgentSessionReaper {
   const clock = dependencies.clock ?? (() => new Date());
   const staleThresholdMs = dependencies.staleThresholdMs ?? defaultStaleThresholdMs;
+  const browserStaleThresholdMs = dependencies.browserStaleThresholdMs ?? defaultBrowserStaleThresholdMs;
   return {
     reapStale(subject: AuthenticatedSubject): Promise<number> {
       const now = clock();
-      return dependencies.agentSessions.reapStale(subject, new Date(now.getTime() - staleThresholdMs), now);
+      return dependencies.agentSessions.reapStale(subject, {
+        default: new Date(now.getTime() - staleThresholdMs),
+        browser: new Date(now.getTime() - browserStaleThresholdMs),
+      }, now);
     },
   };
 }
@@ -57,7 +69,6 @@ export interface AgentSessionService {
 
 export function createAgentSessionService(dependencies: AgentSessionServiceDependencies): AgentSessionService {
   const clock = dependencies.clock ?? (() => new Date());
-  const staleThresholdMs = dependencies.staleThresholdMs ?? defaultStaleThresholdMs;
   const reaper = createAgentSessionReaper(dependencies);
 
   return {
@@ -65,13 +76,23 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
 
     async ingest(subject: AuthenticatedSubject, events: AgentSessionEventInput[]): Promise<AgentSessionEventBatchResponse> {
       const now = clock();
-      await dependencies.agentSessions.reapStale(subject, new Date(now.getTime() - staleThresholdMs), now);
+      await reaper.reapStale(subject);
 
       // Mappings rarely change; one lookup per batch attributes every event in it.
-      let mappings: Promise<PathMappingCandidate[]> | null = null;
-      const loadMappings = (): Promise<PathMappingCandidate[]> => {
+      let mappings: Promise<PathMappingRecord[]> | null = null;
+      const loadMappings = (): Promise<PathMappingRecord[]> => {
         mappings ??= dependencies.pathMappings.listForSubject(subject);
         return mappings;
+      };
+      // The extension proposes a rule id; the stored mapping row decides. A deleted
+      // or foreign rule leaves the span unattributed rather than erroring.
+      const resolveProject = async (event: AgentSessionEventInput): Promise<string | null> => {
+        const candidates = await loadMappings();
+        if (event.source === "browser") {
+          return event.ruleId === undefined ? null : resolveProjectForRuleId(event.ruleId, candidates);
+        }
+        const prefixes = candidates.filter((mapping) => mapping.kind === "path_prefix");
+        return event.cwd === undefined ? null : resolveProjectForCwd(event.cwd, prefixes);
       };
 
       const results: AgentSessionEventBatchResponse["results"] = [];
@@ -87,7 +108,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
         }
 
         if (event.event === "started") {
-          const projectId = resolveProjectForCwd(event.cwd, await loadMappings());
+          const projectId = await resolveProject(event);
           let linkedSessionId: string | null = null;
           if (projectId !== null) {
             const running = await dependencies.sessions.findRunning(subject);
@@ -98,7 +119,8 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
             userId: subject.userId,
             source: event.source,
             externalSessionId: event.externalSessionId,
-            cwd: event.cwd,
+            cwd: event.cwd ?? null,
+            ruleId: event.ruleId ?? null,
             projectId,
             linkedSessionId,
             occurredAt: event.occurredAt,
@@ -108,14 +130,14 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
           const existing = await dependencies.agentSessions.findByExternalKey(subject, event.source, event.externalSessionId);
           if (existing === null) {
             // End-before-start is tolerated: the row is stored directly as ended.
-            const projectId = resolveProjectForCwd(event.cwd, await loadMappings());
             await dependencies.agentSessions.insertEnded({
               organizationId: subject.organizationId,
               userId: subject.userId,
               source: event.source,
               externalSessionId: event.externalSessionId,
-              cwd: event.cwd,
-              projectId,
+              cwd: event.cwd ?? null,
+              ruleId: event.ruleId ?? null,
+              projectId: await resolveProject(event),
               occurredAt: event.occurredAt,
               receivedAt: now,
             });
