@@ -1,0 +1,909 @@
+//! The desktop side of browser attribution: native-messaging registration,
+//! per-browser health, the rules file the host serves, the local suggestion
+//! tally, and the handshake marker the host drops when the extension connects.
+//!
+//! Registration is silent and idempotent: for every detected browser the app
+//! writes a host manifest beside the spools (its `allowed_origins` pins the
+//! extension id) and points the browser's HKCU `NativeMessagingHosts` key at
+//! it, at first run and again on every launch. The keys are Clock-In's own,
+//! need no elevation, and are inert until the user installs the extension from
+//! its store page - the one click no native app can perform for them.
+//!
+//! The manifest's `path` is the `clock-in-browser-host` binary installed next
+//! to the app executable (both ship as `externalBin` siblings, exactly like
+//! `clock-in-hook`), so registration resolves it with the same
+//! "beside the running app" rule the hook registration uses.
+
+use std::io;
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+
+use crate::api::{ApiResult, BridgeError, MappingKind, PathMapping};
+use crate::spool;
+
+/// The native-messaging host name the extension connects to. Changing it is a
+/// breaking change for every registered browser and the extension build.
+pub const HOST_NAME: &str = "com.clock_in.browser_host";
+
+/// Store listing ids are assigned at submission time; until then registration
+/// pins these placeholders, and [Connect] opens the store home page. One spot
+/// to update when the listings land.
+const CHROME_EXTENSION_ID: &str = "pending-chrome-web-store-id";
+const EDGE_EXTENSION_ID: &str = "pending-edge-add-ons-id";
+/// The Firefox variant declares its id in its own manifest
+/// (`apps/browser-extension/manifest.firefox.json`); keep these in sync.
+const FIREFOX_EXTENSION_ID: &str = "browser-extension@clock-in.app";
+
+const CHROME_STORE_URL: &str = "https://chromewebstore.google.com/";
+const EDGE_STORE_URL: &str = "https://microsoftedge.microsoft.com/addons/";
+const FIREFOX_STORE_URL: &str = "https://addons.mozilla.org/";
+
+/// A browser Clock-In can register the native host for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Browser {
+    Chrome,
+    Edge,
+    Firefox,
+}
+
+impl Browser {
+    pub const ALL: [Browser; 3] = [Browser::Chrome, Browser::Edge, Browser::Firefox];
+
+    /// The stable id the wire uses (`browser_repair` takes it, health reports it).
+    pub fn id(self) -> &'static str {
+        match self {
+            Browser::Chrome => "chrome",
+            Browser::Edge => "edge",
+            Browser::Firefox => "firefox",
+        }
+    }
+
+    /// The plain name the UI shows: "Chrome is connected", never more.
+    pub fn label(self) -> &'static str {
+        match self {
+            Browser::Chrome => "Chrome",
+            Browser::Edge => "Edge",
+            Browser::Firefox => "Firefox",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|browser| browser.id() == id)
+    }
+
+    /// Maps the process that launched the host onto a browser, so the
+    /// handshake marker knows which card to flip.
+    fn from_process_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "chrome.exe" | "chrome" => Some(Browser::Chrome),
+            "msedge.exe" | "msedge" => Some(Browser::Edge),
+            "firefox.exe" | "firefox" => Some(Browser::Firefox),
+            _ => None,
+        }
+    }
+
+    /// The HKCU key the browser reads to find the host manifest.
+    fn registry_key_path(self) -> String {
+        let root = match self {
+            Browser::Chrome => r"Software\Google\Chrome\NativeMessagingHosts",
+            Browser::Edge => r"Software\Microsoft\Edge\NativeMessagingHosts",
+            Browser::Firefox => r"Software\Mozilla\NativeMessagingHosts",
+        };
+        format!(r"{root}\{HOST_NAME}")
+    }
+
+    /// The page [Connect] opens. Placeholders until the store listings exist.
+    pub fn store_url(self) -> &'static str {
+        match self {
+            Browser::Chrome => CHROME_STORE_URL,
+            Browser::Edge => EDGE_STORE_URL,
+            Browser::Firefox => FIREFOX_STORE_URL,
+        }
+    }
+
+    /// Install locations that count as "this browser is on the machine".
+    fn install_candidates(self) -> Vec<PathBuf> {
+        let program_files = std::env::var_os("ProgramFiles")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let program_files_x86 = std::env::var_os("ProgramFiles(x86)")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let local_app_data = std::env::var_os("LOCALAPPDATA")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+
+        let mut candidates = Vec::new();
+        let mut under = |roots: &[Option<PathBuf>], rest: &str| {
+            for root in roots.iter().flatten() {
+                candidates.push(root.join(rest));
+            }
+        };
+        match self {
+            Browser::Chrome => {
+                under(
+                    &[program_files, program_files_x86],
+                    r"Google\Chrome\Application\chrome.exe",
+                );
+                under(&[local_app_data], r"Google\Chrome\Application\chrome.exe");
+            }
+            Browser::Edge => under(
+                &[program_files, program_files_x86],
+                r"Microsoft\Edge\Application\msedge.exe",
+            ),
+            Browser::Firefox => under(
+                &[program_files, program_files_x86],
+                r"Mozilla Firefox\firefox.exe",
+            ),
+        }
+        candidates
+    }
+}
+
+/// How one browser's connection stands, in the order a setup flows through
+/// them. `Registered` means the plumbing is done and only the store install
+/// is left - the card keeps offering [Connect], never an error to interpret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HealthState {
+    NeverRegistered,
+    BinaryMissing,
+    Registered,
+    Connected,
+}
+
+/// One browser card's worth of health, surfaced on `monitor_status`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserHealth {
+    pub browser: String,
+    pub label: String,
+    pub state: HealthState,
+    pub store_url: String,
+}
+
+fn health(browser: Browser, state: HealthState) -> BrowserHealth {
+    BrowserHealth {
+        browser: browser.id().to_string(),
+        label: browser.label().to_string(),
+        state,
+        store_url: browser.store_url().to_string(),
+    }
+}
+
+/// The browsers on this machine, by their well-known install locations.
+pub fn detected_browsers() -> Vec<Browser> {
+    Browser::ALL
+        .into_iter()
+        .filter(|browser| {
+            browser
+                .install_candidates()
+                .iter()
+                .any(|candidate| candidate.exists())
+        })
+        .collect()
+}
+
+/// The host binary registration points at: installed beside the app
+/// executable, as `externalBin` places it. Same rule as `clock-in-hook`.
+fn host_binary_path() -> ApiResult<PathBuf> {
+    let exe = std::env::current_exe()
+        .map_err(|_| BridgeError::unknown("Could not locate the Clock-In app."))?;
+    let file_name = if cfg!(windows) {
+        "clock-in-browser-host.exe"
+    } else {
+        "clock-in-browser-host"
+    };
+    Ok(exe
+        .parent()
+        .map(|dir| dir.join(file_name))
+        .unwrap_or_else(|| PathBuf::from(file_name)))
+}
+
+/// The manifest one browser's registry key points at. Kept beside the spools
+/// so the `CLOCK_IN_SPOOL` override relocates it for tests and support setups.
+fn manifest_path(dir: &Path, browser: Browser) -> PathBuf {
+    dir.join(format!("browser-host-manifest-{}.json", browser.id()))
+}
+
+/// The manifest content: the host path plus the extension pin. Chrome and
+/// Edge pin by `allowed_origins`; Firefox uses `allowed_extensions`.
+fn host_manifest(browser: Browser, host_binary: &Path) -> String {
+    // Backslashes in the Windows install path must survive JSON encoding.
+    let path = host_binary.to_string_lossy().replace('\\', "\\\\");
+    let pinned = match browser {
+        Browser::Chrome => {
+            format!(r#""allowed_origins": ["chrome-extension://{CHROME_EXTENSION_ID}/"]"#)
+        }
+        Browser::Edge => {
+            format!(r#""allowed_origins": ["chrome-extension://{EDGE_EXTENSION_ID}/"]"#)
+        }
+        Browser::Firefox => format!(r#""allowed_extensions": ["{FIREFOX_EXTENSION_ID}"]"#),
+    };
+    format!(
+        "{{\n  \"name\": \"{HOST_NAME}\",\n  \"description\": \"Clock-In browser attribution host\",\n  \"path\": \"{path}\",\n  \"type\": \"stdio\",\n  {pinned}\n}}\n"
+    )
+}
+
+/// Silent first-run-and-every-launch registration: rewrite the manifests and
+/// repair any missing registry keys for the browsers on the machine. Nothing
+/// here may fail the app - a broken registration surfaces on the browser card
+/// with a [Fix] button instead.
+pub fn ensure_registered(dir: &Path) {
+    for browser in detected_browsers() {
+        if let Err(error) = register(dir, browser) {
+            eprintln!(
+                "clock-in: could not register the browser host for {}: {error}",
+                browser.id()
+            );
+        }
+    }
+}
+
+/// Writes the manifest and points the browser's registry key at it. Idempotent:
+/// an already-correct key is left alone.
+fn register(dir: &Path, browser: Browser) -> io::Result<()> {
+    let host_binary = host_binary_path().map_err(|error| io::Error::other(error.message))?;
+    let manifest = manifest_path(dir, browser);
+    if let Some(parent) = manifest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    write_if_changed(&manifest, host_manifest(browser, &host_binary).as_bytes())?;
+    registry::ensure_key(&browser.registry_key_path(), &manifest.to_string_lossy())
+}
+
+/// The [Fix] button's repair: register again, then report the resulting
+/// health so the card updates from the answer, not a second poll.
+pub fn repair(dir: &Path, browser_id: &str) -> ApiResult<BrowserHealth> {
+    let browser = Browser::from_id(browser_id)
+        .ok_or_else(|| BridgeError::new(crate::api::ErrorKind::Validation, "Unknown browser."))?;
+    register(dir, browser)
+        .map_err(|_| BridgeError::unknown("The connection could not be repaired."))?;
+    Ok(health_of(dir, browser))
+}
+
+/// Every detected browser's current health, for the status payload.
+pub fn health_all(dir: &Path) -> Vec<BrowserHealth> {
+    detected_browsers()
+        .into_iter()
+        .map(|browser| health_of(dir, browser))
+        .collect()
+}
+
+fn health_of(dir: &Path, browser: Browser) -> BrowserHealth {
+    let Some(registered_manifest) = registry::read_key(&browser.registry_key_path()) else {
+        return health(browser, HealthState::NeverRegistered);
+    };
+    if !Path::new(&registered_manifest).exists() {
+        return health(browser, HealthState::NeverRegistered);
+    }
+    match host_binary_path() {
+        Ok(binary) if !binary.exists() => health(browser, HealthState::BinaryMissing),
+        Err(_) => health(browser, HealthState::BinaryMissing),
+        _ => match handshake_browser(dir) {
+            Some(connected) if connected == browser => health(browser, HealthState::Connected),
+            _ => health(browser, HealthState::Registered),
+        },
+    }
+}
+
+/// Which browser's extension has completed a handshake, if any. The host
+/// drops this marker when the browser launches it (that launch *is* the
+/// handshake), naming the parent process it could see.
+fn handshake_browser(dir: &Path) -> Option<Browser> {
+    let bytes = std::fs::read(dir.join("browser-handshake.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    Browser::from_id(value.get("browser")?.as_str()?)
+}
+
+/// Called by `clock-in-browser-host` at startup: the browser launched it, so
+/// the extension is connected. Best-effort - the marker feeds a UI badge and
+/// nothing else.
+pub fn record_handshake(dir: &Path) {
+    let marker = dir.join("browser-handshake.json");
+    let body = serde_json::json!({
+        "browser": parent_browser().map(|browser| browser.id()),
+        "at": spool::now_iso8601(),
+    });
+    let Ok(bytes) = serde_json::to_vec(&body) else {
+        return;
+    };
+    let _ = write_if_changed(&marker, &bytes);
+}
+
+/// The browser that launched this process, by walking the process table for
+/// the parent's executable name. Windows-only; elsewhere the marker records
+/// `null` and cards stay at "registered" rather than guessing.
+#[cfg(windows)]
+fn parent_browser() -> Option<Browser> {
+    parent_process_name().and_then(|name| Browser::from_process_name(&name))
+}
+
+#[cfg(not(windows))]
+fn parent_browser() -> Option<Browser> {
+    None
+}
+
+#[cfg(windows)]
+fn parent_process_name() -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+    };
+
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let result = (|| {
+            let mut entry: windows_sys::Win32::System::Diagnostics::ToolHelp::PROCESSENTRY32W =
+                std::mem::zeroed();
+            entry.dwSize = std::mem::size_of_val(&entry) as u32;
+            if Process32FirstW(snapshot, &mut entry) == 0 {
+                return None;
+            }
+            let self_pid = std::process::id();
+            let mut parent_pid = None;
+            loop {
+                if entry.th32ProcessID == self_pid {
+                    parent_pid = Some(entry.th32ParentProcessID);
+                }
+                if let Some(parent) = parent_pid {
+                    if entry.th32ProcessID == parent {
+                        let end = entry
+                            .szExeFile
+                            .iter()
+                            .position(|unit| *unit == 0)
+                            .unwrap_or(entry.szExeFile.len());
+                        return String::from_utf16(&entry.szExeFile[..end]).ok();
+                    }
+                }
+                if Process32NextW(snapshot, &mut entry) == 0 {
+                    return None;
+                }
+            }
+        })();
+        let _ = CloseHandle(snapshot);
+        result
+    }
+}
+
+/// Rewrites the rules file the host serves from the cached mappings: rule id
+/// plus pattern only, `url_rule` rows only. Skips the write when nothing
+/// changed, so the five-minute cache refresh does not touch the file.
+pub fn write_rules_file(dir: &Path, mappings: &[PathMapping]) -> io::Result<()> {
+    let rules: Vec<serde_json::Value> = mappings
+        .iter()
+        .filter(|mapping| mapping.kind == MappingKind::UrlRule)
+        .map(|mapping| serde_json::json!({ "id": mapping.id, "pattern": mapping.path_prefix }))
+        .collect();
+    let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "rules": rules }))
+        .map_err(io::Error::other)?;
+    write_if_changed(&dir.join("browser-rules.json"), &bytes)
+}
+
+/// Writes `content` to `path` via a temp file and rename, unless the file
+/// already holds exactly those bytes.
+fn write_if_changed(path: &Path, content: &[u8]) -> io::Result<()> {
+    if std::fs::read(path).is_ok_and(|existing| existing == content) {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, content)?;
+    // Windows cannot rename over an existing file.
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    std::fs::rename(&tmp, path)
+}
+
+/// One suggestion the tally earns: an unmatched origin and its focused seconds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TallyEntry {
+    pub origin: String,
+    pub seconds: u64,
+}
+
+/// The tally minus anything already answered: never-suggest origins and
+/// origins a current `url_rule` already covers (the extension's next snapshot
+/// still carries them until its rules refresh; the desktop filters them).
+pub fn read_suggestions(dir: &Path, mappings: &[PathMapping]) -> Vec<TallyEntry> {
+    let never = read_origin_set(&dir.join("never-suggest.json"));
+    let ruled: Vec<String> = mappings
+        .iter()
+        .filter(|mapping| mapping.kind == MappingKind::UrlRule)
+        .map(|mapping| pattern_host(&mapping.path_prefix))
+        .collect();
+    let bytes = match std::fs::read(dir.join("unmatched-tally.json")) {
+        Ok(bytes) => bytes,
+        Err(_) => return Vec::new(),
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Vec::new();
+    };
+    value
+        .get("entries")
+        .and_then(|entries| entries.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let origin = entry.get("origin")?.as_str()?.to_string();
+                    let seconds = entry.get("seconds")?.as_u64()?;
+                    Some(TallyEntry { origin, seconds })
+                })
+                .filter(|entry| !never.contains(&entry.origin))
+                .filter(|entry| !ruled.iter().any(|host| host == &entry.origin))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The host part of a URL-rule pattern: strip a `*.` prefix, drop any path.
+fn pattern_host(pattern: &str) -> String {
+    let without_glob = pattern.strip_prefix("*.").unwrap_or(pattern);
+    without_glob
+        .split('/')
+        .next()
+        .unwrap_or(without_glob)
+        .to_string()
+}
+
+/// "No - don't ask again": the origin joins the local never-suggest list.
+pub fn never_suggest(dir: &Path, origin: &str) -> ApiResult<()> {
+    let origin = origin.trim();
+    if origin.is_empty() {
+        return Err(BridgeError::new(
+            crate::api::ErrorKind::Validation,
+            "Origin must not be empty.",
+        ));
+    }
+    let mut origins = read_origin_set(&dir.join("never-suggest.json"));
+    origins.insert(origin.to_string());
+    let mut sorted: Vec<&String> = origins.iter().collect();
+    sorted.sort();
+    let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "origins": sorted }))
+        .map_err(|_| BridgeError::unknown("Could not save that answer."))?;
+    write_if_changed(&dir.join("never-suggest.json"), &bytes)
+        .map_err(|_| BridgeError::unknown("Could not save that answer."))
+}
+
+/// Clears the local suggestion data from settings: the tally copy and the
+/// never-suggest list. Both are local-only; nothing here was ever uploaded.
+pub fn clear_suggestion_data(dir: &Path) -> ApiResult<()> {
+    for name in ["unmatched-tally.json", "never-suggest.json"] {
+        match std::fs::remove_file(dir.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(BridgeError::unknown("Could not clear the saved answers.")),
+        }
+    }
+    Ok(())
+}
+
+fn read_origin_set(path: &Path) -> std::collections::BTreeSet<String> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| {
+            value
+                .get("origins")
+                .and_then(|origins| origins.as_array())
+                .map(|origins| {
+                    origins
+                        .iter()
+                        .filter_map(|origin| origin.as_str().map(str::to_string))
+                        .collect()
+                })
+        })
+        .unwrap_or_default()
+}
+
+/// [Connect] opens the browser's own store page in the default browser. The
+/// install and its confirmation are the browser's floor; we only open the door.
+pub fn open_store_page(browser_id: &str) -> ApiResult<()> {
+    let browser = Browser::from_id(browser_id)
+        .ok_or_else(|| BridgeError::new(crate::api::ErrorKind::Validation, "Unknown browser."))?;
+    open_url(browser.store_url())
+}
+
+#[cfg(windows)]
+fn open_url(url: &str) -> ApiResult<()> {
+    std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| BridgeError::unknown("Could not open the browser's store page."))
+}
+
+#[cfg(target_os = "macos")]
+fn open_url(url: &str) -> ApiResult<()> {
+    std::process::Command::new("open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| BridgeError::unknown("Could not open the browser's store page."))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_url(url: &str) -> ApiResult<()> {
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| BridgeError::unknown("Could not open the browser's store page."))
+}
+
+/// The registry half of registration, isolated so everything above it stays
+/// testable on any OS. HKCU only; no elevation, ever.
+#[cfg(windows)]
+mod registry {
+    use std::io;
+
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
+        HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ,
+    };
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// Points `key` at `value`, unless it already does. Returns io::Error so
+    /// callers fold registry failures into their own reporting.
+    pub fn ensure_key(key: &str, value: &str) -> io::Result<()> {
+        if read_key(key).as_deref() == Some(value) {
+            return Ok(());
+        }
+        unsafe {
+            let mut handle: HKEY = std::ptr::null_mut();
+            let path = wide(key);
+            let status = RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                KEY_WRITE,
+                std::ptr::null(),
+                &mut handle,
+                std::ptr::null_mut(),
+            );
+            if status != ERROR_SUCCESS {
+                return Err(io::Error::from_raw_os_error(status as i32));
+            }
+            let data = wide(value);
+            let data_bytes = std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2);
+            let status = RegSetValueExW(
+                handle,
+                std::ptr::null(),
+                0,
+                REG_SZ,
+                data_bytes.as_ptr(),
+                data_bytes.len() as u32,
+            );
+            let _ = RegCloseKey(handle);
+            if status != ERROR_SUCCESS {
+                return Err(io::Error::from_raw_os_error(status as i32));
+            }
+            Ok(())
+        }
+    }
+
+    /// The key's default value, or None when the key is absent or unreadable.
+    pub fn read_key(key: &str) -> Option<String> {
+        unsafe {
+            let mut handle: HKEY = std::ptr::null_mut();
+            let path = wide(key);
+            if RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_READ, &mut handle)
+                != ERROR_SUCCESS
+            {
+                return None;
+            }
+            let mut length: u32 = 0;
+            let status = RegQueryValueExW(
+                handle,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut length,
+            );
+            if status != ERROR_SUCCESS || length == 0 {
+                let _ = RegCloseKey(handle);
+                return None;
+            }
+            let mut buffer = vec![0u16; (length as usize).div_ceil(2)];
+            let status = RegQueryValueExW(
+                handle,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr() as *mut u8,
+                &mut length,
+            );
+            let _ = RegCloseKey(handle);
+            if status != ERROR_SUCCESS {
+                return None;
+            }
+            let used = (length as usize) / 2;
+            buffer.truncate(used);
+            if buffer.last() == Some(&0) {
+                buffer.pop();
+            }
+            String::from_utf16(&buffer).ok()
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod registry {
+    use std::io;
+
+    pub fn ensure_key(_key: &str, _value: &str) -> io::Result<()> {
+        Ok(())
+    }
+
+    pub fn read_key(_key: &str) -> Option<String> {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "clock-in-browser-test-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir is created");
+        dir
+    }
+
+    fn mapping(id: &str, kind: MappingKind, prefix: &str) -> PathMapping {
+        PathMapping {
+            id: id.to_string(),
+            kind,
+            path_prefix: prefix.to_string(),
+            repo_url: None,
+            project_id: "p1".to_string(),
+        }
+    }
+
+    #[test]
+    fn chrome_and_edge_manifests_pin_origins_and_firefox_pins_extensions() {
+        let binary = PathBuf::from(r"C:\Program Files\Clock-In\clock-in-browser-host.exe");
+
+        let chrome: serde_json::Value =
+            serde_json::from_str(&host_manifest(Browser::Chrome, &binary))
+                .expect("manifest parses");
+        assert_eq!(chrome["name"], HOST_NAME);
+        assert_eq!(chrome["type"], "stdio");
+        assert_eq!(
+            chrome["path"],
+            r"C:\Program Files\Clock-In\clock-in-browser-host.exe"
+        );
+        assert_eq!(
+            chrome["allowed_origins"][0],
+            format!("chrome-extension://{CHROME_EXTENSION_ID}/")
+        );
+
+        let edge: serde_json::Value =
+            serde_json::from_str(&host_manifest(Browser::Edge, &binary)).expect("manifest parses");
+        assert_eq!(
+            edge["allowed_origins"][0],
+            format!("chrome-extension://{EDGE_EXTENSION_ID}/")
+        );
+
+        let firefox: serde_json::Value =
+            serde_json::from_str(&host_manifest(Browser::Firefox, &binary))
+                .expect("manifest parses");
+        assert_eq!(firefox["allowed_extensions"][0], FIREFOX_EXTENSION_ID);
+        assert!(firefox.get("allowed_origins").is_none());
+    }
+
+    #[test]
+    fn registry_keys_live_under_each_browsers_native_messaging_hosts() {
+        assert_eq!(
+            Browser::Chrome.registry_key_path(),
+            r"Software\Google\Chrome\NativeMessagingHosts\com.clock_in.browser_host"
+        );
+        assert_eq!(
+            Browser::Edge.registry_key_path(),
+            r"Software\Microsoft\Edge\NativeMessagingHosts\com.clock_in.browser_host"
+        );
+        assert_eq!(
+            Browser::Firefox.registry_key_path(),
+            r"Software\Mozilla\NativeMessagingHosts\com.clock_in.browser_host"
+        );
+    }
+
+    #[test]
+    fn process_names_map_to_browsers_case_insensitively() {
+        assert_eq!(
+            Browser::from_process_name("chrome.exe"),
+            Some(Browser::Chrome)
+        );
+        assert_eq!(
+            Browser::from_process_name("MSEDGE.EXE"),
+            Some(Browser::Edge)
+        );
+        assert_eq!(
+            Browser::from_process_name("firefox"),
+            Some(Browser::Firefox)
+        );
+        assert_eq!(Browser::from_process_name("code.exe"), None);
+    }
+
+    #[test]
+    fn the_rules_file_carries_url_rules_only_as_id_and_pattern() {
+        let dir = temp_dir("rules");
+        let mappings = vec![
+            mapping("r1", MappingKind::UrlRule, "github.com/acme/*"),
+            mapping("m1", MappingKind::PathPrefix, "C:/dev/clock-in"),
+            mapping("r2", MappingKind::UrlRule, "*.figma.com/files/*"),
+        ];
+
+        write_rules_file(&dir, &mappings).expect("rules write");
+        let value: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("browser-rules.json")).expect("rules read"),
+        )
+        .expect("rules parse");
+        let rules = value["rules"].as_array().expect("rules is an array");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0]["id"], "r1");
+        assert_eq!(rules[0]["pattern"], "github.com/acme/*");
+        assert_eq!(rules[1]["id"], "r2");
+        assert!(
+            rules[0].get("projectId").is_none(),
+            "the file is id + pattern only"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unchanged_rule_set_leaves_the_file_untouched() {
+        let dir = temp_dir("rules-stable");
+        let mappings = vec![mapping("r1", MappingKind::UrlRule, "quickbooks.com")];
+
+        write_rules_file(&dir, &mappings).expect("first write");
+        let before = std::fs::metadata(dir.join("browser-rules.json"))
+            .expect("rules exist")
+            .modified()
+            .expect("mtime reads");
+        write_rules_file(&dir, &mappings).expect("second write");
+        let after = std::fs::metadata(dir.join("browser-rules.json"))
+            .expect("rules exist")
+            .modified()
+            .expect("mtime reads");
+        assert_eq!(before, after, "identical content is not rewritten");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn suggestions_drop_never_suggest_and_already_ruled_origins() {
+        let dir = temp_dir("suggestions");
+        std::fs::write(
+            dir.join("unmatched-tally.json"),
+            r#"{"entries":[{"origin":"quickbooks.com","seconds":10800},{"origin":"github.com","seconds":600},{"origin":"figma.com","seconds":300}]}"#,
+        )
+        .expect("tally writes");
+        std::fs::write(
+            dir.join("never-suggest.json"),
+            r#"{"origins":["figma.com"]}"#,
+        )
+        .expect("never-suggest writes");
+        let mappings = vec![mapping("r1", MappingKind::UrlRule, "github.com/acme/*")];
+
+        let entries = read_suggestions(&dir, &mappings);
+        assert_eq!(
+            entries,
+            vec![TallyEntry {
+                origin: "quickbooks.com".to_string(),
+                seconds: 10800,
+            }]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_or_corrupt_tally_suggests_nothing() {
+        let dir = temp_dir("suggestions-empty");
+        assert!(read_suggestions(&dir, &[]).is_empty());
+        std::fs::write(dir.join("unmatched-tally.json"), "{not json").expect("tally writes");
+        assert!(read_suggestions(&dir, &[]).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn never_suggest_accumulates_origins_and_survives_a_corrupt_file() {
+        let dir = temp_dir("never-suggest");
+        never_suggest(&dir, "figma.com").expect("first records");
+        never_suggest(&dir, "netflix.com").expect("second records");
+        never_suggest(&dir, "figma.com").expect("a repeat is idempotent");
+        assert!(never_suggest(&dir, "  ").is_err());
+
+        let stored: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("never-suggest.json")).expect("file reads"),
+        )
+        .expect("file parses");
+        assert_eq!(stored["origins"][0], "figma.com");
+        assert_eq!(stored["origins"][1], "netflix.com");
+        assert_eq!(
+            stored["origins"]
+                .as_array()
+                .expect("origins is an array")
+                .len(),
+            2
+        );
+
+        std::fs::write(dir.join("never-suggest.json"), "garbage").expect("corrupt writes");
+        never_suggest(&dir, "example.com").expect("a corrupt file restarts the list");
+        let stored: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("never-suggest.json")).expect("file reads"),
+        )
+        .expect("file parses");
+        assert_eq!(stored["origins"][0], "example.com");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clearing_suggestion_data_removes_both_files_and_tolerates_their_absence() {
+        let dir = temp_dir("clear");
+        clear_suggestion_data(&dir).expect("clearing nothing succeeds");
+
+        std::fs::write(dir.join("unmatched-tally.json"), "{}").expect("tally writes");
+        std::fs::write(dir.join("never-suggest.json"), "{}").expect("never writes");
+        clear_suggestion_data(&dir).expect("clear succeeds");
+        assert!(!dir.join("unmatched-tally.json").exists());
+        assert!(!dir.join("never-suggest.json").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_handshake_marker_drives_the_connected_state() {
+        let dir = temp_dir("handshake");
+        assert_eq!(handshake_browser(&dir), None);
+
+        std::fs::write(
+            dir.join("browser-handshake.json"),
+            r#"{"browser":"chrome","at":"2026-08-09T12:00:00Z"}"#,
+        )
+        .expect("marker writes");
+        assert_eq!(handshake_browser(&dir), Some(Browser::Chrome));
+
+        std::fs::write(dir.join("browser-handshake.json"), "junk").expect("marker writes");
+        assert_eq!(
+            handshake_browser(&dir),
+            None,
+            "a corrupt marker connects nothing"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pattern_hosts_strip_globs_and_paths() {
+        assert_eq!(pattern_host("github.com/acme/*"), "github.com");
+        assert_eq!(pattern_host("*.figma.com/files/*"), "figma.com");
+        assert_eq!(pattern_host("quickbooks.com"), "quickbooks.com");
+    }
+}

@@ -376,7 +376,7 @@ describe("agent session contracts", () => {
   };
 
   it("covers every supported agent source and event kind", () => {
-    expect(agentSourceValues).toEqual(["claude_code", "codex", "kimi_code", "cursor", "other"]);
+    expect(agentSourceValues).toEqual(["claude_code", "codex", "kimi_code", "cursor", "browser", "other"]);
     expect(agentEventKindValues).toEqual(["started", "ended", "heartbeat"]);
   });
 
@@ -385,6 +385,38 @@ describe("agent session contracts", () => {
     expect(
       agentSessionEventBatchRequestSchema.parse({ events: [event, { ...event, event: "ended", occurredAt: stoppedAt }] }).events,
     ).toHaveLength(2);
+  });
+
+  it("accepts browser span events carrying a rule id instead of a cwd", () => {
+    const browserEvent = {
+      source: "browser",
+      externalSessionId: "span-7",
+      event: "started",
+      occurredAt: startedAt,
+      ruleId: ids.session,
+    };
+    expect(agentSessionEventSchema.parse(browserEvent)).toEqual(browserEvent);
+    expect(
+      agentSessionEventBatchRequestSchema.parse({ events: [browserEvent, { ...browserEvent, event: "heartbeat" }] }).events,
+    ).toHaveLength(2);
+  });
+
+  it("requires exactly one of cwd and ruleId, keyed to the event source", () => {
+    const browserEvent = {
+      source: "browser",
+      externalSessionId: "span-7",
+      event: "started",
+      occurredAt: startedAt,
+      ruleId: ids.session,
+    };
+    // A browser span identifies a rule, never a filesystem path.
+    expect(() => agentSessionEventSchema.parse({ ...browserEvent, ruleId: undefined })).toThrow();
+    expect(() => agentSessionEventSchema.parse({ ...browserEvent, cwd: "C:/dev/Clock-In" })).toThrow();
+    expect(() => agentSessionEventSchema.parse({ ...browserEvent, ruleId: "not-a-uuid" })).toThrow();
+    // Agent CLI sources identify a working directory, never a rule.
+    expect(() => agentSessionEventSchema.parse({ ...event, ruleId: ids.session })).toThrow();
+    const { cwd: _dropped, ...withoutCwd } = event;
+    expect(() => agentSessionEventSchema.parse(withoutCwd)).toThrow();
   });
 
   it("rejects malformed events and out-of-bounds batches", () => {
@@ -422,6 +454,7 @@ describe("agent session contracts", () => {
 describe("path mapping contracts", () => {
   const mapping = {
     id: ids.session,
+    kind: "path_prefix",
     pathPrefix: "C:/dev/Clock-In",
     repoUrl: "https://github.com/siqstack/clock-in.git",
     projectId: ids.project,
@@ -437,8 +470,35 @@ describe("path mapping contracts", () => {
   it("rejects malformed mappings and unknown fields", () => {
     expect(() => projectPathMappingSchema.parse({ ...mapping, pathPrefix: "" })).toThrow();
     expect(() => projectPathMappingSchema.parse({ ...mapping, pathPrefix: "x".repeat(501) })).toThrow();
+    expect(() => projectPathMappingSchema.parse({ ...mapping, kind: "domain" })).toThrow();
     expect(() => projectPathMappingSchema.parse({ ...mapping, projectId: "not-a-uuid" })).toThrow();
     expect(() => projectPathMappingSchema.parse({ ...mapping, branch: "main" })).toThrow();
+  });
+
+  it("accepts url rules as scheme-less host patterns with a single trailing glob", () => {
+    for (const pattern of ["github.com/acme/*", "*.figma.com/files/*", "app.linear.app/acme/*", "quickbooks.com"]) {
+      expect(projectPathMappingSchema.parse({ ...mapping, kind: "url_rule", pathPrefix: pattern })).toEqual({
+        ...mapping,
+        kind: "url_rule",
+        pathPrefix: pattern,
+      });
+    }
+  });
+
+  it("rejects url rules with a scheme, an uppercase host, or a misplaced glob", () => {
+    for (const pattern of [
+      "https://github.com/acme/*",
+      "GitHub.com/acme/*",
+      "github.com/*/acme",
+      "github.com/acme/*/pulls",
+      "github.com/acme/*foo",
+      "github.com/acme?tab=issues",
+      "github .com/acme/*",
+    ]) {
+      expect(() => projectPathMappingSchema.parse({ ...mapping, kind: "url_rule", pathPrefix: pattern })).toThrow();
+    }
+    // Path prefixes are not URL rules and stay unvalidated.
+    expect(projectPathMappingSchema.parse({ ...mapping, pathPrefix: "C:/dev/*" })).toEqual({ ...mapping, pathPrefix: "C:/dev/*" });
   });
 
   it("accepts create and update requests without a server-assigned id", () => {
@@ -447,8 +507,23 @@ describe("path mapping contracts", () => {
     expect(() => pathMappingCreateRequestSchema.parse(mapping)).toThrow();
     expect(() => pathMappingCreateRequestSchema.parse({ pathPrefix: mapping.pathPrefix })).toThrow();
 
+    // Kind defaults to a path prefix on create; url rules validate their pattern.
+    const { kind: _kind, ...withoutKind } = createRequest;
+    expect(pathMappingCreateRequestSchema.parse(withoutKind)).toEqual(createRequest);
+    expect(
+      pathMappingCreateRequestSchema.parse({ ...withoutKind, kind: "url_rule", pathPrefix: "github.com/acme/*" }),
+    ).toEqual({ ...withoutKind, kind: "url_rule", pathPrefix: "github.com/acme/*" });
+    expect(() =>
+      pathMappingCreateRequestSchema.parse({ ...withoutKind, kind: "url_rule", pathPrefix: "https://github.com/*" }),
+    ).toThrow();
+
     expect(pathMappingUpdateRequestSchema.parse({})).toEqual({});
     expect(pathMappingUpdateRequestSchema.parse({ pathPrefix: "D:/work", repoUrl: null })).toEqual({ pathPrefix: "D:/work", repoUrl: null });
+    expect(pathMappingUpdateRequestSchema.parse({ kind: "url_rule", pathPrefix: "*.figma.com/files/*" })).toEqual({
+      kind: "url_rule",
+      pathPrefix: "*.figma.com/files/*",
+    });
+    expect(() => pathMappingUpdateRequestSchema.parse({ kind: "url_rule", pathPrefix: "github.com/*/acme" })).toThrow();
     expect(() => pathMappingUpdateRequestSchema.parse({ id: ids.session })).toThrow();
     expect(() => pathMappingUpdateRequestSchema.parse({ pathPrefix: "" })).toThrow();
   });
@@ -477,11 +552,21 @@ describe("personal stats contracts", () => {
       { processName: "Code.exe", durationSeconds: 4_800 },
       { processName: "chrome.exe", durationSeconds: 1_200 },
     ],
+    sites: [
+      {
+        mapping: { id: ids.user, pattern: "github.com/acme/*", projectId: ids.project },
+        durationSeconds: 900,
+      },
+      {
+        mapping: { id: ids.session, pattern: "quickbooks.com", projectId: null },
+        durationSeconds: 300,
+      },
+    ],
   };
 
-  it("accepts a per-project corroborated/uncorroborated split with a per-app breakdown", () => {
+  it("accepts a per-project corroborated/uncorroborated split with per-app and per-site breakdowns", () => {
     expect(meStatsResponseSchema.parse(stats)).toEqual(stats);
-    expect(meStatsResponseSchema.parse({ ...stats, filters: {}, projects: [], apps: [] })).toEqual({ ...stats, filters: {}, projects: [], apps: [] });
+    expect(meStatsResponseSchema.parse({ ...stats, filters: {}, projects: [], apps: [], sites: [] })).toEqual({ ...stats, filters: {}, projects: [], apps: [], sites: [] });
   });
 
   it("rejects unsafe or negative counters and unknown fields", () => {
@@ -505,6 +590,23 @@ describe("personal stats contracts", () => {
     expect(() => meStatsResponseSchema.parse({
       ...stats,
       apps: [{ processName: "Code.exe", durationSeconds: 60, title: "main.ts" }],
+    })).toThrow();
+    expect(() => meStatsResponseSchema.parse({ ...stats, sites: undefined })).toThrow();
+    expect(() => meStatsResponseSchema.parse({
+      ...stats,
+      sites: [{ mapping: { id: ids.user, pattern: "github.com/acme/*", projectId: ids.project }, durationSeconds: -1 }],
+    })).toThrow();
+    expect(() => meStatsResponseSchema.parse({
+      ...stats,
+      sites: [{ mapping: { id: ids.user, pattern: "github.com/acme/*", projectId: undefined }, durationSeconds: 60 }],
+    })).toThrow();
+    expect(() => meStatsResponseSchema.parse({
+      ...stats,
+      sites: [{ mapping: { id: ids.user, pattern: "github.com/acme/*", projectId: null, url: "https://github.com/acme" }, durationSeconds: 60 }],
+    })).toThrow();
+    expect(() => meStatsResponseSchema.parse({
+      ...stats,
+      sites: [{ mapping: { id: ids.user, pattern: "x".repeat(501), projectId: null }, durationSeconds: 60 }],
     })).toThrow();
   });
 });

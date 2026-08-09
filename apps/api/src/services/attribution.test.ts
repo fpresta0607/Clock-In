@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizePath, resolveProjectForCwd } from "./attribution.js";
+import { normalizePath, resolveProjectForCwd, resolveProjectForRuleId } from "./attribution.js";
 
 const projectA = "a1c7e513-b094-4d4c-ae55-21790ae019a4";
 const projectB = "b1c7e513-b094-4d4c-ae55-21790ae019a4";
+const ruleId = "01c7e513-b094-4d4c-ae55-21790ae019a4";
 
 describe("normalizePath", () => {
   it("unifies case and separators and strips trailing separators", () => {
@@ -69,5 +70,25 @@ describe("resolveProjectForCwd", () => {
       { pathPrefix: "C:/dev/clock-in", projectId: projectB },
     ];
     expect(resolveProjectForCwd("c:/dev/clock-in", mappings)).toBe(projectB);
+  });
+});
+
+describe("resolveProjectForRuleId", () => {
+  const rules = [
+    { id: ruleId, kind: "url_rule" as const, projectId: projectA },
+    { id: "02c7e513-b094-4d4c-ae55-21790ae019a4", kind: "path_prefix" as const, projectId: projectB },
+  ];
+
+  it("resolves a live url rule to its project", () => {
+    expect(resolveProjectForRuleId(ruleId, rules)).toBe(projectA);
+  });
+
+  it("returns null for a deleted or foreign rule id — the span stays unattributed", () => {
+    expect(resolveProjectForRuleId("03c7e513-b094-4d4c-ae55-21790ae019a4", rules)).toBeNull();
+    expect(resolveProjectForRuleId(ruleId, [])).toBeNull();
+  });
+
+  it("never resolves a path-prefix mapping as a rule", () => {
+    expect(resolveProjectForRuleId("02c7e513-b094-4d4c-ae55-21790ae019a4", rules)).toBeNull();
   });
 });

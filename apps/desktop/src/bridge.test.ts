@@ -47,7 +47,11 @@ describe("defaultBridge", () => {
     lastUploadAt: "2026-08-06T15:00:00.000Z",
     segmentBacklog: 3,
     agentBacklog: 1,
-    hooks: [{ source: "claude_code", detected: true, configPath: "C:/Users/dev/.claude/settings.json" }],
+    hooks: [{ source: "claude_code", detected: true, installed: true, configPath: "C:/Users/dev/.claude/settings.json" }],
+    browsers: [
+      { browser: "chrome", label: "Chrome", state: "connected", storeUrl: "https://chromewebstore.google.com/" },
+      { browser: "edge", label: "Edge", state: "registered", storeUrl: "https://microsoftedge.microsoft.com/addons/" },
+    ],
     pendingSuggestion: {
       projectId: "00000000-0000-4000-8000-000000000010",
       source: "codex",
@@ -64,6 +68,9 @@ describe("defaultBridge", () => {
     expect(invoke).toHaveBeenCalledWith("monitor_status", undefined);
 
     invoke.mockResolvedValueOnce({ ...statusPayload, hooks: "claude_code" });
+    await expect(defaultBridge.monitorStatus()).rejects.toMatchObject({ kind: "unknown" });
+
+    invoke.mockResolvedValueOnce({ ...statusPayload, browsers: [{ browser: "chrome", label: "Chrome", state: "half-connected", storeUrl: "u" }] });
     await expect(defaultBridge.monitorStatus()).rejects.toMatchObject({ kind: "unknown" });
 
     invoke.mockResolvedValueOnce({ ...statusPayload, pendingSuggestion: { projectId: "not-a-uuid", source: "codex", since: statusPayload.pendingSuggestion.since } });
@@ -109,6 +116,7 @@ describe("defaultBridge", () => {
     hardAwayLimitMinutes: 60,
     autoStopOnLock: false,
     agentOverrideEnabled: true,
+    onboarded: true,
     deviceId: "00000000-0000-4000-8000-000000000300",
   };
 
@@ -146,6 +154,9 @@ describe("defaultBridge", () => {
         { processName: "Code.exe", durationSeconds: 4_800 },
         { processName: "chrome.exe", durationSeconds: 1_200 },
       ],
+      sites: [
+        { mapping: { id: "00000000-0000-4000-8000-000000000400", pattern: "*.quickbooks.com", projectId: "00000000-0000-4000-8000-000000000010" }, durationSeconds: 900 },
+      ],
     };
     invoke.mockResolvedValueOnce(stats);
     await expect(defaultBridge.meStats("2026-08-06T00:00:00.000Z")).resolves.toEqual(stats);
@@ -171,6 +182,7 @@ describe("defaultBridge", () => {
   it("maps path-mapping commands and rejects malformed rows", async () => {
     const mapping = {
       id: "00000000-0000-4000-8000-000000000400",
+      kind: "path_prefix",
       pathPrefix: "C:/dev/Clock-In",
       repoUrl: null,
       projectId: "00000000-0000-4000-8000-000000000010",
@@ -193,6 +205,36 @@ describe("defaultBridge", () => {
 
     invoke.mockResolvedValueOnce([{ ...mapping, repoUrl: 42 }]);
     await expect(defaultBridge.pathMappingsList()).rejects.toMatchObject({ kind: "unknown" });
+
+    invoke.mockResolvedValueOnce([{ ...mapping, kind: "glob_rule" }]);
+    await expect(defaultBridge.pathMappingsList()).rejects.toMatchObject({ kind: "unknown" });
+  });
+
+  it("maps the browser and suggestion commands", async () => {
+    const chrome = { browser: "chrome", label: "Chrome", state: "registered", storeUrl: "https://chromewebstore.google.com/" };
+    invoke.mockResolvedValueOnce(chrome);
+    await expect(defaultBridge.browserRepair("chrome")).resolves.toEqual(chrome);
+    expect(invoke).toHaveBeenCalledWith("browser_repair", { browser: "chrome" });
+
+    invoke.mockResolvedValueOnce(undefined);
+    await expect(defaultBridge.browserOpenStorePage("chrome")).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith("browser_open_store_page", { browser: "chrome" });
+
+    const tally = [{ origin: "quickbooks.com", seconds: 10_800 }];
+    invoke.mockResolvedValueOnce(tally);
+    await expect(defaultBridge.suggestionsList()).resolves.toEqual(tally);
+    expect(invoke).toHaveBeenCalledWith("suggestions_list", undefined);
+
+    invoke.mockResolvedValueOnce(undefined);
+    await expect(defaultBridge.suggestionNeverSuggest("quickbooks.com")).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith("suggestion_never_suggest", { origin: "quickbooks.com" });
+
+    invoke.mockResolvedValueOnce(undefined);
+    await expect(defaultBridge.suggestionsClear()).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith("suggestions_clear", undefined);
+
+    invoke.mockResolvedValueOnce([{ origin: "quickbooks.com", seconds: -1 }]);
+    await expect(defaultBridge.suggestionsList()).rejects.toMatchObject({ kind: "unknown" });
   });
 
   it("forwards a UI-decided idle figure on stop verbatim", async () => {

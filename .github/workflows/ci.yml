@@ -26,6 +26,25 @@ jobs:
       # Proves the deployable image still builds; the platform builds its own.
       - run: docker build -f apps/api/Dockerfile -t clock-in-api:ci .
 
+  # Builds the store packages (Chrome/Edge zip and Firefox variant zip) and
+  # keeps them as artifacts for the manual store submissions in DEPLOY.md.
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @clock-in/browser-extension build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: browser-extension-store-zips
+          path: apps/browser-extension/release/*.zip
+          if-no-files-found: error
+
   rust:
     runs-on: ubuntu-latest
     steps:

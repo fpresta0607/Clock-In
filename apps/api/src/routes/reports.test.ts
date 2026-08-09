@@ -69,6 +69,9 @@ class Reports implements ReportRepository {
   public async readProjectTotalsForMember(): Promise<never> {
     throw new Error("not used by these routes");
   }
+  public async readSiteTotalsForMember(): Promise<never> {
+    throw new Error("not used by these routes");
+  }
 }
 
 /** Report routes reap stale agent sessions before corroboration math; nothing else is used. */

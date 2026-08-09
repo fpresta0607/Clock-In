@@ -260,11 +260,24 @@ struct AgentEventBatchResponse {
     results: Vec<AgentEventOutcome>,
 }
 
+/// What a mapping row matches against: a local path prefix (agent sessions) or
+/// a URL rule (browser spans). Server-assigned; older servers omit it, so it
+/// defaults to path prefixes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MappingKind {
+    #[default]
+    PathPrefix,
+    UrlRule,
+}
+
 /// A per-user path prefix → project mapping, as `/path-mappings` returns it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PathMapping {
     pub id: String,
+    #[serde(default)]
+    pub kind: MappingKind,
     pub path_prefix: String,
     #[serde(default)]
     pub repo_url: Option<String>,
@@ -280,6 +293,8 @@ struct PathMappingListResponse {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PathMappingCreateInput {
+    #[serde(default)]
+    pub kind: MappingKind,
     pub path_prefix: String,
     #[serde(default)]
     pub repo_url: Option<String>,
@@ -312,6 +327,26 @@ pub struct MeStats {
     // Without this field serde silently drops the array and the TS bridge
     // rejects the whole response as invalid.
     pub apps: Vec<MeStatsApp>,
+    // Same for the per-rule browser totals; older servers omit it.
+    #[serde(default)]
+    pub sites: Vec<MeStatsSite>,
+}
+
+/// Per-rule browser focus totals: the pattern is text the user wrote, and
+/// `project_id` is null while the rule is unattributed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeStatsSite {
+    pub mapping: MeStatsSiteMapping,
+    pub duration_seconds: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeStatsSiteMapping {
+    pub id: String,
+    pub pattern: String,
+    pub project_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -750,6 +785,7 @@ impl ApiClient {
         input: &PathMappingCreateInput,
     ) -> ApiResult<PathMapping> {
         let mut body = serde_json::json!({
+            "kind": input.kind,
             "pathPrefix": input.path_prefix,
             "projectId": input.project_id,
         });

@@ -3,10 +3,11 @@
 //!
 //! Lightweight by construction: one Tokio task wakes every 30 seconds and asks
 //! the OS two read-only questions (`GetLastInputInfo`, the foreground process
-//! name — the name only, never a window title). Lock and suspend arrive as
-//! broadcasts on a hidden window owned by a dedicated thread, so between
-//! events the monitor costs nothing. There are no hooks, no injection, and no
-//! per-keystroke cost.
+//! name — the name only, never a window title). Lock, suspend, and session
+//! disconnect arrive as broadcasts on a hidden window owned by a dedicated
+//! thread, and foreground changes through an out-of-context WinEvent hook on
+//! that thread's message loop, so between events the monitor costs nothing.
+//! There is no injection and no per-keystroke cost.
 //!
 //! The signal stream folds into transition-based segments (`active`, `idle`,
 //! `locked`, `suspended`), so a workday produces dozens of rows, not ticks.
@@ -19,12 +20,22 @@
 //! new installs); disabling it aborts both tasks, so a paused monitor records
 //! nothing.
 //!
-//! Tradeoff, documented: the event thread uses a real hidden top-level window
-//! rather than a message-only one because Windows does not broadcast
-//! `WM_POWERBROADCAST` to message-only windows. Session unlock and
-//! resume-from-suspend deliberately raise no event — the next poll's
-//! Active/Idle signal closes the span, which is the same code path a
-//! transition would take.
+//! Tradeoffs, documented:
+//! - The event thread uses a real hidden top-level window rather than a
+//!   message-only one because Windows does not broadcast `WM_POWERBROADCAST`
+//!   to message-only windows.
+//! - Session unlock, reconnect, and resume-from-suspend deliberately raise no
+//!   event — the next poll's Active/Idle signal closes the span, which is the
+//!   same code path a transition would take.
+//! - The poll stays the idle/active authority; the foreground hook only
+//!   sharpens process boundaries inside an open `active` span, so per-app time
+//!   stops inheriting whatever was foreground last before idle.
+//! - Each tick pairs wall time with a monotonic reading. Both jumping together
+//!   past two poll intervals means the machine slept without delivering
+//!   `PBT_APMSUSPEND` (the normal case on Modern Standby) and the gap is
+//!   synthesized as `suspended`; wall time jumping alone means the system
+//!   clock changed, so the open segment is split at the jump and a notice is
+//!   surfaced in `MonitorStatus`.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -58,15 +69,24 @@ pub const AGENT_ACTIVE_WINDOW_SECONDS: u64 = 6 * 3_600;
 /// segments are already on disk, so dropping the oldest here loses nothing.
 const MAX_BUFFERED_SEGMENTS: usize = 10_000;
 
-/// What the OS reports. `Locked` and `Suspended` are pushed by the event
-/// thread; `Active` and `Idle` come from the 30-second poll.
+/// What the OS reports. `Locked`, `Suspended`, and `Foreground` are pushed by
+/// the event thread; `Active` and `Idle` come from the 30-second poll.
 // Constructors are Windows-only today (event thread + poll source); non-Windows
 // builds only consume signals in tests.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActivitySignal {
-    Active { process_name: Option<String> },
-    Idle { idle_seconds: u32 },
+    Active {
+        process_name: Option<String>,
+    },
+    Idle {
+        idle_seconds: u32,
+    },
+    /// The foreground window changed to another process. Only sharpens the
+    /// process boundary of an open `active` span; it never starts activity.
+    Foreground {
+        process_name: Option<String>,
+    },
     Locked,
     Suspended,
 }
@@ -105,7 +125,7 @@ struct OpenSegment {
 
 fn signal_kind(signal: &ActivitySignal) -> SegmentKind {
     match signal {
-        ActivitySignal::Active { .. } => SegmentKind::Active,
+        ActivitySignal::Active { .. } | ActivitySignal::Foreground { .. } => SegmentKind::Active,
         ActivitySignal::Idle { .. } => SegmentKind::Idle,
         ActivitySignal::Locked => SegmentKind::Locked,
         ActivitySignal::Suspended => SegmentKind::Suspended,
@@ -114,7 +134,9 @@ fn signal_kind(signal: &ActivitySignal) -> SegmentKind {
 
 fn signal_process_name(signal: &ActivitySignal) -> Option<String> {
     match signal {
-        ActivitySignal::Active { process_name } => process_name.clone(),
+        ActivitySignal::Active { process_name } | ActivitySignal::Foreground { process_name } => {
+            process_name.clone()
+        }
         _ => None,
     }
 }
@@ -137,6 +159,9 @@ impl SegmentBuilder {
     /// signal backdates the transition: the active span ended when the last
     /// input happened (`now - idle_seconds`), not when the poll noticed.
     pub fn apply(&mut self, now: u64, signal: &ActivitySignal) -> Vec<Segment> {
+        if let ActivitySignal::Foreground { process_name } = signal {
+            return self.apply_foreground(now, process_name.clone());
+        }
         let kind = signal_kind(signal);
         let transition_at = match signal {
             ActivitySignal::Idle { idle_seconds } => now.saturating_sub(u64::from(*idle_seconds)),
@@ -156,8 +181,11 @@ impl SegmentBuilder {
             }
             Some(open) => {
                 // Clamp into [open.started_at, now]: an idle span that predates
-                // the open segment must not overlap what came before it.
-                let boundary = transition_at.clamp(open.started_at, now);
+                // the open segment must not overlap what came before it. An
+                // out-of-order event (a pushed timestamp predating the open
+                // span, possible after a backwards clock change) collapses to
+                // a zero-length close instead of panicking the clamp.
+                let boundary = transition_at.clamp(open.started_at, open.started_at.max(now));
                 if boundary > open.started_at {
                     closed_now.push(Segment {
                         kind: open.kind,
@@ -181,14 +209,51 @@ impl SegmentBuilder {
             }
         }
 
-        if !closed_now.is_empty() {
-            self.closed.extend(closed_now.iter().cloned());
-            let overflow = self.closed.len().saturating_sub(MAX_BUFFERED_SEGMENTS);
-            if overflow > 0 {
-                self.closed.drain(..overflow);
-            }
-        }
+        self.buffer_closed(&closed_now);
         closed_now
+    }
+
+    /// A foreground change sharpens the process boundary of an open `active`
+    /// span: close it and reopen under the new process, so per-app time stops
+    /// inheriting the last-foreground label. Outside an active span the event
+    /// means nothing — the poll stays the idle/active authority.
+    fn apply_foreground(&mut self, now: u64, process_name: Option<String>) -> Vec<Segment> {
+        let Some(open) = &self.open else {
+            return Vec::new();
+        };
+        if open.kind != SegmentKind::Active
+            || open.process_name == process_name
+            || now <= open.started_at
+        {
+            return Vec::new();
+        }
+        let closed = Segment {
+            kind: SegmentKind::Active,
+            process_name: open.process_name.clone(),
+            started_at: open.started_at,
+            ended_at: now,
+        };
+        self.open = Some(OpenSegment {
+            kind: SegmentKind::Active,
+            process_name,
+            started_at: now,
+        });
+        self.buffer_closed(std::slice::from_ref(&closed));
+        vec![closed]
+    }
+
+    /// Buffers closed segments for snapshot reads, capped so a monitor running
+    /// for months stays bounded. Spooled segments are already on disk, so
+    /// dropping the oldest here loses nothing.
+    fn buffer_closed(&mut self, segments: &[Segment]) {
+        if segments.is_empty() {
+            return;
+        }
+        self.closed.extend(segments.iter().cloned());
+        let overflow = self.closed.len().saturating_sub(MAX_BUFFERED_SEGMENTS);
+        if overflow > 0 {
+            self.closed.drain(..overflow);
+        }
     }
 
     /// The open span's kind and start, for the lock-aware auto-stop check.
@@ -226,6 +291,32 @@ impl SegmentBuilder {
             started_at: open.started_at,
             ended_at: now,
         })
+    }
+
+    /// Splits the open span across a wall-clock jump: the old timeline's half
+    /// closes at `end` (the last trusted wall reading) and the same state
+    /// reopens at `restart` on the new timeline. Returns the closed half for
+    /// spooling, when it has any length.
+    pub fn split_at(&mut self, end: u64, restart: u64) -> Option<Segment> {
+        let open = self.open.take()?;
+        let closed = if end > open.started_at {
+            let segment = Segment {
+                kind: open.kind,
+                process_name: open.process_name.clone(),
+                started_at: open.started_at,
+                ended_at: end,
+            };
+            self.buffer_closed(std::slice::from_ref(&segment));
+            Some(segment)
+        } else {
+            None
+        };
+        self.open = Some(OpenSegment {
+            kind: open.kind,
+            process_name: open.process_name,
+            started_at: restart,
+        });
+        closed
     }
 }
 
@@ -276,6 +367,10 @@ pub struct MonitorSettings {
     /// Suppress away auto-stop and idle accrual while an agent session is
     /// active — an overnight agent run on a locked machine is legitimate work.
     pub agent_override_enabled: bool,
+    /// The first-run flow (monitoring question + browser cards) ran to
+    /// completion; false drops a signed-in user into onboarding instead of
+    /// the main screen.
+    pub onboarded: bool,
     /// Stable per-install device id stamped on every segment; generated once.
     pub device_id: String,
 }
@@ -288,6 +383,7 @@ impl Default for MonitorSettings {
             hard_away_limit_minutes: 60,
             auto_stop_on_lock: true,
             agent_override_enabled: true,
+            onboarded: false,
             device_id: String::new(),
         }
     }
@@ -328,6 +424,7 @@ impl MonitorSettings {
             agent_override_enabled: patch
                 .agent_override_enabled
                 .unwrap_or(self.agent_override_enabled),
+            onboarded: patch.onboarded.unwrap_or(self.onboarded),
             device_id: self.device_id.clone(),
         }
     }
@@ -342,6 +439,7 @@ pub struct SettingsPatch {
     pub hard_away_limit_minutes: Option<u32>,
     pub auto_stop_on_lock: Option<bool>,
     pub agent_override_enabled: Option<bool>,
+    pub onboarded: Option<bool>,
 }
 
 /// The policy inputs the pure decision functions take, already in seconds.
@@ -486,12 +584,36 @@ impl AgentTracking {
 
 /// "An agent started in a mapped directory while no timer runs" — the one
 /// prompt the monitor raises locally; the server stays authoritative.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingSuggestion {
     pub project_id: String,
     pub source: String,
     pub since: String,
+    /// The browser span the suggestion was raised for, when it was. Internal
+    /// only (never serialized): it is how dismissal is remembered per span.
+    #[serde(skip)]
+    pub span_id: Option<String>,
+}
+
+/// The browser-span side of the drain's bookkeeping. Kept apart from
+/// `AgentTracking` so a focused tab never opens the away override: an open
+/// browser span says nothing once the human leaves.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BrowserTracking {
+    /// Every span the drain has seen, by span id. Bounded: past the cap the
+    /// oldest-starter is evicted.
+    pub spans: std::collections::BTreeMap<String, BrowserSpan>,
+    /// The span the user dismissed; a drain never re-raises it.
+    pub dismissed_span: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserSpan {
+    pub started_at: u64,
+    /// The latest event seen for the span (its end, once ended).
+    pub last_seen: u64,
+    pub project_id: String,
 }
 
 /// The state the poll task, the upload task, and the Tauri commands share.
@@ -501,7 +623,11 @@ pub struct MonitorShared {
     /// Local cache of the user's path mappings, refreshed on each upload run.
     pub mappings: Vec<PathMapping>,
     pub agent: AgentTracking,
+    pub browser: BrowserTracking,
     pub last_upload_at: Option<String>,
+    /// Wall time of the last detected system-clock change, surfaced in
+    /// `MonitorStatus`. Sticky until the next change or a restart.
+    pub clock_change_at: Option<u64>,
 }
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -538,6 +664,120 @@ impl PlatformEvents {
     }
 }
 
+// wparam values of WM_WTSSESSION_CHANGE (winuser.h), defined here rather than
+// imported so the mapping is testable on any OS.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const WTS_CONSOLE_DISCONNECT_WP: usize = 0x2;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const WTS_REMOTE_DISCONNECT_WP: usize = 0x4;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const WTS_SESSION_LOCK_WP: usize = 0x7;
+
+/// Maps a `WM_WTSSESSION_CHANGE` wparam to a signal. Console and remote
+/// disconnects — fast user switching, RDP takeover — mean the session left the
+/// local console, which records exactly like a lock. Connect, reconnect, and
+/// unlock raise no event: the next poll closes the span, same as always.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn session_change_signal(wparam: usize) -> Option<ActivitySignal> {
+    match wparam {
+        WTS_SESSION_LOCK_WP | WTS_CONSOLE_DISCONNECT_WP | WTS_REMOTE_DISCONNECT_WP => {
+            Some(ActivitySignal::Locked)
+        }
+        _ => None,
+    }
+}
+
+/// Store-packaged (UWP) apps draw inside a frame window owned by
+/// ApplicationFrameHost.exe; the app's real process owns the child
+/// CoreWindow. The image-name casing varies between builds.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn is_uwp_frame_host(process_name: &str) -> bool {
+    process_name.eq_ignore_ascii_case("applicationframehost.exe")
+}
+
+/// One tick's two clock readings: wall time (unix seconds) beside a monotonic
+/// source (seconds from an arbitrary process-local epoch, never compared
+/// across restarts).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TickReading {
+    wall: u64,
+    mono: u64,
+}
+
+/// What comparing two consecutive tick readings says happened between them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClockGap {
+    /// Both clocks jumped together: the machine slept without a suspend
+    /// broadcast (Modern Standby). Carries the wall-clock span of the gap.
+    Slept { from: u64, to: u64 },
+    /// Wall time moved against the monotonic clock: the system clock changed.
+    ClockChanged,
+}
+
+/// A gap must exceed two poll intervals before it means anything; below that,
+/// a slow tick is just a slow tick.
+const CLOCK_GAP_THRESHOLD_SECONDS: u64 = 2 * POLL_INTERVAL_SECONDS;
+
+fn classify_clock_gap(prior: TickReading, reading: TickReading) -> Option<ClockGap> {
+    let mono_delta = reading.mono.saturating_sub(prior.mono);
+    let wall_delta = i128::from(reading.wall) - i128::from(prior.wall);
+    let divergence = (wall_delta - i128::from(mono_delta)).abs();
+    if divergence > i128::from(CLOCK_GAP_THRESHOLD_SECONDS) {
+        return Some(ClockGap::ClockChanged);
+    }
+    if mono_delta > CLOCK_GAP_THRESHOLD_SECONDS {
+        return Some(ClockGap::Slept {
+            from: prior.wall,
+            to: reading.wall,
+        });
+    }
+    None
+}
+
+/// One tick of the poll loop, folded into segments: gap synthesis first (its
+/// timestamp predates anything pushed since the last tick), then pushed
+/// session events, then the poll's own signal. Returns the closed segments
+/// for spooling and the clock gap detected, so the caller can surface a
+/// clock-change notice.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn fold_tick(
+    builder: &mut SegmentBuilder,
+    previous: &mut Option<TickReading>,
+    reading: TickReading,
+    pushed: Vec<(u64, ActivitySignal)>,
+    signal: &ActivitySignal,
+) -> (Vec<Segment>, Option<ClockGap>) {
+    let prior = *previous;
+    let gap = prior.and_then(|prior| classify_clock_gap(prior, reading));
+    *previous = Some(reading);
+
+    let mut closed = Vec::new();
+    match gap {
+        // Slept without a suspend broadcast: the whole wall-clock gap is
+        // Suspended; the poll signal below closes it at `reading.wall`.
+        Some(ClockGap::Slept { from, to }) => {
+            debug_assert_eq!(to, reading.wall);
+            closed.extend(builder.apply(from, &ActivitySignal::Suspended));
+        }
+        // The wall clock jumped against the monotonic one: split the open
+        // span at the last trusted wall reading and reopen it on the new
+        // timeline.
+        Some(ClockGap::ClockChanged) => {
+            if let Some(prior) = prior {
+                closed.extend(builder.split_at(prior.wall, reading.wall));
+            }
+        }
+        None => {}
+    }
+    // Event timestamps come from when the OS broadcast fired, which can be
+    // long ago (a suspend/resume pair spanning the night).
+    for (at, pushed_signal) in pushed {
+        closed.extend(builder.apply(at, &pushed_signal));
+    }
+    closed.extend(builder.apply(reading.wall, signal));
+    (closed, gap)
+}
+
 /// Per-CLI hook registration status, detected by a plain substring check for
 /// the hook binary name inside the CLI's own config file. Cheap and read-only,
 /// and honest about being a heuristic: it cannot tell a live registration
@@ -546,7 +786,11 @@ impl PlatformEvents {
 #[serde(rename_all = "camelCase")]
 pub struct HookRegistration {
     pub source: String,
+    /// The hook is already mentioned in the CLI's config.
     pub detected: bool,
+    /// The CLI's config file exists at all — the CLI is on the machine, so
+    /// the settings UI offers the opt-in. CLIs without a config stay hidden.
+    pub installed: bool,
     pub config_path: String,
 }
 
@@ -596,6 +840,7 @@ pub fn detect_hooks(probes: &[HookProbe]) -> Vec<HookRegistration> {
             HookRegistration {
                 source: probe.source.to_string(),
                 detected,
+                installed: probe.config_path.exists(),
                 config_path: probe.config_path.to_string_lossy().into_owned(),
             }
         })
@@ -905,6 +1150,8 @@ pub struct MonitorStatus {
     pub segment_backlog: u32,
     pub agent_backlog: u32,
     pub hooks: Vec<HookRegistration>,
+    /// Per-browser extension health, for the setup cards and settings badges.
+    pub browsers: Vec<crate::browser::BrowserHealth>,
     pub pending_suggestion: Option<PendingSuggestion>,
     /// The agent session holding the away override open, if any — explains to
     /// the user why `session_idle_seconds` is frozen.
@@ -912,6 +1159,9 @@ pub struct MonitorStatus {
     /// Idle trimmed from the running session so far, when a timer runs.
     pub session_idle_seconds: Option<u32>,
     pub away: Option<AwayInfo>,
+    /// Wall time of the last detected system-clock change. The open segment
+    /// was split at the jump; this tells the UI the timeline had a seam.
+    pub clock_change_detected_at: Option<String>,
 }
 
 /// Lines (≈ pending rows) in a spool file, for the backlog counters.
@@ -926,6 +1176,9 @@ pub struct MonitorConfig {
     pub settings_path: PathBuf,
     pub segments_path: PathBuf,
     pub agent_path: PathBuf,
+    /// Beside the agent spool: the browser spool, rules file, tally, and
+    /// handshake marker live here.
+    pub browser_dir: PathBuf,
     pub recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
     pub recovery_path: PathBuf,
 }
@@ -946,6 +1199,7 @@ pub struct Monitor {
     settings_path: PathBuf,
     segments_path: PathBuf,
     agent_path: PathBuf,
+    browser_dir: PathBuf,
     client: ApiClient,
     recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
     // Read only by the Windows-gated poll/auto-stop path today.
@@ -966,12 +1220,15 @@ impl Monitor {
                 settings,
                 mappings: Vec::new(),
                 agent: AgentTracking::default(),
+                browser: BrowserTracking::default(),
                 last_upload_at: None,
+                clock_change_at: None,
             })),
             events: Arc::new(PlatformEvents::new()),
             settings_path: config.settings_path,
             segments_path: config.segments_path,
             agent_path: config.agent_path,
+            browser_dir: config.browser_dir,
             client: config.client,
             recovery: config.recovery,
             recovery_path: config.recovery_path,
@@ -1018,6 +1275,7 @@ impl Monitor {
             self.client.clone(),
             self.segments_path.clone(),
             self.agent_path.clone(),
+            self.browser_dir.clone(),
             Arc::clone(&self.recovery),
             Arc::clone(&self.upload_now),
         ));
@@ -1075,12 +1333,35 @@ impl Monitor {
         Ok(next)
     }
 
+    /// Clears the pending suggestion. A browser-span suggestion's dismissal is
+    /// remembered for that span: the next drain must not re-raise it.
     pub fn clear_suggestion(&self) {
-        lock(&self.shared).agent.suggestion = None;
+        let mut shared = lock(&self.shared);
+        if let Some(suggestion) = shared.agent.suggestion.take() {
+            if let Some(span_id) = suggestion.span_id {
+                shared.browser.dismissed_span = Some(span_id);
+            }
+        }
     }
 
+    /// Refreshes the local mapping cache and rewrites the browser rules file
+    /// when the `url_rule` set changed; the extension picks it up through the
+    /// host. A failed write keeps the old file — stale rules beat none.
     pub fn cache_mappings(&self, mappings: Vec<PathMapping>) {
+        if let Err(error) = crate::browser::write_rules_file(&self.browser_dir, &mappings) {
+            eprintln!("clock-in: could not write the browser rules file: {error}");
+        }
         lock(&self.shared).mappings = mappings;
+    }
+
+    /// The mappings cache, for suggestion filtering.
+    pub fn cached_mappings(&self) -> Vec<PathMapping> {
+        lock(&self.shared).mappings.clone()
+    }
+
+    /// Where the browser spool, rules file, tally, and handshake marker live.
+    pub fn browser_dir(&self) -> PathBuf {
+        self.browser_dir.clone()
     }
 
     /// Asks the upload task to run now instead of at the next 5-minute tick
@@ -1165,10 +1446,12 @@ impl Monitor {
             segment_backlog: count_lines(&self.segments_path),
             agent_backlog: count_lines(&self.agent_path),
             hooks: detect_hooks(&default_hook_probes()),
+            browsers: crate::browser::health_all(&self.browser_dir),
             pending_suggestion: shared.agent.suggestion.clone(),
             agent_active,
             session_idle_seconds,
             away,
+            clock_change_detected_at: shared.clock_change_at.map(iso8601),
         }
     }
 }
@@ -1210,8 +1493,9 @@ fn append_segment_line(path: &Path, segment: &Segment, device_id: &str) {
     }
 }
 
-/// The 30-second poll task: drain pushed session events, poll the OS, fold
-/// signals into segments, spool transitions, enforce the auto-stop policy.
+/// The 30-second poll task: detect sleep/clock gaps, drain pushed session
+/// events, poll the OS, fold signals into segments, spool transitions,
+/// enforce the auto-stop policy.
 #[cfg_attr(not(windows), allow(dead_code))]
 async fn poll_loop(
     shared: Arc<Mutex<MonitorShared>>,
@@ -1222,31 +1506,43 @@ async fn poll_loop(
     upload_now: Arc<Notify>,
 ) {
     let source = platform::Poller::new();
+    // Monotonic baseline for the sleep/clock-change detector; paired with the
+    // wall clock each tick, a missed suspend broadcast becomes visible.
+    let clock_start = std::time::Instant::now();
+    let mut previous: Option<TickReading> = None;
     let mut tick = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECONDS));
     // A slept machine replays missed ticks one at a time, not in a burst.
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        let now = unix_now();
+        let reading = TickReading {
+            wall: unix_now(),
+            mono: clock_start.elapsed().as_secs(),
+        };
         let pushed = events.drain();
+        let signal = source.poll();
 
-        let mut closed = Vec::new();
-        let device_id = {
+        let (closed, device_id) = {
             let mut shared = lock(&shared);
-            // Event timestamps come from when the OS broadcast fired, which
-            // can be long ago (a suspend/resume pair spanning the night).
-            for (at, signal) in pushed {
-                closed.extend(shared.builder.apply(at, &signal));
+            let (closed, gap) =
+                fold_tick(&mut shared.builder, &mut previous, reading, pushed, &signal);
+            if matches!(gap, Some(ClockGap::ClockChanged)) {
+                shared.clock_change_at = Some(reading.wall);
             }
-            let signal = source.poll();
-            closed.extend(shared.builder.apply(now, &signal));
-            shared.settings.device_id.clone()
+            (closed, shared.settings.device_id.clone())
         };
         for segment in &closed {
             append_segment_line(&segments_path, segment, &device_id);
         }
 
-        enforce_auto_stop(&shared, &recovery, &recovery_path, &upload_now, now).await;
+        enforce_auto_stop(
+            &shared,
+            &recovery,
+            &recovery_path,
+            &upload_now,
+            reading.wall,
+        )
+        .await;
     }
 }
 
@@ -1428,15 +1724,25 @@ mod platform {
     use windows_sys::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     };
+    use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetForegroundWindow, GetMessageW,
-        GetWindowLongPtrW, GetWindowThreadProcessId, RegisterClassW, SetWindowLongPtrW,
-        TranslateMessage, CW_USEDEFAULT, GWLP_USERDATA, MSG, PBT_APMSUSPEND, WM_POWERBROADCAST,
-        WM_WTSSESSION_CHANGE, WNDCLASSW, WS_POPUP, WTS_SESSION_LOCK,
+        CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows, GetClassNameW,
+        GetForegroundWindow, GetMessageW, GetWindowLongPtrW, GetWindowThreadProcessId,
+        RegisterClassW, SetWindowLongPtrW, TranslateMessage, CHILDID_SELF, CW_USEDEFAULT,
+        EVENT_SYSTEM_FOREGROUND, GWLP_USERDATA, MSG, OBJID_WINDOW, PBT_APMSUSPEND,
+        WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_POWERBROADCAST, WM_WTSSESSION_CHANGE,
+        WNDCLASSW, WS_POPUP,
     };
 
-    use super::{unix_now, ActivitySignal, ActivitySource, PlatformEvents, IDLE_THRESHOLD_SECONDS};
+    use super::{
+        is_uwp_frame_host, session_change_signal, unix_now, ActivitySignal, ActivitySource,
+        PlatformEvents, IDLE_THRESHOLD_SECONDS,
+    };
+
+    /// The child-window class that marks a UWP app's real content window
+    /// inside the ApplicationFrameHost.exe frame.
+    const UWP_CORE_WINDOW_CLASS: &str = "Windows.UI.Core.CoreWindow";
 
     pub struct Poller;
 
@@ -1480,16 +1786,37 @@ mod platform {
     /// never the window title. `None` when the OS won't say (no foreground
     /// window, access denied), which the segment simply records without one.
     fn foreground_process_name() -> Option<String> {
+        process_name_for_window(unsafe { GetForegroundWindow() })
+    }
+
+    /// The executable name of the process owning `window`. Store-packaged
+    /// (UWP) apps report as ApplicationFrameHost.exe; those resolve through
+    /// the child CoreWindow's process so Calculator, Photos, and friends
+    /// report their own names.
+    fn process_name_for_window(window: HWND) -> Option<String> {
+        if window.is_null() {
+            return None;
+        }
+        let mut process_id = 0u32;
+        unsafe { GetWindowThreadProcessId(window, &mut process_id) };
+        if process_id == 0 {
+            return None;
+        }
+        let name = process_name_for_pid(process_id)?;
+        if is_uwp_frame_host(&name) {
+            if let Some(child_id) = uwp_child_process_id(window) {
+                if let Some(child_name) = process_name_for_pid(child_id) {
+                    return Some(child_name);
+                }
+            }
+        }
+        Some(name)
+    }
+
+    /// The executable file name of a process id, or `None` when the process
+    /// won't open (access denied, already exited).
+    fn process_name_for_pid(process_id: u32) -> Option<String> {
         unsafe {
-            let window = GetForegroundWindow();
-            if window.is_null() {
-                return None;
-            }
-            let mut process_id = 0u32;
-            GetWindowThreadProcessId(window, &mut process_id);
-            if process_id == 0 {
-                return None;
-            }
             let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
             if process.is_null() {
                 return None;
@@ -1509,11 +1836,51 @@ mod platform {
         }
     }
 
-    /// Publishes lock and suspend broadcasts into `events`. Runs for the
-    /// process lifetime: the thread is created once, and between broadcasts
-    /// it sleeps inside `GetMessageW` at zero background cost.
+    /// The PID of the UWP app's real process: the descendant window whose
+    /// class is `Windows.UI.Core.CoreWindow`. `None` when the frame hosts
+    /// none (the app is still starting) — the caller keeps the frame name.
+    fn uwp_child_process_id(window: HWND) -> Option<u32> {
+        struct Search {
+            process_id: u32,
+        }
+        unsafe extern "system" fn visit(child: HWND, lparam: LPARAM) -> i32 {
+            let search = unsafe { &mut *(lparam as *mut Search) };
+            let mut class = [0u16; 64];
+            let length = unsafe { GetClassNameW(child, class.as_mut_ptr(), class.len() as i32) };
+            if length > 0
+                && String::from_utf16_lossy(&class[..length as usize]) == UWP_CORE_WINDOW_CLASS
+            {
+                let mut process_id = 0u32;
+                unsafe { GetWindowThreadProcessId(child, &mut process_id) };
+                if process_id != 0 {
+                    search.process_id = process_id;
+                    return 0; // Found: stop enumerating.
+                }
+            }
+            1
+        }
+        let mut search = Search { process_id: 0 };
+        unsafe {
+            EnumChildWindows(window, Some(visit), &mut search as *mut Search as LPARAM);
+        }
+        (search.process_id != 0).then_some(search.process_id)
+    }
+
+    /// Publishes lock, disconnect, and suspend broadcasts plus foreground
+    /// changes into `events`. Runs for the process lifetime: the thread is
+    /// created once, and between events it sleeps inside `GetMessageW` at
+    /// zero background cost.
     pub fn spawn_event_thread(events: Arc<PlatformEvents>) {
         std::thread::spawn(move || unsafe { event_loop(events) });
+    }
+
+    thread_local! {
+        /// The queue the WinEvent callback pushes into. Set once on this
+        /// thread before the hook is registered; the Arc behind the pointer
+        /// is leaked in `event_loop`, so the pointer stays valid for the
+        /// process lifetime.
+        static HOOK_EVENTS: std::cell::Cell<*const PlatformEvents> =
+            const { std::cell::Cell::new(std::ptr::null()) };
     }
 
     unsafe fn event_loop(events: Arc<PlatformEvents>) {
@@ -1559,6 +1926,23 @@ mod platform {
             SetWindowLongPtrW(window, GWLP_USERDATA, leaked as isize);
             WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION);
         }
+        // Foreground changes arrive over this same message loop. Out of
+        // context means no injection into other processes — events are posted
+        // to our queue; skip-own-process keeps our own window's focus out.
+        // If the hook fails to register, the poll still tracks the
+        // foreground every 30 seconds, just with coarser boundaries.
+        HOOK_EVENTS.with(|cell| cell.set(leaked));
+        let _hook = unsafe {
+            SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND,
+                EVENT_SYSTEM_FOREGROUND,
+                std::ptr::null_mut(),
+                Some(foreground_event_proc),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+            )
+        };
 
         let mut message: MSG = unsafe { std::mem::zeroed() };
         while unsafe { GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) } > 0 {
@@ -1567,6 +1951,35 @@ mod platform {
                 DispatchMessageW(&message);
             }
         }
+    }
+
+    /// The WinEventProc behind `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)`,
+    /// invoked on the event thread through its message loop. Only real
+    /// window-level foreground changes interest us, and only while the machine
+    /// reads as active: a focus change on an idle machine is programmatic,
+    /// and the poll owns the idle/active call.
+    unsafe extern "system" fn foreground_event_proc(
+        _hook: HWINEVENTHOOK,
+        _event: u32,
+        window: HWND,
+        id_object: i32,
+        id_child: i32,
+        _event_thread: u32,
+        _event_time: u32,
+    ) {
+        if window.is_null() || id_object != OBJID_WINDOW || id_child != CHILDID_SELF as i32 {
+            return;
+        }
+        if idle_seconds().is_some_and(|idle| idle >= IDLE_THRESHOLD_SECONDS) {
+            return;
+        }
+        HOOK_EVENTS.with(|cell| {
+            let events = cell.get();
+            if !events.is_null() {
+                let process_name = process_name_for_window(window);
+                unsafe { &*events }.push(unix_now(), ActivitySignal::Foreground { process_name });
+            }
+        });
     }
 
     unsafe extern "system" fn window_proc(
@@ -1578,11 +1991,11 @@ mod platform {
         let events = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *const PlatformEvents;
         if !events.is_null() {
             let signal = match message {
-                WM_WTSSESSION_CHANGE if wparam == WTS_SESSION_LOCK as usize => {
-                    Some(ActivitySignal::Locked)
-                }
-                // Unlock and resume raise no event: the next poll's Active or
-                // Idle signal closes the span the same way a transition would.
+                // Lock, fast-user-switch disconnect, and RDP-takeover
+                // disconnect all record as locked. Unlock, reconnect, and
+                // resume raise no event: the next poll's Active or Idle
+                // signal closes the span the same way a transition would.
+                WM_WTSSESSION_CHANGE => session_change_signal(wparam),
                 WM_POWERBROADCAST if wparam == PBT_APMSUSPEND as usize => {
                     Some(ActivitySignal::Suspended)
                 }
@@ -1631,6 +2044,12 @@ mod tests {
     fn idle(seconds: u32) -> ActivitySignal {
         ActivitySignal::Idle {
             idle_seconds: seconds,
+        }
+    }
+
+    fn foreground(name: &str) -> ActivitySignal {
+        ActivitySignal::Foreground {
+            process_name: Some(name.to_string()),
         }
     }
 
@@ -1723,6 +2142,294 @@ mod tests {
         assert_eq!((flushed.started_at, flushed.ended_at), (1_000, 1_500));
         assert!(builder.flush(1_600).is_none(), "nothing left open");
         assert!(builder.snapshot(1_600).is_empty());
+    }
+
+    #[test]
+    fn a_foreground_change_splits_the_open_active_span() {
+        let mut builder = SegmentBuilder::new();
+        builder.apply(1_000, &active("chrome.exe"));
+
+        // Switching from Chrome to VS Code at t=1030 closes Chrome's span and
+        // opens a new one, instead of the whole span inheriting one label.
+        let closed = builder.apply(1_030, &foreground("code.exe"));
+        assert_eq!(
+            closed,
+            vec![{
+                let mut chrome = segment(SegmentKind::Active, 1_000, 1_030);
+                chrome.process_name = Some("chrome.exe".to_string());
+                chrome
+            }]
+        );
+        assert_eq!(builder.open_span(), Some((SegmentKind::Active, 1_030)));
+
+        // Same process again: nothing to split.
+        assert!(builder.apply(1_060, &foreground("code.exe")).is_empty());
+
+        // The poll keeps confirming the new label and coalescing.
+        assert!(builder.apply(1_090, &active("code.exe")).is_empty());
+        let snapshot = builder.snapshot(1_090);
+        let open = snapshot.last().expect("the active span is open");
+        assert_eq!(open.process_name.as_deref(), Some("code.exe"));
+        assert_eq!((open.started_at, open.ended_at), (1_030, 1_090));
+
+        // A foreground event with an unresolvable process still splits: the
+        // time after the switch is honestly unlabeled, not Chrome's.
+        let closed = builder.apply(1_120, &ActivitySignal::Foreground { process_name: None });
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].process_name.as_deref(), Some("code.exe"));
+        let open = builder
+            .snapshot(1_150)
+            .last()
+            .expect("span is open")
+            .clone();
+        assert_eq!(open.process_name, None);
+        assert_eq!(open.started_at, 1_120);
+    }
+
+    #[test]
+    fn foreground_events_only_sharpen_active_spans() {
+        let mut builder = SegmentBuilder::new();
+        // Nothing open: the poll opens spans, not the hook.
+        assert!(builder.apply(1_000, &foreground("code.exe")).is_empty());
+        assert_eq!(builder.open_span(), None);
+
+        // While idle, a programmatic focus change is not activity.
+        builder.apply(1_000, &idle(120));
+        assert_eq!(builder.open_span(), Some((SegmentKind::Idle, 880)));
+        assert!(builder.apply(1_030, &foreground("code.exe")).is_empty());
+        assert_eq!(builder.open_span(), Some((SegmentKind::Idle, 880)));
+
+        // While locked, same.
+        builder.apply(1_100, &ActivitySignal::Locked);
+        assert!(builder.apply(1_130, &foreground("code.exe")).is_empty());
+        assert_eq!(builder.open_span(), Some((SegmentKind::Locked, 1_100)));
+    }
+
+    #[test]
+    fn classify_clock_gap_distinguishes_sleep_from_clock_changes() {
+        let prior = TickReading {
+            wall: 1_000,
+            mono: 100,
+        };
+        // A normal 30s tick: nothing.
+        assert_eq!(
+            classify_clock_gap(
+                prior,
+                TickReading {
+                    wall: 1_030,
+                    mono: 130
+                }
+            ),
+            None
+        );
+        // A tick delayed past two poll intervals with both clocks moving
+        // together: the machine slept without a suspend broadcast.
+        assert_eq!(
+            classify_clock_gap(
+                prior,
+                TickReading {
+                    wall: 8_200,
+                    mono: 7_300
+                }
+            ),
+            Some(ClockGap::Slept {
+                from: 1_000,
+                to: 8_200
+            })
+        );
+        // Wall jumped alone, forward or backward: the system clock changed.
+        assert_eq!(
+            classify_clock_gap(
+                prior,
+                TickReading {
+                    wall: 4_630,
+                    mono: 130
+                }
+            ),
+            Some(ClockGap::ClockChanged)
+        );
+        assert_eq!(
+            classify_clock_gap(
+                prior,
+                TickReading {
+                    wall: 200,
+                    mono: 130
+                }
+            ),
+            Some(ClockGap::ClockChanged)
+        );
+        // A slow tick within two intervals on both clocks is still normal.
+        assert_eq!(
+            classify_clock_gap(
+                prior,
+                TickReading {
+                    wall: 1_045,
+                    mono: 130
+                }
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_joint_clock_jump_synthesizes_a_suspended_gap() {
+        let mut builder = SegmentBuilder::new();
+        let mut previous = None;
+        builder.apply(900, &active("code.exe"));
+        let (closed, gap) = fold_tick(
+            &mut builder,
+            &mut previous,
+            TickReading {
+                wall: 1_000,
+                mono: 100,
+            },
+            Vec::new(),
+            &active("code.exe"),
+        );
+        assert!(closed.is_empty() && gap.is_none());
+
+        // Eight hours later the machine wakes; the suspend broadcast never
+        // fired (Modern Standby). The gap becomes Suspended, not active time.
+        let (closed, gap) = fold_tick(
+            &mut builder,
+            &mut previous,
+            TickReading {
+                wall: 8_200,
+                mono: 7_300,
+            },
+            Vec::new(),
+            &active("code.exe"),
+        );
+        assert_eq!(
+            gap,
+            Some(ClockGap::Slept {
+                from: 1_000,
+                to: 8_200
+            })
+        );
+        assert_eq!(
+            closed,
+            vec![
+                {
+                    let mut work = segment(SegmentKind::Active, 900, 1_000);
+                    work.process_name = Some("code.exe".to_string());
+                    work
+                },
+                segment(SegmentKind::Suspended, 1_000, 8_200),
+            ]
+        );
+        assert_eq!(builder.open_span(), Some((SegmentKind::Active, 8_200)));
+    }
+
+    #[test]
+    fn a_wall_only_jump_splits_the_span_at_the_last_trusted_reading() {
+        let mut builder = SegmentBuilder::new();
+        let mut previous = None;
+        builder.apply(900, &active("code.exe"));
+        fold_tick(
+            &mut builder,
+            &mut previous,
+            TickReading {
+                wall: 1_000,
+                mono: 100,
+            },
+            Vec::new(),
+            &active("code.exe"),
+        );
+
+        // The wall clock jumped an hour forward while 30 monotonic seconds
+        // passed: the system clock changed mid-span.
+        let (closed, gap) = fold_tick(
+            &mut builder,
+            &mut previous,
+            TickReading {
+                wall: 4_630,
+                mono: 130,
+            },
+            Vec::new(),
+            &active("code.exe"),
+        );
+        assert_eq!(gap, Some(ClockGap::ClockChanged));
+        // The old timeline's half closed at the last trusted wall reading...
+        assert_eq!(
+            closed,
+            vec![{
+                let mut work = segment(SegmentKind::Active, 900, 1_000);
+                work.process_name = Some("code.exe".to_string());
+                work
+            }]
+        );
+        // ...and the same state reopened on the new timeline.
+        assert_eq!(builder.open_span(), Some((SegmentKind::Active, 4_630)));
+        let snapshot = builder.snapshot(4_630);
+        assert_eq!(snapshot.len(), 1, "only the closed half is history");
+    }
+
+    #[test]
+    fn pushed_events_still_apply_after_a_clock_change_split() {
+        let mut builder = SegmentBuilder::new();
+        let mut previous = None;
+        builder.apply(900, &active("code.exe"));
+        fold_tick(
+            &mut builder,
+            &mut previous,
+            TickReading {
+                wall: 1_000,
+                mono: 100,
+            },
+            Vec::new(),
+            &active("code.exe"),
+        );
+
+        // The clock jumped backwards; a lock event pushed after the jump
+        // carries a timestamp on the new (earlier) timeline and must not
+        // panic the fold.
+        let (closed, gap) = fold_tick(
+            &mut builder,
+            &mut previous,
+            TickReading {
+                wall: 200,
+                mono: 130,
+            },
+            vec![(190, ActivitySignal::Locked)],
+            &ActivitySignal::Locked,
+        );
+        assert_eq!(gap, Some(ClockGap::ClockChanged));
+        assert_eq!(builder.open_span(), Some((SegmentKind::Locked, 200)));
+        // The old timeline's active half still spooled.
+        assert!(closed
+            .iter()
+            .any(|segment| { segment.kind == SegmentKind::Active && segment.ended_at == 1_000 }));
+    }
+
+    #[test]
+    fn session_disconnects_map_to_locked_like_the_lock_broadcast() {
+        assert_eq!(
+            session_change_signal(WTS_SESSION_LOCK_WP),
+            Some(ActivitySignal::Locked)
+        );
+        assert_eq!(
+            session_change_signal(WTS_CONSOLE_DISCONNECT_WP),
+            Some(ActivitySignal::Locked),
+            "fast user switching records as locked"
+        );
+        assert_eq!(
+            session_change_signal(WTS_REMOTE_DISCONNECT_WP),
+            Some(ActivitySignal::Locked),
+            "RDP takeover records as locked"
+        );
+        // Unlock, connect, and logon raise no event: the poll closes the span.
+        for wparam in [0x1, 0x3, 0x5, 0x8] {
+            assert_eq!(session_change_signal(wparam), None);
+        }
+    }
+
+    #[test]
+    fn uwp_frame_host_detection_is_case_insensitive_and_exact() {
+        assert!(is_uwp_frame_host("ApplicationFrameHost.exe"));
+        assert!(is_uwp_frame_host("applicationframehost.exe"));
+        assert!(!is_uwp_frame_host("chrome.exe"));
+        assert!(!is_uwp_frame_host("ApplicationFrameHost.exe.tmp"));
     }
 
     #[test]
@@ -2033,6 +2740,7 @@ mod tests {
             settings_path: dir.join("settings.json"),
             segments_path: dir.join("segments-spool.jsonl"),
             agent_path: dir.join("agent-spool.jsonl"),
+            browser_dir: dir.clone(),
             recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
             recovery_path: dir.join("recovery.json"),
         });
@@ -2067,6 +2775,7 @@ mod tests {
             settings_path: dir.join("settings.json"),
             segments_path: dir.join("segments-spool.jsonl"),
             agent_path: dir.join("agent-spool.jsonl"),
+            browser_dir: dir.clone(),
             recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
             recovery_path: dir.join("recovery.json"),
         });
@@ -2103,6 +2812,41 @@ mod tests {
             monitor.status().await.agent_active.is_none(),
             "an ended session is over"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn status_surfaces_a_clock_change_notice() {
+        let dir =
+            std::env::temp_dir().join(format!("clock-in-monitor-clock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let client = ApiClient::new(
+            "http://127.0.0.1:9/auth".to_string(),
+            "http://127.0.0.1:9".to_string(),
+        )
+        .expect("client builds");
+        let monitor = Monitor::new(MonitorConfig {
+            client,
+            settings_path: dir.join("settings.json"),
+            segments_path: dir.join("segments-spool.jsonl"),
+            agent_path: dir.join("agent-spool.jsonl"),
+            browser_dir: dir.clone(),
+            recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
+            recovery_path: dir.join("recovery.json"),
+        });
+
+        assert_eq!(monitor.status().await.clock_change_detected_at, None);
+
+        lock(&monitor.shared).clock_change_at = Some(1_704_067_200);
+        let status = monitor.status().await;
+        assert_eq!(
+            status.clock_change_detected_at.as_deref(),
+            Some("2024-01-01T00:00:00Z")
+        );
+        // The payload uses the camelCase keys the bridge decodes.
+        let json = serde_json::to_value(&status).expect("status serializes");
+        assert_eq!(json["clockChangeDetectedAt"], "2024-01-01T00:00:00Z");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -1,3 +1,5 @@
+import type { PathMappingKind } from "@clock-in/shared";
+
 import type { AuthenticatedSubject } from "../auth.js";
 import { AppError } from "../errors.js";
 import {
@@ -8,12 +10,14 @@ import {
 } from "../repositories.js";
 
 export interface CreatePathMappingInput {
+  kind?: PathMappingKind;
   pathPrefix: string;
   repoUrl?: string | null;
   projectId: string;
 }
 
 export interface UpdatePathMappingInput {
+  kind?: PathMappingKind;
   pathPrefix?: string;
   repoUrl?: string | null;
   projectId?: string;
@@ -59,6 +63,7 @@ export function createPathMappingService(dependencies: PathMappingServiceDepende
         return await dependencies.pathMappings.create({
           organizationId: subject.organizationId,
           userId: subject.userId,
+          kind: input.kind ?? "path_prefix",
           pathPrefix: input.pathPrefix,
           repoUrl: input.repoUrl ?? null,
           projectId: input.projectId,

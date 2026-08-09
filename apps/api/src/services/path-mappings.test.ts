@@ -68,6 +68,7 @@ class MemoryPathMappings implements PathMappingRepository {
     if (existing === null) return null;
     const updated: PathMappingRecord = {
       ...existing,
+      kind: input.kind ?? existing.kind,
       pathPrefix: input.pathPrefix ?? existing.pathPrefix,
       repoUrl: input.repoUrl === undefined ? existing.repoUrl : input.repoUrl,
       projectId: input.projectId ?? existing.projectId,
@@ -94,6 +95,7 @@ function existingMapping(overrides: Partial<PathMappingRecord> = {}): PathMappin
     id: ids.mapping,
     organizationId: ids.organization,
     userId: ids.user,
+    kind: "path_prefix",
     pathPrefix: "C:/dev/clock-in",
     repoUrl: null,
     projectId: ids.project,
@@ -115,8 +117,28 @@ describe("path-mapping service", () => {
 
     const created = await service.create(subject, { pathPrefix: "C:/dev/clock-in", projectId: ids.project });
 
-    expect(created).toMatchObject({ pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project, userId: ids.user });
+    expect(created).toMatchObject({ kind: "path_prefix", pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project, userId: ids.user });
     expect(pathMappings.records).toHaveLength(1);
+  });
+
+  it("creates a url-rule mapping with the same membership checks", async () => {
+    const { service } = createService();
+
+    const created = await service.create(subject, { kind: "url_rule", pathPrefix: "github.com/acme/*", projectId: ids.project });
+
+    expect(created).toMatchObject({ kind: "url_rule", pathPrefix: "github.com/acme/*", projectId: ids.project });
+  });
+
+  it("rejects a duplicate pattern across both kinds, exactly like duplicate prefixes", async () => {
+    const { service } = createService([
+      existingMapping({ kind: "url_rule", pathPrefix: "github.com/acme/*" }),
+    ]);
+
+    await expect(service.create(subject, { kind: "url_rule", pathPrefix: "github.com/acme/*", projectId: ids.project }))
+      .rejects.toMatchObject({ code: "conflict", status: 409 });
+    // The uniqueness spans both kinds: a path prefix equal to a rule's pattern conflicts too.
+    await expect(service.create(subject, { pathPrefix: "github.com/acme/*", projectId: ids.project }))
+      .rejects.toMatchObject({ code: "conflict", status: 409 });
   });
 
   it("requires the project to be an accessible, active membership project", async () => {

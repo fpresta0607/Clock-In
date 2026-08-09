@@ -1,6 +1,25 @@
+import type { PathMappingKind } from "@clock-in/shared";
+
 export interface PathMappingCandidate {
   pathPrefix: string;
   projectId: string;
+}
+
+export interface UrlRuleCandidate {
+  id: string;
+  kind: PathMappingKind;
+  projectId: string;
+}
+
+/**
+ * Resolves a browser span's matched rule to its project through the caller's
+ * own live url-rule mappings. A deleted or foreign rule id resolves to null —
+ * the span stays unattributed rather than erroring, so deleting a rule never
+ * invalidates honest evidence already in flight.
+ */
+export function resolveProjectForRuleId(ruleId: string, mappings: readonly UrlRuleCandidate[]): string | null {
+  const rule = mappings.find((mapping) => mapping.kind === "url_rule" && mapping.id === ruleId);
+  return rule?.projectId ?? null;
 }
 
 /** Lowercases, unifies separators to "/", and strips trailing separators. */

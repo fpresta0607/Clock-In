@@ -18,6 +18,7 @@ import type {
   ReportRepository,
   ReportRowRecord,
   ReportSummaryRecord,
+  SiteTotalRecord,
 } from "../repositories.js";
 import type { AgentSessionReaper } from "./agent-sessions.js";
 
@@ -168,6 +169,13 @@ function asAppTotal(record: AppTotalRecord): MeStatsResponse["apps"][number] {
   };
 }
 
+function asSiteTotal(record: SiteTotalRecord): MeStatsResponse["sites"][number] {
+  return {
+    mapping: record.mapping,
+    durationSeconds: safeInteger(record.durationSeconds, "site duration"),
+  };
+}
+
 export function createReportService(dependencies: ReportServiceDependencies): ReportService {
   return {
     async list(subject: AuthenticatedSubject, filters: ReportFilters): Promise<ReportResponse> {
@@ -229,12 +237,14 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       await dependencies.reaper.reapStale(subject);
       const projects = (await dependencies.reports.readProjectTotalsForMember(subject, query)).map(asProjectTotal);
       const apps = (await dependencies.reports.readAppTotalsForMember(subject, query)).map(asAppTotal);
+      const sites = (await dependencies.reports.readSiteTotalsForMember(subject, query)).map(asSiteTotal);
       return {
         filters,
         totalDurationSeconds: projects.reduce((total, project) => total + project.durationSeconds, 0),
         corroboratedSeconds: projects.reduce((total, project) => total + project.corroboratedSeconds, 0),
         projects,
         apps,
+        sites,
       };
     },
   };

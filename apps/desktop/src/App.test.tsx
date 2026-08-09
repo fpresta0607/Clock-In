@@ -78,6 +78,7 @@ const monitorSettings = {
   hardAwayLimitMinutes: 60,
   autoStopOnLock: false,
   agentOverrideEnabled: true,
+  onboarded: true,
   deviceId: "00000000-0000-4000-8000-000000000300",
 };
 
@@ -88,9 +89,10 @@ const idleMonitorStatus = {
   segmentBacklog: 0,
   agentBacklog: 0,
   hooks: [
-    { source: "claude_code", detected: true, configPath: "C:/Users/dev/.claude/settings.json" },
-    { source: "codex", detected: false, configPath: "C:/Users/dev/.codex/config.toml" },
+    { source: "claude_code", detected: true, installed: true, configPath: "C:/Users/dev/.claude/settings.json" },
+    { source: "codex", detected: false, installed: true, configPath: "C:/Users/dev/.codex/config.toml" },
   ],
+  browsers: [] as { browser: string; label: string; state: string; storeUrl: string }[],
   pendingSuggestion: null,
   agentActive: null,
   sessionIdleSeconds: null,
@@ -108,10 +110,12 @@ const meStats = {
     { processName: "Code.exe", durationSeconds: 4_800 },
     { processName: "chrome.exe", durationSeconds: 1_200 },
   ],
+  sites: [],
 };
 
 const mapping = {
   id: "00000000-0000-4000-8000-000000000400",
+  kind: "path_prefix" as const,
   pathPrefix: "C:/dev/Clock-In",
   repoUrl: null,
   projectId: project.id,
@@ -142,6 +146,11 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   // hidden, which is what the legacy tests above implicitly rely on.
   monitorStatus: vi.fn().mockRejectedValue({ kind: "unknown", message: "Monitoring unavailable" }),
   hookRegister: vi.fn().mockResolvedValue({ status: "registered", configPath: "C:/Users/dev/.claude/settings.json" }),
+  browserRepair: vi.fn().mockResolvedValue({ browser: "chrome", label: "Chrome", state: "registered", storeUrl: "https://chromewebstore.google.com/" }),
+  browserOpenStorePage: vi.fn().mockResolvedValue(undefined),
+  suggestionsList: vi.fn().mockResolvedValue([]),
+  suggestionNeverSuggest: vi.fn().mockResolvedValue(undefined),
+  suggestionsClear: vi.fn().mockResolvedValue(undefined),
   monitorSetEnabled: vi.fn().mockResolvedValue(monitorSettings),
   monitorDismissSuggestion: vi.fn().mockResolvedValue(undefined),
   settingsGet: vi.fn().mockResolvedValue(monitorSettings),
@@ -159,6 +168,11 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
 const openSettings = async (person: ReturnType<typeof userEvent.setup>): Promise<HTMLElement> => {
   await person.click(await screen.findByRole("button", { name: "Settings" }));
   return screen.getByRole("dialog", { name: "Settings" });
+};
+
+/// Opens the Advanced disclosure inside an open settings dialog.
+const openAdvanced = async (person: ReturnType<typeof userEvent.setup>, dialog: HTMLElement): Promise<void> => {
+  await person.click(within(dialog).getByRole("button", { name: "Advanced" }));
 };
 
 afterEach(() => {
@@ -333,7 +347,7 @@ describe("App", () => {
     expect(screen.getByLabelText("Project")).toHaveValue(projectB.id);
   });
 
-  it("refreshes today's stats and the board after a mid-timer project switch", async () => {
+  it("refreshes today's stats after a mid-timer project switch", async () => {
     const switched = { ...start, projectId: projectB.id, sessionId: "00000000-0000-4000-8000-000000000201" };
     const bridge = bridgeFor({
       bootstrap: vi.fn().mockResolvedValue({ kind: "running", user, projects: [project, projectB], running, source: "server-only" }),
@@ -343,11 +357,13 @@ describe("App", () => {
     render(<App bridge={bridge} />);
 
     await waitFor(() => expect(bridge.meStats).toHaveBeenCalledTimes(1));
-    expect(bridge.orgOverview).toHaveBeenCalledTimes(1);
+    // The board lives in settings now, so nothing fetches it on the main screen.
+    expect(bridge.orgOverview).not.toHaveBeenCalled();
     await person.selectOptions(await screen.findByLabelText("Project"), projectB.id);
 
     await waitFor(() => expect(bridge.meStats).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(bridge.orgOverview).toHaveBeenCalledTimes(2));
+    await openSettings(person);
+    await waitFor(() => expect(bridge.orgOverview).toHaveBeenCalledTimes(1));
   });
 
   it("aborts the project switch when the stop fails", async () => {
@@ -387,7 +403,7 @@ describe("App", () => {
     });
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
-    expect(await screen.findByRole("heading", { name: "We found two timers — pick one to keep" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "We found two timers - pick one to keep" })).toBeVisible();
     expect(screen.getByText("Inspect relay")).toBeVisible();
     await person.click(screen.getByRole("button", { name: "Use server timer" }));
     await waitFor(() => expect(bridge.useServerTimer).toHaveBeenCalledTimes(1));
@@ -452,14 +468,14 @@ describe("App", () => {
     await person.type(screen.getByLabelText("Password"), "not-stored-here");
     await person.click(screen.getByRole("button", { name: "Sign in" }));
     await waitFor(() => expect(bridge.retryLocalStart).toHaveBeenCalledWith(start));
-    expect(await screen.findByRole("heading", { name: "Start a timer" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "What are you working on?" })).toBeVisible();
     expect(screen.getByRole("alert")).toHaveTextContent("Local start cannot be resumed");
   });
 
   it("uses one bootstrap request during StrictMode effect replay", async () => {
     const bridge = bridgeFor();
     render(<StrictMode><App bridge={bridge} /></StrictMode>);
-    await screen.findByRole("heading", { name: "Start a timer" });
+    await screen.findByRole("heading", { name: "What are you working on?" });
     expect(bridge.bootstrap).toHaveBeenCalledTimes(1);
   });
 
@@ -584,7 +600,7 @@ describe("App", () => {
     expect(bridge.logout).toHaveBeenCalledTimes(1);
     request.reject({ kind: "transient", message: "Unable to sign out right now" });
     expect(await screen.findByRole("alert")).toHaveTextContent("Unable to sign out right now");
-    expect(screen.getByRole("heading", { name: "Start a timer" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "What are you working on?" })).toBeInTheDocument();
   });
 
   it("allows a pending start to settle when logout fails", async () => {
@@ -726,7 +742,7 @@ describe("App", () => {
       password: "long-enough-password",
       name: "Alex Morgan",
     }));
-    expect(await screen.findByRole("heading", { name: "Start a timer" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "What are you working on?" })).toBeInTheDocument();
   });
 
   it("shows an actionable error when the email is already registered", async () => {
@@ -761,21 +777,31 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
   });
 
-  it("shows the team leaderboard with the signed-in member marked", async () => {
+  it("shows the team leaderboard in settings with the signed-in member marked", async () => {
+    const person = userEvent.setup();
     render(<App bridge={bridgeFor()} />);
 
-    const board = await screen.findByRole("region", { name: "SIQstack" });
-    const rows = within(board).getAllByRole("listitem");
+    const dialog = await openSettings(person);
+    const rows = await within(dialog).findAllByRole("listitem");
     expect(rows[0]).toHaveTextContent("Sam");
     expect(rows[0]).toHaveTextContent("02:00:00");
     expect(rows[1]).toHaveTextContent(user.name);
     expect(rows[1]).toHaveTextContent("you");
   });
 
-  it("shows the invite code a teammate needs to join", async () => {
+  it("keeps invite codes and join forms off the main screen", async () => {
     render(<App bridge={bridgeFor()} />);
 
-    expect(await screen.findByText("ACDEF-GHJKM")).toBeInTheDocument();
+    await screen.findByRole("heading", { name: "What are you working on?" });
+    await waitFor(() => expect(screen.queryByText("ACDEF-GHJKM")).not.toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Join" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Invite code to join/)).not.toBeInTheDocument();
+    // The idle hero offers exactly one primary action.
+    expect(screen.getAllByRole("button").filter((button) => button.className.includes("signal-button"))).toHaveLength(1);
+
+    const person = userEvent.setup();
+    const dialog = await openSettings(person);
+    expect(await within(dialog).findByText("ACDEF-GHJKM")).toBeInTheDocument();
   });
 
   it("shows at most five members so the window stays compact", async () => {
@@ -791,10 +817,11 @@ describe("App", () => {
         entries,
       }),
     });
+    const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
-    const board = await screen.findByRole("region", { name: "SIQstack" });
-    expect(within(board).getAllByRole("listitem")).toHaveLength(5);
+    const dialog = await openSettings(person);
+    expect((await within(dialog).findAllByRole("listitem"))).toHaveLength(5);
   });
 
   it("invites a teammate into an existing workspace at sign-up", async () => {
@@ -842,13 +869,15 @@ describe("App", () => {
     const bridge = bridgeFor({
       orgOverview: vi.fn().mockRejectedValue({ kind: "transient", message: "Board unavailable" }),
     });
+    const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
-    expect(await screen.findByRole("heading", { name: "Start a timer" })).toBeInTheDocument();
-    expect(screen.queryByRole("region", { name: "SIQstack" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "What are you working on?" })).toBeInTheDocument();
+    const dialog = await openSettings(person);
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Board unavailable");
   });
 
-  it("joins a teammate's workspace from the timer window", async () => {
+  it("joins a teammate's workspace from settings", async () => {
     const orgJoin = vi.fn().mockResolvedValue({
       organization: { id: "00000000-0000-4000-8000-000000000901", name: "Joined Team", inviteCode: "PQRTU-VWXY3" },
       entries: [{ rank: 1, user: { id: user.id, name: user.name }, durationSeconds: 0, sessionCount: 0 }],
@@ -863,11 +892,12 @@ describe("App", () => {
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
-    await person.type(await screen.findByLabelText(/Invite code to join/), "acdef-ghjkm");
-    await person.click(screen.getByRole("button", { name: "Join" }));
+    const dialog = await openSettings(person);
+    await person.type(await within(dialog).findByLabelText(/Invite code to join/), "acdef-ghjkm");
+    await person.click(within(dialog).getByRole("button", { name: "Join" }));
 
     await waitFor(() => expect(orgJoin).toHaveBeenCalledWith("acdef-ghjkm"));
-    expect(await screen.findByRole("heading", { name: "Joined Team" })).toBeInTheDocument();
+    expect(await within(dialog).findByText("Joined Team")).toBeInTheDocument();
   });
 
   it("keeps the timer usable when a join is refused", async () => {
@@ -881,11 +911,12 @@ describe("App", () => {
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
-    await person.type(await screen.findByLabelText(/Invite code to join/), "ACDEF-GHJKM");
-    await person.click(screen.getByRole("button", { name: "Join" }));
+    const dialog = await openSettings(person);
+    await person.type(await within(dialog).findByLabelText(/Invite code to join/), "ACDEF-GHJKM");
+    await person.click(within(dialog).getByRole("button", { name: "Join" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("does not match a workspace");
-    expect(screen.getByRole("heading", { name: "Start a timer" })).toBeInTheDocument();
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("does not match a workspace");
+    expect(screen.getByRole("heading", { name: "What are you working on?" })).toBeInTheDocument();
   });
 
   it("shows one muted monitoring line when the host answers", async () => {
@@ -913,7 +944,7 @@ describe("App", () => {
 
   it("renders no monitor surfaces when the host cannot report status", async () => {
     render(<App bridge={bridgeFor()} />);
-    await screen.findByRole("heading", { name: "Start a timer" });
+    await screen.findByRole("heading", { name: "What are you working on?" });
     await waitFor(() => expect(screen.queryByText(/^Monitoring (on|paused|off)$/)).not.toBeInTheDocument());
   });
 
@@ -923,6 +954,7 @@ describe("App", () => {
     render(<App bridge={bridge} />);
 
     const dialog = await openSettings(person);
+    await openAdvanced(person, dialog);
     expect(within(dialog).getByRole("heading", { name: "Watch my agent CLIs" })).toBeInTheDocument();
     const detected = await within(dialog).findByText("Claude Code");
     expect(detected).toHaveClass("hook-badge", "is-detected");
@@ -936,13 +968,14 @@ describe("App", () => {
     const bridge = bridgeFor({
       monitorStatus: vi.fn().mockResolvedValue({
         ...idleMonitorStatus,
-        hooks: [{ source: "cursor", detected: true, configPath: "C:/Users/dev/.cursor/hooks.json" }],
+        hooks: [{ source: "cursor", detected: true, installed: true, configPath: "C:/Users/dev/.cursor/hooks.json" }],
       }),
     });
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
     const dialog = await openSettings(person);
+    await openAdvanced(person, dialog);
     const detected = await within(dialog).findByText("Cursor");
     expect(detected).toHaveClass("hook-badge", "is-detected");
     expect(detected).toHaveAttribute("title", "C:/Users/dev/.cursor/hooks.json");
@@ -961,6 +994,7 @@ describe("App", () => {
     render(<App bridge={bridge} />);
 
     const dialog = await openSettings(person);
+    await openAdvanced(person, dialog);
     // Only the missing hook (Codex) offers registration; Claude Code is detected.
     const register = await within(dialog).findByRole("button", { name: "Register" });
     await person.click(register);
@@ -979,6 +1013,7 @@ describe("App", () => {
     render(<App bridge={bridge} />);
 
     const dialog = await openSettings(person);
+    await openAdvanced(person, dialog);
     // Claude Code is detected in the fixture: state, not a Register button.
     expect(await within(dialog).findByText("Registered")).toBeInTheDocument();
     expect(within(dialog).getAllByRole("button", { name: "Register" })).toHaveLength(1);
@@ -994,12 +1029,12 @@ describe("App", () => {
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
-    expect(await screen.findByText(/Codex active — start tracking/)).toBeInTheDocument();
+    expect(await screen.findByText(/Codex active - start tracking/)).toBeInTheDocument();
     expect(screen.getByText("Field work", { selector: "strong" })).toBeInTheDocument();
     await person.click(screen.getByRole("button", { name: "Start" }));
     await waitFor(() => expect(bridge.start).toHaveBeenCalledWith(expect.objectContaining({ projectId: project.id })));
     expect(await screen.findByRole("button", { name: "Stop timer" })).toBeVisible();
-    expect(screen.queryByText(/Codex active — start tracking/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Codex active - start tracking/)).not.toBeInTheDocument();
   });
 
   it("dismisses a suggested start on the host and in the UI", async () => {
@@ -1014,10 +1049,10 @@ describe("App", () => {
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
-    await screen.findByText(/Codex active — start tracking/);
+    await screen.findByText(/Codex active - start tracking/);
     await person.click(screen.getByRole("button", { name: "Dismiss" }));
     await waitFor(() => expect(bridge.monitorDismissSuggestion).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(screen.queryByText(/Codex active — start tracking/)).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText(/Codex active - start tracking/)).not.toBeInTheDocument());
     expect(bridge.start).not.toHaveBeenCalled();
   });
 
@@ -1044,8 +1079,8 @@ describe("App", () => {
     render(<App bridge={bridge} />);
 
     expect(await screen.findByText(/You were away 25 minutes/)).toBeInTheDocument();
-    await person.click(screen.getByRole("button", { name: "Keep" }));
-    expect(screen.getByText("Away time kept — it stays billable.")).toBeInTheDocument();
+    await person.click(screen.getByRole("button", { name: "Yes" }));
+    expect(screen.getByText("Away time kept - it stays on the timer.")).toBeInTheDocument();
     await person.click(screen.getByRole("button", { name: "Stop timer" }));
     await waitFor(() => expect(bridge.stop).toHaveBeenCalledWith(expect.objectContaining({ idleSeconds: 600 })));
   });
@@ -1056,7 +1091,7 @@ describe("App", () => {
     render(<App bridge={bridge} />);
 
     expect(await screen.findByText(/You were away 25 minutes/)).toBeInTheDocument();
-    await person.click(screen.getByRole("button", { name: "Discard" }));
+    await person.click(screen.getByRole("button", { name: "No" }));
     expect(screen.getByText("Away time will be trimmed at stop.")).toBeInTheDocument();
     await person.click(screen.getByRole("button", { name: "Stop timer" }));
     await waitFor(() => expect(bridge.stop).toHaveBeenCalledWith(expect.objectContaining({ idleSeconds: null })));
@@ -1070,7 +1105,7 @@ describe("App", () => {
     render(<App bridge={bridge} />);
 
     expect(await screen.findByText(/You were away 25 minutes/)).toBeInTheDocument();
-    await person.click(screen.getByRole("button", { name: "Keep" }));
+    await person.click(screen.getByRole("button", { name: "Yes" }));
     await person.click(screen.getByRole("button", { name: "Stop timer" }));
     // Authoritative 0: the host must not re-measure and flip keep into discard.
     await waitFor(() => expect(bridge.stop).toHaveBeenCalledWith(expect.objectContaining({ idleSeconds: 0 })));
@@ -1085,7 +1120,7 @@ describe("App", () => {
     });
     render(<App bridge={bridge} />);
 
-    expect(await screen.findByTestId("agent-active")).toHaveTextContent("Kimi Code active — idle trim paused");
+    expect(await screen.findByTestId("agent-active")).toHaveTextContent("Kimi Code active - idle trim paused");
   });
 
   it("does not raise the away prompt while the user is still away", async () => {
@@ -1156,7 +1191,7 @@ describe("App", () => {
     render(<App bridge={bridge} />);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Stats unavailable");
-    expect(screen.getByRole("heading", { name: "Start a timer" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "What are you working on?" })).toBeInTheDocument();
   });
 
   it("shows the verified footer only when monitoring is on and some of today is verified", async () => {
@@ -1242,17 +1277,18 @@ describe("App", () => {
     expect(row).not.toHaveTextContent("active now");
   });
 
-  it("loads settings and mappings only once the overlay opens", async () => {
+  it("loads mappings only once the overlay opens", async () => {
     const bridge = bridgeFor();
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
-    await screen.findByRole("heading", { name: "Start a timer" });
-    expect(bridge.settingsGet).not.toHaveBeenCalled();
+    // Settings load with the account (the first-run flow keys off them), so
+    // only the mappings wait for the overlay.
+    await screen.findByRole("heading", { name: "What are you working on?" });
+    await waitFor(() => expect(bridge.settingsGet).toHaveBeenCalledTimes(1));
     expect(bridge.pathMappingsList).not.toHaveBeenCalled();
 
     await openSettings(person);
-    await waitFor(() => expect(bridge.settingsGet).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(bridge.pathMappingsList).toHaveBeenCalledTimes(1));
   });
 
@@ -1286,15 +1322,16 @@ describe("App", () => {
     render(<App bridge={bridge} />);
 
     const dialog = await openSettings(person);
-    await waitFor(() => expect(bridge.settingsGet).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.settingsGet).toHaveBeenCalled());
     expect(await within(dialog).findByLabelText("Activity monitoring")).toBeChecked();
 
     await person.click(within(dialog).getByLabelText("Activity monitoring"));
     await waitFor(() => expect(bridge.monitorSetEnabled).toHaveBeenCalledWith(false));
 
-    await person.click(within(dialog).getByLabelText("Count active agent sessions as work while away"));
+    await person.click(within(dialog).getByLabelText("Count agent sessions as work while I'm away"));
     await waitFor(() => expect(bridge.settingsUpdate).toHaveBeenCalledWith({ agentOverrideEnabled: false }));
 
+    await openAdvanced(person, dialog);
     const threshold = within(dialog).getByLabelText("Away threshold (minutes)");
     await person.clear(threshold);
     await person.type(threshold, "15");
@@ -1325,11 +1362,12 @@ describe("App", () => {
     render(<App bridge={bridge} />);
 
     const dialog = await openSettings(person);
+    await openAdvanced(person, dialog);
     expect(await within(dialog).findByText("C:/dev/Clock-In")).toBeInTheDocument();
     expect(within(dialog).getByText("C:/dev/Clock-In").closest("li")).toHaveTextContent("Field work");
 
     await person.type(within(dialog).getByLabelText("Path prefix"), "C:/dev/other");
-    await person.selectOptions(within(dialog).getByLabelText("Project"), project.id);
+    await person.selectOptions(within(dialog).getAllByLabelText("Project")[0]!, project.id);
     await person.click(within(dialog).getByRole("button", { name: "Add mapping" }));
     await waitFor(() => expect(bridge.pathMappingsCreate).toHaveBeenCalledWith({ pathPrefix: "C:/dev/other", projectId: project.id }));
     expect(await within(dialog).findByText("C:/dev/other")).toBeInTheDocument();
@@ -1349,10 +1387,11 @@ describe("App", () => {
     render(<App bridge={bridge} />);
 
     const dialog = await openSettings(person);
+    await openAdvanced(person, dialog);
     await within(dialog).findByText("C:/dev/Clock-In");
 
     await person.type(within(dialog).getByLabelText("Path prefix"), "C:/dev/Clock-In");
-    await person.selectOptions(within(dialog).getByLabelText("Project"), project.id);
+    await person.selectOptions(within(dialog).getAllByLabelText("Project")[0]!, project.id);
     await person.click(within(dialog).getByRole("button", { name: "Add mapping" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("already mapped");
 
@@ -1371,5 +1410,177 @@ describe("App", () => {
     expect(note).toHaveTextContent("%APPDATA%");
     expect(note).toHaveTextContent("not marked verified");
     expect(note).not.toHaveTextContent(/uncorroborated/i);
+  });
+
+  const chromeRegistered = {
+    browser: "chrome",
+    label: "Chrome",
+    state: "registered" as const,
+    storeUrl: "https://chromewebstore.google.com/",
+  };
+
+  it("runs first-run onboarding: one question, browser cards, then the timer", async () => {
+    const notOnboarded = { ...monitorSettings, onboarded: false };
+    const onboardedNow = { ...monitorSettings, onboarded: true };
+    let connected = false;
+    const bridge = bridgeFor({
+      settingsGet: vi.fn().mockResolvedValue(notOnboarded),
+      settingsUpdate: vi.fn().mockResolvedValue(onboardedNow),
+      monitorSetEnabled: vi.fn().mockResolvedValue(notOnboarded),
+      monitorStatus: vi.fn().mockImplementation(() => Promise.resolve({
+        ...idleMonitorStatus,
+        browsers: [{ ...chromeRegistered, state: connected ? "connected" : "registered" }],
+      })),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    // One question, one button, nothing else to decide.
+    await person.click(await screen.findByRole("button", { name: "Turn on" }));
+    await waitFor(() => expect(bridge.monitorSetEnabled).toHaveBeenCalledWith(true));
+
+    // The browser card offers the store page, then flips on the handshake.
+    await person.click(await screen.findByRole("button", { name: "Connect Chrome" }));
+    expect(bridge.browserOpenStorePage).toHaveBeenCalledWith("chrome");
+    connected = true;
+    expect(await screen.findByText("Chrome is connected ✓", {}, { timeout: 5_000 })).toBeInTheDocument();
+
+    await person.click(screen.getByRole("button", { name: "Start using Clock-In" }));
+    await waitFor(() => expect(bridge.settingsUpdate).toHaveBeenCalledWith({ onboarded: true }));
+    expect(await screen.findByRole("heading", { name: "What are you working on?" })).toBeInTheDocument();
+  });
+
+  it("repairs a broken browser connection with one [Fix] click", async () => {
+    const bridge = bridgeFor({
+      settingsGet: vi.fn().mockResolvedValue({ ...monitorSettings, onboarded: false }),
+      settingsUpdate: vi.fn().mockResolvedValue(monitorSettings),
+      monitorSetEnabled: vi.fn().mockResolvedValue({ ...monitorSettings, onboarded: false }),
+      monitorStatus: vi.fn().mockResolvedValue({
+        ...idleMonitorStatus,
+        browsers: [{ ...chromeRegistered, state: "binary-missing" }],
+      }),
+      browserRepair: vi.fn().mockResolvedValue({ ...chromeRegistered }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "Turn on" }));
+    expect(await screen.findByText("The Chrome connection needs a quick repair.")).toBeInTheDocument();
+    await person.click(screen.getByRole("button", { name: "Fix" }));
+
+    await waitFor(() => expect(bridge.browserRepair).toHaveBeenCalledWith("chrome"));
+    // The answer carries the repaired health, so the card offers Connect next.
+    expect(await screen.findByRole("button", { name: "Connect Chrome" })).toBeInTheDocument();
+  });
+
+  it("answers a site question with Yes and creates the whole-site rule", async () => {
+    const bridge = bridgeFor({
+      suggestionsList: vi.fn().mockResolvedValue([{ origin: "quickbooks.com", seconds: 10_800 }]),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByText(/You spent 3 hours on quickbooks\.com this week\. Is that work\?/)).toBeInTheDocument();
+    await person.selectOptions(screen.getByLabelText("Project for this site"), project.id);
+    await person.click(screen.getByRole("button", { name: "Yes" }));
+
+    await waitFor(() => expect(bridge.pathMappingsCreate).toHaveBeenCalledWith({
+      kind: "url_rule",
+      pathPrefix: "*.quickbooks.com",
+      projectId: project.id,
+    }));
+    await waitFor(() => expect(screen.queryByText(/Is that work\?/)).not.toBeInTheDocument());
+  });
+
+  it("asks the narrower question for a multi-project host before creating the rule", async () => {
+    const bridge = bridgeFor({
+      suggestionsList: vi.fn().mockResolvedValue([{ origin: "github.com", seconds: 3_600 }]),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByText(/You spent 1 hour on github\.com this week/)).toBeInTheDocument();
+    await person.selectOptions(screen.getByLabelText("Project for this site"), project.id);
+    await person.click(screen.getByRole("button", { name: "Yes" }));
+
+    // github.com spans many projects: one follow-up, then the narrowed rule.
+    expect(bridge.pathMappingsCreate).not.toHaveBeenCalled();
+    await person.type(await screen.findByLabelText("Organization or team name"), "acme");
+    await person.click(screen.getByRole("button", { name: "Yes, track it" }));
+
+    await waitFor(() => expect(bridge.pathMappingsCreate).toHaveBeenCalledWith({
+      kind: "url_rule",
+      pathPrefix: "github.com/acme/*",
+      projectId: project.id,
+    }));
+  });
+
+  it("answers a site question with No and never asks again for that origin", async () => {
+    const bridge = bridgeFor({
+      suggestionsList: vi.fn().mockResolvedValue([{ origin: "quickbooks.com", seconds: 10_800 }]),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await screen.findByText(/Is that work\?/);
+    await person.click(screen.getByRole("button", { name: /don't ask again/ }));
+
+    await waitFor(() => expect(bridge.suggestionNeverSuggest).toHaveBeenCalledWith("quickbooks.com"));
+    await waitFor(() => expect(screen.queryByText(/Is that work\?/)).not.toBeInTheDocument());
+    expect(bridge.pathMappingsCreate).not.toHaveBeenCalled();
+  });
+
+  it("keeps thresholds, mappings, and hooks behind the Advanced disclosure", async () => {
+    const bridge = bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(idleMonitorStatus) });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const dialog = await openSettings(person);
+    await within(dialog).findByLabelText("Activity monitoring");
+    expect(within(dialog).queryByLabelText("Away threshold (minutes)")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("Path mappings")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("Claude Code")).not.toBeInTheDocument();
+
+    await openAdvanced(person, dialog);
+    expect(within(dialog).getByLabelText("Away threshold (minutes)")).toBeInTheDocument();
+    expect(within(dialog).getByText("Path mappings")).toBeInTheDocument();
+    expect(await within(dialog).findByText("Claude Code")).toBeInTheDocument();
+  });
+
+  it("hides hook rows for CLIs that are not on the machine", async () => {
+    const bridge = bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue({
+        ...idleMonitorStatus,
+        hooks: [
+          { source: "claude_code", detected: true, installed: true, configPath: "C:/Users/dev/.claude/settings.json" },
+          { source: "codex", detected: false, installed: false, configPath: "C:/Users/dev/.codex/config.toml" },
+        ],
+      }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const dialog = await openSettings(person);
+    await openAdvanced(person, dialog);
+    expect(await within(dialog).findByText("Claude Code")).toBeInTheDocument();
+    expect(within(dialog).queryByText("Codex")).not.toBeInTheDocument();
+  });
+
+  it("shows browser cards with health in settings and clears saved site answers", async () => {
+    const bridge = bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue({
+        ...idleMonitorStatus,
+        browsers: [chromeRegistered],
+      }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const dialog = await openSettings(person);
+    expect(await within(dialog).findByRole("button", { name: "Connect Chrome" })).toBeInTheDocument();
+
+    await person.click(within(dialog).getByRole("button", { name: "Clear saved site answers" }));
+    await waitFor(() => expect(bridge.suggestionsClear).toHaveBeenCalledTimes(1));
+    expect(await within(dialog).findByRole("status")).toHaveTextContent(/ask about sites again/);
   });
 });

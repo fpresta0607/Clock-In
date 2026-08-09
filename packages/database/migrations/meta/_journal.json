@@ -50,6 +50,20 @@
       "when": 1786198091416,
       "tag": "0006_spooky_blur",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786244227275,
+      "tag": "0007_browser_attribution",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786246191197,
+      "tag": "0008_browser_span_rules",
+      "breakpoints": true
     }
   ]
 }

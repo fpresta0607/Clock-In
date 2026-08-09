@@ -29,6 +29,15 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": ["binaries/clock-in-hook", "binaries/clock-in-browser-host"],
     "icon": ["icons/icon.ico", "icons/icon.png"]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/fpresta0607/Clock-In/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDEwNzJCMzhDMEZERkQ5OTQKUldTVTJkOFBqTE55RU5uV29QQnJtQW5pUnZoWmsxN1dOV2tPanIxOVJ5YlBkOUViWGxZMHVDODUK"
+    }
   }
 }

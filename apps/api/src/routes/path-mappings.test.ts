@@ -77,6 +77,7 @@ class MemoryPathMappings implements PathMappingRepository {
     if (existing === null) return null;
     const updated: PathMappingRecord = {
       ...existing,
+      kind: input.kind ?? existing.kind,
       pathPrefix: input.pathPrefix ?? existing.pathPrefix,
       repoUrl: input.repoUrl === undefined ? existing.repoUrl : input.repoUrl,
       projectId: input.projectId ?? existing.projectId,
@@ -124,7 +125,7 @@ describe("path-mapping routes", () => {
     });
     expect(created.status).toBe(200);
     const mapping = await created.json();
-    expect(mapping).toEqual({ id: expect.any(String), pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project });
+    expect(mapping).toEqual({ id: expect.any(String), kind: "path_prefix", pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project });
 
     const listed = await app.request("http://api.test/path-mappings", { headers });
     await expect(listed.json()).resolves.toEqual({ mappings: [mapping] });
@@ -189,6 +190,34 @@ describe("path-mapping routes", () => {
     });
     expect(duplicate.status).toBe(409);
     await expect(duplicate.json()).resolves.toEqual({ error: { code: "conflict", message: "A path mapping already exists for this prefix." } });
+  });
+
+  it("creates url rules through the shared contract and rejects invalid patterns", async () => {
+    const headers = { authorization: bearerHeader, "content-type": "application/json" };
+    const app = createTestApp();
+
+    const created = await app.request("http://api.test/path-mappings", {
+      method: "POST", headers, body: JSON.stringify({ kind: "url_rule", pathPrefix: "github.com/acme/*", projectId: ids.project }),
+    });
+    expect(created.status).toBe(200);
+    await expect(created.json()).resolves.toEqual({
+      id: expect.any(String), kind: "url_rule", pathPrefix: "github.com/acme/*", repoUrl: null, projectId: ids.project,
+    });
+
+    // A duplicate pattern conflicts across both kinds, exactly like duplicate prefixes.
+    const duplicate = await app.request("http://api.test/path-mappings", {
+      method: "POST", headers, body: JSON.stringify({ pathPrefix: "github.com/acme/*", projectId: ids.project }),
+    });
+    expect(duplicate.status).toBe(409);
+
+    // Schemes, uppercase hosts, and interior globs fail the shared contract.
+    for (const pattern of ["https://github.com/acme/*", "GitHub.com/acme/*", "github.com/*/issues"]) {
+      const invalid = await app.request("http://api.test/path-mappings", {
+        method: "POST", headers, body: JSON.stringify({ kind: "url_rule", pathPrefix: pattern, projectId: ids.project }),
+      });
+      expect(invalid.status).toBe(400);
+      await expect(invalid.json()).resolves.toEqual({ error: { code: "validation_error", message: "Invalid request body." } });
+    }
   });
 
   it("keeps another organization's mappings invisible", async () => {

@@ -104,6 +104,30 @@ describe("Drizzle report repository", () => {
       { processName: "chrome.exe", durationSeconds: "1200" },
     ]);
   });
+
+  it("maps caller-scoped per-rule browser-span totals, preserving postgres sum strings", async () => {
+    const rows = {
+      innerJoin: () => rows,
+      where: () => rows,
+      groupBy: () => rows,
+      orderBy: async () => [{
+        mappingId: "01c7e513-b094-4d4c-ae55-21790ae019a4",
+        pattern: "github.com/acme/*",
+        projectId: input.projectId,
+        durationSeconds: "2400",
+      }],
+    };
+    const db = {
+      select: () => ({ from: () => rows }),
+    } as unknown as DatabaseConnection["db"];
+    const repository = new DrizzleReportRepository(db);
+    const subject = { organizationId: input.organizationId, userId: input.userId };
+
+    await expect(repository.readSiteTotalsForMember(subject, {})).resolves.toEqual([{
+      mapping: { id: "01c7e513-b094-4d4c-ae55-21790ae019a4", pattern: "github.com/acme/*", projectId: input.projectId },
+      durationSeconds: "2400",
+    }]);
+  });
 });
 
 describe("Drizzle project repository", () => {
@@ -147,6 +171,7 @@ describe("Drizzle path-mapping repository", () => {
     await expect(repository.create({
       organizationId: input.organizationId,
       userId: input.userId,
+      kind: "path_prefix",
       pathPrefix: "C:/dev/clock-in",
       repoUrl: null,
       projectId: input.projectId,

@@ -45,7 +45,29 @@ export type PendingRetryResult = {
 export type HookRegistration = {
   source: string;
   detected: boolean;
+  /// The CLI's config file exists: the CLI is on the machine, so the hook
+  /// opt-in is offered. Hooks for absent CLIs are never rendered.
+  installed: boolean;
   configPath: string;
+};
+
+/// Per-browser extension health, in the order a setup flows through them.
+/// "registered" means the plumbing is done and only the store install is
+/// left; the card keeps offering [Connect] rather than showing an error.
+export type BrowserHealthState = "never-registered" | "binary-missing" | "registered" | "connected";
+
+export type BrowserHealth = {
+  browser: string;
+  label: string;
+  state: BrowserHealthState;
+  storeUrl: string;
+};
+
+/// One suggestion the local tally earns: an unmatched origin and its focused
+/// seconds. Local-only; never uploaded.
+export type TallyEntry = {
+  origin: string;
+  seconds: number;
 };
 
 /// The outcome of an opt-in `hookRegister` call: the CLI's config was merged,
@@ -83,6 +105,7 @@ export type MonitorStatus = {
   segmentBacklog: number;
   agentBacklog: number;
   hooks: readonly HookRegistration[];
+  browsers: readonly BrowserHealth[];
   pendingSuggestion: PendingSuggestion | null;
   agentActive: AgentActive | null;
   sessionIdleSeconds: number | null;
@@ -95,6 +118,8 @@ export type MonitorSettings = {
   hardAwayLimitMinutes: number;
   autoStopOnLock: boolean;
   agentOverrideEnabled: boolean;
+  /// The first-run flow (monitoring question + browser cards) completed.
+  onboarded: boolean;
   deviceId: string;
 };
 
@@ -106,6 +131,12 @@ export type MeStats = {
   corroboratedSeconds: number;
   projects: readonly MeStatsProject[];
   apps: readonly MeStatsApp[];
+  sites: readonly MeStatsSite[];
+};
+
+export type MeStatsSite = {
+  mapping: { id: string; pattern: string; projectId: string | null };
+  durationSeconds: number;
 };
 
 export type MeStatsApp = {
@@ -120,14 +151,18 @@ export type MeStatsProject = {
   sessionCount: number;
 };
 
+export type PathMappingKind = "path_prefix" | "url_rule";
+
 export type PathMapping = {
   id: string;
+  kind: PathMappingKind;
   pathPrefix: string;
   repoUrl?: string | null | undefined;
   projectId: string;
 };
 
 export type PathMappingCreateInput = {
+  kind?: PathMappingKind | undefined;
   pathPrefix: string;
   repoUrl?: string | undefined;
   projectId: string;
@@ -157,6 +192,11 @@ export interface TimerBridge {
   orgJoin(inviteCode: string): Promise<OrganizationOverview>;
   monitorStatus(): Promise<MonitorStatus>;
   hookRegister(source: string): Promise<HookRegisterResult>;
+  browserRepair(browser: string): Promise<BrowserHealth>;
+  browserOpenStorePage(browser: string): Promise<void>;
+  suggestionsList(): Promise<readonly TallyEntry[]>;
+  suggestionNeverSuggest(origin: string): Promise<void>;
+  suggestionsClear(): Promise<void>;
   monitorSetEnabled(enabled: boolean): Promise<MonitorSettings>;
   monitorDismissSuggestion(): Promise<void>;
   settingsGet(): Promise<MonitorSettings>;
@@ -321,6 +361,7 @@ const decodeHookRegistration = (value: unknown): HookRegistration => {
   return {
     source: string(candidate.source),
     detected: boolean(candidate.detected),
+    installed: boolean(candidate.installed),
     configPath: string(candidate.configPath),
   };
 };
@@ -364,10 +405,39 @@ const decodeAwayInfo = (value: unknown): AwayInfo => {
   };
 };
 
+const decodeBrowserHealth = (value: unknown): BrowserHealth => {
+  const candidate = record(value);
+  const state = candidate.state;
+  if (state !== "never-registered" && state !== "binary-missing" && state !== "registered" && state !== "connected") {
+    invalidResponse();
+  }
+  return {
+    browser: string(candidate.browser),
+    label: string(candidate.label),
+    state: state as BrowserHealthState,
+    storeUrl: string(candidate.storeUrl),
+  };
+};
+
+const decodeTallyEntry = (value: unknown): TallyEntry => {
+  const candidate = record(value);
+  return {
+    origin: string(candidate.origin),
+    seconds: nonnegativeInteger(candidate.seconds),
+  };
+};
+
+export const decodeTallyEntries = (value: unknown): readonly TallyEntry[] => {
+  if (!Array.isArray(value)) invalidResponse();
+  return (value as unknown[]).map(decodeTallyEntry);
+};
+
 export const decodeMonitorStatus = (value: unknown): MonitorStatus => {
   const candidate = record(value);
   const hooks = candidate.hooks;
   if (!Array.isArray(hooks)) invalidResponse();
+  const browsers = candidate.browsers;
+  if (!Array.isArray(browsers)) invalidResponse();
   return {
     enabled: boolean(candidate.enabled),
     running: boolean(candidate.running),
@@ -375,6 +445,7 @@ export const decodeMonitorStatus = (value: unknown): MonitorStatus => {
     segmentBacklog: nonnegativeInteger(candidate.segmentBacklog),
     agentBacklog: nonnegativeInteger(candidate.agentBacklog),
     hooks: (hooks as unknown[]).map(decodeHookRegistration),
+    browsers: (browsers as unknown[]).map(decodeBrowserHealth),
     pendingSuggestion: candidate.pendingSuggestion === null ? null : decodePendingSuggestion(candidate.pendingSuggestion),
     agentActive: candidate.agentActive === null ? null : decodeAgentActive(candidate.agentActive),
     sessionIdleSeconds: candidate.sessionIdleSeconds === null ? null : nonnegativeInteger(candidate.sessionIdleSeconds),
@@ -390,6 +461,7 @@ export const decodeMonitorSettings = (value: unknown): MonitorSettings => {
     hardAwayLimitMinutes: nonnegativeInteger(candidate.hardAwayLimitMinutes),
     autoStopOnLock: boolean(candidate.autoStopOnLock),
     agentOverrideEnabled: boolean(candidate.agentOverrideEnabled),
+    onboarded: boolean(candidate.onboarded),
     deviceId: string(candidate.deviceId),
   };
 };
@@ -413,12 +485,26 @@ const decodeMeStatsApp = (value: unknown): MeStatsApp => {
   };
 };
 
+const decodeMeStatsSite = (value: unknown): MeStatsSite => {
+  const candidate = record(value);
+  const mapping = record(candidate.mapping);
+  return {
+    mapping: {
+      id: uuid(mapping.id),
+      pattern: string(mapping.pattern),
+      projectId: mapping.projectId === null ? null : uuid(mapping.projectId),
+    },
+    durationSeconds: nonnegativeInteger(candidate.durationSeconds),
+  };
+};
+
 export const decodeMeStats = (value: unknown): MeStats => {
   const candidate = record(value);
   const filters = record(candidate.filters);
   const projects = candidate.projects;
   const apps = candidate.apps;
-  if (!Array.isArray(projects) || !Array.isArray(apps)) invalidResponse();
+  const sites = candidate.sites;
+  if (!Array.isArray(projects) || !Array.isArray(apps) || !Array.isArray(sites)) invalidResponse();
   const totalDurationSeconds = nonnegativeInteger(candidate.totalDurationSeconds);
   const corroboratedSeconds = nonnegativeInteger(candidate.corroboratedSeconds);
   if (corroboratedSeconds > totalDurationSeconds) invalidResponse();
@@ -428,13 +514,17 @@ export const decodeMeStats = (value: unknown): MeStats => {
     corroboratedSeconds,
     projects: (projects as unknown[]).map(decodeMeStatsProject),
     apps: (apps as unknown[]).map(decodeMeStatsApp),
+    sites: (sites as unknown[]).map(decodeMeStatsSite),
   };
 };
 
 export const decodePathMapping = (value: unknown): PathMapping => {
   const candidate = record(value);
+  const kind = candidate.kind;
+  if (kind !== "path_prefix" && kind !== "url_rule") invalidResponse();
   return {
     id: uuid(candidate.id),
+    kind: kind as PathMappingKind,
     pathPrefix: string(candidate.pathPrefix),
     repoUrl: candidate.repoUrl === undefined ? undefined : stringOrNull(candidate.repoUrl),
     projectId: uuid(candidate.projectId),
@@ -475,6 +565,11 @@ export const defaultBridge: TimerBridge = {
   orgJoin: (inviteCode) => invokeDecoded("org_join", decodeOrganizationOverview, { input: { inviteCode } }),
   monitorStatus: () => invokeDecoded("monitor_status", decodeMonitorStatus),
   hookRegister: (source) => invokeDecoded("hook_register", decodeHookRegisterResult, { source }),
+  browserRepair: (browser) => invokeDecoded("browser_repair", decodeBrowserHealth, { browser }),
+  browserOpenStorePage: (browser) => invokeDecoded("browser_open_store_page", decodeVoid, { browser }),
+  suggestionsList: () => invokeDecoded("suggestions_list", decodeTallyEntries),
+  suggestionNeverSuggest: (origin) => invokeDecoded("suggestion_never_suggest", decodeVoid, { origin }),
+  suggestionsClear: () => invokeDecoded("suggestions_clear", decodeVoid),
   monitorSetEnabled: (enabled) => invokeDecoded("monitor_set_enabled", decodeMonitorSettings, { enabled }),
   monitorDismissSuggestion: () => invokeDecoded("monitor_dismiss_suggestion", decodeVoid),
   settingsGet: () => invokeDecoded("settings_get", decodeMonitorSettings),
