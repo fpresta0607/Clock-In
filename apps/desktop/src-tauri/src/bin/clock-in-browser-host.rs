@@ -96,9 +96,16 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
     let Ok(message) = serde_json::from_slice::<serde_json::Value>(body) else {
         return Ok(());
     };
+    browser::record_handshake(&paths.dir);
     match message.get("type").and_then(|kind| kind.as_str()) {
         Some("get-rules") => {
-            let reply = serde_json::json!({ "type": "rules", "rules": load_rules(&paths.rules) });
+            let state = collection_state(paths);
+            let rules = state["collectionEnabled"]
+                .as_bool()
+                .unwrap_or(false)
+                .then(|| load_rules(&paths.rules))
+                .unwrap_or_default();
+            let reply = rules_reply(state, rules);
             match native_messaging::write_json(writer, &reply) {
                 Ok(()) => Ok(()),
                 // A rule set that outgrows the 64 KB frame cap fails closed,
@@ -111,28 +118,51 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
                     );
                     native_messaging::write_json(
                         writer,
-                        &serde_json::json!({ "type": "rules", "rules": [] }),
+                        &rules_reply(collection_state(paths), Vec::new()),
                     )
                 }
             }
         }
         Some("span-event") => {
-            if let Err(error) = append_span_event(message.get("event"), paths) {
+            if let Err(error) = append_span_event(message.get("event"), message.get("collectionId"), paths) {
                 // The port stays up; the extension's heartbeats mean the span
                 // recovers on the next event.
                 eprintln!("clock-in-browser-host: {error}");
             }
-            Ok(())
+            write_collection_state(writer, paths)
         }
         Some("tally") => {
-            if let Err(error) = store_tally(message.get("entries"), paths) {
-                eprintln!("clock-in-browser-host: could not store the tally: {error}");
+            match store_tally(message.get("entries"), message.get("weekStart"), message.get("collectionId"), paths) {
+                Ok(TallyOutcome::ClearRequested) => {
+                    native_messaging::write_json(writer, &serde_json::json!({ "type": "clear-tally" }))?
+                }
+                Ok(TallyOutcome::Stored | TallyOutcome::Dropped) => {}
+                Err(error) => eprintln!("clock-in-browser-host: could not store the tally: {error}"),
             }
-            Ok(())
+            write_collection_state(writer, paths)
         }
         // Unknown message types are ignored.
         _ => Ok(()),
     }
+}
+
+fn collection_state(paths: &HostPaths) -> serde_json::Value {
+    match browser::collection_id(&paths.dir) {
+        Some(collection_id) => serde_json::json!({ "collectionEnabled": true, "collectionId": collection_id }),
+        None => serde_json::json!({ "collectionEnabled": false }),
+    }
+}
+
+fn rules_reply(mut state: serde_json::Value, rules: Vec<Rule>) -> serde_json::Value {
+    state["type"] = serde_json::Value::String("rules".to_string());
+    state["rules"] = serde_json::to_value(rules).unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
+    state
+}
+
+fn write_collection_state(writer: &mut impl Write, paths: &HostPaths) -> io::Result<()> {
+    let mut state = collection_state(paths);
+    state["type"] = serde_json::Value::String("collection-state".to_string());
+    native_messaging::write_json(writer, &state)
 }
 
 /// One URL rule as the extension needs it: id for the verdict, pattern for
@@ -198,15 +228,27 @@ impl SpanEventInput {
     }
 }
 
-fn append_span_event(event: Option<&serde_json::Value>, paths: &HostPaths) -> Result<(), String> {
+fn message_collection_id(value: Option<&serde_json::Value>) -> Option<&str> {
+    value.and_then(|value| value.as_str()).filter(|id| !id.trim().is_empty())
+}
+
+fn append_span_event(
+    event: Option<&serde_json::Value>,
+    collection_id: Option<&serde_json::Value>,
+    paths: &HostPaths,
+) -> Result<bool, String> {
     let event = event.ok_or_else(|| "span-event without an event payload".to_string())?;
     let input: SpanEventInput = serde_json::from_value(event.clone())
         .map_err(|error| format!("invalid span event: {error}"))?;
     input.validate()?;
+    let Some(collection_id) = message_collection_id(collection_id) else {
+        return Ok(false);
+    };
+    let collection_id = collection_id.to_string();
     let event = input.into_event();
-    // The shared discipline: interprocess lock, whole-line append, rotation
-    // at the cap, partial-tail repair.
-    spool::append(&paths.spool, &event)
+    spool::append_if(&paths.spool, &event, || {
+        browser::collection_id(&paths.dir).as_deref() == Some(collection_id.as_str())
+    })
         .map_err(|error| format!("could not write the browser spool: {error}"))
 }
 
@@ -215,13 +257,40 @@ fn append_span_event(event: Option<&serde_json::Value>, paths: &HostPaths) -> Re
 /// reads this file on demand, and nobody uploads it. A snapshot replaces the
 /// file rather than merging; the extension's copy wins. The shared locked
 /// temp-and-rename writer keeps concurrent host processes from racing.
-fn store_tally(entries: Option<&serde_json::Value>, paths: &HostPaths) -> io::Result<()> {
+enum TallyOutcome {
+    Stored,
+    ClearRequested,
+    Dropped,
+}
+
+fn store_tally(
+    entries: Option<&serde_json::Value>,
+    week_start: Option<&serde_json::Value>,
+    collection_id: Option<&serde_json::Value>,
+    paths: &HostPaths,
+) -> Result<TallyOutcome, String> {
     let Some(entries) = entries.filter(|value| value.is_array()) else {
-        return Ok(());
+        return Ok(TallyOutcome::Dropped);
     };
-    let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "entries": entries }))
-        .map_err(io::Error::other)?;
-    browser::write_if_changed(&paths.tally, &bytes)
+    let Some(week_start) = week_start.and_then(|value| value.as_u64()) else {
+        return Ok(TallyOutcome::Dropped);
+    };
+    let Some(collection_id) = message_collection_id(collection_id) else {
+        return Ok(TallyOutcome::Dropped);
+    };
+    let collection_id = collection_id.to_string();
+    let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "weekStart": week_start, "entries": entries }))
+        .map_err(|error| error.to_string())?;
+    spool::with_lock(&paths.spool, || {
+        if browser::collection_id(&paths.dir).as_deref() != Some(collection_id.as_str()) {
+            return Ok(TallyOutcome::Dropped);
+        }
+        match browser::store_tally_snapshot(&paths.dir, &bytes, entries.as_array().is_some_and(Vec::is_empty))? {
+            browser::TallyStoreOutcome::Stored => Ok(TallyOutcome::Stored),
+            browser::TallyStoreOutcome::ClearRequested => Ok(TallyOutcome::ClearRequested),
+        }
+    })
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -263,15 +332,32 @@ mod tests {
         values
     }
 
-    fn span_event_message(session: &str) -> Vec<u8> {
+    fn configured_paths(dir: &Path) -> HostPaths {
+        browser::enable_collection(dir, "u1").expect("collection enables");
+        HostPaths::in_dir(dir)
+    }
+
+    fn span_event_message(paths: &HostPaths, session: &str) -> Vec<u8> {
+        let collection_id = browser::collection_id(&paths.dir).expect("collection id exists");
         serde_json::to_vec(&serde_json::json!({
             "type": "span-event",
+            "collectionId": collection_id,
             "event": {
                 "event": "started",
                 "externalSessionId": session,
                 "ruleId": "r1",
                 "occurredAt": "2026-08-09T12:00:00Z"
             }
+        }))
+        .expect("the message serializes")
+    }
+
+    fn tally_message(paths: &HostPaths, entries: serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "type": "tally",
+            "collectionId": browser::collection_id(&paths.dir).expect("collection id exists"),
+            "weekStart": 1785801600000u64,
+            "entries": entries,
         }))
         .expect("the message serializes")
     }
@@ -287,7 +373,7 @@ mod tests {
     #[test]
     fn get_rules_replies_with_the_rules_files_rules() {
         let dir = temp_dir("get-rules");
-        let paths = HostPaths::in_dir(&dir);
+        let paths = configured_paths(&dir);
         std::fs::write(
             &paths.rules,
             r#"{"rules":[{"id":"r1","pattern":"github.com/acme/*"},{"id":"r2","pattern":"*.figma.com/files/*"}]}"#,
@@ -342,13 +428,12 @@ mod tests {
     #[test]
     fn a_span_event_lands_as_one_canonical_browser_line() {
         let dir = temp_dir("span-event");
-        let paths = HostPaths::in_dir(&dir);
+        let paths = configured_paths(&dir);
         let mut out = Vec::new();
 
-        dispatch(&span_event_message("s1"), &paths, &mut out).expect("dispatch succeeds");
+        dispatch(&span_event_message(&paths, "s1"), &paths, &mut out).expect("dispatch succeeds");
 
-        // Appends are fire-and-forget: no reply frame.
-        assert!(out.is_empty());
+        assert_eq!(reply_values(&out)[0]["collectionEnabled"], true);
         let lines = spool_lines(&paths.spool);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["source"], "browser");
@@ -381,9 +466,36 @@ mod tests {
     }
 
     #[test]
+    fn signed_out_and_stale_collection_messages_never_cross_the_browser_spool_boundary() {
+        let dir = temp_dir("collection-boundary");
+        let paths = configured_paths(&dir);
+        let old_id = browser::collection_id(&dir).expect("old collection id exists");
+        let old_message = span_event_message(&paths, "old-span");
+        browser::disable_collection(&dir).expect("logout disables collection");
+        let mut out = Vec::new();
+
+        dispatch(&old_message, &paths, &mut out).expect("signed-out message is handled");
+        assert!(!paths.spool.exists());
+        assert_eq!(reply_values(&out)[0]["collectionEnabled"], false);
+
+        browser::enable_collection(&dir, "u2").expect("next account enables collection");
+        out.clear();
+        dispatch(&old_message, &paths, &mut out).expect("stale message is handled");
+        assert!(!paths.spool.exists());
+        assert_ne!(reply_values(&out)[0]["collectionId"], old_id);
+
+        let current_message = span_event_message(&paths, "new-span");
+        out.clear();
+        dispatch(&current_message, &paths, &mut out).expect("current message is handled");
+        assert_eq!(spool_lines(&paths.spool)[0]["externalSessionId"], "new-span");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn concurrent_span_events_append_whole_lines_under_the_lock() {
         let dir = temp_dir("concurrent");
-        let paths = Arc::new(HostPaths::in_dir(&dir));
+        let paths = Arc::new(configured_paths(&dir));
 
         // Same sizing as the agent spool's concurrent test: lock hand-off
         // favours the thread that just released, so large bursts can outwait
@@ -394,7 +506,7 @@ mod tests {
                 std::thread::spawn(move || {
                     let mut out = Vec::new();
                     for index in 0..15 {
-                        let message = span_event_message(&format!("t{thread_index}-{index}"));
+                        let message = span_event_message(&paths, &format!("t{thread_index}-{index}"));
                         dispatch(&message, &paths, &mut out).expect("dispatch succeeds");
                     }
                 })
@@ -417,7 +529,7 @@ mod tests {
     #[test]
     fn unknown_message_types_and_bad_json_are_ignored() {
         let dir = temp_dir("unknown");
-        let paths = HostPaths::in_dir(&dir);
+        let paths = configured_paths(&dir);
         let mut out = Vec::new();
 
         for body in [
@@ -439,17 +551,13 @@ mod tests {
     #[test]
     fn a_tally_snapshot_is_stored_beside_the_spools_and_never_answered() {
         let dir = temp_dir("tally");
-        let paths = HostPaths::in_dir(&dir);
+        let paths = configured_paths(&dir);
         let mut out = Vec::new();
 
-        dispatch(
-            br#"{"type":"tally","entries":[{"origin":"quickbooks.com","seconds":10800}]}"#,
-            &paths,
-            &mut out,
-        )
+        dispatch(&tally_message(&paths, serde_json::json!([{"origin":"quickbooks.com","seconds":10800}])), &paths, &mut out)
         .expect("dispatch succeeds");
 
-        assert!(out.is_empty());
+        assert_eq!(reply_values(&out)[0]["collectionEnabled"], true);
         let stored: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.tally).expect("the tally reads"))
                 .expect("the tally parses");
@@ -457,7 +565,7 @@ mod tests {
         assert_eq!(stored["entries"][0]["seconds"], 10800);
 
         // A second snapshot replaces the first; the extension's copy wins.
-        dispatch(br#"{"type":"tally","entries":[]}"#, &paths, &mut out).expect("dispatch succeeds");
+        dispatch(&tally_message(&paths, serde_json::json!([])), &paths, &mut out).expect("dispatch succeeds");
         let stored: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.tally).expect("the tally reads"))
                 .expect("the tally parses");
@@ -470,9 +578,32 @@ mod tests {
     }
 
     #[test]
+    fn a_clear_request_rejects_stale_tally_until_the_extension_confirms_empty_state() {
+        let dir = temp_dir("tally-clear");
+        let paths = configured_paths(&dir);
+        let mut out = Vec::new();
+        browser::clear_suggestion_data(&dir).expect("clear queues");
+
+        dispatch(&tally_message(&paths, serde_json::json!([{"origin":"quickbooks.com","seconds":10800}])), &paths, &mut out)
+            .expect("stale tally is handled");
+        let replies = reply_values(&out);
+        assert_eq!(replies[0]["type"], "clear-tally");
+        assert!(!paths.tally.exists());
+
+        out.clear();
+        dispatch(&tally_message(&paths, serde_json::json!([])), &paths, &mut out).expect("empty tally is handled");
+        let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(&paths.tally).expect("empty tally mirrors"))
+            .expect("empty tally parses");
+        assert!(stored["entries"].as_array().expect("entries is an array").is_empty());
+        assert!(!paths.dir.join("browser-tally-clear.json").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn an_oversize_rule_set_fails_closed_and_the_port_keeps_serving() {
         let dir = temp_dir("oversize-rules");
-        let paths = HostPaths::in_dir(&dir);
+        let paths = configured_paths(&dir);
         // Enough rules that the serialized reply clears the 64 KB frame cap.
         let rules: Vec<serde_json::Value> = (0..700)
             .map(|index| {
@@ -490,14 +621,14 @@ mod tests {
         let mut wire = Vec::new();
         wire.extend_from_slice(&framed(br#"{"type":"get-rules"}"#));
         // The port must survive and answer the next request too.
-        wire.extend_from_slice(&framed(&span_event_message("s1")));
+        wire.extend_from_slice(&framed(&span_event_message(&paths, "s1")));
 
         let mut reader = &wire[..];
         let mut out = Vec::new();
         serve(&mut reader, &mut out, &paths).expect("serve runs to EOF");
 
         let replies = reply_values(&out);
-        assert_eq!(replies.len(), 1, "one answer, not a dead port");
+        assert_eq!(replies.len(), 2, "the port keeps serving after the fallback");
         assert_eq!(replies[0]["type"], "rules");
         assert!(
             replies[0]["rules"]
@@ -514,7 +645,7 @@ mod tests {
     #[test]
     fn the_loop_survives_dropped_frames_and_keeps_serving() {
         let dir = temp_dir("serve");
-        let paths = HostPaths::in_dir(&dir);
+        let paths = configured_paths(&dir);
         // A corrupt rules file, to prove fail-closed end to end.
         std::fs::write(&paths.rules, "garbage").expect("the rules file writes");
 
@@ -523,7 +654,7 @@ mod tests {
         let big = vec![b'x'; native_messaging::MAX_MESSAGE_BYTES + 1];
         wire.extend_from_slice(&framed(&big));
         // A span event and a get-rules behind it must still land.
-        wire.extend_from_slice(&framed(&span_event_message("s1")));
+        wire.extend_from_slice(&framed(&span_event_message(&paths, "s1")));
         wire.extend_from_slice(&framed(br#"{"type":"get-rules"}"#));
 
         let mut reader = &wire[..];
@@ -532,9 +663,9 @@ mod tests {
 
         assert_eq!(spool_lines(&paths.spool).len(), 1);
         let replies = reply_values(&out);
-        assert_eq!(replies.len(), 1);
-        assert_eq!(replies[0]["type"], "rules");
-        assert!(replies[0]["rules"]
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[1]["type"], "rules");
+        assert!(replies[1]["rules"]
             .as_array()
             .expect("rules is an array")
             .is_empty());

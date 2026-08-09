@@ -290,9 +290,23 @@ pub struct PendingEvents {
 /// tail left by a crashed append is quarantined before the new line goes on, so
 /// a complete line never gets glued onto a fragment.
 pub fn append(path: &Path, event: &SpoolEvent) -> SpoolResult<()> {
+    append_if(path, event, || true).map(|_| ())
+}
+
+pub fn append_if(
+    path: &Path,
+    event: &SpoolEvent,
+    allowed: impl FnOnce() -> bool,
+) -> SpoolResult<bool> {
     let mut line = serde_json::to_vec(event).map_err(io::Error::other)?;
     line.push(b'\n');
-    append_line(path, &line, MAX_SPOOL_BYTES)
+    with_lock(path, || {
+        if !allowed() {
+            return Ok(false);
+        }
+        append_line_locked(path, &line, MAX_SPOOL_BYTES)?;
+        Ok(true)
+    })
 }
 
 /// Reads every complete event without removing anything. A trailing partial
@@ -444,21 +458,23 @@ pub(crate) fn format_iso8601(unix_secs: u64) -> String {
 /// browser host (whose lines are written via `append`, but a raw line is
 /// exposed for writers with their own encoding).
 pub fn append_line(path: &Path, line: &[u8], max_bytes: u64) -> SpoolResult<()> {
-    with_lock(path, || {
-        let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-        if size > 0 && !ends_with_newline(path)? {
-            repair_partial_tail(path)?;
-        }
-        let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-        if size > 0 && size + line.len() as u64 > max_bytes {
-            rotate(path)?;
-        }
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?
-            .write_all(line)
-    })
+    with_lock(path, || append_line_locked(path, line, max_bytes))
+}
+
+fn append_line_locked(path: &Path, line: &[u8], max_bytes: u64) -> SpoolResult<()> {
+    let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    if size > 0 && !ends_with_newline(path)? {
+        repair_partial_tail(path)?;
+    }
+    let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    if size > 0 && size + line.len() as u64 > max_bytes {
+        rotate(path)?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?
+        .write_all(line)
 }
 
 fn ends_with_newline(path: &Path) -> io::Result<bool> {

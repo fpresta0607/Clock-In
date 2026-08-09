@@ -42,14 +42,21 @@ import {
 } from "./spans.js";
 import {
   addFocusSeconds,
+  clearTally,
   emptyTally,
   originFor,
+  rollTallyIntoCurrentWeek,
   TALLY_STORAGE_KEY,
   tallySnapshot,
   type Tally,
 } from "./tally.js";
 import { tickCredit } from "./tick.js";
-import { LAST_TICK_STORAGE_KEY, MACHINE_STORAGE_KEY, parseStartupStorage } from "./startup.js";
+import {
+  COLLECTION_ID_STORAGE_KEY,
+  LAST_TICK_STORAGE_KEY,
+  MACHINE_STORAGE_KEY,
+  parseStartupStorage,
+} from "./startup.js";
 
 /** The registered native-messaging host name (the desktop registers it). */
 const HOST_NAME = "com.clock_in.browser_host";
@@ -64,6 +71,8 @@ let reconnectAttempt = 0;
 let machine: SpanMachine = createSpanMachine();
 const outbox = new Outbox<SpanEvent>();
 let tally: Tally = emptyTally();
+let collectionEnabled = false;
+let collectionId: string | undefined;
 
 // The active tab's local verdict. `unmatchedOrigin` exists only to feed the
 // local tally; it is never part of an emitted event.
@@ -78,10 +87,11 @@ let lastTallyFlushAt = 0;
 function persistState(): void {
   const savedAt = Date.now();
   void chrome.storage.local.set({
-    [TALLY_STORAGE_KEY]: tally.entries,
+    [TALLY_STORAGE_KEY]: tally,
     [OUTBOX_STORAGE_KEY]: outbox.snapshot(),
     [MACHINE_STORAGE_KEY]: snapshotMachine(machine, savedAt),
     [LAST_TICK_STORAGE_KEY]: lastTickAt,
+    [COLLECTION_ID_STORAGE_KEY]: collectionId ?? null,
   }).catch(() => {
     // A later alarm or browser event retries. The in-memory state remains
     // authoritative for this worker lifetime.
@@ -101,8 +111,11 @@ function sendToHost(message: unknown): boolean {
 }
 
 function emitSpanEvents(events: readonly SpanEvent[]): void {
+  if (collectionId === undefined) {
+    return;
+  }
   for (const event of events) {
-    if (!sendToHost({ type: "span-event", event })) {
+    if (!sendToHost({ type: "span-event", event, collectionId })) {
       outbox.push(event);
     }
   }
@@ -142,13 +155,24 @@ function requestRules(): void {
 }
 
 function sendTally(): void {
-  sendToHost({ type: "tally", entries: tallySnapshot(tally) });
+  if (!collectionEnabled || collectionId === undefined) {
+    return;
+  }
+  sendToHost({
+    type: "tally",
+    collectionId,
+    weekStart: tally.weekStart,
+    entries: tallySnapshot(tally),
+  });
 }
 
 function flushOutbox(): void {
+  if (!collectionEnabled || collectionId === undefined) {
+    return;
+  }
   const queued = outbox.drain();
   for (const event of queued) {
-    if (!sendToHost({ type: "span-event", event })) {
+    if (!sendToHost({ type: "span-event", event, collectionId })) {
       outbox.push(event);
     }
   }
@@ -161,6 +185,37 @@ function isRule(value: unknown): value is UrlRule {
   }
   const candidate = value as Record<string, unknown>;
   return typeof candidate["id"] === "string" && typeof candidate["pattern"] === "string";
+}
+
+function collectionDetails(message: Record<string, unknown>): { enabled: boolean; id: string | undefined } {
+  const id = message["collectionId"];
+  return {
+    enabled: message["collectionEnabled"] === true && typeof id === "string" && id.length > 0,
+    id: typeof id === "string" && id.length > 0 ? id : undefined,
+  };
+}
+
+function applyCollectionState(message: Record<string, unknown>): void {
+  const { enabled, id } = collectionDetails(message);
+  if (!enabled || id === undefined) {
+    collectionEnabled = false;
+    collectionId = undefined;
+    rules = [];
+    unmatchedOrigin = null;
+    outbox.clear();
+    clearTally(tally);
+    feedMachine({ type: "active-tab", ruleId: null });
+    persistState();
+    return;
+  }
+  const changed = collectionId !== id;
+  collectionEnabled = true;
+  collectionId = id;
+  if (changed) {
+    outbox.clear();
+    clearTally(tally);
+    persistState();
+  }
 }
 
 function connect(): void {
@@ -177,17 +232,30 @@ function connect(): void {
   port = opened;
   void chrome.alarms.clear(RECONNECT_ALARM_NAME);
   opened.onMessage.addListener((message: unknown) => {
-    if (
-      typeof message === "object" &&
-      message !== null &&
-      (message as Record<string, unknown>)["type"] === "rules"
-    ) {
-      const list = (message as Record<string, unknown>)["rules"];
+    if (typeof message !== "object" || message === null) {
+      return;
+    }
+    const payload = message as Record<string, unknown>;
+    if (payload["type"] === "clear-tally") {
+      clearTally(tally);
+      persistState();
+      sendTally();
+      return;
+    }
+    if (payload["type"] === "collection-state") {
+      applyCollectionState(payload);
+      return;
+    }
+    if (payload["type"] === "rules") {
+      applyCollectionState(payload);
+      const list = payload["rules"];
       // Fail closed: an unusable rule set matches nothing.
-      rules = Array.isArray(list) ? list.filter(isRule) : [];
+      rules = collectionEnabled && Array.isArray(list) ? list.filter(isRule) : [];
       reconnectAttempt = 0;
       // A new rule set changes the verdict of the tab already open.
       reApplyActiveTab();
+      flushOutbox();
+      sendTally();
     }
   });
   opened.onDisconnect.addListener(() => {
@@ -197,8 +265,6 @@ function connect(): void {
     scheduleReconnect();
   });
   requestRules();
-  flushOutbox();
-  sendTally();
 }
 
 function scheduleReconnect(): void {
@@ -213,7 +279,7 @@ function applyTab(tab: chrome.tabs.Tab): void {
   unmatchedOrigin = null;
   let ruleId: string | null = null;
   const url = tab.url ?? tab.pendingUrl;
-  if (!tab.incognito && url !== undefined && url.length > 0) {
+  if (collectionEnabled && !tab.incognito && url !== undefined && url.length > 0) {
     ruleId = match(url, rules);
     unmatchedOrigin = ruleId === null ? originFor(url) : null;
   }
@@ -274,39 +340,47 @@ function revalidateAttention(): void {
 }
 
 chrome.tabs.onActivated.addListener((activeInfo) => {
-  // A tab switch in a window the user is not looking at must not move the
-  // state machine.
-  if (!shouldApplyTabActivation(activeInfo.windowId, focusedWindowId)) {
-    return;
-  }
-  void chrome.tabs
-    .get(activeInfo.tabId)
-    .then(applyTab)
-    .catch(() => {
-      // The tab vanished between the event and the lookup; treat as no match.
-      feedMachine({ type: "active-tab", ruleId: null });
-    });
+  void initialized.then(() => {
+    // A tab switch in a window the user is not looking at must not move the
+    // state machine.
+    if (!shouldApplyTabActivation(activeInfo.windowId, focusedWindowId)) {
+      return;
+    }
+    void chrome.tabs
+      .get(activeInfo.tabId)
+      .then(applyTab)
+      .catch(() => {
+        // The tab vanished between the event and the lookup; treat as no match.
+        feedMachine({ type: "active-tab", ruleId: null });
+      });
+  });
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  // Only URL changes in the active tab re-seat the state machine.
-  if (tabId === currentTabId && changeInfo.url !== undefined) {
-    applyTab(tab);
-  }
+  void initialized.then(() => {
+    // Only URL changes in the active tab re-seat the state machine.
+    if (tabId === currentTabId && changeInfo.url !== undefined) {
+      applyTab(tab);
+    }
+  });
 });
 
 chrome.windows.onFocusChanged.addListener((windowId) => {
-  const focused = windowId !== chrome.windows.WINDOW_ID_NONE;
-  focusedWindowId = focused ? windowId : null;
-  feedMachine({ type: "window-focus", focused });
-  if (focused) {
-    watchActiveTab(windowId);
-  }
+  void initialized.then(() => {
+    const focused = windowId !== chrome.windows.WINDOW_ID_NONE;
+    focusedWindowId = focused ? windowId : null;
+    feedMachine({ type: "window-focus", focused });
+    if (focused) {
+      watchActiveTab(windowId);
+    }
+  });
 });
 
 chrome.idle.setDetectionInterval(IDLE_DETECTION_SECONDS);
 chrome.idle.onStateChanged.addListener((state) => {
-  feedMachine({ type: "idle", state: state as IdleState });
+  void initialized.then(() => {
+    feedMachine({ type: "idle", state: state as IdleState });
+  });
 });
 
 // Alarm-driven tick: unlike an in-memory interval, this survives routine MV3
@@ -314,14 +388,17 @@ chrome.idle.onStateChanged.addListener((state) => {
 // re-validation, so laptop sleep cannot credit hours to a stale origin.
 function runTick(): void {
   const now = Date.now();
+  if (rollTallyIntoCurrentWeek(tally, now)) {
+    persistState();
+  }
   const { creditMs, gapExceeded } = tickCredit(now, lastTickAt, TICK_MS);
   lastTickAt = now;
   if (gapExceeded) {
     revalidateAttention();
   }
   advanceMachine(now);
-  if (unmatchedOrigin !== null && machine.windowFocused && machine.idleState === "active") {
-    addFocusSeconds(tally, unmatchedOrigin, Math.round(creditMs / 1000));
+  if (collectionEnabled && unmatchedOrigin !== null && machine.windowFocused && machine.idleState === "active") {
+    addFocusSeconds(tally, unmatchedOrigin, Math.round(creditMs / 1000), now);
   }
   if (now - lastTallyFlushAt >= TALLY_FLUSH_MS) {
     lastTallyFlushAt = now;
@@ -331,20 +408,22 @@ function runTick(): void {
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  switch (alarm.name) {
-    case TICK_ALARM_NAME:
-      runTick();
-      break;
-    case RULES_REFRESH_ALARM_NAME:
-      requestRules();
-      break;
-    case RECONNECT_ALARM_NAME:
-      connect();
-      break;
-    case SPAN_ADVANCE_ALARM_NAME:
-      advanceMachine(Date.now());
-      break;
-  }
+  void initialized.then(() => {
+    switch (alarm.name) {
+      case TICK_ALARM_NAME:
+        runTick();
+        break;
+      case RULES_REFRESH_ALARM_NAME:
+        requestRules();
+        break;
+      case RECONNECT_ALARM_NAME:
+        connect();
+        break;
+      case SPAN_ADVANCE_ALARM_NAME:
+        advanceMachine(Date.now());
+        break;
+    }
+  });
 });
 
 function ensurePeriodicAlarm(name: string, periodInMinutes: number): void {
@@ -361,25 +440,24 @@ function ensurePeriodicAlarm(name: string, periodInMinutes: number): void {
 ensurePeriodicAlarm(TICK_ALARM_NAME, TICK_ALARM_PERIOD_MINUTES);
 ensurePeriodicAlarm(RULES_REFRESH_ALARM_NAME, RULES_REFRESH_PERIOD_MINUTES);
 
-// Startup: restore the local tally, queued verdicts, and the span machine;
-// re-derive attention from the platform; then connect.
-void chrome.storage.local
-  .get([TALLY_STORAGE_KEY, OUTBOX_STORAGE_KEY, MACHINE_STORAGE_KEY, LAST_TICK_STORAGE_KEY])
-  .catch(() => undefined)
-  .then((stored) => {
-    const startup = parseStartupStorage(stored);
-    tally = { entries: startup.tallyEntries };
-    for (const event of startup.queuedEvents) {
-      outbox.push(event);
-    }
-    const now = Date.now();
-    // A persisted tick keeps local focus totals honest across routine worker
-    // eviction. Future values from a wall-clock change fail toward zero.
-    lastTickAt = Math.min(now, startup.lastTickAt ?? now);
-    const restored = restoreMachine(startup.machineSnapshot, now);
-    machine = restored.machine;
-    emitSpanEvents(restored.emitted);
-    scheduleMachineAdvance();
-    revalidateAttention();
-    connect();
-  });
+async function initialize(): Promise<void> {
+  const stored = await chrome.storage.local
+    .get([TALLY_STORAGE_KEY, OUTBOX_STORAGE_KEY, MACHINE_STORAGE_KEY, LAST_TICK_STORAGE_KEY, COLLECTION_ID_STORAGE_KEY])
+    .catch(() => undefined);
+  const now = Date.now();
+  const startup = parseStartupStorage(stored, now);
+  tally = startup.tally;
+  collectionId = startup.collectionId;
+  for (const event of startup.queuedEvents) {
+    outbox.push(event);
+  }
+  lastTickAt = Math.min(now, startup.lastTickAt ?? now);
+  const restored = restoreMachine(startup.machineSnapshot, now);
+  machine = restored.machine;
+  emitSpanEvents(restored.emitted);
+  scheduleMachineAdvance();
+  revalidateAttention();
+  connect();
+}
+
+const initialized = initialize();
