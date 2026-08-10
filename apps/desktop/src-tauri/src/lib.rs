@@ -651,7 +651,7 @@ async fn auth_logout(state: State<'_, AppState>) -> ApiResult<()> {
 #[tauri::command]
 async fn timer_start(state: State<'_, AppState>, mut input: StartIntent) -> ApiResult<RunningTimer> {
     let access_token = state.access_token().await?;
-    input.device_id = state.monitor.trusted_device_id();
+    input.device_id = Some(state.monitor.trusted_device_id()?);
 
     // Record the intent before the request so a crash mid-flight is recoverable.
     let mut pending = state.read_recovery().await;
@@ -790,7 +790,7 @@ async fn timer_retry_local_start(
     mut input: StartIntent,
 ) -> ApiResult<Snapshot> {
     let access_token = state.access_token().await?;
-    input.device_id = state.monitor.trusted_device_id();
+    input.device_id = Some(state.monitor.trusted_device_id()?);
     let running = state
         .authenticated_result(state.client.start_session(&access_token, &input).await)
         .await?;

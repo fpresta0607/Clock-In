@@ -104,10 +104,20 @@ describe("session contracts", () => {
   });
 
   it("allows a start to use the member's selected default project", () => {
-    expect(sessionStartRequestSchema.parse({ clientId: ids.client, description: "General work" })).toEqual({
+    expect(sessionStartRequestSchema.parse({ clientId: ids.client, deviceId: ids.user, description: "General work" })).toEqual({
       clientId: ids.client,
+      deviceId: ids.user,
       description: "General work",
     });
+  });
+
+  it("rejects a start without a recording device", () => {
+    expect(() => sessionStartRequestSchema.parse({
+      clientId: ids.client,
+      projectId: ids.project,
+      description: "Prepare the landing page",
+      startedAt,
+    })).toThrow();
   });
 
   it("accepts the persisted running session returned after a start", () => {

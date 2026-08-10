@@ -1454,9 +1454,11 @@ impl Monitor {
         lock(&self.paths).browser_dir.clone()
     }
 
-    pub fn trusted_device_id(&self) -> Option<String> {
+    pub fn trusted_device_id(&self) -> ApiResult<String> {
         let device_id = lock(&self.shared).settings.device_id.clone();
-        uuid::Uuid::parse_str(&device_id).ok().map(|_| device_id)
+        uuid::Uuid::parse_str(&device_id)
+            .map(|_| device_id)
+            .map_err(|_| BridgeError::unknown("A valid recording device is required to start a timer."))
     }
 
     /// Asks the upload task to run now instead of at the next 5-minute tick

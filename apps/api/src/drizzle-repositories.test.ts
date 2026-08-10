@@ -15,6 +15,7 @@ const input = {
   userId: "e1c7e513-b094-4d4c-ae55-21790ae019a4",
   clientId: "c1c7e513-b094-4d4c-ae55-21790ae019a4",
   projectId: "a1c7e513-b094-4d4c-ae55-21790ae019a4",
+  deviceId: "f1c7e513-b094-4d4c-ae55-21790ae019a4",
   description: null,
   startedAt: new Date("2026-08-06T13:00:00.000Z"),
 };
