@@ -18,6 +18,7 @@ function backgroundHarness(
   tabs: chrome.tabs.Tab[],
   queryTabs?: (query: chrome.tabs.QueryInfo) => Promise<chrome.tabs.Tab[]>,
   getLastFocused: () => Promise<chrome.windows.Window> = () => Promise.resolve({ focused: true, id: 1 }),
+  getTab?: (tabId: number) => Promise<chrome.tabs.Tab | undefined>,
 ) {
   const alarm = listeners();
   const activated = listeners();
@@ -39,7 +40,7 @@ function backgroundHarness(
     tabs: {
       onActivated: activated,
       onUpdated: updated,
-      get: vi.fn((tabId: number) => Promise.resolve(tabsById.get(tabId))),
+      get: vi.fn((tabId: number) => getTab?.(tabId) ?? Promise.resolve(tabsById.get(tabId))),
       query: vi.fn((query: chrome.tabs.QueryInfo) => queryTabs?.(query) ?? Promise.resolve(activeTabId === undefined ? [] : [tabsById.get(activeTabId)])),
     },
     windows: { WINDOW_ID_CURRENT: -2, WINDOW_ID_NONE: -1, onFocusChanged: focusChanged, getLastFocused: vi.fn(getLastFocused) },
@@ -302,6 +303,98 @@ describe("background startup", () => {
         { origin: "example.com", seconds: 10 },
         { origin: "example.net", seconds: 20 },
       ]),
+    }));
+  });
+
+  it("does not credit a prior tab while an activation read is pending", async () => {
+    vi.useFakeTimers();
+    const start = Date.parse("2026-08-09T12:00:00.000Z");
+    vi.setSystemTime(start);
+    let resolveActivatedTab: (tab: chrome.tabs.Tab | undefined) => void = () => undefined;
+    const harness = backgroundHarness(
+      [
+        { id: 1, windowId: 1, url: "https://a.example.com", incognito: false },
+        { id: 2, windowId: 1, url: "https://github.com/acme/project", incognito: false },
+      ],
+      undefined,
+      undefined,
+      (tabId) => tabId === 2
+        ? new Promise((resolve) => { resolveActivatedTab = resolve; })
+        : Promise.resolve({ id: 1, windowId: 1, url: "https://a.example.com", incognito: false }),
+    );
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      rules: [{ id: "rule-1", pattern: "github.com/acme/*" }],
+    } as never);
+    await settle();
+
+    harness.activated.emit({ tabId: 2, windowId: 1 } as never);
+    await settle();
+    await vi.advanceTimersByTimeAsync(15_000);
+    harness.alarm.emit({ name: TICK_ALARM_NAME } as never);
+    await settle();
+
+    expect(spanMessages(harness.port)).toHaveLength(0);
+    const tally = hostMessages(harness.port).findLast((message) => message["type"] === "tally");
+    expect(tally).toEqual(expect.objectContaining({ entries: [] }));
+
+    resolveActivatedTab({ id: 2, windowId: 1, url: "https://github.com/acme/project", incognito: false });
+    await settle();
+    await vi.advanceTimersByTimeAsync(15_000);
+    harness.alarm.emit({ name: SPAN_ADVANCE_ALARM_NAME } as never);
+    await settle();
+
+    expect(spanMessages(harness.port)).toContainEqual(expect.objectContaining({
+      event: expect.objectContaining({ event: "started", occurredAt: new Date(start + 15_000).toISOString() }),
+    }));
+  });
+
+  it("does not retain a prior tab while a focused-window read is pending", async () => {
+    vi.useFakeTimers();
+    const start = Date.parse("2026-08-09T12:00:00.000Z");
+    vi.setSystemTime(start);
+    let resolveWindowTwo: (tabs: chrome.tabs.Tab[]) => void = () => undefined;
+    const harness = backgroundHarness(
+      [
+        { id: 1, windowId: 1, url: "https://github.com/acme/one", incognito: false },
+        { id: 2, windowId: 2, url: "https://github.com/acme/two", incognito: false },
+      ],
+      (query) => query.windowId === 2
+        ? new Promise((resolve) => { resolveWindowTwo = resolve; })
+        : Promise.resolve([{ id: 1, windowId: 1, url: "https://github.com/acme/one", incognito: false }]),
+    );
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      rules: [{ id: "rule-1", pattern: "github.com/acme/*" }],
+    } as never);
+    await settle();
+
+    harness.focusChanged.emit(2 as never);
+    await settle();
+    await vi.advanceTimersByTimeAsync(15_000);
+    harness.alarm.emit({ name: SPAN_ADVANCE_ALARM_NAME } as never);
+    await settle();
+
+    expect(spanMessages(harness.port)).toHaveLength(0);
+
+    resolveWindowTwo([{ id: 2, windowId: 2, url: "https://github.com/acme/two", incognito: false }]);
+    await settle();
+    await vi.advanceTimersByTimeAsync(15_000);
+    harness.alarm.emit({ name: SPAN_ADVANCE_ALARM_NAME } as never);
+    await settle();
+
+    expect(spanMessages(harness.port)).toContainEqual(expect.objectContaining({
+      event: expect.objectContaining({ event: "started", occurredAt: new Date(start + 15_000).toISOString() }),
     }));
   });
 
