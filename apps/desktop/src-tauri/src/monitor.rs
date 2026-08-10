@@ -1198,7 +1198,7 @@ pub struct MonitorConfig {
     pub recovery_path: PathBuf,
 }
 
-type InvalidSessionHandler = Arc<dyn Fn() + Send + Sync>;
+pub(crate) type InvalidSessionHandler = Arc<dyn Fn() + Send + Sync>;
 
 struct MonitorTasks {
     /// No poll task on non-Windows builds (no `ActivitySource` ships there);
@@ -1544,12 +1544,16 @@ impl Monitor {
             enabled: shared.settings.enabled,
             running,
             last_upload_at: shared.last_upload_at.clone(),
-            segment_backlog: active_identity
-                .then(|| count_lines(&paths.segments_path))
-                .unwrap_or(0),
-            agent_backlog: active_identity
-                .then(|| count_lines(&paths.agent_path))
-                .unwrap_or(0),
+            segment_backlog: if active_identity {
+                count_lines(&paths.segments_path)
+            } else {
+                0
+            },
+            agent_backlog: if active_identity {
+                count_lines(&paths.agent_path)
+            } else {
+                0
+            },
             browser_capture_paused: active_identity
                 && crate::browser::capture_is_paused(&paths.browser_dir),
             hooks: detect_hooks(&default_hook_probes()),
@@ -1622,6 +1626,7 @@ pub(crate) fn flush_open_segment_to_spool(
 /// events, poll the OS, fold signals into segments, spool transitions,
 /// enforce the auto-stop policy.
 #[cfg_attr(not(windows), allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
 async fn poll_loop(
     shared: Arc<Mutex<MonitorShared>>,
     events: Arc<PlatformEvents>,

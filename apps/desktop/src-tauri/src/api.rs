@@ -636,15 +636,6 @@ impl ApiClient {
         Ok(body.entries)
     }
 
-    pub async fn me(&self, access_token: &str) -> ApiResult<TimerUser> {
-        let body: MeResponse = self.get_json(access_token, "/me").await?;
-        Ok(TimerUser {
-            id: body.user.id,
-            email: body.user.email,
-            name: body.user.name,
-        })
-    }
-
     pub async fn me_with_identity(
         &self,
         access_token: &str,

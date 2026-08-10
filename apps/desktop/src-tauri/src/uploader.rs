@@ -19,7 +19,7 @@ use tokio::sync::Notify;
 use crate::api::{ApiClient, ErrorKind, MappingKind, PathMapping};
 use crate::monitor::{
     iso8601, lock, parse_iso8601, unix_now, ActiveAgent, AgentTracking, BrowserSpan,
-    BrowserTracking, MonitorShared, PendingSuggestion, SegmentRecord,
+    BrowserTracking, InvalidSessionHandler, MonitorShared, PendingSuggestion, SegmentRecord,
 };
 use crate::recovery::RecoveryState;
 use crate::spool::{self, AgentEventKind, AgentSource, EvidenceIdentity, SpoolEvent};
@@ -31,6 +31,8 @@ const UPLOAD_BATCH_SIZE: usize = 500;
 /// enough that the monitor stays below notice.
 const UPLOAD_INTERVAL_SECONDS: u64 = 300;
 
+type InvalidSessionHandlerState = Arc<Mutex<Option<InvalidSessionHandler>>>;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UploadDrainResult {
     Complete,
@@ -38,6 +40,7 @@ enum UploadDrainResult {
     AuthLost,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn upload_loop(
     shared: Arc<Mutex<MonitorShared>>,
     client: ApiClient,
@@ -49,7 +52,7 @@ pub async fn upload_loop(
     upload_now: Arc<Notify>,
     recording: Arc<AtomicBool>,
     identity_invalidated: Arc<AtomicBool>,
-    invalid_session_handler: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    invalid_session_handler: InvalidSessionHandlerState,
 ) {
     let browser_path = browser_dir.join("browser-spool.jsonl");
     let mut tick = tokio::time::interval(Duration::from_secs(UPLOAD_INTERVAL_SECONDS));
@@ -81,6 +84,7 @@ pub async fn upload_loop(
 
 /// One upload pass. Returns as soon as anything is unreachable; whatever was
 /// not acknowledged stays in its spool for the next pass.
+#[allow(clippy::too_many_arguments)]
 async fn upload_once(
     shared: &Arc<Mutex<MonitorShared>>,
     client: &ApiClient,
@@ -92,7 +96,7 @@ async fn upload_once(
     recovery: &Arc<tokio::sync::Mutex<RecoveryState>>,
     recording: &Arc<AtomicBool>,
     identity_invalidated: &Arc<AtomicBool>,
-    invalid_session_handler: &Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    invalid_session_handler: &InvalidSessionHandlerState,
 ) {
     let Some(session) = crate::read_session_token() else {
         invalidate_auth_loss(
@@ -247,7 +251,7 @@ fn invalidate_auth_loss(
     browser_dir: &Path,
     recording: &Arc<AtomicBool>,
     identity_invalidated: &Arc<AtomicBool>,
-    invalid_session_handler: &Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    invalid_session_handler: &InvalidSessionHandlerState,
 ) {
     complete_auth_loss(
         || crate::monitor::flush_open_segment_to_spool(shared, segments_path, unix_now()),
@@ -282,7 +286,7 @@ fn deactivate_invalid_identity(
     shared: &Arc<Mutex<MonitorShared>>,
     recording: &Arc<AtomicBool>,
     identity_invalidated: &Arc<AtomicBool>,
-    invalid_session_handler: &Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    invalid_session_handler: &InvalidSessionHandlerState,
 ) {
     recording.store(false, Ordering::SeqCst);
     identity_invalidated.store(true, Ordering::SeqCst);
