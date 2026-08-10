@@ -314,8 +314,8 @@ describe("me/stats routes", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
       totalDurationSeconds: 1_800,
-      corroboratedSeconds: 1_800,
-      projects: [{ project: { id: ids.project }, durationSeconds: 1_800, corroboratedSeconds: 1_800, sessionCount: 1 }],
+      attributedSeconds: 1_800,
+      projects: [{ project: { id: ids.project }, durationSeconds: 1_800, attributedSeconds: 1_800, sessionCount: 1 }],
     });
   });
 
@@ -388,8 +388,8 @@ describe("me/stats routes", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
       totalDurationSeconds: 600,
-      corroboratedSeconds: 300,
-      projects: [{ project: { id: ids.project }, durationSeconds: 600, corroboratedSeconds: 300, sessionCount: 1 }],
+      attributedSeconds: 300,
+      projects: [{ project: { id: ids.project }, durationSeconds: 600, attributedSeconds: 300, sessionCount: 1 }],
     });
   });
 

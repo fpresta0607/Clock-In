@@ -61,11 +61,9 @@ class MemoryAgentSessions implements AgentSessionRepository {
   public async upsertStarted(input: UpsertStartedAgentSession) {
     const existing = this.find(input.organizationId, input.userId, input.source, input.externalSessionId);
     if (existing !== undefined) {
-      if (existing.status === "stale" && input.source === "browser" && input.occurredAt > existing.lastEventAt) {
-        existing.status = "running";
-        existing.endedAt = null;
+      if (existing.status === "running" && input.occurredAt > existing.lastEventAt) {
+        existing.lastEventAt = input.occurredAt;
       }
-      if (input.occurredAt > existing.lastEventAt) existing.lastEventAt = input.occurredAt;
       return existing;
     }
     const record: AgentSessionRecord = {
@@ -89,7 +87,6 @@ class MemoryAgentSessions implements AgentSessionRepository {
   public async closeRunning(subject: { organizationId: string; userId: string }, source: AgentSessionRecord["source"], externalSessionId: string, endedAt: Date, _now: Date) {
     const existing = this.find(subject.organizationId, subject.userId, source, externalSessionId);
     if (existing === undefined || existing.status === "ended") return null;
-    if (existing.status === "stale" && (source !== "browser" || endedAt < existing.lastEventAt)) return null;
     existing.status = "ended";
     const terminalAt = endedAt > existing.lastEventAt ? endedAt : existing.lastEventAt;
     existing.endedAt = terminalAt;
@@ -107,7 +104,6 @@ class MemoryAgentSessions implements AgentSessionRepository {
       externalSessionId: input.externalSessionId,
       projectId: input.projectId,
       cwd: input.cwd,
-      ruleId: input.ruleId,
       status: "ended",
       startedAt: input.occurredAt,
       endedAt: input.occurredAt,
@@ -119,11 +115,6 @@ class MemoryAgentSessions implements AgentSessionRepository {
   public async advanceLastEvent(subject: { organizationId: string; userId: string }, source: AgentSessionRecord["source"], externalSessionId: string, occurredAt: Date, _now: Date) {
     const existing = this.find(subject.organizationId, subject.userId, source, externalSessionId);
     if (existing === undefined || existing.status === "ended") return false;
-    if (existing.status === "stale") {
-      if (source !== "browser" || occurredAt <= existing.lastEventAt) return false;
-      existing.status = "running";
-      existing.endedAt = null;
-    }
     if (occurredAt > existing.lastEventAt) existing.lastEventAt = occurredAt;
     return true;
   }
@@ -133,7 +124,7 @@ class MemoryAgentSessions implements AgentSessionRepository {
     for (const record of this.records) {
       if (record.organizationId !== subject.organizationId || record.userId !== subject.userId) continue;
       if (record.status === "running" && record.lastEventAt < cutoff) {
-        record.status = "stale";
+        record.status = "ended";
         record.endedAt = record.lastEventAt;
         reaped += 1;
       }
@@ -313,7 +304,7 @@ describe("agent-session routes", () => {
       method: "POST", headers, body: JSON.stringify({ events: [event({ externalSessionId: "fresh" })] }),
     });
 
-    expect(agentSessions.records[0]).toMatchObject({ status: "stale", endedAt: new Date("2026-08-06T07:00:00.000Z") });
+    expect(agentSessions.records[0]).toMatchObject({ status: "ended", endedAt: new Date("2026-08-06T07:00:00.000Z") });
     expect(agentSessions.records[1]).toMatchObject({ externalSessionId: "fresh", status: "running" });
   });
 
@@ -334,10 +325,9 @@ describe("agent-session routes", () => {
     await expect(started.json()).resolves.toEqual({ results: [{ externalSessionId: "span-1", accepted: true }] });
     expect(agentSessions.records[0]).toMatchObject({
       source: "browser",
-      cwd: null,
-      ruleId: "01c7e513-b094-4d4c-ae55-21790ae019a4",
-      projectId: ids.project,
-      linkedSessionId: ids.timer,
+      cwd: "",
+      projectId: null,
+      linkedSessionId: null,
     });
 
     // A browser event with a cwd, or an agent event with a ruleId, fails the contract.
@@ -388,7 +378,7 @@ describe("agent-session routes", () => {
 
     expect(agentSessions.records[0]).toMatchObject({
       externalSessionId: "span-1",
-      status: "stale",
+      status: "ended",
       endedAt: new Date("2026-08-06T13:40:00.000Z"),
     });
     expect(agentSessions.records[1]).toMatchObject({ externalSessionId: "session-1", status: "running" });

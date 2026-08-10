@@ -30,6 +30,10 @@ export interface ProjectRepository {
   findForMember(subject: AuthenticatedSubject, projectId: string): Promise<ProjectRecord | null>;
   /** Creates the project and the creator's membership in one transaction. */
   createForMember(subject: AuthenticatedSubject, name: string): Promise<ProjectRecord>;
+  /** @deprecated Returns the member's preferred (default) project. */
+  preferredForMember?(subject: AuthenticatedSubject): Promise<ProjectRecord | null>;
+  /** @deprecated Records the member's last selected project. */
+  rememberSelection?(subject: AuthenticatedSubject, projectId: string): Promise<void>;
 }
 
 export interface CreateRunningSession {

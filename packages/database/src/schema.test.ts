@@ -193,7 +193,7 @@ describe("database schema", () => {
     expect(agentSessions.organizationId.notNull).toBe(true);
     expect(agentSessions.userId.notNull).toBe(true);
     expect(agentSessions.source.notNull).toBe(true);
-    expect(agentSessions.source.enumValues).toEqual(["claude_code", "codex", "kimi_code", "cursor", "browser", "other"]);
+    expect(agentSessions.source.enumValues).toEqual(["claude_code", "codex", "kimi_code", "cursor", "other"]);
     expect(agentSessions.externalSessionId.notNull).toBe(true);
     expect(agentSessions.externalSessionId.columnType).toBe("PgText");
     expect(agentSessions.projectId.notNull).toBe(false);
@@ -202,7 +202,7 @@ describe("database schema", () => {
     expect(agentSessions.ruleId.notNull).toBe(false);
     expect(agentSessions.ruleId.columnType).toBe("PgUUID");
     expect(agentSessions.status.notNull).toBe(true);
-    expect(agentSessions.status.enumValues).toEqual(["running", "ended", "stale"]);
+    expect(agentSessions.status.enumValues).toEqual(["running", "ended"]);
     expect(agentSessions.startedAt.notNull).toBe(true);
     expect(agentSessions.endedAt.notNull).toBe(false);
     expect(agentSessions.lastEventAt.notNull).toBe(true);

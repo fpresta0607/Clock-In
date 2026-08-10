@@ -826,7 +826,7 @@ integration(integrationDescription, () => {
     ]);
 
     const project = body.projects.find((entry: { project: { id: string } }) => entry.project.id === projectId);
-    expect(project).toMatchObject({ durationSeconds: 600, corroboratedSeconds: 330, sessionCount: 1 });
+    expect(project).toMatchObject({ durationSeconds: 600, attributedSeconds: 330, sessionCount: 1 });
 
     const idleTimerDeviceId = randomUUID();
     const idleTimer = await app.request("/sessions", {
@@ -1013,7 +1013,7 @@ integration(integrationDescription, () => {
     expect(body.projects).toContainEqual({
       project: { id: projectId, name: "DST Boundary Project" },
       durationSeconds: 1_800,
-      corroboratedSeconds: 1_800,
+      attributedSeconds: 1_800,
       sessionCount: 1,
     });
 
@@ -1027,7 +1027,7 @@ integration(integrationDescription, () => {
     expect(reportBody.rows).toContainEqual(expect.objectContaining({
       project: { id: projectId, name: "DST Boundary Project" },
       durationSeconds: 1_800,
-      corroboratedSeconds: 1_800,
+      attributedSeconds: 1_800,
     }));
 
     const leaderboard = await app.request(
@@ -1040,7 +1040,7 @@ integration(integrationDescription, () => {
     expect(leaderboardBody.entries).toContainEqual(expect.objectContaining({
       user: { id: user.id, name: user.name },
       durationSeconds: 1_800,
-      corroboratedSeconds: 1_800,
+      attributedSeconds: 1_800,
       sessionCount: 1,
     }));
   }, 60_000);
