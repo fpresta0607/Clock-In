@@ -14,7 +14,8 @@ Three things never leave the machine at all:
 
 - The unmatched-origin tally (focus seconds per unmatched eTLD+1) lives in extension storage and is mirrored to the desktop's local needs-mapping view through the native host.
   It is never uploaded, and it is user-clearable.
-- The queued-verdict outbox holds up to 1,000 saved verdicts in extension storage until the native host is reachable again. At capacity, capture pauses until saved activity syncs; no saved verdict is dropped.
+- Offline verdicts are durably partitioned by the exact account and organization that the native host admits. A saved verdict is replayed only for that same identity, so signing out, restarting, or changing workspaces cannot rebind it.
+- Each identity's queued-verdict outbox holds up to 1,000 saved verdicts in extension storage until the native host is reachable again. At capacity, capture pauses until saved activity syncs; no saved verdict is dropped. The extension retains at most eight identity namespaces and prunes only fully drained, inactive ones. If pending evidence fills that limit, the new identity is refused until capacity is safely available.
 - The span machine's in-flight state (open span, dwell candidate, session id) sits in extension storage so an MV3 service-worker eviction cannot strand an open span. A corrupt or unavailable read starts fresh; after an unobserved gap, the restored span closes at the last provable attention time before the extension rechecks browser focus and idle state.
 
 Off-the-record tabs are excluded via `tab.incognito` (Chrome's Guest windows report as off-the-record); Clock-In never asks for the browser's incognito toggle.
@@ -33,12 +34,12 @@ Off-the-record tabs are excluded via `tab.incognito` (Chrome's Guest windows rep
 The extension speaks Chrome native messaging to the host registered as `com.clock_in.browser_host` after the desktop is built with that browser's released extension ID.
 Framing (4-byte little-endian length-prefixed JSON) is handled by `chrome.runtime.connectNative`; the JSON shapes are:
 
-- `{"type":"get-rules"}` -> `{"type":"rules","collectionEnabled","collectionId","rules":[{"id","pattern"}]}`; fetched on connect and every five minutes.
-  An empty rule set matches nothing (fail closed).
-- `{"type":"span-event","collectionId","event":{"event","externalSessionId","ruleId","occurredAt"}}` - appended to the desktop's local browser spool. A `span-ack` returns the acknowledged event; `span-retry` keeps it queued, and `collection-state` means collection is unavailable.
+- `{"type":"get-rules"}` -> `{"type":"rules","collectionEnabled","collectionId","collectionNamespace","capturePaused","rules":[{"id","pattern"}]}`; fetched on connect and every five minutes. `collectionNamespace` is the admitted `accountId:organizationId` pair. A missing or malformed namespace, or an empty rule set, matches nothing (fail closed).
+- `{"type":"span-event","collectionId","event":{"event","externalSessionId","ruleId","occurredAt"}}` - appended to the desktop's local browser spool. A `span-ack` returns the acknowledged event; `span-retry` keeps it queued, and `collection-state` refreshes collection, identity, and backpressure state.
 - `{"type":"tally","collectionId","weekStart","entries":[{"origin","seconds"}]}` - a snapshot of the local unmatched-origin tally; read-only passthrough, never uploaded. The host returns `collection-state` and may send `clear-tally` before it.
+- `{"type":"namespace-capacity","collectionId","namespaces":[{"namespace","pending"}]}` - reports the retained identity queues. The host may return a `namespaceReservation` in `collection-state`; the extension durably acknowledges its reserve or release before a workspace move can finish.
 
-When the host is unreachable, span events queue in a 1,000-entry persisted outbox and replay on reconnect (30 s backoff doubling to 60 s). At capacity, capture pauses and resumes only after the saved activity has synced and the user resumes tracking.
+When the host is unreachable, span events queue in their identity's 1,000-entry persisted outbox and replay on reconnect (30 s backoff doubling to 60 s). State writes are serialized, and an emitted span is persisted before it can leave the extension. A failed write or full outbox pauses capture; it resumes only after the saved activity has synced and the user resumes tracking.
 
 ## Layout
 

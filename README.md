@@ -155,7 +155,7 @@ organization are derived from verified claims, never from the request body.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | liveness probe |
-| `POST` | `/accounts` | first call after sign-up: create a workspace, or join one by invite code |
+| `POST` | `/accounts` | first call after sign-up: create a workspace with `General Work`, or join one by invite code |
 | `GET` | `/me` | the signed-in user |
 | `GET` | `/organization` | workspace name and invite code |
 | `POST` | `/organization/join` | move an account into another workspace |
@@ -173,7 +173,14 @@ organization are derived from verified claims, never from the request body.
 **Invariants the server enforces**, not the client: one running timer per user (a partial
 unique index, not a check-then-write race); starts backdate at most 7 days; stops can't be in
 the future; sessions past 12 hours are flagged `needs_review`; a session's project must be one
-the user is a member of (a composite foreign key, so it can't be bypassed).
+the user is a member of (a composite foreign key, so it can't be bypassed). Every workspace has
+one usable default project, named `General Work` when created or repaired. It is available to all
+active members; a member's last valid selection wins, otherwise the default is selected. Only a
+workspace admin can rename or replace the default, and it cannot be archived without a
+replacement.
+
+The desktop's **Today** and **This week** totals use device-local calendar boundaries and clip
+every completed session and evidence total to the selected range.
 
 **Corroborated seconds** are the overlap of `[startedAt, stoppedAt]` with the union of the
 user's fresh `active` segments and non-browser agent sessions linked to that timer, capped at

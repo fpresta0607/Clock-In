@@ -150,10 +150,11 @@ messaging integration stays disabled.
 
 ### Code signing and auto-update
 
-The release workflow refuses to publish when the Windows or macOS signing
-credentials, notarization credentials, or Tauri updater signing key are
-missing. Local non-production builds may remain unsigned; a tagged release
-must include signed installers and updater artifacts.
+Production release builds and the release workflow fail closed when Windows or
+macOS signing credentials, notarization credentials, or the Tauri updater
+signing key are missing. Local unsigned builds are explicit development-only
+builds and cannot create production updater artifacts; a tagged release must
+include signed installers and updater artifacts.
 
 The certificates have days-to-weeks of identity-verification lead time, so
 start procurement before the release, not after:
