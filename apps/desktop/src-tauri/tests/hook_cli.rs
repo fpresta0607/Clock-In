@@ -5,6 +5,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use clock_in_desktop_lib::spool::MAX_SPOOL_RECORD_BYTES;
+
 fn temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("clock-in-hook-test-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -139,6 +141,20 @@ fn malformed_stdin_exits_non_zero_and_writes_nothing() {
     assert!(!spool.exists());
     let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
     assert!(stderr.contains("clock-in-hook:"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn oversized_stdin_exits_non_zero_without_creating_a_spool() {
+    let dir = temp_dir("oversized");
+    let spool = dir.join("agent-spool.jsonl");
+    let input = "x".repeat(MAX_SPOOL_RECORD_BYTES + 1);
+
+    let output = run_hook(&spool, &[], Some(&input));
+
+    assert!(!output.status.success());
+    assert!(!spool.exists());
 
     let _ = std::fs::remove_dir_all(&dir);
 }

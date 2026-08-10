@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { Outbox, reconnectBackoffMs } from "./outbox.js";
+import { MAX_RETAINED_OUTBOX_NAMESPACES, Outbox, pruneOutboxNamespaces, reconnectBackoffMs } from "./outbox.js";
 
 describe("Outbox", () => {
   it("queues and drains first-in-first-out", () => {
@@ -28,6 +28,24 @@ describe("Outbox", () => {
     expect(outbox.snapshot()).toEqual([2, 3]);
     outbox.push(4);
     expect(outbox.snapshot()).toEqual([3, 4]);
+  });
+
+  it("evicts only drained inactive namespaces beyond the retention cap", () => {
+    const outboxes = new Map<string, Outbox<number>>();
+    for (let index = 0; index < MAX_RETAINED_OUTBOX_NAMESPACES + 2; index += 1) {
+      outboxes.set(`drained-${index}`, new Outbox<number>());
+    }
+    const pending = new Outbox<number>();
+    pending.push(1);
+    outboxes.set("pending", pending);
+    const active = new Outbox<number>();
+    outboxes.set("active", active);
+
+    pruneOutboxNamespaces(outboxes, "active");
+
+    expect(outboxes.size).toBe(MAX_RETAINED_OUTBOX_NAMESPACES);
+    expect(outboxes.get("pending")?.snapshot()).toEqual([1]);
+    expect(outboxes.has("active")).toBe(true);
   });
 });
 

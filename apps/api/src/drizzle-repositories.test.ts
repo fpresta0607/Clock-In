@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { projectMemberships, projects, type DatabaseConnection } from "@clock-in/database";
 
@@ -83,6 +83,7 @@ describe("Drizzle report repository", () => {
   it("uses the repeatable-read transaction handle for both summary and row reads", async () => {
     let transactionSelects = 0;
     const transaction = {
+      execute: async () => [{ organization_id: input.organizationId, role: "member" }],
       select: () => {
         transactionSelects += 1;
         if (transactionSelects % 2 === 1) {
@@ -123,8 +124,12 @@ describe("Drizzle report repository", () => {
         sessionCount: 3,
       }],
     };
-    const db = {
+    const transaction = {
+      execute: async () => [{ organization_id: input.organizationId, role: "member" }],
       select: () => ({ from: () => rows }),
+    };
+    const db = {
+      transaction: async (callback: (handle: typeof transaction) => Promise<unknown>) => callback(transaction),
     } as unknown as DatabaseConnection["db"];
     const repository = new DrizzleReportRepository(db);
     const subject = { organizationId: input.organizationId, userId: input.userId };
@@ -147,8 +152,12 @@ describe("Drizzle report repository", () => {
         { processName: "chrome.exe", durationSeconds: "1200" },
       ],
     };
-    const db = {
+    const transaction = {
+      execute: async () => [{ organization_id: input.organizationId, role: "member" }],
       select: () => ({ from: () => rows }),
+    };
+    const db = {
+      transaction: async (callback: (handle: typeof transaction) => Promise<unknown>) => callback(transaction),
     } as unknown as DatabaseConnection["db"];
     const repository = new DrizzleReportRepository(db);
     const subject = { organizationId: input.organizationId, userId: input.userId };
@@ -160,13 +169,23 @@ describe("Drizzle report repository", () => {
   });
 
   it("maps caller-scoped per-rule browser-span totals, preserving postgres sum strings", async () => {
+    let executeCount = 0;
+    const transaction = {
+      execute: async () => {
+        executeCount += 1;
+        if (executeCount === 1) {
+          return [{ organization_id: input.organizationId, role: "member" }];
+        }
+        return [{
+          mappingId: "01c7e513-b094-4d4c-ae55-21790ae019a4",
+          pattern: "github.com/acme/*",
+          projectId: input.projectId,
+          durationSeconds: "2400",
+        }];
+      },
+    };
     const db = {
-      execute: async () => [{
-        mappingId: "01c7e513-b094-4d4c-ae55-21790ae019a4",
-        pattern: "github.com/acme/*",
-        projectId: input.projectId,
-        durationSeconds: "2400",
-      }],
+      transaction: async (callback: (handle: typeof transaction) => Promise<unknown>) => callback(transaction),
     } as unknown as DatabaseConnection["db"];
     const repository = new DrizzleReportRepository(db);
     const subject = { organizationId: input.organizationId, userId: input.userId };
@@ -175,6 +194,22 @@ describe("Drizzle report repository", () => {
       mapping: { id: "01c7e513-b094-4d4c-ae55-21790ae019a4", pattern: "github.com/acme/*", projectId: input.projectId },
       durationSeconds: "2400",
     }]);
+  });
+
+  it("rejects a totals read when membership moved before the locked query", async () => {
+    const select = vi.fn();
+    const transaction = {
+      execute: async () => [{ organization_id: "00000000-0000-4000-8000-000000000999", role: "member" }],
+      select,
+    };
+    const db = {
+      transaction: async (callback: (handle: typeof transaction) => Promise<unknown>) => callback(transaction),
+    } as unknown as DatabaseConnection["db"];
+    const repository = new DrizzleReportRepository(db);
+    const subject = { organizationId: input.organizationId, userId: input.userId, role: "member" as const };
+
+    await expect(repository.readLeaderboardForOrganization(subject, {})).rejects.toMatchObject({ code: "forbidden" });
+    expect(select).not.toHaveBeenCalled();
   });
 });
 

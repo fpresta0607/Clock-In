@@ -223,18 +223,22 @@ impl AppState {
     async fn deactivate_identity(&self) -> ApiResult<()> {
         self.monitor.stop().await;
         let active = spool::active_identity();
+        let mut browser_error = None;
         if self.active_identity.lock().await.take().is_some() || active.is_some() {
             let browser_dir = active
                 .as_ref()
                 .map(spool::evidence_paths)
                 .map(|paths| paths.browser_dir)
                 .unwrap_or_else(|| self.monitor.browser_dir());
-            browser::deactivate_collection(&browser_dir)?;
+            browser_error = browser::deactivate_collection(&browser_dir).err();
         }
         spool::clear_active_identity()
             .map_err(|_| BridgeError::unknown("Could not secure offline evidence."))?;
         self.monitor.deactivate_identity().await;
         *self.recovery.lock().await = RecoveryState::default();
+        if browser_error.is_some() {
+            return Err(BridgeError::unknown("Could not revoke browser attribution."));
+        }
         Ok(())
     }
 
@@ -540,6 +544,13 @@ async fn timer_retry_local_start(
 
 #[tauri::command]
 async fn monitor_status(state: State<'_, AppState>) -> ApiResult<MonitorStatus> {
+    if state.monitor.identity_invalidated() {
+        state.clear_session_token();
+        if let Err(error) = state.deactivate_identity().await {
+            eprintln!("clock-in: could not fully deactivate an invalid session: {}", error.message);
+        }
+        return Err(BridgeError::auth("Your session has expired. Sign in again."));
+    }
     Ok(state.monitor.status().await)
 }
 

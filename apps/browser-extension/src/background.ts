@@ -17,7 +17,12 @@
 
 import { shouldApplyTabActivation } from "./activation.js";
 import { match, type UrlRule } from "./matching.js";
-import { Outbox, OUTBOX_NAMESPACES_STORAGE_KEY, OUTBOX_STORAGE_KEY } from "./outbox.js";
+import {
+  Outbox,
+  OUTBOX_NAMESPACES_STORAGE_KEY,
+  OUTBOX_STORAGE_KEY,
+  pruneOutboxNamespaces,
+} from "./outbox.js";
 import {
   MIN_ALARM_MINUTES,
   reconnectDelayMinutes,
@@ -92,6 +97,7 @@ let lastTickAt = Date.now();
 let lastTallyFlushAt = 0;
 
 function persistState(): void {
+  pruneOutboxes();
   const savedAt = Date.now();
   void chrome.storage.local.set({
     [TALLY_STORAGE_KEY]: tally,
@@ -319,7 +325,12 @@ function collectionDetails(message: Record<string, unknown>): { enabled: boolean
 function activateOutbox(namespace: string): void {
   collectionNamespace = namespace;
   outbox = outboxes.get(namespace) ?? new Outbox<SpanEvent>();
+  outboxes.delete(namespace);
   outboxes.set(namespace, outbox);
+}
+
+function pruneOutboxes(): void {
+  pruneOutboxNamespaces(outboxes, collectionNamespace);
 }
 
 function applyCollectionState(message: Record<string, unknown>): boolean {

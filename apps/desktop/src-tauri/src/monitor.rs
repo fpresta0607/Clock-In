@@ -1211,6 +1211,7 @@ pub struct Monitor {
     paths: Mutex<MonitorPaths>,
     identity: Mutex<Option<spool::EvidenceIdentity>>,
     recording: Arc<AtomicBool>,
+    identity_invalidated: Arc<AtomicBool>,
     client: ApiClient,
     recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
     // Read only by the Windows-gated poll/auto-stop path today.
@@ -1244,6 +1245,7 @@ impl Monitor {
             }),
             identity: Mutex::new(None),
             recording: Arc::new(AtomicBool::new(false)),
+            identity_invalidated: Arc::new(AtomicBool::new(false)),
             client: config.client,
             recovery: config.recovery,
             recovery_path: Mutex::new(config.recovery_path),
@@ -1300,6 +1302,7 @@ impl Monitor {
             Arc::clone(&self.recovery),
             Arc::clone(&self.upload_now),
             Arc::clone(&self.recording),
+            Arc::clone(&self.identity_invalidated),
         ));
         *guard = Some(MonitorTasks { poll, upload });
     }
@@ -1337,12 +1340,14 @@ impl Monitor {
         *lock(&self.recovery_path) = evidence.recovery_path;
         *lock(&self.identity) = Some(identity);
         self.recording.store(true, Ordering::SeqCst);
+        self.identity_invalidated.store(false, Ordering::SeqCst);
         self.clear_identity_state();
     }
 
     pub async fn deactivate_identity(&self) {
         self.stop().await;
         self.recording.store(false, Ordering::SeqCst);
+        self.identity_invalidated.store(false, Ordering::SeqCst);
         *lock(&self.identity) = None;
         self.clear_identity_state();
     }
@@ -1355,6 +1360,10 @@ impl Monitor {
         shared.browser = BrowserTracking::default();
         shared.last_upload_at = None;
         shared.clock_change_at = None;
+    }
+
+    pub fn identity_invalidated(&self) -> bool {
+        self.identity_invalidated.load(Ordering::SeqCst)
     }
 
     /// Starts the tasks when the setting is on; called after a successful

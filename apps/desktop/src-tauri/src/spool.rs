@@ -25,6 +25,8 @@ use serde::{Deserialize, Serialize};
 /// Rotation threshold for a single spool file.
 pub const MAX_SPOOL_BYTES: u64 = 10 * 1024 * 1024;
 
+pub const MAX_SPOOL_RECORD_BYTES: usize = 256 * 1024;
+
 /// Overrides the spool location; tests and support setups use this.
 pub const SPOOL_ENV_VAR: &str = "CLOCK_IN_SPOOL";
 
@@ -652,6 +654,9 @@ pub fn append_line(path: &Path, line: &[u8], max_bytes: u64) -> SpoolResult<()> 
 }
 
 fn append_line_locked(path: &Path, line: &[u8], max_bytes: u64) -> SpoolResult<()> {
+    if line.len() > MAX_SPOOL_RECORD_BYTES {
+        return Err(io::Error::other("spool record exceeds the maximum size"));
+    }
     let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
     if size > 0 && !ends_with_newline(path)? {
         repair_partial_tail(path)?;
@@ -1333,6 +1338,18 @@ mod tests {
 
         assert_eq!(pending.events, vec![event("recovered")]);
         assert!(!sibling(&path, ".tmp").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn oversized_records_are_rejected_before_creating_a_spool() {
+        let dir = temp_dir("oversized-record");
+        let path = dir.join("agent-spool.jsonl");
+        let line = vec![b'x'; MAX_SPOOL_RECORD_BYTES + 1];
+
+        assert!(append_line(&path, &line, MAX_SPOOL_BYTES).is_err());
+        assert!(!path.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
