@@ -55,12 +55,15 @@ jobs:
       - run: |
           deps="$RUNNER_TEMP/clock-in-tauri-deps"
           mkdir -p "$deps/lists/partial" "$deps/cache/archives/partial" "$deps/root"
+          touch "$deps/status"
           apt-get update \
             -o "Dir::State::Lists=$deps/lists" \
+            -o "Dir::State::status=$deps/status" \
             -o "Dir::Cache=$deps/cache" \
             -o "Dir::Cache::Archives=$deps/cache/archives"
           sudo apt-get --download-only --yes install \
             -o "Dir::State::Lists=$deps/lists" \
+            -o "Dir::State::status=$deps/status" \
             -o "Dir::Cache=$deps/cache" \
             -o "Dir::Cache::Archives=$deps/cache/archives" \
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
