@@ -78,26 +78,6 @@ jobs:
       # TAURI_CONFIG neutralizes bundle.externalBin for this step only:
       # tauri-build would otherwise try to copy binaries/<name>-<triple>,
       # which does not exist until the staging steps below run.
-      - name: Build helper binaries
-        env:
-          CLOCK_IN_AUTH_URL: ${{ vars.CLOCK_IN_AUTH_URL }}
-          CLOCK_IN_API_URL: ${{ vars.CLOCK_IN_API_URL }}
-          CLOCK_IN_CHROME_EXTENSION_ID: ${{ vars.CLOCK_IN_CHROME_EXTENSION_ID }}
-          CLOCK_IN_EDGE_EXTENSION_ID: ${{ vars.CLOCK_IN_EDGE_EXTENSION_ID }}
-          CLOCK_IN_FIREFOX_EXTENSION_ID: ${{ vars.CLOCK_IN_FIREFOX_EXTENSION_ID }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          TAURI_CONFIG: '{"bundle":{"active":false,"externalBin":[]}}'
-        run: cargo build --release --manifest-path apps/desktop/src-tauri/Cargo.toml
-
       - name: Prepare Windows signing identity
         id: windows_signing
         if: matrix.target == 'windows'
@@ -128,6 +108,41 @@ jobs:
             throw 'The configured Windows code-signing certificate is unavailable or lacks a private key.'
           }
           "thumbprint=$($certificate.Thumbprint)" >> $env:GITHUB_OUTPUT
+
+      - name: Build helper binaries
+        shell: bash
+        env:
+          CLOCK_IN_AUTH_URL: ${{ vars.CLOCK_IN_AUTH_URL }}
+          CLOCK_IN_API_URL: ${{ vars.CLOCK_IN_API_URL }}
+          CLOCK_IN_CHROME_EXTENSION_ID: ${{ vars.CLOCK_IN_CHROME_EXTENSION_ID }}
+          CLOCK_IN_EDGE_EXTENSION_ID: ${{ vars.CLOCK_IN_EDGE_EXTENSION_ID }}
+          CLOCK_IN_FIREFOX_EXTENSION_ID: ${{ vars.CLOCK_IN_FIREFOX_EXTENSION_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          CLOCK_IN_RELEASE_TARGET: ${{ matrix.target }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ steps.windows_signing.outputs.thumbprint }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          set -euo pipefail
+          TAURI_CONFIG="$(node -e '
+            const bundle = { externalBin: [] };
+            if (process.env.CLOCK_IN_RELEASE_TARGET === "windows") {
+              bundle.windows = {
+                certificateThumbprint: process.env.WINDOWS_CERTIFICATE_THUMBPRINT,
+                digestAlgorithm: "sha256",
+                timestampUrl: process.env.WINDOWS_TIMESTAMP_URL || "http://timestamp.digicert.com",
+              };
+            }
+            process.stdout.write(JSON.stringify({ bundle }));
+          ')" cargo build --release --manifest-path apps/desktop/src-tauri/Cargo.toml
 
       - name: Sign helper binaries (Authenticode)
         if: matrix.target == 'windows'

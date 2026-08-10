@@ -282,14 +282,7 @@ impl AppState {
         match workspace_move {
             Some(spool::WorkspaceMoveRecovery::Rollback(reservation)) => {
                 let paths = spool::evidence_paths(reservation.source_identity());
-                browser::release_extension_namespace_reservation_for_workspace_move(
-                    &paths.browser_dir,
-                    reservation.source_identity(),
-                    reservation.target_identity(),
-                    reservation.extension_reservation_id(),
-                )?;
-                spool::release_identity_namespace_reservation(&reservation)
-                    .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
+                release_workspace_move_reservations(&paths.browser_dir, &reservation)?;
                 self.bind_identity(account.identity.clone()).await?;
             }
             Some(spool::WorkspaceMoveRecovery::Complete(reservation)) => {
@@ -442,17 +435,27 @@ async fn await_extension_namespace_reservation(
     }
 }
 
-fn rollback_workspace_move(browser_dir: &Path, reservation: &spool::NamespaceReservation) {
-    if browser::release_extension_namespace_reservation_for_workspace_move(
+fn release_workspace_move_reservations(
+    browser_dir: &Path,
+    reservation: &spool::NamespaceReservation,
+) -> ApiResult<()> {
+    let extension = browser::release_extension_namespace_reservation_for_workspace_move(
         browser_dir,
         reservation.source_identity(),
         reservation.target_identity(),
         reservation.extension_reservation_id(),
-    )
-    .is_ok()
-    {
-        let _ = spool::release_identity_namespace_reservation(reservation);
+    );
+    let desktop = spool::release_identity_namespace_reservation(reservation)
+        .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()));
+    match (extension, desktop) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), _) => Err(error),
+        (_, Err(error)) => Err(error),
     }
+}
+
+fn rollback_workspace_move(browser_dir: &Path, reservation: &spool::NamespaceReservation) {
+    let _ = release_workspace_move_reservations(browser_dir, reservation);
 }
 
 fn complete_workspace_move_extension_reservation(
@@ -465,6 +468,27 @@ fn complete_workspace_move_extension_reservation(
         reservation.target_identity(),
         reservation.extension_reservation_id(),
     )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceMoveRevalidation {
+    Source,
+    Target,
+    Indeterminate,
+}
+
+fn revalidate_workspace_move(
+    source: &spool::EvidenceIdentity,
+    target: &spool::EvidenceIdentity,
+    observed: &spool::EvidenceIdentity,
+) -> WorkspaceMoveRevalidation {
+    if observed == source {
+        WorkspaceMoveRevalidation::Source
+    } else if observed == target {
+        WorkspaceMoveRevalidation::Target
+    } else {
+        WorkspaceMoveRevalidation::Indeterminate
+    }
 }
 
 #[tauri::command]
@@ -494,7 +518,6 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
         rollback_workspace_move(&browser_dir, &desktop_reservation);
         return Err(BridgeError::new(ErrorKind::Conflict, error.to_string()));
     }
-    let previous = state.active_identity.lock().await.clone();
     if let Err(error) = state.deactivate_identity().await {
         rollback_workspace_move(&browser_dir, &desktop_reservation);
         return Err(error);
@@ -504,13 +527,47 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
         .join_organization(&access_token, input.invite_code.trim(), &target.id)
         .await
     {
-        rollback_workspace_move(&browser_dir, &desktop_reservation);
-        if let Some(identity) = previous {
-            let _ = state.bind_identity(identity).await;
-            let _ = state.enable_active_collection().await;
-            state.monitor.ensure_running().await;
+        let observed = match state.client.identity(&access_token).await {
+            Ok(identity) => identity,
+            Err(revalidation_error) if revalidation_error.kind == ErrorKind::Auth => {
+                state.deactivate_invalid_session().await?;
+                return Err(revalidation_error);
+            }
+            Err(_) => {
+                return Err(BridgeError::new(
+                    ErrorKind::Conflict,
+                    "Could not confirm whether the workspace move completed. Keep this workspace open and try again.",
+                ));
+            }
+        };
+        match revalidate_workspace_move(&current_identity, &target_identity, &observed) {
+            WorkspaceMoveRevalidation::Source => {
+                rollback_workspace_move(&browser_dir, &desktop_reservation);
+                state.bind_identity(current_identity).await?;
+                state.enable_active_collection().await?;
+                state.monitor.ensure_running().await;
+                return Err(error);
+            }
+            WorkspaceMoveRevalidation::Target => {
+                spool::mark_workspace_move_committed(&desktop_reservation)
+                    .map_err(|storage_error| {
+                        BridgeError::new(ErrorKind::Conflict, storage_error.to_string())
+                    })?;
+                state.snapshot(&access_token).await?;
+                state.enable_active_collection().await?;
+                state.monitor.ensure_running().await;
+                return Ok(OrganizationOverview {
+                    organization: target,
+                    entries: Vec::new(),
+                });
+            }
+            WorkspaceMoveRevalidation::Indeterminate => {
+                return Err(BridgeError::new(
+                    ErrorKind::Conflict,
+                    "Could not confirm whether the workspace move completed. Keep this workspace open and try again.",
+                ));
+            }
         }
-        return Err(error);
     }
     spool::mark_workspace_move_committed(&desktop_reservation)
         .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
@@ -1230,6 +1287,29 @@ mod tests {
                 "http://localhost:3977"
             ),
             "https://api.clock-in.example"
+        );
+    }
+
+    #[test]
+    fn workspace_move_revalidation_only_resolves_matching_workspaces() {
+        let source = spool::EvidenceIdentity::new("account-one", "organization-one")
+            .expect("source identity is valid");
+        let target = spool::EvidenceIdentity::new("account-one", "organization-two")
+            .expect("target identity is valid");
+        let foreign = spool::EvidenceIdentity::new("account-two", "organization-three")
+            .expect("foreign identity is valid");
+
+        assert_eq!(
+            revalidate_workspace_move(&source, &target, &source),
+            WorkspaceMoveRevalidation::Source
+        );
+        assert_eq!(
+            revalidate_workspace_move(&source, &target, &target),
+            WorkspaceMoveRevalidation::Target
+        );
+        assert_eq!(
+            revalidate_workspace_move(&source, &target, &foreign),
+            WorkspaceMoveRevalidation::Indeterminate
         );
     }
 

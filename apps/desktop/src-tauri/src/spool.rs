@@ -27,6 +27,8 @@ use uuid::Uuid;
 /// Rotation threshold for a single spool file.
 pub const MAX_SPOOL_BYTES: u64 = 10 * 1024 * 1024;
 
+pub const MAX_PENDING_SPOOL_BYTES: u64 = 5 * MAX_SPOOL_BYTES;
+
 pub const MAX_SPOOL_RECORD_BYTES: usize = 256 * 1024;
 
 /// Overrides the spool location; tests and support setups use this.
@@ -327,9 +329,7 @@ fn workspace_move_recovery_at(
         if current_identity == reservation.source_identity() {
             return Ok(Some(WorkspaceMoveRecovery::Rollback(reservation)));
         }
-        Err(io::Error::other(
-            "workspace move does not match the signed-in account",
-        ))
+        Ok(None)
     })
 }
 
@@ -743,7 +743,7 @@ pub fn append_if(
         if !allowed() {
             return Ok(false);
         }
-        append_line_locked(path, &line, MAX_SPOOL_BYTES)?;
+        append_line_locked(path, &line, MAX_SPOOL_BYTES, MAX_PENDING_SPOOL_BYTES)?;
         Ok(true)
     })
 }
@@ -1171,7 +1171,16 @@ pub(crate) fn format_iso8601(unix_secs: u64) -> String {
 /// browser host (whose lines are written via `append`, but a raw line is
 /// exposed for writers with their own encoding).
 pub fn append_line(path: &Path, line: &[u8], max_bytes: u64) -> SpoolResult<()> {
-    with_lock(path, || append_line_locked(path, line, max_bytes))
+    append_line_with_pending_limit(path, line, max_bytes, MAX_PENDING_SPOOL_BYTES)
+}
+
+fn append_line_with_pending_limit(
+    path: &Path,
+    line: &[u8],
+    max_bytes: u64,
+    pending_limit: u64,
+) -> SpoolResult<()> {
+    with_lock(path, || append_line_locked(path, line, max_bytes, pending_limit))
 }
 
 pub fn write_atomically(path: &Path, content: &[u8]) -> SpoolResult<()> {
@@ -1193,7 +1202,12 @@ pub fn ensure_namespace_directory(dir: &Path) -> SpoolResult<()> {
     std::fs::create_dir_all(dir)
 }
 
-fn append_line_locked(path: &Path, line: &[u8], max_bytes: u64) -> SpoolResult<()> {
+fn append_line_locked(
+    path: &Path,
+    line: &[u8],
+    max_bytes: u64,
+    pending_limit: u64,
+) -> SpoolResult<()> {
     if line.len() > MAX_SPOOL_RECORD_BYTES {
         return Err(io::Error::other("spool record exceeds the maximum size"));
     }
@@ -1202,6 +1216,14 @@ fn append_line_locked(path: &Path, line: &[u8], max_bytes: u64) -> SpoolResult<(
         repair_partial_tail(path)?;
     }
     let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    let pending_after_append = pending_spool_bytes_locked(path)?
+        .checked_add(line.len() as u64)
+        .ok_or_else(|| io::Error::other("spool pending evidence exceeds capacity"))?;
+    if pending_after_append > pending_limit {
+        return Err(io::Error::other(
+            "Clock-In saved existing offline evidence and paused new capture until it syncs.",
+        ));
+    }
     if size > 0 && size + line.len() as u64 > max_bytes {
         rotate(path)?;
     }
@@ -1210,6 +1232,20 @@ fn append_line_locked(path: &Path, line: &[u8], max_bytes: u64) -> SpoolResult<(
         .append(true)
         .open(path)?
         .write_all(line)
+}
+
+fn pending_spool_bytes_locked(path: &Path) -> SpoolResult<u64> {
+    all_spool_paths_locked(path)?.into_iter().try_fold(0u64, |total, candidate| {
+        [candidate.clone(), sibling(&candidate, ".partial"), sibling(&candidate, ".corrupt")]
+            .into_iter()
+            .try_fold(total, |total, candidate| match std::fs::metadata(candidate) {
+                Ok(metadata) => total
+                    .checked_add(metadata.len())
+                    .ok_or_else(|| io::Error::other("spool pending evidence exceeds capacity")),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(total),
+                Err(error) => Err(error),
+            })
+    })
 }
 
 fn ends_with_newline(path: &Path) -> io::Result<bool> {
@@ -1978,6 +2014,40 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_pending_spool_limit_retains_existing_generations() {
+        let dir = temp_dir("aggregate-spool-cap");
+        let path = dir.join("agent-spool.jsonl");
+
+        for line in [b"one\n".as_slice(), b"two\n".as_slice(), b"six\n".as_slice()] {
+            append_line_with_pending_limit(&path, line, 4, 12)
+                .expect("evidence fits within the aggregate cap");
+        }
+
+        let error = append_line_with_pending_limit(&path, b"four\n", 4, 12)
+            .expect_err("new evidence is refused once retained generations fill the cap");
+        assert!(error.to_string().contains("paused new capture"));
+        assert_eq!(
+            pending_spool_paths(&path)
+                .expect("retained generations enumerate")
+                .iter()
+                .flat_map(|candidate| spool_lines(candidate))
+                .collect::<Vec<_>>(),
+            vec!["one", "two", "six"]
+        );
+
+        for generation in pending_spool_paths(&path).expect("retained generations enumerate") {
+            let bytes = std::fs::metadata(&generation)
+                .expect("retained generation metadata reads")
+                .len();
+            truncate_acked(&generation, bytes).expect("acknowledged evidence drains");
+        }
+        append_line_with_pending_limit(&path, b"four\n", 4, 12)
+            .expect("draining retained evidence resumes capture");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn corrupted_generation_sequence_recovers_without_reusing_a_generation() {
         let dir = temp_dir("sequence-recovery");
         let path = dir.join("agent-spool.jsonl");
@@ -2343,6 +2413,36 @@ mod tests {
             Some(WorkspaceMoveRecovery::Complete(_))
         ));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn foreign_workspace_move_does_not_block_identity_activation() {
+        let dir = temp_dir("foreign-workspace-move");
+        let root = dir.join("evidence");
+        let active_path = active_identity_path_for_root(&root);
+        let source = EvidenceIdentity::new("account-source", "organization-source")
+            .expect("source identity is valid");
+        let target = EvidenceIdentity::new("account-target", "organization-target")
+            .expect("target identity is valid");
+        let foreign = EvidenceIdentity::new("account-foreign", "organization-foreign")
+            .expect("foreign identity is valid");
+        let reservation = reserve_identity_namespace_at(&root, &active_path, &source, &target)
+            .expect("source workspace move reserves its target");
+
+        assert!(workspace_move_recovery_at(&root, &foreign)
+            .expect("foreign recovery reads")
+            .is_none());
+        activate_identity_at(&root, &active_path, &foreign)
+            .expect("foreign identity activates without consuming another account's move");
+        assert_eq!(active_identity_at(&active_path), Some(foreign));
+        assert!(matches!(
+            workspace_move_recovery_at(&root, &source).expect("source recovery remains available"),
+            Some(WorkspaceMoveRecovery::Rollback(_))
+        ));
+
+        release_identity_namespace_reservation_at(&root, &reservation)
+            .expect("matching owner releases its reservation");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
