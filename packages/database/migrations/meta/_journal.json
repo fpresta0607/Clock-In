@@ -54,64 +54,8 @@
     {
       "idx": 7,
       "version": "7",
-      "when": 1786244227275,
-      "tag": "0007_browser_attribution",
-      "breakpoints": true
-    },
-    {
-      "idx": 8,
-      "version": "7",
-      "when": 1786246191197,
-      "tag": "0008_browser_span_rules",
-      "breakpoints": true
-    },
-    {
-      "idx": 9,
-      "version": "7",
-      "when": 1786287719356,
-      "tag": "0009_mapping_kind_check",
-      "breakpoints": true
-    },
-    {
-      "idx": 10,
-      "version": "7",
-      "when": 1786324015544,
-      "tag": "0010_stormy_leo",
-      "breakpoints": true
-    },
-    {
-      "idx": 11,
-      "version": "7",
-      "when": 1786324015545,
-      "tag": "0011_agent_session_stale_check",
-      "breakpoints": true
-    },
-    {
-      "idx": 12,
-      "version": "7",
-      "when": 1786331719163,
-      "tag": "0012_organization_default_project",
-      "breakpoints": true
-    },
-    {
-      "idx": 13,
-      "version": "7",
-      "when": 1786332754368,
-      "tag": "0013_legacy_default_project_backfill",
-      "breakpoints": true
-    },
-    {
-      "idx": 14,
-      "version": "7",
-      "when": 1786334661299,
-      "tag": "0014_fresh_felicia_hardy",
-      "breakpoints": true
-    },
-    {
-      "idx": 15,
-      "version": "7",
-      "when": 1786367992017,
-      "tag": "0015_session_device_association",
+      "when": 1786378562326,
+      "tag": "0007_phase4_observed_sessions",
       "breakpoints": true
     }
   ]

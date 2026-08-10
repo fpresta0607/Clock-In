@@ -54,7 +54,7 @@ class Reports implements ReportRepository {
       stoppedAt: new Date("2026-08-06T15:00:00.000Z"),
       idleSeconds: 0,
       durationSeconds: 3_600,
-      corroboratedSeconds: "1800",
+      attribution: "agent" as const,
     }];
   public async readPageForOrganization(_subject: AuthenticatedSubject, _query: Parameters<ReportRepository["readPageForOrganization"]>[1], _options: Parameters<ReportRepository["readPageForOrganization"]>[2]) {
     return { summary: { totalRows: 1, totalDurationSeconds: "3600" }, rows: this.rows };
@@ -132,7 +132,7 @@ describe("report routes", () => {
         const headers = { authorization: bearerHeader };
     const json = await app().request("http://api.test/reports?from=2026-08-06", { headers });
     expect(json.status).toBe(200);
-    await expect(json.json()).resolves.toMatchObject({ filters: { from: "2026-08-06", page: 1, pageSize: 50 }, totalDurationSeconds: 3_600, pagination: { totalRows: 1, totalPages: 1 }, rows: [{ status: "stopped", corroboratedSeconds: 1_800 }] });
+    await expect(json.json()).resolves.toMatchObject({ filters: { from: "2026-08-06", page: 1, pageSize: 50 }, totalDurationSeconds: 3_600, pagination: { totalRows: 1, totalPages: 1 }, rows: [{ status: "stopped", attribution: "agent", attributedSeconds: 3_600, unattributedSeconds: 0 }] });
     const csv = await app().request("http://api.test/reports/export.csv?from=2026-08-06", { headers });
     expect(csv.status).toBe(200);
     expect(csv.headers.get("content-type")).toContain("text/csv; charset=utf-8");

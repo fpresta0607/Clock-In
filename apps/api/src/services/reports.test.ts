@@ -35,7 +35,7 @@ function row(overrides: Partial<ReportRowRecord> = {}): ReportRowRecord {
     stoppedAt: new Date("2026-08-06T15:00:00.000Z"),
     idleSeconds: 60,
     durationSeconds: 3_540,
-    corroboratedSeconds: 0,
+    attribution: "agent",
     ...overrides,
   };
 }
@@ -211,30 +211,36 @@ describe("report service", () => {
     expect(reaper.subjects).toEqual([subject, subject, subject, subject]);
   });
 
-  it("carries the repository's corroborated seconds onto each row, reading postgres sum strings", async () => {
+  it("splits each row into attributed and unattributed by how it learned its project", async () => {
     const reports = new Reports([
-      row({ corroboratedSeconds: 1_800 }),
-      row({ id: ids.otherProject, corroboratedSeconds: "3540" }),
+      row({ attribution: "agent" }),
+      row({ id: ids.otherProject, attribution: "default" }),
+      row({ id: ids.session, attribution: "manual" }),
     ]);
     const result = await createReportService({ reports, reaper: silentReaper }).list(subject, { page: 1, pageSize: 50 });
 
-    expect(result.rows.map((record) => record.corroboratedSeconds)).toEqual([1_800, 3_540]);
+    expect(result.rows.map((record) => [record.attributedSeconds, record.unattributedSeconds])).toEqual([
+      [3_540, 0],
+      [0, 3_540],
+      [3_540, 0],
+    ]);
   });
 
-  it("caps double-counted overlapping evidence at the session duration", async () => {
-    const reports = new Reports([row({ durationSeconds: 3_540, corroboratedSeconds: "999999" })]);
+  it("never lets a row's two halves disagree with its duration", async () => {
+    const reports = new Reports([row({ durationSeconds: 3_540, attribution: "default" })]);
     const result = await createReportService({ reports, reaper: silentReaper }).list(subject, { page: 1, pageSize: 50 });
 
-    expect(result.rows[0]?.corroboratedSeconds).toBe(3_540);
+    const [only] = result.rows;
+    expect((only?.attributedSeconds ?? 0) + (only?.unattributedSeconds ?? 0)).toBe(only?.durationSeconds);
   });
 });
 
 describe("leaderboard", () => {
-  const entry = (id: string, name: string, durationSeconds: number | string | null, sessionCount: number, corroboratedSeconds: number | string | null = 0): LeaderboardRowRecord => ({
+  const entry = (id: string, name: string, durationSeconds: number | string | null, sessionCount: number, attributedSeconds: number | string | null = 0): LeaderboardRowRecord => ({
     user: { id, name },
     durationSeconds,
     sessionCount,
-    corroboratedSeconds,
+    attributedSeconds,
   });
 
   it("ranks members by recorded time and totals the organization", async () => {
@@ -248,8 +254,8 @@ describe("leaderboard", () => {
     const result = await service.leaderboard(subject, {});
 
     expect(result.entries).toEqual([
-      { rank: 1, user: { id: ids.user, name: "Alex" }, durationSeconds: 7_200, sessionCount: 3, corroboratedSeconds: 5_400 },
-      { rank: 2, user: { id: ids.otherUser, name: "Sam" }, durationSeconds: 3_600, sessionCount: 1, corroboratedSeconds: 3_600 },
+      { rank: 1, user: { id: ids.user, name: "Alex" }, durationSeconds: 7_200, sessionCount: 3, attributedSeconds: 5_400, unattributedSeconds: 1_800 },
+      { rank: 2, user: { id: ids.otherUser, name: "Sam" }, durationSeconds: 3_600, sessionCount: 1, attributedSeconds: 3_600, unattributedSeconds: 0 },
     ]);
     expect(result.totalDurationSeconds).toBe(10_800);
   });
@@ -277,7 +283,8 @@ describe("leaderboard", () => {
 
     expect(result.entries[0]?.durationSeconds).toBe(9_007_199_254_740_990);
     expect(result.entries[1]?.durationSeconds).toBe(0);
-    expect(result.entries[1]?.corroboratedSeconds).toBe(0);
+    expect(result.entries[1]?.attributedSeconds).toBe(0);
+    expect(result.entries[1]?.unattributedSeconds).toBe(0);
   });
 
   it("applies the same inclusive calendar bounds the reports use", async () => {
@@ -326,8 +333,8 @@ describe("me/stats", () => {
   it("scopes per-project totals to the caller with inclusive calendar bounds and reaps stale agents first", async () => {
     const reports = new Reports();
     reports.projectTotals = [
-      { project: { id: ids.project, name: "Timer" }, durationSeconds: 7_200, corroboratedSeconds: 5_400, sessionCount: 2 },
-      { project: { id: ids.otherProject, name: "Side" }, durationSeconds: "600", corroboratedSeconds: "600", sessionCount: 1 },
+      { project: { id: ids.project, name: "Timer" }, durationSeconds: 7_200, attributedSeconds: 5_400, sessionCount: 2 },
+      { project: { id: ids.otherProject, name: "Side" }, durationSeconds: "600", attributedSeconds: "600", sessionCount: 1 },
     ];
     reports.appTotals = [
       { processName: "Code.exe", durationSeconds: "4200" },
@@ -344,10 +351,11 @@ describe("me/stats", () => {
     expect(result).toEqual({
       filters: { from: "2026-08-01", to: "2026-08-06" },
       totalDurationSeconds: 7_800,
-      corroboratedSeconds: 6_000,
+      attributedSeconds: 6_000,
+      unattributedSeconds: 1_800,
       projects: [
-        { project: { id: ids.project, name: "Timer" }, durationSeconds: 7_200, corroboratedSeconds: 5_400, sessionCount: 2 },
-        { project: { id: ids.otherProject, name: "Side" }, durationSeconds: 600, corroboratedSeconds: 600, sessionCount: 1 },
+        { project: { id: ids.project, name: "Timer" }, durationSeconds: 7_200, attributedSeconds: 5_400, unattributedSeconds: 1_800, sessionCount: 2 },
+        { project: { id: ids.otherProject, name: "Side" }, durationSeconds: 600, attributedSeconds: 600, unattributedSeconds: 0, sessionCount: 1 },
       ],
       apps: [
         { processName: "Code.exe", durationSeconds: 4_200 },
@@ -372,27 +380,7 @@ describe("me/stats", () => {
   it("returns an empty stats response when the caller recorded nothing", async () => {
     const result = await createReportService({ reports: new Reports(), reaper: silentReaper }).meStats(subject, {});
 
-    expect(result).toEqual({ filters: {}, totalDurationSeconds: 0, corroboratedSeconds: 0, projects: [], apps: [], sites: [] });
-  });
-
-  it("uses exact canonical instants for a user-device local calendar range", async () => {
-    const reports = new Reports();
-    const service = createReportService({ reports, reaper: silentReaper });
-
-    const result = await service.meStats(subject, {
-      fromAt: "2026-08-06T05:00:00.000Z",
-      toExclusiveAt: "2026-08-07T05:00:00.000Z",
-    });
-
-    expect(result.filters).toEqual({ fromAt: "2026-08-06T05:00:00.000Z", toExclusiveAt: "2026-08-07T05:00:00.000Z" });
-    expect(reports.lastProjectTotalsQuery).toEqual({
-      from: new Date("2026-08-06T05:00:00.000Z"),
-      toExclusive: new Date("2026-08-07T05:00:00.000Z"),
-      clipToRange: true,
-      userId: ids.user,
-    });
-    expect(reports.lastAppTotalsQuery).toEqual(reports.lastProjectTotalsQuery);
-    expect(reports.lastSiteTotalsQuery).toEqual(reports.lastProjectTotalsQuery);
+    expect(result).toEqual({ filters: {}, totalDurationSeconds: 0, attributedSeconds: 0, unattributedSeconds: 0, projects: [], apps: [] });
   });
 
   it("rejects reversed or excessive date ranges like the org reports do", async () => {

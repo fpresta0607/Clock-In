@@ -1,4 +1,4 @@
-import type { ActivitySegmentKind, AgentSource, PathMappingKind } from "@clock-in/shared";
+import type { ActivitySegmentKind, AgentSource, SessionAttribution } from "@clock-in/shared";
 
 import type { AuthenticatedSubject } from "./auth.js";
 
@@ -23,6 +23,7 @@ export interface SessionRecord {
   stoppedAt: Date | null;
   idleSeconds: number;
   durationSeconds: number | null;
+  attribution: SessionAttribution;
 }
 
 export interface ProjectRepository {
@@ -52,6 +53,24 @@ export interface CreateRunningSession {
   startedAt: Date;
 }
 
+/**
+ * One finished session the desktop observed. It arrives complete: the monitor
+ * decided the boundaries and the project before uploading, so the server never
+ * holds an open observed session.
+ */
+export interface ObservedSessionInsert {
+  organizationId: string;
+  userId: string;
+  clientId: string;
+  projectId: string;
+  attribution: Exclude<SessionAttribution, "manual">;
+  startedAt: Date;
+  stoppedAt: Date;
+  idleSeconds: number;
+  durationSeconds: number;
+  status: "stopped" | "needs_review";
+}
+
 export interface StopRunningSession {
   stoppedAt: Date;
   idleSeconds: number;
@@ -75,6 +94,8 @@ export interface SessionRepository {
   findById(subject: AuthenticatedSubject, sessionId: string): Promise<SessionRecord | null>;
   createRunning(input: CreateRunningSession): Promise<SessionRecord>;
   stopRunning(subject: AuthenticatedSubject, sessionId: string, input: StopRunningSession): Promise<SessionRecord | null>;
+  /** Inserts finished observed sessions, ignoring client ids already stored, so replays are safe. */
+  insertObservedBatch(sessions: ObservedSessionInsert[]): Promise<void>;
 }
 
 export interface ReportLookupRecord {
@@ -92,8 +113,8 @@ export interface ReportRowRecord {
   stoppedAt: Date;
   idleSeconds: number;
   durationSeconds: number;
-  /** Overlap with fresh evidence, capped at durationSeconds; sql sums surface as string/bigint. */
-  corroboratedSeconds: number | string | bigint | null;
+  /** How the session learned its project; everything but `default` is attributed time. */
+  attribution: SessionAttribution;
 }
 
 export interface ReportQuery {
@@ -128,13 +149,14 @@ export interface LeaderboardRowRecord {
   user: ReportLookupRecord;
   durationSeconds: number | string | bigint | null;
   sessionCount: number | string | bigint;
-  corroboratedSeconds: number | string | bigint | null;
+  /** Duration summed over sessions whose project was named by something; sql sums surface as string/bigint. */
+  attributedSeconds: number | string | bigint | null;
 }
 
 export interface ProjectTotalRecord {
   project: ReportLookupRecord;
   durationSeconds: number | string | bigint | null;
-  corroboratedSeconds: number | string | bigint | null;
+  attributedSeconds: number | string | bigint | null;
   sessionCount: number | string | bigint;
 }
 

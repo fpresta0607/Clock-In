@@ -38,6 +38,7 @@ import {
   type CreateRunningSession,
   type InsertEndedAgentSession,
   type LeaderboardRowRecord,
+  type ObservedSessionInsert,
   type PathMappingRecord,
   type PathMappingRepository,
   type ProjectRecord,
@@ -73,6 +74,7 @@ function asSessionRecord(row: typeof timeSessions.$inferSelect): SessionRecord {
     stoppedAt: row.stoppedAt,
     idleSeconds: row.idleSeconds,
     durationSeconds: row.durationSeconds,
+    attribution: row.attribution,
   };
 }
 
@@ -432,7 +434,7 @@ export class DrizzleSessionRepository implements SessionRepository {
         userId: input.userId,
       }, async (transaction) => transaction
         .insert(timeSessions)
-        .values({ ...input, status: "running", stoppedAt: null, idleSeconds: 0, durationSeconds: null })
+        .values({ ...input, status: "running", stoppedAt: null, idleSeconds: 0, durationSeconds: null, attribution: "manual" })
         .returning());
       return asSessionRecord(rows[0]!);
     } catch (error) {
@@ -460,6 +462,16 @@ export class DrizzleSessionRepository implements SessionRepository {
       ))
       .returning());
     return rows[0] === undefined ? null : asSessionRecord(rows[0]);
+  }
+
+  public async insertObservedBatch(sessions: ObservedSessionInsert[]): Promise<void> {
+    if (sessions.length === 0) return;
+    await this.db
+      .insert(timeSessions)
+      .values(sessions.map((session) => ({ ...session, description: null })))
+      .onConflictDoNothing({
+        target: [timeSessions.organizationId, timeSessions.userId, timeSessions.clientId],
+      });
   }
 }
 
@@ -815,18 +827,7 @@ export class DrizzleAccountStore implements AccountStore {
 }
 
 /**
- * Corroborated seconds for one time session: the overlap of [startedAt, stoppedAt]
- * with the union of the member's fresh "active" activity segments and agent sessions linked
- * to the session, floored and capped at durationSeconds. Browser spans are excluded:
- * they attribute active time to a project but never corroborate it. Evidence received
- * more than seven days after it occurred is stored but never corroborates. Overlapping
- * evidence intervals are unioned, so simultaneous devices never inflate corroborated
- * wall-clock time.
- */
-interface ClippedRange {
-  from?: Date;
-  toExclusive?: Date;
-}
+
 
 function clippedRange(query: ReportQuery): ClippedRange | null {
   if (!query.clipToRange || (query.from === undefined && query.toExclusive === undefined)) return null;
@@ -959,6 +960,20 @@ function corroboratedSecondsSql(range: ClippedRange | null = null) {
       ) as merged_segments
     ), 0))
   )::bigint`;
+
+/**
+ * Attributed seconds for one time session: its whole duration when something
+ * named the project (a legacy manual start, an explicit selection, or an agent
+ * session's working directory), and zero when it fell back to the user's
+ * default project. Attribution is a property of the session, not an overlap, so
+ * attributed time can never exceed the session it describes.
+ */
+function attributedSecondsSql() {
+  return sql<string | null>`case
+    when ${timeSessions.attribution} = 'default' then 0
+    else coalesce(${timeSessions.durationSeconds}, 0)
+  end`;
+}
 }
 
 export class DrizzleReportRepository implements ReportRepository {
@@ -1071,8 +1086,8 @@ export class DrizzleReportRepository implements ReportRepository {
         startedAt: timeSessions.startedAt,
         stoppedAt: timeSessions.stoppedAt,
         idleSeconds: timeSessions.idleSeconds,
-        durationSeconds: sessionDurationSecondsSql(range),
-        corroboratedSeconds: corroboratedSecondsSql(range),
+        durationSeconds: timeSessions.durationSeconds,
+        attribution: timeSessions.attribution,
       })
       .from(timeSessions)
       .innerJoin(users, and(
@@ -1102,7 +1117,7 @@ export class DrizzleReportRepository implements ReportRepository {
         stoppedAt: row.stoppedAt,
         idleSeconds: row.idleSeconds,
         durationSeconds: row.durationSeconds,
-        corroboratedSeconds: row.corroboratedSeconds,
+        attribution: row.attribution,
       };
     });
   }
@@ -1112,34 +1127,31 @@ export class DrizzleReportRepository implements ReportRepository {
     subject: AuthenticatedSubject,
     query: ReportQuery,
   ): Promise<LeaderboardRowRecord[]> {
-    const range = clippedRange(query);
-    const totalDuration = sum(sessionDurationSecondsSql(range));
-    return this.snapshot(subject, query, async (db) => {
-      const rows = await db
-        .select({
-          userId: users.id,
-          userName: users.name,
-          durationSeconds: totalDuration,
-          sessionCount: count(timeSessions.id),
-          corroboratedSeconds: sum(corroboratedSecondsSql(range)),
-        })
-        .from(timeSessions)
-        .innerJoin(users, and(
-          eq(users.organizationId, timeSessions.organizationId),
-          eq(users.id, timeSessions.userId),
-        ))
-        .where(and(...this.predicates(subject, query), eq(users.organizationId, subject.organizationId)))
-        .groupBy(users.id, users.name)
-        // id breaks ties so equal totals do not reorder between requests.
-        .orderBy(desc(totalDuration), asc(users.id));
+    const totalDuration = sum(timeSessions.durationSeconds);
+    const rows = await this.db
+      .select({
+        userId: users.id,
+        userName: users.name,
+        durationSeconds: totalDuration,
+        sessionCount: count(timeSessions.id),
+        attributedSeconds: sum(attributedSecondsSql()),
+      })
+      .from(timeSessions)
+      .innerJoin(users, and(
+        eq(users.organizationId, timeSessions.organizationId),
+        eq(users.id, timeSessions.userId),
+      ))
+      .where(and(...this.predicates(subject, query), eq(users.organizationId, subject.organizationId)))
+      .groupBy(users.id, users.name)
+      // id breaks ties so equal totals do not reorder between requests.
+      .orderBy(desc(totalDuration), asc(users.id));
 
-      return rows.map((row) => ({
-        user: { id: row.userId, name: row.userName },
-        durationSeconds: row.durationSeconds,
-        sessionCount: row.sessionCount,
-        corroboratedSeconds: row.corroboratedSeconds,
-      }));
-    });
+    return rows.map((row) => ({
+      user: { id: row.userId, name: row.userName },
+      durationSeconds: row.durationSeconds,
+      sessionCount: row.sessionCount,
+      attributedSeconds: row.attributedSeconds,
+    }));
   }
 
   /** One row per project the member recorded time in, heaviest first. */
@@ -1147,39 +1159,35 @@ export class DrizzleReportRepository implements ReportRepository {
     subject: AuthenticatedSubject,
     query: ReportQuery,
   ): Promise<ProjectTotalRecord[]> {
-    const range = clippedRange(query);
-    const sessionDuration = sessionDurationSecondsSql(range);
-    const totalDuration = sum(sessionDuration);
-    return this.snapshot(subject, query, async (db) => {
-      const rows = await db
-        .select({
-          projectId: projects.id,
-          projectName: projects.name,
-          durationSeconds: totalDuration,
-          corroboratedSeconds: sum(corroboratedSecondsSql(range)),
-          sessionCount: count(timeSessions.id),
-        })
-        .from(timeSessions)
-        .innerJoin(projects, and(
-          eq(projects.organizationId, timeSessions.organizationId),
-          eq(projects.id, timeSessions.projectId),
-        ))
-        .where(and(
-          ...this.predicates(subject, query),
-          eq(timeSessions.userId, subject.userId),
-          eq(projects.organizationId, subject.organizationId),
-        ))
-        .groupBy(projects.id, projects.name)
-        // id breaks ties so equal totals do not reorder between requests.
-        .orderBy(desc(totalDuration), asc(projects.id));
+    const totalDuration = sum(timeSessions.durationSeconds);
+    const rows = await this.db
+      .select({
+        projectId: projects.id,
+        projectName: projects.name,
+        durationSeconds: totalDuration,
+        attributedSeconds: sum(attributedSecondsSql()),
+        sessionCount: count(timeSessions.id),
+      })
+      .from(timeSessions)
+      .innerJoin(projects, and(
+        eq(projects.organizationId, timeSessions.organizationId),
+        eq(projects.id, timeSessions.projectId),
+      ))
+      .where(and(
+        ...this.predicates(subject, query),
+        eq(timeSessions.userId, subject.userId),
+        eq(projects.organizationId, subject.organizationId),
+      ))
+      .groupBy(projects.id, projects.name)
+      // id breaks ties so equal totals do not reorder between requests.
+      .orderBy(desc(totalDuration), asc(projects.id));
 
-      return rows.map((row) => ({
-        project: { id: row.projectId, name: row.projectName },
-        durationSeconds: row.durationSeconds,
-        corroboratedSeconds: row.corroboratedSeconds,
-        sessionCount: row.sessionCount,
-      }));
-    });
+    return rows.map((row) => ({
+      project: { id: row.projectId, name: row.projectName },
+      durationSeconds: row.durationSeconds,
+      attributedSeconds: row.attributedSeconds,
+      sessionCount: row.sessionCount,
+    }));
   }
 
   /**

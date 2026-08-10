@@ -167,7 +167,7 @@ describe("Drizzle report repository", () => {
         projectId: input.projectId,
         projectName: "Timer",
         durationSeconds: "7200",
-        corroboratedSeconds: "5400",
+        attributedSeconds: "5400",
         sessionCount: 3,
       }],
     };
@@ -184,7 +184,7 @@ describe("Drizzle report repository", () => {
     await expect(repository.readProjectTotalsForMember(subject, {})).resolves.toEqual([{
       project: { id: input.projectId, name: "Timer" },
       durationSeconds: "7200",
-      corroboratedSeconds: "5400",
+      attributedSeconds: "5400",
       sessionCount: 3,
     }]);
   });

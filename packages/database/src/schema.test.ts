@@ -89,6 +89,10 @@ describe("database schema", () => {
     expect(timeSessions.idleSeconds.notNull).toBe(true);
     expect(timeSessions.idleSeconds.columnType).toBe("PgInteger");
     expect(timeSessions.durationSeconds.columnType).toBe("PgInteger");
+    // Legacy manual rows keep the default, so the column backfills without touching them.
+    expect(timeSessions.attribution.notNull).toBe(true);
+    expect(timeSessions.attribution.default).toBe("manual");
+    expect(timeSessions.attribution.enumValues).toEqual(["manual", "selected", "agent", "default"]);
     expect(timeSessions.createdAt.notNull).toBe(true);
     expect(timeSessions.updatedAt.notNull).toBe(true);
     expect(timeSessions.createdAt.withTimezone).toBe(true);
