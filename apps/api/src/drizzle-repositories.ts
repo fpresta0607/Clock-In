@@ -830,7 +830,10 @@ interface ClippedRange {
 
 function clippedRange(query: ReportQuery): ClippedRange | null {
   if (!query.clipToRange || (query.from === undefined && query.toExclusive === undefined)) return null;
-  return { from: query.from, toExclusive: query.toExclusive };
+  return {
+    ...(query.from === undefined ? {} : { from: query.from }),
+    ...(query.toExclusive === undefined ? {} : { toExclusive: query.toExclusive }),
+  };
 }
 
 function inactiveDurationSecondsSql(sessionStart: SQL, sessionEnd: SQL) {

@@ -245,7 +245,7 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
     },
 
     async leaderboard(subject: AuthenticatedSubject, filters: LeaderboardFilters): Promise<LeaderboardResponse> {
-      const query = normalizedQuery({ ...filters, page: 1, pageSize: 1 });
+      const query = normalizedQuery(filters);
       await dependencies.reaper.reapStale(subject);
       const rows = await dependencies.reports.readLeaderboardForOrganization(subject, query);
       const entries = rows.map(asLeaderboardEntry);

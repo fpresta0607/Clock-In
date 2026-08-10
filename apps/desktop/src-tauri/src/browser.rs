@@ -150,9 +150,7 @@ fn valid_extension_id(browser: Browser, value: &str) -> bool {
             value.len() == 32 && value.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
         }
         Browser::Firefox => {
-            !value.is_empty()
-                && value.contains('@')
-                && !value.chars().any(char::is_whitespace)
+            !value.is_empty() && value.contains('@') && !value.chars().any(char::is_whitespace)
         }
     }
 }
@@ -250,8 +248,7 @@ const TALLY_CLEAR_FILE: &str = "browser-tally-clear.json";
 const CAPTURE_PAUSED_FILE: &str = "browser-capture-paused.json";
 const CAPTURE_RESUME_FILE: &str = "browser-capture-resume";
 const EXTENSION_NAMESPACE_CAPACITY_FILE: &str = "browser-extension-namespace-capacity.json";
-const EXTENSION_NAMESPACE_RESERVATION_FILE: &str =
-    "browser-extension-namespace-reservation.json";
+const EXTENSION_NAMESPACE_RESERVATION_FILE: &str = "browser-extension-namespace-reservation.json";
 const COLLECTION_AUTHORIZATION_SECONDS: u64 = 10 * 60;
 const MAX_RETAINED_EXTENSION_NAMESPACES: usize = 8;
 
@@ -418,7 +415,9 @@ pub fn record_extension_namespace_capacity(
             namespaces,
         };
         if !capacity_snapshot_is_valid(&snapshot, &collection) {
-            return Err(io::Error::other("browser extension namespace capacity is invalid"));
+            return Err(io::Error::other(
+                "browser extension namespace capacity is invalid",
+            ));
         }
         let bytes = serde_json::to_vec(&snapshot).map_err(io::Error::other)?;
         write_if_changed_locked(&extension_namespace_capacity_path(dir), &bytes)
@@ -436,17 +435,23 @@ pub fn ensure_extension_namespace_capacity(
         let capacity = extension_namespace_capacity_path(dir);
         let snapshot = match std::fs::read(capacity) {
             Ok(bytes) => serde_json::from_slice::<ExtensionNamespaceCapacitySnapshot>(&bytes)
-                .map_err(|_| io::Error::other("browser extension namespace capacity is unavailable"))?,
+                .map_err(|_| {
+                    io::Error::other("browser extension namespace capacity is unavailable")
+                })?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 if extension_capacity_tracking_is_active(dir) {
-                    return Err(io::Error::other("browser extension namespace capacity is unavailable"));
+                    return Err(io::Error::other(
+                        "browser extension namespace capacity is unavailable",
+                    ));
                 }
                 return Ok(());
             }
             Err(error) => return Err(error),
         };
         if !capacity_snapshot_is_valid(&snapshot, &collection) {
-            return Err(io::Error::other("browser extension namespace capacity is unavailable"));
+            return Err(io::Error::other(
+                "browser extension namespace capacity is unavailable",
+            ));
         }
         let target_namespace = format!("{}:{}", target.account_id, target.organization_id);
         if snapshot
@@ -463,7 +468,9 @@ pub fn ensure_extension_namespace_capacity(
                 .iter()
                 .position(|entry| entry.namespace != active_namespace && entry.pending == 0)
             else {
-                return Err(io::Error::other("browser extension namespace capacity is full"));
+                return Err(io::Error::other(
+                    "browser extension namespace capacity is full",
+                ));
             };
             namespaces.remove(index);
         }
@@ -497,7 +504,9 @@ pub fn request_extension_namespace_reservation(
     ensure_browser_dir(dir).map_err(|_| extension_reservation_error())?;
     spool::with_lock(&browser_spool_path(dir), || {
         if !extension_capacity_tracking_is_active(dir) {
-            return Err(io::Error::other("browser extension handshake is unavailable"));
+            return Err(io::Error::other(
+                "browser extension handshake is unavailable",
+            ));
         }
         let Some(collection) = read_collection(dir) else {
             return Err(io::Error::other("browser collection is unavailable"));
@@ -622,13 +631,17 @@ fn release_extension_namespace_reservation_matching(
             return Ok(());
         }
         if current.action == ExtensionNamespaceReservationAction::Release {
-            return Err(io::Error::other("browser extension release acknowledgement is pending"));
+            return Err(io::Error::other(
+                "browser extension release acknowledgement is pending",
+            ));
         }
         current.action = ExtensionNamespaceReservationAction::Release;
         current.acknowledgement = None;
         let bytes = serde_json::to_vec(&current).map_err(io::Error::other)?;
         write_if_changed_locked(&extension_namespace_reservation_path(dir), &bytes)?;
-        Err(io::Error::other("browser extension release acknowledgement is pending"))
+        Err(io::Error::other(
+            "browser extension release acknowledgement is pending",
+        ))
     })
     .map_err(|_| extension_reservation_error())
 }
@@ -643,10 +656,12 @@ pub fn pending_extension_namespace_reservation(
         if admitted_collection_id_locked(dir).is_none() {
             return Ok(None);
         }
-        Ok(read_extension_namespace_reservation(dir).filter(|reservation| {
-            reservation.acknowledgement.is_none()
-                && collection_namespace_is_reservation_source(&collection, reservation)
-        }))
+        Ok(
+            read_extension_namespace_reservation(dir).filter(|reservation| {
+                reservation.acknowledgement.is_none()
+                    && collection_namespace_is_reservation_source(&collection, reservation)
+            }),
+        )
     })
     .ok()
     .flatten()
@@ -724,9 +739,8 @@ pub fn admitted_collection_namespace(dir: &Path) -> Option<String> {
         if admitted_collection_id_at_locked(dir, now).is_none() {
             return Ok(None);
         }
-        Ok(read_collection(dir).map(|collection| {
-            format!("{}:{}", collection.account_id, collection.organization_id)
-        }))
+        Ok(read_collection(dir)
+            .map(|collection| format!("{}:{}", collection.account_id, collection.organization_id)))
     })
     .ok()
     .flatten()
@@ -821,8 +835,7 @@ pub fn enable_collection_for_identity(
             if let Some(collection) = read_collection(dir).filter(|collection| {
                 collection.account_id == identity.account_id
                     && collection.organization_id == identity.organization_id
-            })
-            {
+            }) {
                 return authorize_collection_locked(dir, &collection);
             }
         }
@@ -902,10 +915,17 @@ pub fn capture_is_paused(dir: &Path) -> bool {
         let Some(collection_id) = admitted_collection_id_locked(dir) else {
             return Ok(false);
         };
-        let paused = serde_json::from_slice::<serde_json::Value>(&std::fs::read(capture_paused_path(dir))?)
-            .ok()
-            .and_then(|value| value.get("collectionId").and_then(serde_json::Value::as_str).map(str::to_string))
-            .as_deref() == Some(collection_id.as_str());
+        let paused =
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(capture_paused_path(dir))?)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("collectionId")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .as_deref()
+                == Some(collection_id.as_str());
         Ok(paused)
     })
     .unwrap_or(false)
@@ -915,8 +935,10 @@ pub fn request_capture_resume(dir: &Path) -> ApiResult<()> {
     ensure_browser_dir(dir)
         .map_err(|_| BridgeError::unknown("Could not resume browser attribution."))?;
     let spool = browser_spool_path(dir);
-    spool::with_lock(&spool, || write_if_changed_locked(&capture_resume_path(dir), b"{}"))
-        .map_err(|_| BridgeError::unknown("Could not resume browser attribution."))
+    spool::with_lock(&spool, || {
+        write_if_changed_locked(&capture_resume_path(dir), b"{}")
+    })
+    .map_err(|_| BridgeError::unknown("Could not resume browser attribution."))
 }
 
 pub fn consume_capture_resume(dir: &Path) -> bool {
@@ -981,7 +1003,10 @@ fn register(dir: &Path, browser: Browser) -> io::Result<()> {
     if let Some(parent) = manifest.parent() {
         spool::ensure_namespace_directory(parent)?;
     }
-    write_if_changed(&manifest, host_manifest(browser, &host_binary, extension_id).as_bytes())?;
+    write_if_changed(
+        &manifest,
+        host_manifest(browser, &host_binary, extension_id).as_bytes(),
+    )?;
     registry::ensure_key(&browser.registry_key_path(), &manifest.to_string_lossy())
 }
 
@@ -1619,7 +1644,10 @@ mod tests {
         assert!(valid_extension_id(Browser::Chrome, chrome_id));
         assert!(valid_extension_id(Browser::Edge, edge_id));
         assert!(valid_extension_id(Browser::Firefox, firefox_id));
-        assert!(!valid_extension_id(Browser::Chrome, "pending-chrome-web-store-id"));
+        assert!(!valid_extension_id(
+            Browser::Chrome,
+            "pending-chrome-web-store-id"
+        ));
         assert!(!valid_extension_id(Browser::Edge, "not-an-extension-id"));
         assert!(!valid_extension_id(Browser::Firefox, "browser extension"));
 
@@ -1638,7 +1666,8 @@ mod tests {
         );
 
         let edge: serde_json::Value =
-            serde_json::from_str(&host_manifest(Browser::Edge, &binary, edge_id)).expect("manifest parses");
+            serde_json::from_str(&host_manifest(Browser::Edge, &binary, edge_id))
+                .expect("manifest parses");
         assert_eq!(
             edge["allowed_origins"][0],
             format!("chrome-extension://{edge_id}/")
@@ -2003,7 +2032,9 @@ mod tests {
         assert_ne!(first_id, second_id);
         assert!(dir.join("browser-spool.jsonl").exists());
         assert_eq!(
-            spool::pending_spool_paths(&spool).expect("spool reads").len(),
+            spool::pending_spool_paths(&spool)
+                .expect("spool reads")
+                .len(),
             2
         );
 
@@ -2016,8 +2047,8 @@ mod tests {
     #[test]
     fn extension_capacity_blocks_a_new_namespace_before_collection_replacement() {
         let dir = temp_dir("extension-capacity");
-        let identity = spool::EvidenceIdentity::new("account-0", "organization-0")
-            .expect("identity is valid");
+        let identity =
+            spool::EvidenceIdentity::new("account-0", "organization-0").expect("identity is valid");
         enable_collection_for_identity(&dir, &identity).expect("collection enables");
         let initial_collection_id = collection_id(&dir).expect("collection id exists");
         let mut namespaces = vec![ExtensionNamespaceCapacity {
@@ -2077,13 +2108,8 @@ mod tests {
         let reservation = request_extension_namespace_reservation(&dir, &target)
             .expect("extension reservation records");
 
-        release_extension_namespace_reservation_for_workspace_move(
-            &dir,
-            &source,
-            &other,
-            None,
-        )
-        .expect("unrelated recovery reads safely");
+        release_extension_namespace_reservation_for_workspace_move(&dir, &source, &other, None)
+            .expect("unrelated recovery reads safely");
         assert_eq!(
             pending_extension_namespace_reservation(&dir)
                 .expect("reservation remains pending")

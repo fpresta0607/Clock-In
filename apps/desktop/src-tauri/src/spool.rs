@@ -53,7 +53,8 @@ impl EvidenceIdentity {
     pub fn new(account_id: impl AsRef<str>, organization_id: impl AsRef<str>) -> Option<Self> {
         let account_id = account_id.as_ref().trim();
         let organization_id = organization_id.as_ref().trim();
-        if !identity_component_is_valid(account_id) || !identity_component_is_valid(organization_id) {
+        if !identity_component_is_valid(account_id) || !identity_component_is_valid(organization_id)
+        {
             return None;
         }
         Some(Self {
@@ -120,7 +121,9 @@ pub fn evidence_paths(identity: &EvidenceIdentity) -> EvidencePaths {
 }
 
 fn evidence_paths_at(root: &Path, identity: &EvidenceIdentity) -> EvidencePaths {
-    let browser_dir = root.join(&identity.account_id).join(&identity.organization_id);
+    let browser_dir = root
+        .join(&identity.account_id)
+        .join(&identity.organization_id);
     EvidencePaths {
         agent_path: browser_dir.join("agent-spool.jsonl"),
         segments_path: browser_dir.join("segments-spool.jsonl"),
@@ -169,7 +172,10 @@ fn activate_identity_at(
                 "evidence namespace is reserved for a workspace move",
             ));
         }
-        std::fs::write(paths.browser_dir.join(".last-active"), unix_seconds().to_string())?;
+        std::fs::write(
+            paths.browser_dir.join(".last-active"),
+            unix_seconds().to_string(),
+        )?;
         let body = serde_json::to_vec(identity).map_err(io::Error::other)?;
         rewrite(active_path, &body)?;
         remove_if_exists(&reservation_path)
@@ -357,13 +363,22 @@ fn activate_reserved_identity_at(
         if let Some(namespace_record) = namespace_reservation_record(&reservation_path)? {
             ensure_matching_workspace_move(&namespace_record, reservation)?;
         } else if active_identity_at(active_path).as_ref() != Some(reservation.target_identity()) {
-            return Err(io::Error::other("workspace move reservation is unavailable"));
+            return Err(io::Error::other(
+                "workspace move reservation is unavailable",
+            ));
         }
         let active_dir = active_identity_at(active_path)
             .map(|identity| evidence_paths_at(root, &identity).browser_dir);
-        reserve_namespace_slot_at_locked(root, Some(reservation.target_identity()), active_dir.as_deref())?;
+        reserve_namespace_slot_at_locked(
+            root,
+            Some(reservation.target_identity()),
+            active_dir.as_deref(),
+        )?;
         std::fs::create_dir_all(&paths.browser_dir)?;
-        std::fs::write(paths.browser_dir.join(".last-active"), unix_seconds().to_string())?;
+        std::fs::write(
+            paths.browser_dir.join(".last-active"),
+            unix_seconds().to_string(),
+        )?;
         let body = serde_json::to_vec(reservation.target_identity()).map_err(io::Error::other)?;
         rewrite(active_path, &body)?;
         remove_if_exists(&reservation_path)?;
@@ -921,8 +936,10 @@ fn check_namespace_capacity_at_locked(
     reserved: Option<&EvidenceIdentity>,
     active_dir: Option<&Path>,
 ) -> SpoolResult<()> {
-    let reserved_dir =
-        reserved.map(|identity| root.join(&identity.account_id).join(&identity.organization_id));
+    let reserved_dir = reserved.map(|identity| {
+        root.join(&identity.account_id)
+            .join(&identity.organization_id)
+    });
     let mut candidates = Vec::new();
     let mut namespaces = 0usize;
     match std::fs::read_dir(root) {
@@ -940,7 +957,9 @@ fn check_namespace_capacity_at_locked(
                     let path = organization.path();
                     namespaces += 1;
                     if active_dir.is_some_and(|active| path == active)
-                        || reserved_dir.as_ref().is_some_and(|reserved| path == *reserved)
+                        || reserved_dir
+                            .as_ref()
+                            .is_some_and(|reserved| path == *reserved)
                     {
                         continue;
                     }
@@ -963,9 +982,7 @@ fn check_namespace_capacity_at_locked(
         return Ok(());
     }
     let evictable = candidates.iter().try_fold(0usize, |count, path| {
-        Ok::<_, io::Error>(
-            count + usize::from(namespace_is_evictable_while_root_locked(path)?),
-        )
+        Ok::<_, io::Error>(count + usize::from(namespace_is_evictable_while_root_locked(path)?))
     })?;
     if evictable >= required_evictions {
         return Ok(());
@@ -978,8 +995,10 @@ fn reserve_namespace_slot_at_locked(
     reserved: Option<&EvidenceIdentity>,
     active_dir: Option<&Path>,
 ) -> SpoolResult<()> {
-    let reserved_dir =
-        reserved.map(|identity| root.join(&identity.account_id).join(&identity.organization_id));
+    let reserved_dir = reserved.map(|identity| {
+        root.join(&identity.account_id)
+            .join(&identity.organization_id)
+    });
     let mut candidates = Vec::new();
     let mut namespaces = 0usize;
     match std::fs::read_dir(root) {
@@ -997,7 +1016,9 @@ fn reserve_namespace_slot_at_locked(
                     let path = organization.path();
                     namespaces += 1;
                     if active_dir.is_some_and(|active| path == active)
-                        || reserved_dir.as_ref().is_some_and(|reserved| path == *reserved)
+                        || reserved_dir
+                            .as_ref()
+                            .is_some_and(|reserved| path == *reserved)
                     {
                         continue;
                     }
@@ -1084,18 +1105,20 @@ fn namespace_has_pending_evidence_while_leased(dir: &Path) -> SpoolResult<bool> 
     if namespace_reservation_record(&reservation_path)?.is_some() {
         return Ok(true);
     }
-    for name in ["agent-spool.jsonl", "segments-spool.jsonl", "browser-spool.jsonl"] {
+    for name in [
+        "agent-spool.jsonl",
+        "segments-spool.jsonl",
+        "browser-spool.jsonl",
+    ] {
         if !pending_spool_paths_while_leased(&dir.join(name))?.is_empty() {
             return Ok(true);
         }
     }
     match std::fs::read(dir.join("recovery.json")) {
         Ok(bytes) => match serde_json::from_slice::<crate::recovery::RecoveryState>(&bytes) {
-            Ok(recovery) => Ok(
-                recovery.local_start.is_some()
-                    || recovery.running.is_some()
-                    || !recovery.pending_stops.is_empty(),
-            ),
+            Ok(recovery) => Ok(recovery.local_start.is_some()
+                || recovery.running.is_some()
+                || !recovery.pending_stops.is_empty()),
             Err(_) => Ok(true),
         },
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -1180,7 +1203,9 @@ fn append_line_with_pending_limit(
     max_bytes: u64,
     pending_limit: u64,
 ) -> SpoolResult<()> {
-    with_lock(path, || append_line_locked(path, line, max_bytes, pending_limit))
+    with_lock(path, || {
+        append_line_locked(path, line, max_bytes, pending_limit)
+    })
 }
 
 pub fn write_atomically(path: &Path, content: &[u8]) -> SpoolResult<()> {
@@ -1235,17 +1260,25 @@ fn append_line_locked(
 }
 
 fn pending_spool_bytes_locked(path: &Path) -> SpoolResult<u64> {
-    all_spool_paths_locked(path)?.into_iter().try_fold(0u64, |total, candidate| {
-        [candidate.clone(), sibling(&candidate, ".partial"), sibling(&candidate, ".corrupt")]
+    all_spool_paths_locked(path)?
+        .into_iter()
+        .try_fold(0u64, |total, candidate| {
+            [
+                candidate.clone(),
+                sibling(&candidate, ".partial"),
+                sibling(&candidate, ".corrupt"),
+            ]
             .into_iter()
-            .try_fold(total, |total, candidate| match std::fs::metadata(candidate) {
-                Ok(metadata) => total
-                    .checked_add(metadata.len())
-                    .ok_or_else(|| io::Error::other("spool pending evidence exceeds capacity")),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(total),
-                Err(error) => Err(error),
+            .try_fold(total, |total, candidate| {
+                match std::fs::metadata(candidate) {
+                    Ok(metadata) => total
+                        .checked_add(metadata.len())
+                        .ok_or_else(|| io::Error::other("spool pending evidence exceeds capacity")),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(total),
+                    Err(error) => Err(error),
+                }
             })
-    })
+        })
 }
 
 fn ends_with_newline(path: &Path) -> io::Result<bool> {
@@ -1998,8 +2031,13 @@ mod tests {
             );
             truncate_acked(&generation, pending.acked_bytes).expect("generation acknowledges");
         }
-        assert_eq!(sessions, (0..9).map(|index| format!("s{index}")).collect::<Vec<_>>());
-        assert!(pending_spool_paths(&path).expect("generations enumerate").is_empty());
+        assert_eq!(
+            sessions,
+            (0..9).map(|index| format!("s{index}")).collect::<Vec<_>>()
+        );
+        assert!(pending_spool_paths(&path)
+            .expect("generations enumerate")
+            .is_empty());
 
         let mut later = serde_json::to_vec(&event("s9")).expect("event serializes");
         later.push(b'\n');
@@ -2018,7 +2056,11 @@ mod tests {
         let dir = temp_dir("aggregate-spool-cap");
         let path = dir.join("agent-spool.jsonl");
 
-        for line in [b"one\n".as_slice(), b"two\n".as_slice(), b"six\n".as_slice()] {
+        for line in [
+            b"one\n".as_slice(),
+            b"two\n".as_slice(),
+            b"six\n".as_slice(),
+        ] {
             append_line_with_pending_limit(&path, line, 4, 12)
                 .expect("evidence fits within the aggregate cap");
         }
@@ -2151,17 +2193,28 @@ mod tests {
     fn a_new_identity_is_blocked_when_all_retained_namespaces_are_pending() {
         let dir = temp_dir("namespace-capacity");
         for index in 0..MAX_RETAINED_NAMESPACES {
-            let namespace = dir.join(format!("account-{index}")).join(format!("organization-{index}"));
+            let namespace = dir
+                .join(format!("account-{index}"))
+                .join(format!("organization-{index}"));
             std::fs::create_dir_all(&namespace).expect("namespace creates");
-            append(&namespace.join("agent-spool.jsonl"), &event(&format!("pending-{index}")))
-                .expect("pending evidence writes");
+            append(
+                &namespace.join("agent-spool.jsonl"),
+                &event(&format!("pending-{index}")),
+            )
+            .expect("pending evidence writes");
         }
-        let next = EvidenceIdentity::new("new-account", "new-organization").expect("identity is valid");
+        let next =
+            EvidenceIdentity::new("new-account", "new-organization").expect("identity is valid");
 
-        let error = reserve_namespace_slot_at(&dir, Some(&next)).expect_err("new namespace is blocked");
+        let error =
+            reserve_namespace_slot_at(&dir, Some(&next)).expect_err("new namespace is blocked");
 
         assert!(error.to_string().contains("unsynced work"));
-        assert!(dir.join("account-0").join("organization-0").join("agent-spool.jsonl").exists());
+        assert!(dir
+            .join("account-0")
+            .join("organization-0")
+            .join("agent-spool.jsonl")
+            .exists());
         assert!(!dir.join("new-account").join("new-organization").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2171,16 +2224,27 @@ mod tests {
     fn a_retained_identity_remains_available_when_pending_namespaces_fill_the_cap() {
         let dir = temp_dir("namespace-return");
         for index in 0..MAX_RETAINED_NAMESPACES {
-            let namespace = dir.join(format!("account-{index}")).join(format!("organization-{index}"));
+            let namespace = dir
+                .join(format!("account-{index}"))
+                .join(format!("organization-{index}"));
             std::fs::create_dir_all(&namespace).expect("namespace creates");
-            append(&namespace.join("agent-spool.jsonl"), &event(&format!("pending-{index}")))
-                .expect("pending evidence writes");
+            append(
+                &namespace.join("agent-spool.jsonl"),
+                &event(&format!("pending-{index}")),
+            )
+            .expect("pending evidence writes");
         }
-        let retained = EvidenceIdentity::new("account-3", "organization-3").expect("identity is valid");
+        let retained =
+            EvidenceIdentity::new("account-3", "organization-3").expect("identity is valid");
 
-        reserve_namespace_slot_at(&dir, Some(&retained)).expect("retained namespace remains available");
+        reserve_namespace_slot_at(&dir, Some(&retained))
+            .expect("retained namespace remains available");
 
-        assert!(dir.join("account-3").join("organization-3").join("agent-spool.jsonl").exists());
+        assert!(dir
+            .join("account-3")
+            .join("organization-3")
+            .join("agent-spool.jsonl")
+            .exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2190,21 +2254,23 @@ mod tests {
         let root = dir.join("evidence");
         let active_path = active_identity_path_for_root(&root);
         std::fs::create_dir_all(&root).expect("evidence root creates");
-        let identity = EvidenceIdentity::new("account-next", "organization-next")
-            .expect("identity is valid");
+        let identity =
+            EvidenceIdentity::new("account-next", "organization-next").expect("identity is valid");
         let guard = acquire_lock(&root).expect("root lock acquires");
         let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
         let worker_root = root.clone();
         let worker_active_path = active_path.clone();
         let worker = std::thread::spawn(move || {
             result_tx
-                .send(activate_identity_at(&worker_root, &worker_active_path, &identity))
+                .send(activate_identity_at(
+                    &worker_root,
+                    &worker_active_path,
+                    &identity,
+                ))
                 .expect("activation result sends");
         });
 
-        assert!(result_rx
-            .recv_timeout(Duration::from_millis(50))
-            .is_err());
+        assert!(result_rx.recv_timeout(Duration::from_millis(50)).is_err());
         drop(guard);
         result_rx
             .recv_timeout(Duration::from_secs(1))
@@ -2271,16 +2337,14 @@ mod tests {
             .count();
 
         assert_eq!(retained, MAX_RETAINED_NAMESPACES);
-        assert!(
-            root.join("account-next-a")
-                .join("organization-next-a")
-                .is_dir()
-        );
-        assert!(
-            root.join("account-next-b")
-                .join("organization-next-b")
-                .is_dir()
-        );
+        assert!(root
+            .join("account-next-a")
+            .join("organization-next-a")
+            .is_dir());
+        assert!(root
+            .join("account-next-b")
+            .join("organization-next-b")
+            .is_dir());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2302,7 +2366,11 @@ mod tests {
             );
             std::fs::write(
                 result_path,
-                if result.is_err() { "blocked" } else { "admitted" },
+                if result.is_err() {
+                    "blocked"
+                } else {
+                    "admitted"
+                },
             )
             .expect("child result writes");
             assert!(result.is_err());
@@ -2317,8 +2385,7 @@ mod tests {
                 .join(format!("account-{index}"))
                 .join(format!("organization-{index}"))
                 .join("agent-spool.jsonl");
-            append(&pending, &event(&format!("pending-{index}")))
-                .expect("pending evidence writes");
+            append(&pending, &event(&format!("pending-{index}"))).expect("pending evidence writes");
         }
         let source = EvidenceIdentity::new("account-source", "organization-source")
             .expect("source identity is valid");
@@ -2370,8 +2437,7 @@ mod tests {
             .expect("target namespace reserves");
         record_workspace_move_extension_reservation_at(&root, &reservation, "request-one")
             .expect("extension reservation records");
-        mark_workspace_move_committed_at(&root, &reservation)
-            .expect("committed move records");
+        mark_workspace_move_committed_at(&root, &reservation).expect("committed move records");
         let recovery = workspace_move_recovery_at(&root, &target)
             .expect("target recovery reads")
             .expect("target recovery exists");
@@ -2382,7 +2448,9 @@ mod tests {
             .expect("target namespace activates");
 
         assert_eq!(active_identity_at(&active_path), Some(target.clone()));
-        assert!(!namespace_reservation_path(&evidence_paths_at(&root, &target).browser_dir).exists());
+        assert!(
+            !namespace_reservation_path(&evidence_paths_at(&root, &target).browser_dir).exists()
+        );
         assert!(workspace_move_recovery_at(&root, &target)
             .expect("completed move reads")
             .is_none());
@@ -2494,16 +2562,17 @@ mod tests {
                 .expect("writer result sends");
         });
 
-        assert!(result_rx
-            .recv_timeout(Duration::from_millis(50))
-            .is_err());
+        assert!(result_rx.recv_timeout(Duration::from_millis(50)).is_err());
         drop(root_guard);
         result_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("writer completes after the root lock releases")
             .expect("writer preserves evidence");
         writer.join().expect("writer joins");
-        assert_eq!(read_pending(&path).expect("writer spool reads").events, vec![event("blocked-writer")]);
+        assert_eq!(
+            read_pending(&path).expect("writer spool reads").events,
+            vec![event("blocked-writer")]
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2531,7 +2600,9 @@ mod tests {
         let writer_path_for_thread = writer_path.clone();
         let writer = std::thread::spawn(move || {
             let lease_path = namespace_writer_lease_path(
-                writer_path_for_thread.parent().expect("writer parent exists"),
+                writer_path_for_thread
+                    .parent()
+                    .expect("writer parent exists"),
             );
             let lease = acquire_lock(&lease_path)?;
             leased_tx
@@ -2545,23 +2616,25 @@ mod tests {
         });
 
         leased_rx.recv().expect("writer lease acquires");
-        let next = EvidenceIdentity::new("account-next", "organization-next")
-            .expect("identity is valid");
+        let next =
+            EvidenceIdentity::new("account-next", "organization-next").expect("identity is valid");
         let error = activate_identity_at(&root, &active_identity_path_for_root(&root), &next)
             .expect_err("a leased namespace is not evicted");
         assert!(error.to_string().contains("unsynced work"));
         assert!(writer_path.parent().expect("writer parent exists").is_dir());
-        assert!(!root
-            .join("account-next")
-            .join("organization-next")
-            .exists());
+        assert!(!root.join("account-next").join("organization-next").exists());
 
         resume_tx.send(()).expect("writer resumes");
         writer
             .join()
             .expect("writer joins")
             .expect("writer preserves the evidence");
-        assert_eq!(read_pending(&writer_path).expect("writer spool reads").events, vec![event("in-flight")]);
+        assert_eq!(
+            read_pending(&writer_path)
+                .expect("writer spool reads")
+                .events,
+            vec![event("in-flight")]
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

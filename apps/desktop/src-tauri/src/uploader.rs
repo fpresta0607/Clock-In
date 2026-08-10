@@ -10,8 +10,8 @@
 //! rejections are dropped (a redacted count is logged, never the row).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::Notify;
@@ -255,7 +255,14 @@ fn invalidate_auth_loss(
             let _ = crate::browser::deactivate_collection(browser_dir);
         },
         crate::clear_session_token,
-        || deactivate_invalid_identity(shared, recording, identity_invalidated, invalid_session_handler),
+        || {
+            deactivate_invalid_identity(
+                shared,
+                recording,
+                identity_invalidated,
+                invalid_session_handler,
+            )
+        },
     );
 }
 
@@ -310,7 +317,11 @@ async fn upload_segments(client: &ApiClient, token: &str, path: &Path) -> Upload
     UploadDrainResult::Complete
 }
 
-async fn upload_segment_generation(client: &ApiClient, token: &str, path: &Path) -> UploadDrainResult {
+async fn upload_segment_generation(
+    client: &ApiClient,
+    token: &str,
+    path: &Path,
+) -> UploadDrainResult {
     let Ok((records, acked_bytes)) = spool::read_pending_lines::<SegmentRecord>(path) else {
         return UploadDrainResult::Incomplete;
     };
@@ -358,7 +369,8 @@ async fn drain_agent_spool(
         Err(_) => return UploadDrainResult::Incomplete,
     };
     for generation in generations {
-        match drain_agent_spool_generation(shared, client, token, &generation, timer_running).await {
+        match drain_agent_spool_generation(shared, client, token, &generation, timer_running).await
+        {
             UploadDrainResult::Complete => {}
             result => return result,
         }
@@ -428,7 +440,9 @@ async fn drain_browser_spool(
         Err(_) => return UploadDrainResult::Incomplete,
     };
     for generation in generations {
-        match drain_browser_spool_generation(shared, client, token, &generation, timer_running).await {
+        match drain_browser_spool_generation(shared, client, token, &generation, timer_running)
+            .await
+        {
             UploadDrainResult::Complete => {}
             result => return result,
         }
@@ -777,7 +791,10 @@ mod tests {
             move || lock(&identity).push("identity"),
         );
 
-        assert_eq!(*lock(&actions), vec!["flush", "collection", "token", "identity"]);
+        assert_eq!(
+            *lock(&actions),
+            vec!["flush", "collection", "token", "identity"]
+        );
     }
 
     fn mapping(id: &str, prefix: &str, project: &str) -> PathMapping {

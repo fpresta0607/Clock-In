@@ -663,7 +663,9 @@ impl ApiClient {
     }
 
     pub async fn identity(&self, access_token: &str) -> ApiResult<EvidenceIdentity> {
-        self.me_with_identity(access_token).await.map(|(_, identity)| identity)
+        self.me_with_identity(access_token)
+            .await
+            .map(|(_, identity)| identity)
     }
 
     pub async fn projects(&self, access_token: &str) -> ApiResult<ProjectSelection> {
@@ -724,10 +726,9 @@ impl ApiClient {
         access_token: &str,
         intent: &StartIntent,
     ) -> ApiResult<RunningTimer> {
-        let device_id = intent
-            .device_id
-            .as_ref()
-            .ok_or_else(|| BridgeError::unknown("A recording device is required to start a timer."))?;
+        let device_id = intent.device_id.as_ref().ok_or_else(|| {
+            BridgeError::unknown("A recording device is required to start a timer.")
+        })?;
         let request = serde_json::json!({
             "clientId": intent.client_id,
             "projectId": intent.project_id,

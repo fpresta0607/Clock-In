@@ -41,8 +41,7 @@ fn run() -> Result<(), String> {
     let Some(path) = spool::active_agent_spool_path() else {
         return Ok(());
     };
-    spool::append(&path, &event)
-        .map_err(|error| format!("could not write the spool: {error}"))
+    spool::append(&path, &event).map_err(|error| format!("could not write the spool: {error}"))
 }
 
 /// How the command line says the event arrives.

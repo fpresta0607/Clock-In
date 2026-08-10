@@ -179,7 +179,9 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
         Some("capture-paused") => {
             if let Some(collection_id) = message_collection_id(message.get("collectionId")) {
                 if let Err(error) = browser::record_capture_paused(&paths.dir, collection_id) {
-                    eprintln!("clock-in-browser-host: could not record browser backpressure: {error}");
+                    eprintln!(
+                        "clock-in-browser-host: could not record browser backpressure: {error}"
+                    );
                 }
             }
             write_collection_state(writer, &paths)
@@ -190,7 +192,9 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
                 message.get("collectionId"),
                 &paths,
             ) {
-                eprintln!("clock-in-browser-host: could not record browser namespace capacity: {error}");
+                eprintln!(
+                    "clock-in-browser-host: could not record browser namespace capacity: {error}"
+                );
             }
             write_collection_state(writer, &paths)
         }
@@ -230,8 +234,8 @@ fn collection_state(paths: &HostPaths) -> serde_json::Value {
     };
     if state["collectionEnabled"].as_bool() == Some(true) {
         if let Some(reservation) = browser::pending_extension_namespace_reservation(&paths.dir) {
-            state["namespaceReservation"] = serde_json::to_value(reservation)
-                .unwrap_or(serde_json::Value::Null);
+            state["namespaceReservation"] =
+                serde_json::to_value(reservation).unwrap_or(serde_json::Value::Null);
         }
     }
     state
@@ -349,10 +353,9 @@ fn store_extension_namespace_capacity(
     let Some(namespaces) = namespaces else {
         return Ok(());
     };
-    let namespaces = serde_json::from_value::<Vec<browser::ExtensionNamespaceCapacity>>(
-        namespaces.clone(),
-    )
-    .map_err(|error| error.to_string())?;
+    let namespaces =
+        serde_json::from_value::<Vec<browser::ExtensionNamespaceCapacity>>(namespaces.clone())
+            .map_err(|error| error.to_string())?;
     browser::record_extension_namespace_capacity(&paths.dir, collection_id, namespaces)
         .map_err(|error| error.to_string())
 }
@@ -371,11 +374,10 @@ fn store_extension_namespace_reservation(
     let Some(acknowledgement) = acknowledgement.and_then(serde_json::Value::as_str) else {
         return Ok(());
     };
-    let acknowledgement =
-        serde_json::from_value::<browser::ExtensionNamespaceReservationAcknowledgement>(
-            serde_json::Value::String(acknowledgement.to_string()),
-        )
-        .map_err(|error| error.to_string())?;
+    let acknowledgement = serde_json::from_value::<
+        browser::ExtensionNamespaceReservationAcknowledgement,
+    >(serde_json::Value::String(acknowledgement.to_string()))
+    .map_err(|error| error.to_string())?;
     browser::acknowledge_extension_namespace_reservation(&paths.dir, request_id, acknowledgement)
         .map_err(|error| error.to_string())
 }
@@ -1031,8 +1033,14 @@ mod tests {
         dispatch(br#"{"type":"get-collection-state"}"#, &paths, &mut out)
             .expect("state request succeeds");
         let state = reply_values(&out).pop().expect("state reply exists");
-        assert_eq!(state["namespaceReservation"]["requestId"], reservation.request_id);
-        assert_eq!(state["namespaceReservation"]["targetNamespace"], "u1:organization-next");
+        assert_eq!(
+            state["namespaceReservation"]["requestId"],
+            reservation.request_id
+        );
+        assert_eq!(
+            state["namespaceReservation"]["targetNamespace"],
+            "u1:organization-next"
+        );
 
         out.clear();
         let acknowledgement = serde_json::to_vec(&serde_json::json!({
@@ -1055,7 +1063,8 @@ mod tests {
     fn source_reactivation_delivers_a_precommit_release_and_frees_capacity() {
         let dir = temp_dir("workspace-move-precommit-release");
         let paths = configured_paths(&dir);
-        let source = spool::EvidenceIdentity::new("u1", "legacy").expect("source identity is valid");
+        let source =
+            spool::EvidenceIdentity::new("u1", "legacy").expect("source identity is valid");
         let target = spool::EvidenceIdentity::new("u1", "organization-next")
             .expect("target identity is valid");
         std::fs::write(dir.join("browser-handshake-chrome.json"), b"{}")
@@ -1085,7 +1094,10 @@ mod tests {
             .expect("release state is served");
         let state = reply_values(&out).pop().expect("state reply exists");
         assert_eq!(state["collectionEnabled"], true);
-        assert_eq!(state["namespaceReservation"]["requestId"], reservation.request_id);
+        assert_eq!(
+            state["namespaceReservation"]["requestId"],
+            reservation.request_id
+        );
         assert_eq!(state["namespaceReservation"]["action"], "release");
 
         let acknowledgement = serde_json::to_vec(&serde_json::json!({
