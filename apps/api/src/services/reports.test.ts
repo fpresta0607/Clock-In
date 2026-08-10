@@ -347,6 +347,7 @@ describe("me/stats", () => {
     expect(reports.lastProjectTotalsQuery).toEqual({
       from: new Date("2026-08-06T05:00:00.000Z"),
       toExclusive: new Date("2026-08-07T05:00:00.000Z"),
+      clipToRange: true,
       userId: ids.user,
     });
     expect(reports.lastAppTotalsQuery).toEqual(reports.lastProjectTotalsQuery);

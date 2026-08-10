@@ -3,7 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { App } from "./App.js";
+import { App, statsRangeBounds } from "./App.js";
 import type { TimerBridge } from "./bridge.js";
 
 vi.mock("./WebGLShader.js", () => ({ WebGLShader: () => null }));
@@ -1223,6 +1223,30 @@ describe("App", () => {
     tomorrow.setDate(tomorrow.getDate() + 1);
     expect(bridge.meStats).toHaveBeenLastCalledWith(monday.toISOString(), tomorrow.toISOString());
     expect(screen.getByRole("region", { name: "This week" })).toBeInTheDocument();
+  });
+
+  it("uses local calendar instants across DST and east-of-UTC boundaries", () => {
+    const originalTimezone = process.env.TZ;
+    try {
+      process.env.TZ = "America/Chicago";
+      expect(statsRangeBounds("today", new Date("2026-03-08T18:00:00.000Z"))).toEqual({
+        fromAt: "2026-03-08T06:00:00.000Z",
+        toExclusiveAt: "2026-03-09T05:00:00.000Z",
+      });
+      expect(statsRangeBounds("week", new Date("2026-03-12T18:00:00.000Z"))).toEqual({
+        fromAt: "2026-03-09T05:00:00.000Z",
+        toExclusiveAt: "2026-03-13T05:00:00.000Z",
+      });
+
+      process.env.TZ = "Asia/Tokyo";
+      expect(statsRangeBounds("today", new Date("2026-08-09T14:00:00.000Z"))).toEqual({
+        fromAt: "2026-08-08T15:00:00.000Z",
+        toExclusiveAt: "2026-08-09T15:00:00.000Z",
+      });
+    } finally {
+      if (originalTimezone === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTimezone;
+    }
   });
 
   it("keeps the Today card readable when the stats request fails", async () => {

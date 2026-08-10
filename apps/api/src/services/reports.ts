@@ -83,7 +83,7 @@ function normalizedMeStatsQuery(filters: MeStatsFilters): ReportQuery {
   if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > 367 * millisecondsPerDay) {
     throw new AppError("validation_error", "The stats time range must be between zero and 367 days.");
   }
-  return { from, toExclusive };
+  return { from, toExclusive, clipToRange: true };
 }
 
 function asReportRow(record: ReportRowRecord): ReportRow {

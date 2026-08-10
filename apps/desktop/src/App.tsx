@@ -227,9 +227,9 @@ const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
   return [...rows.slice(0, TOP_APP_ROWS), { key: "everything-else", label: "Everything else", icon: "generic-app", durationSeconds: rest, agent: false }];
 };
 
-type StatsRange = "today" | "week";
+export type StatsRange = "today" | "week";
 
-const statsRangeBounds = (range: StatsRange, now = new Date()): { fromAt: string; toExclusiveAt: string } => {
+export const statsRangeBounds = (range: StatsRange, now = new Date()): { fromAt: string; toExclusiveAt: string } => {
   const start = new Date(now);
   if (range === "week") start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
   start.setHours(0, 0, 0, 0);

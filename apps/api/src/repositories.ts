@@ -86,6 +86,7 @@ export interface ReportRowRecord {
 export interface ReportQuery {
   from?: Date;
   toExclusive?: Date;
+  clipToRange?: boolean;
   projectId?: string;
   userId?: string;
 }
