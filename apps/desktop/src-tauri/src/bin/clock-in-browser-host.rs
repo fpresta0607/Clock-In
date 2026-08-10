@@ -68,6 +68,7 @@ impl HostPaths {
         Self::in_dir_with_active(&spool::default_browser_dir(), true)
     }
 
+    #[cfg(test)]
     fn in_dir(dir: &Path) -> Self {
         Self::in_dir_with_active(dir, false)
     }

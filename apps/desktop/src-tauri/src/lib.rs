@@ -173,6 +173,19 @@ where
     browser_result.and(identity_result)
 }
 
+async fn store_session_before_enabling_collection<F, G, GFut>(
+    store_session: F,
+    enable_collection: G,
+) -> ApiResult<()>
+where
+    F: FnOnce() -> ApiResult<()>,
+    G: FnOnce() -> GFut,
+    GFut: std::future::Future<Output = ApiResult<()>>,
+{
+    store_session()?;
+    enable_collection().await
+}
+
 impl AppState {
     /// Reads the session token the OS is holding for us, if any.
     fn session_token(&self) -> Option<String> {
@@ -388,8 +401,11 @@ async fn auth_login(state: State<'_, AppState>, input: LoginInput) -> ApiResult<
         .authenticated_result(state.client.fetch_access_token(&session).await)
         .await?;
     let snapshot = state.snapshot(&access_token).await?;
-    state.store_session_token(&session)?;
-    state.enable_active_collection().await?;
+    store_session_before_enabling_collection(
+        || state.store_session_token(&session),
+        || state.enable_active_collection(),
+    )
+    .await?;
     state.monitor.ensure_running().await;
     Ok(snapshot)
 }
@@ -435,8 +451,11 @@ async fn auth_signup(state: State<'_, AppState>, input: SignupInput) -> ApiResul
         .await?;
 
     let snapshot = state.snapshot(&access_token).await?;
-    state.store_session_token(&session)?;
-    state.enable_active_collection().await?;
+    store_session_before_enabling_collection(
+        || state.store_session_token(&session),
+        || state.enable_active_collection(),
+    )
+    .await?;
     state.monitor.ensure_running().await;
     Ok(snapshot)
 }
@@ -1552,19 +1571,20 @@ mod tests {
         assert!(!cached.get());
     }
 
-    #[test]
-    fn session_persistence_precedes_browser_collection_authorization() {
+    #[tokio::test]
+    async fn session_persistence_precedes_browser_collection_authorization() {
         let effects = RefCell::new(Vec::new());
         store_session_before_enabling_collection(
             || {
                 effects.borrow_mut().push("store");
                 Ok(())
             },
-            || {
+            || async {
                 effects.borrow_mut().push("enable");
                 Ok(())
             },
         )
+        .await
         .expect("both steps succeed");
         assert_eq!(*effects.borrow(), ["store", "enable"]);
 
@@ -1574,11 +1594,12 @@ mod tests {
                 blocked.borrow_mut().push("store");
                 Err(BridgeError::unknown("store failed"))
             },
-            || {
+            || async {
                 blocked.borrow_mut().push("enable");
                 Ok(())
             },
-        );
+        )
+        .await;
         assert!(result.is_err());
         assert_eq!(*blocked.borrow(), ["store"]);
     }

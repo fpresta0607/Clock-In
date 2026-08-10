@@ -911,6 +911,7 @@ fn identity_component_is_valid(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
+#[cfg(test)]
 fn reserve_namespace_slot_at(root: &Path, reserved: Option<&EvidenceIdentity>) -> SpoolResult<()> {
     with_lock(root, || {
         let active_path = active_identity_path_for_root(root);
@@ -1086,6 +1087,7 @@ fn namespace_reservation_record(path: &Path) -> SpoolResult<Option<WorkspaceMove
     }
 }
 
+#[cfg(test)]
 fn namespace_has_pending_evidence(dir: &Path) -> SpoolResult<bool> {
     with_namespace_writer_lease(dir, || namespace_has_pending_evidence_while_leased(dir))
 }
@@ -1412,6 +1414,7 @@ fn generation_number(path: &Path, candidate: &Path) -> Option<u64> {
     name.strip_prefix(&format!("{stem}.generation-"))?
         .strip_suffix(".jsonl")?
         .parse()
+        .ok()
 }
 
 fn numbered_generation_path(path: &Path, candidate: &Path) -> Option<(u64, PathBuf)> {
@@ -1544,7 +1547,7 @@ fn namespace_lease_is_held(namespace: &Path) -> bool {
 
 struct NamespaceLeaseGuard {
     namespace: PathBuf,
-    lease: LockGuard,
+    _lease: LockGuard,
 }
 
 impl Drop for NamespaceLeaseGuard {
@@ -1581,7 +1584,7 @@ fn with_namespace_writer_lease<T>(
     HELD_NAMESPACE_LEASES.with(|leases| leases.borrow_mut().push(location.namespace.clone()));
     let _guard = NamespaceLeaseGuard {
         namespace: location.namespace,
-        lease,
+        _lease: lease,
     };
     action()
 }
