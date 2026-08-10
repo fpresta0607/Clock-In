@@ -287,7 +287,7 @@ fn append_span_event(
     let collection_id = collection_id.to_string();
     let event = input.into_event();
     spool::append_if(&paths.spool, &event, || {
-        admitted_collection_id(paths).as_deref() == Some(collection_id.as_str())
+        browser::admitted_collection_id_locked(&paths.dir).as_deref() == Some(collection_id.as_str())
     })
     .map(|appended| if appended { SpanAppendOutcome::Appended } else { SpanAppendOutcome::Dropped })
     .unwrap_or_else(|error| SpanAppendOutcome::Retry(format!("could not write the browser spool: {error}")))
@@ -323,7 +323,7 @@ fn store_tally(
     let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "weekStart": week_start, "entries": entries }))
         .map_err(|error| error.to_string())?;
     spool::with_lock(&paths.spool, || {
-        if admitted_collection_id(paths).as_deref() != Some(collection_id.as_str()) {
+        if browser::admitted_collection_id_locked(&paths.dir).as_deref() != Some(collection_id.as_str()) {
             return Ok(TallyOutcome::Dropped);
         }
         match browser::store_tally_snapshot(&paths.dir, &bytes, entries.as_array().is_some_and(Vec::is_empty))? {
@@ -497,6 +497,62 @@ mod tests {
 
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0]["rules"][0]["id"], "new");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_rules_waits_for_a_collection_authorization_renewal() {
+        let dir = temp_dir("authorization-renewal");
+        let paths = configured_paths(&dir);
+        let collection_id = browser::enable_collection(&dir, "user-one")
+            .expect("collection enables");
+        std::fs::write(&paths.rules, r#"{"rules":[]}"#).expect("rules write");
+        let authorization = dir.join("browser-collection-authorization.json");
+        let replacement = dir.join("browser-collection-authorization.next.json");
+        std::fs::copy(&authorization, &replacement).expect("authorization copy");
+
+        let spool_path = paths.spool.clone();
+        let (removed_tx, removed_rx) = std::sync::mpsc::sync_channel(0);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+        let writer = std::thread::spawn(move || {
+            spool::with_lock(&spool_path, || {
+                std::fs::remove_file(&authorization)?;
+                removed_tx
+                    .send(())
+                    .map_err(|_| io::Error::other("test did not await authorization replacement"))?;
+                resume_rx
+                    .recv()
+                    .map_err(|_| io::Error::other("test did not resume authorization replacement"))?;
+                std::fs::rename(&replacement, &authorization)
+            })
+        });
+        removed_rx.recv().expect("writer removed the authorization");
+
+        let reader_dir = dir.clone();
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+        let reader = std::thread::spawn(move || {
+            let paths = HostPaths::in_dir(&reader_dir);
+            let mut out = Vec::new();
+            let reply = dispatch(br#"{"type":"get-rules"}"#, &paths, &mut out)
+                .map(|()| reply_values(&out));
+            reply_tx.send(reply).expect("test receives the reply");
+        });
+
+        assert!(reply_rx
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+        resume_tx.send(()).expect("writer resumes");
+        writer.join().expect("writer joins").expect("writer succeeds");
+        let replies = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("reader replies")
+            .expect("dispatch succeeds");
+        reader.join().expect("reader joins");
+
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0]["collectionEnabled"].as_bool(), Some(true));
+        assert_eq!(replies[0]["collectionId"].as_str(), Some(collection_id.as_str()));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
