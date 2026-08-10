@@ -1058,6 +1058,62 @@ mod tests {
     }
 
     #[test]
+    fn source_reactivation_delivers_a_precommit_release_and_frees_capacity() {
+        let dir = temp_dir("workspace-move-precommit-release");
+        let paths = configured_paths(&dir);
+        let source = spool::EvidenceIdentity::new("u1", "legacy").expect("source identity is valid");
+        let target = spool::EvidenceIdentity::new("u1", "organization-next")
+            .expect("target identity is valid");
+        std::fs::write(dir.join("browser-handshake-chrome.json"), b"{}")
+            .expect("extension handshake records");
+        let reservation = browser::request_extension_namespace_reservation(&dir, &target)
+            .expect("reservation request records");
+        browser::acknowledge_extension_namespace_reservation(
+            &dir,
+            &reservation.request_id,
+            browser::ExtensionNamespaceReservationAcknowledgement::Reserved,
+        )
+        .expect("reservation acknowledgement records");
+
+        browser::deactivate_collection(&dir).expect("precommit deactivation succeeds");
+        browser::enable_collection_for_identity(&dir, &source)
+            .expect("source workspace reactivates for release delivery");
+        browser::release_extension_namespace_reservation_for_workspace_move(
+            &dir,
+            &source,
+            &target,
+            Some(&reservation.request_id),
+        )
+        .expect_err("release waits for the extension acknowledgement");
+
+        let mut out = Vec::new();
+        dispatch(br#"{"type":"get-collection-state"}"#, &paths, &mut out)
+            .expect("release state is served");
+        let state = reply_values(&out).pop().expect("state reply exists");
+        assert_eq!(state["collectionEnabled"], true);
+        assert_eq!(state["namespaceReservation"]["requestId"], reservation.request_id);
+        assert_eq!(state["namespaceReservation"]["action"], "release");
+
+        let acknowledgement = serde_json::to_vec(&serde_json::json!({
+            "type": "namespace-reservation",
+            "requestId": reservation.request_id,
+            "acknowledgement": "released",
+        }))
+        .expect("release acknowledgement serializes");
+        dispatch(&acknowledgement, &paths, &mut out).expect("release acknowledgement stores");
+        browser::release_extension_namespace_reservation_for_workspace_move(
+            &dir,
+            &source,
+            &target,
+            Some(&reservation.request_id),
+        )
+        .expect("acknowledged release frees the extension reservation");
+        assert!(browser::pending_extension_namespace_reservation(&dir).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_clear_request_rejects_stale_tally_until_the_extension_confirms_empty_state() {
         let dir = temp_dir("tally-clear");
         let paths = configured_paths(&dir);
