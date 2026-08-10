@@ -6,7 +6,7 @@ Phase 3 closes the two accuracy gaps Phase 2 accepted: browser-based work regist
 
 The privacy posture is unchanged and load-bearing: full URLs, page titles, and browsing history never leave the browser process. What crosses the boundary is "rule N matched from 14:02 to 14:31" — and rules are created from the user's own answers.
 
-Phase 3 also carries a usability gate it must not ship without: setup and daily use must pass the grandmother test defined below — signed installers, auto-update, silent plumbing, and question-driven configuration. This phase points the product at non-engineers for the first time, so it is the phase where "works if you read the docs" stops being acceptable.
+Phase 3 also carries a usability gate it must not ship without: setup and daily use must pass the grandmother test defined below - signed external installers, auto-update, silent plumbing, and question-driven configuration. The exact signing and updater policy lives in `DEPLOY.md`. This phase points the product at non-engineers for the first time, so it is the phase where "works if you read the docs" stops being acceptable.
 
 Out of scope, unchanged: keystroke logging, screenshots, window titles, input content, network-level inspection, macOS/Linux monitoring, mobile.
 
@@ -18,7 +18,7 @@ Phase 3 adds the product's most technical machinery — an extension, native mes
 
 The gate forces three requirements that were previously deferred:
 
-- **Code signing ships in this phase.** An unsigned installer greets a novice with "Windows protected your PC" and a hidden "Run anyway" — that is where their setup ends. Windows signing and macOS notarization (priced in DEPLOY.md) stop being optional the moment the product targets non-engineers. `clock-in-hook` and `clock-in-browser-host` sign with the same certificate.
+- **Code-signing support ships in this phase.** An unsigned installer greets a novice with "Windows protected your PC" and a hidden "Run anyway" - that is where their setup ends. Windows signing and macOS notarization (priced in DEPLOY.md) are required for non-engineer distribution. `clock-in-hook` and `clock-in-browser-host` sign with the same certificate.
 - **Auto-update via the Tauri updater**, fed by the existing GitHub Releases pipeline. Install once; no user is ever asked to re-download anything.
 - **Progressive disclosure.** The default settings screen is three plain toggles. Agent hooks appear only when an agent CLI is detected on the machine; thresholds, path prefixes, and raw rule patterns live behind an "Advanced" disclosure. An engineer loses nothing; everyone else never sees it.
 
@@ -26,7 +26,7 @@ The gate forces three requirements that were previously deferred:
 
 The complete path from nothing to tracking, as the user experiences it:
 
-1. Dashboard → **Download** → run the signed installer.
+1. Dashboard → **Download** → run the signed installer for external distribution.
 2. The app opens to one sign-in form — the same email and password as the dashboard.
 3. One question: "Track your work time on this computer?" **[Turn on]** — the monitoring opt-in as a sentence, not a settings hunt.
 4. One card per detected browser: **[Connect Chrome]** opens the extension's store page; when the extension connects, the card flips to "Chrome is connected ✓" on its own.
@@ -131,7 +131,7 @@ The manual checklist adds: register in Chrome and Edge, answer a suggestion, ver
 - **Firefox** needs its own signed build and native-messaging manifest path; ship Chrome/Edge first, Firefox when demand exists. Safari waits for macOS support entirely.
 - **Store distribution**: Chrome on Windows stable does not sideload, so the extension ships via the Web Store (unlisted) and Edge Add-ons; review latency becomes part of the release cadence.
 - **The two clicks that cannot be removed**: no native app may install a browser extension silently — the store-page visit and the browser's own "Add extension?" confirmation are the browsers' floor, not ours. Managed fleets can erase even those via force-install policy; for everyone else, the browser card's one button is the minimum the platform permits.
-- **Signing logistics**: an OV/EV certificate and Apple Developer enrollment have lead time and identity-verification steps; they gate the release, so they start before implementation does.
+- **Signing logistics**: an OV/EV certificate and Apple Developer enrollment have lead time and identity-verification steps; they gate distribution to non-engineers, so they start before implementation does.
 - **Multi-profile browsers**: registration is per-user but extension install is per-profile; an unregistered profile is invisible, and the health badge cannot see profiles. Accepted; the monitor still records the browser as active.
 - **Path-bearing SPAs** that rewrite URLs without navigation events are covered by `tabs.onUpdated`, but sites that keep state out of the URL entirely (some editors) can only be matched at origin granularity.
 - **Watching a mapped site's video** with hands off the keyboard is attributed browser time on an idle machine: attributed, uncorroborated, and correctly so. The false-idle rescue signals (mic-in-use, presentation mode, media session) remain a later phase, as does input-density sampling.

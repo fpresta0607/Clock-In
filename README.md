@@ -27,6 +27,10 @@ Clock-In keeps the manual timer — a human still decides when work starts — b
 
 - **OS activity.** A slow, read-only monitor folds the machine's state into coarse segments
   (`active`, `idle`, `locked`, `suspended`). No hooks, no injection, no keystrokes.
+- **Browser attribution.** An optional browser extension matches active tabs against the
+  user's rules locally, so mapped browser work can be attributed to a project without
+  sending browsing data to the server. Its privacy and protocol contract lives in the
+  [extension guide](apps/browser-extension/README.md).
 - **Agent sessions.** Claude Code, Cursor, Codex, and Kimi Code fire lifecycle hooks into a
   tiny binary that spools them locally. A session's working directory resolves to a project,
   so an hour on the leaderboard can name *what* produced it.
@@ -49,6 +53,8 @@ flowchart LR
         OS["OS signals<br/>idle · foreground process<br/>lock · suspend"] --> MON["Activity monitor<br/>30s poll"]
         HOOK --> SPOOL[("Local spool<br/>append-only")]
         MON --> SPOOL
+        EXT["Browser extension<br/>local rule matching"] --> BHOST["clock-in-browser-host"]
+        BHOST --> SPOOL
         SPOOL --> APP["Clock-In desktop<br/>Tauri 2 + React"]
     end
 
@@ -74,7 +80,8 @@ A pnpm workspace. Contracts flow down; nothing flows back up.
 | **`packages/shared`** | Zod contracts shared by every client and the API, invite-code and duration helpers, and the SIQstack brand stylesheet both frontends import. |
 | **`packages/database`** | Drizzle schema, SQL migrations, the connection factory, and the migration runner. |
 | **`apps/api`** | Hono API: env validation, Neon Auth JWT verification, services (sessions, activity, agent sessions, attribution, reports), Drizzle repositories, CSV export. |
-| **`apps/desktop`** | The tray app. React UI over a Tauri 2 Rust host: `monitor.rs` (activity), `spool.rs` (shared with the hook binary), `uploader.rs`, `recovery.rs`, and the `clock-in-hook` bin target. |
+| **`apps/desktop`** | The tray app. React UI over a Tauri 2 Rust host: `monitor.rs` (activity, browser registration, and browser-spool drain), `spool.rs` (shared by both helper binaries), `uploader.rs`, `recovery.rs`, `clock-in-hook`, and `clock-in-browser-host`. |
+| **`apps/browser-extension`** | The Manifest V3 extension for Chrome, Edge, and Firefox variants. It matches URL rules locally and sends verdict-only browser spans through the native host. |
 | **`apps/web`** | The dashboard: sign-up/sign-in, team leaderboard, recent sessions, installer downloads. |
 
 Routes stay thin, services own the rules, repositories own SQL. Every service is tested
@@ -152,15 +159,16 @@ organization are derived from verified claims, never from the request body.
 | `GET` | `/me` | the signed-in user |
 | `GET` | `/organization` | workspace name and invite code |
 | `POST` | `/organization/join` | move an account into another workspace |
-| `GET` | `/projects` | projects the caller belongs to |
+| `GET` `POST` | `/projects` | list the caller's projects or create one |
+| `PATCH` `DELETE` | `/projects/:id` | rename or archive a project (workspace admin) |
 | `POST` | `/sessions` | start a timer — idempotent on the client-generated `clientId` |
 | `POST` | `/sessions/:id/stop` | stop it, submitting measured `idleSeconds` |
 | `GET` | `/sessions/current` | the caller's running timer, if any |
 | `POST` | `/activity/segments` | batch upload of activity segments |
 | `POST` | `/agent-sessions` | batch upload of agent lifecycle events |
-| `GET` `POST` `PATCH` `DELETE` | `/path-mappings`, `/path-mappings/:id` | map a path prefix to a project |
+| `GET` `POST` `PATCH` `DELETE` | `/path-mappings`, `/path-mappings/:id` | map an agent path prefix or browser URL rule to a project |
 | `GET` | `/reports`, `/reports/leaderboard`, `/reports/export.csv` | organization reporting |
-| `GET` | `/me/stats` | the caller's own totals, per project and per app |
+| `GET` | `/me/stats` | the caller's own totals, per project, app, and mapped site |
 
 **Invariants the server enforces**, not the client: one running timer per user (a partial
 unique index, not a check-then-write race); starts backdate at most 7 days; stops can't be in
@@ -168,9 +176,10 @@ the future; sessions past 12 hours are flagged `needs_review`; a session's proje
 the user is a member of (a composite foreign key, so it can't be bypassed).
 
 **Corroborated seconds** are the overlap of `[startedAt, stoppedAt]` with the union of the
-user's fresh `active` segments and the agent sessions linked to that timer, capped at
-`durationSeconds`. Evidence that arrives more than 7 days after it occurred is stored but
-never corroborates — history can't be backfilled after the fact.
+user's fresh `active` segments and non-browser agent sessions linked to that timer, capped at
+`durationSeconds`. Browser spans attribute mapped site time but do not corroborate it. Evidence
+that arrives more than 7 days after it occurred is stored but never corroborates - history can't
+be backfilled after the fact.
 
 ## Agent hooks
 
@@ -195,7 +204,8 @@ arrives before its `start` is tolerated by upsert, not rejected.
 The posture is deliberate, and it is the same in the code as it is here.
 
 **Collected:** coarse activity segments with timestamps; the foreground **process name** only;
-agent session boundaries with their working directory; your own timer start/stop.
+agent session boundaries with their working directory; matched browser-rule spans; your own timer
+start/stop.
 
 **Never collected:** keystrokes, mouse movement, screenshots, window titles, URLs, document
 names, file contents. The monitor takes no input hooks and injects into no process.
@@ -207,6 +217,9 @@ names, file contents. The monitor takes no input hooks and injects into no proce
   admins, and redacted from logs like session descriptions are.
 - `clock-in-hook` holds no credentials and opens no sockets. The spool file is its entire
   interface.
+- Browser URLs, titles, history, unmatched-origin tally, and saved "don't ask again" answers
+  stay local. See the [extension guide](apps/browser-extension/README.md) for the exact browser
+  boundary and local-storage behavior.
 - The desktop app never persists the session token: Rust keeps it in the OS credential store,
   and the webview never sees it.
 
@@ -227,9 +240,10 @@ Behavior first, plumbing second:
 - **Rust tests** are pure: the clock and the activity source are injected as traits, so the
   Win32 calls never run under test.
 
-`pnpm test` and the Rust suite are the gate; a manual GUI checklist lives at the end of
-[`docs/plans/2026-08-07-phase-2-implementation.md`](docs/plans/2026-08-07-phase-2-implementation.md)
-for what automation can't click.
+`pnpm test` and the Rust suite are the gate; manual GUI checklists live at the end of the
+[Phase 2](docs/plans/2026-08-07-phase-2-implementation.md) and
+[Phase 3](docs/plans/2026-08-09-phase-3-implementation.md) implementation plans for what
+automation cannot click.
 
 ## Deploying
 
@@ -244,24 +258,23 @@ rejected and why.
 
 - [Phase 1 design](docs/plans/2026-08-06-phase-1-design.md) — the manual timer, its data model, and its guardrails
 - [Phase 2 design](docs/plans/2026-08-07-phase-2-design.md) — evidence, attribution, and the anti-manipulation stance
-- [Phase 1](docs/plans/2026-08-06-phase-1-implementation.md) · [Phase 2](docs/plans/2026-08-07-phase-2-implementation.md) implementation plans
+- [Phase 3 design](docs/plans/2026-08-09-phase-3-design.md) - browser attribution and monitor precision
+- [Phase 1](docs/plans/2026-08-06-phase-1-implementation.md) · [Phase 2](docs/plans/2026-08-07-phase-2-implementation.md) · [Phase 3](docs/plans/2026-08-09-phase-3-implementation.md) implementation plans
 
 ## Status and known gaps
 
-Phases 1 and 2 are implemented. What's deliberately not built yet:
+Phases 1 through 3 are implemented. What's deliberately not built yet:
 
-- **No project administration.** A new workspace gets one project (`General`) and joining a
-  workspace grants membership to every active project. Creating more currently means touching
-  the database directly.
+- **Project lifecycle administration is API-only.** Any member can create a project; workspace
+  admins can rename or archive one. The desktop currently exposes project creation, not the
+  rest of that lifecycle.
 - **Activity monitoring is Windows-only.** The `ActivitySource` trait admits macOS and Linux
   implementations; installers are built for Windows and macOS today.
-- **Non-agent activity carries no project.** Process activity corroborates "the machine was
-  working"; only agent sessions can say *which* project. So suggested-start fires from agent
-  sessions only.
+- **Non-agent, non-browser activity carries no project.** Process activity corroborates "the
+  machine was working"; browser spans and agent sessions can attribute it. Browser-store
+  distribution and review are covered in [DEPLOY.md](DEPLOY.md).
 - **One running timer per user**, so only one concurrent agent session can be linked. Others
   are stored and flagged for review.
-- **Installers are unsigned** — Windows SmartScreen warns, and macOS needs right-click → Open.
-  Fixing that needs paid certificates (see DEPLOY.md).
 - Evidence can be forged by a determined user. Phase 2 raises the cost and the visibility of
   padding; it does not attempt cryptographic proof.
 

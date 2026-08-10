@@ -10,12 +10,12 @@ Span events carry `ruleId`, a generated span id, and timestamps - nothing else.
 Full URLs, page titles, and browsing history are read inside this process for local matching and are never transmitted.
 A tab that matches no rule produces nothing at all.
 
-Two things never leave the machine at all:
+Three things never leave the machine at all:
 
 - The unmatched-origin tally (focus seconds per unmatched eTLD+1) lives in extension storage and is mirrored to the desktop's local needs-mapping view through the native host.
   It is never uploaded, and it is user-clearable.
 - The queued-verdict outbox (bounded ring, oldest dropped) sits in extension storage until the native host is reachable again.
-- The span machine's in-flight state (open span, dwell candidate, session id) sits in extension storage so an MV3 service-worker eviction cannot strand an open span; a restored span still ends correctly on the next tab switch or idle.
+- The span machine's in-flight state (open span, dwell candidate, session id) sits in extension storage so an MV3 service-worker eviction cannot strand an open span. A corrupt or unavailable read starts fresh; after an unobserved gap, the restored span closes at the last provable attention time before the extension rechecks browser focus and idle state.
 
 Off-the-record tabs are excluded via `tab.incognito` (Chrome's Guest windows report as off-the-record); Clock-In never asks for the browser's incognito toggle.
 
@@ -26,6 +26,7 @@ Off-the-record tabs are excluded via `tab.incognito` (Chrome's Guest windows rep
 - `idle` - to end spans when the machine goes idle or locks (`idle.onStateChanged`).
 - `storage` - to persist the local tally and the offline outbox across service-worker restarts.
 - `nativeMessaging` - to talk to `clock-in-browser-host`, the desktop's local stdio bridge, which holds no credentials and opens no sockets.
+- `alarms` - to schedule ticks, rule refreshes, reconnects, and pending span transitions after an MV3 service-worker eviction.
 
 ## Wire protocol
 
@@ -45,7 +46,8 @@ When the host is unreachable, span events queue in a 1000-entry ring in extensio
 - `src/spans.ts` - the span state machine over an injected clock: 15 s dwell to open, sub-15 s gaps merge, 60 s heartbeats, `ended` on tab switch / blur / idle / lock / shutdown (pure).
 - `src/tally.ts` - the local unmatched eTLD+1 focus-time tally (pure).
 - `src/outbox.ts` - the bounded offline ring and reconnect backoff (pure).
-- `src/background.ts` - the MV3 service worker: chrome.* adapters feeding the state machine.
+- `src/background.ts` - the MV3 service worker: chrome.* adapters, durable alarms, and conservative startup recovery around the state machine.
+- `src/schedule.ts` / `src/startup.ts` - persistent MV3 cadence and validation at the extension-storage boundary.
 - `manifest.chrome.json` / `manifest.firefox.json` - build variants.
 
 ## Build
