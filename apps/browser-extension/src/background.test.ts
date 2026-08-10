@@ -23,6 +23,7 @@ function backgroundHarness(
   getTab?: (tabId: number) => Promise<BrowserTab | undefined>,
   getIdleState: () => Promise<"active" | "idle" | "locked"> = () => Promise.resolve("active"),
   stored: Record<string, unknown> = {},
+  storageSet: (state: Record<string, unknown>) => Promise<void> = () => Promise.resolve(),
 ) {
   const alarm = listeners();
   const activated = listeners();
@@ -50,8 +51,9 @@ function backgroundHarness(
     onMessage: portMessages,
     onDisconnect: portDisconnect,
   };
+  const set = vi.fn(storageSet);
   vi.stubGlobal("chrome", {
-    storage: { local: { get: vi.fn(() => Promise.resolve(stored)), set: vi.fn(() => Promise.resolve()) } },
+    storage: { local: { get: vi.fn(() => Promise.resolve(stored)), set } },
     alarms: { onAlarm: alarm, clear: vi.fn(() => Promise.resolve(true)), create: vi.fn(), get: vi.fn(() => Promise.resolve(undefined)) },
     tabs: {
       onActivated: activated,
@@ -70,6 +72,7 @@ function backgroundHarness(
     focusChanged,
     port,
     portMessages,
+    set,
     setActiveTab: (tabId: number) => { activeTabId = tabId; },
   };
 }
@@ -130,6 +133,75 @@ describe("background startup", () => {
       collectionId: "collection-one",
       event,
     }));
+  });
+
+  it("does not replay legacy rows already captured by namespaced storage", async () => {
+    vi.useFakeTimers();
+    const event = {
+      event: "started",
+      externalSessionId: "saved-span",
+      ruleId: "rule-1",
+      occurredAt: "2026-08-09T12:00:00.000Z",
+    } as const;
+    const harness = backgroundHarness([], undefined, undefined, undefined, undefined, {
+      browserCollectionId: "collection-one",
+      spanOutbox: [event],
+      spanOutboxesByNamespace: {
+        "account-one:organization-one": [event],
+      },
+    });
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      collectionNamespace: "account-one:organization-one",
+      rules: [],
+    } as never);
+    await settle();
+
+    const sent = spanMessages(harness.port);
+    expect(sent).toHaveLength(1);
+    harness.portMessages.emit({ type: "span-ack", collectionId: "collection-one", event: sent[0]?.["event"] } as never);
+    await settle();
+    expect(spanMessages(harness.port)).toHaveLength(1);
+  });
+
+  it("pauses capture until rejected storage can durably retain the saved span", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-09T12:00:00.000Z"));
+    const harness = backgroundHarness([{ id: 1, url: "https://github.com/acme/project", incognito: false }]);
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      rules: [{ id: "rule-1", pattern: "github.com/acme/*" }],
+    } as never);
+    await settle();
+
+    let finishRetry: () => void = () => undefined;
+    const retry = new Promise<void>((resolve) => { finishRetry = resolve; });
+    harness.set.mockRejectedValueOnce(new Error("storage unavailable"));
+    harness.set.mockImplementationOnce(() => retry);
+    await vi.advanceTimersByTimeAsync(15_000);
+    harness.alarm.emit({ name: SPAN_ADVANCE_ALARM_NAME } as never);
+    await settle();
+
+    expect(spanMessages(harness.port)).toEqual([]);
+    expect(lastHostMessage(harness.port, "capture-paused")).toEqual(expect.objectContaining({ collectionId: "collection-one" }));
+    expect(harness.set.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
+      spanCapturePaused: true,
+      spanOutbox: [expect.objectContaining({ event: "started" })],
+    }));
+
+    finishRetry();
+    await settle();
+    expect(spanMessages(harness.port)).toHaveLength(1);
   });
 
   it("fails closed when the native host omits the identity namespace", async () => {
