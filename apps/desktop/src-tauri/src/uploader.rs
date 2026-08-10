@@ -10,19 +10,17 @@
 //! rejections are dropped (a redacted count is logged, never the row).
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use crate::api::{ApiClient, ErrorKind, MappingKind, PathMapping};
+use crate::api::{ApiClient, PathMapping};
 use crate::monitor::{
-    iso8601, lock, parse_iso8601, unix_now, ActiveAgent, AgentTracking, BrowserSpan,
-    BrowserTracking, InvalidSessionHandler, MonitorShared, PendingSuggestion, SegmentRecord,
+    iso8601, lock, parse_iso8601, unix_now, ActiveAgent, AgentTracking, MonitorShared,
+    ObservedSession, SegmentRecord,
 };
-use crate::recovery::RecoveryState;
-use crate::spool::{self, AgentEventKind, AgentSource, EvidenceIdentity, SpoolEvent};
+use crate::spool::{self, AgentEventKind, AgentSource, SpoolEvent};
 
 /// The server's batch bound for both upload routes.
 const UPLOAD_BATCH_SIZE: usize = 500;
@@ -31,30 +29,14 @@ const UPLOAD_BATCH_SIZE: usize = 500;
 /// enough that the monitor stays below notice.
 const UPLOAD_INTERVAL_SECONDS: u64 = 300;
 
-type InvalidSessionHandlerState = Arc<Mutex<Option<InvalidSessionHandler>>>;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum UploadDrainResult {
-    Complete,
-    Incomplete,
-    AuthLost,
-}
-
-#[allow(clippy::too_many_arguments)]
 pub async fn upload_loop(
     shared: Arc<Mutex<MonitorShared>>,
     client: ApiClient,
     segments_path: PathBuf,
     agent_path: PathBuf,
-    browser_dir: PathBuf,
-    identity: EvidenceIdentity,
-    recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
+    sessions_path: PathBuf,
     upload_now: Arc<Notify>,
-    recording: Arc<AtomicBool>,
-    identity_invalidated: Arc<AtomicBool>,
-    invalid_session_handler: InvalidSessionHandlerState,
 ) {
-    let browser_path = browser_dir.join("browser-spool.jsonl");
     let mut tick = tokio::time::interval(Duration::from_secs(UPLOAD_INTERVAL_SECONDS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -62,279 +44,54 @@ pub async fn upload_loop(
             _ = tick.tick() => {}
             _ = upload_now.notified() => {}
         }
-        if !recording.load(Ordering::SeqCst) {
-            return;
-        }
-        upload_once(
-            &shared,
-            &client,
-            &segments_path,
-            &agent_path,
-            &browser_dir,
-            &browser_path,
-            &identity,
-            &recovery,
-            &recording,
-            &identity_invalidated,
-            &invalid_session_handler,
-        )
-        .await;
+        upload_once(&shared, &client, &segments_path, &agent_path, &sessions_path).await;
     }
 }
 
 /// One upload pass. Returns as soon as anything is unreachable; whatever was
 /// not acknowledged stays in its spool for the next pass.
-#[allow(clippy::too_many_arguments)]
 async fn upload_once(
     shared: &Arc<Mutex<MonitorShared>>,
     client: &ApiClient,
     segments_path: &Path,
     agent_path: &Path,
-    browser_dir: &Path,
-    browser_path: &Path,
-    identity: &EvidenceIdentity,
-    recovery: &Arc<tokio::sync::Mutex<RecoveryState>>,
-    recording: &Arc<AtomicBool>,
-    identity_invalidated: &Arc<AtomicBool>,
-    invalid_session_handler: &InvalidSessionHandlerState,
+    sessions_path: &Path,
 ) {
+    // Signed out: leave both spools for a session that can upload them.
     let Some(session) = crate::read_session_token() else {
-        invalidate_auth_loss(
-            shared,
-            segments_path,
-            browser_dir,
-            recording,
-            identity_invalidated,
-            invalid_session_handler,
-        );
         return;
     };
-    let token = match client.fetch_access_token(&session).await {
-        Ok(token) => token,
-        Err(error) => {
-            if error.kind == ErrorKind::Auth {
-                invalidate_auth_loss(
-                    shared,
-                    segments_path,
-                    browser_dir,
-                    recording,
-                    identity_invalidated,
-                    invalid_session_handler,
-                );
-            }
-            return;
-        }
+    let Ok(token) = client.fetch_access_token(&session).await else {
+        return;
     };
-    match client.identity(&token).await {
-        Ok(current) if current == *identity => {}
-        Ok(_) => {
-            invalidate_auth_loss(
-                shared,
-                segments_path,
-                browser_dir,
-                recording,
-                identity_invalidated,
-                invalid_session_handler,
-            );
-            return;
-        }
-        Err(error) => {
-            if error.kind == ErrorKind::Auth {
-                invalidate_auth_loss(
-                    shared,
-                    segments_path,
-                    browser_dir,
-                    recording,
-                    identity_invalidated,
-                    invalid_session_handler,
-                );
-            }
-            return;
-        }
-    }
-    if let Err(error) = crate::browser::renew_collection_authorization(browser_dir) {
-        eprintln!(
-            "clock-in: could not renew browser attribution: {}",
-            error.message
-        );
-    }
 
-    let mut complete = match upload_segments(client, &token, segments_path).await {
-        UploadDrainResult::Complete => true,
-        UploadDrainResult::Incomplete => false,
-        UploadDrainResult::AuthLost => {
-            invalidate_auth_loss(
-                shared,
-                segments_path,
-                browser_dir,
-                recording,
-                identity_invalidated,
-                invalid_session_handler,
-            );
-            return;
-        }
-    };
+    let mut complete = upload_segments(client, &token, segments_path).await;
 
     // Refresh the local mapping cache before the drain resolves suggestions.
     // A failed refresh keeps last pass's cache — stale mappings beat none.
-    match client.path_mappings(&token).await {
-        Ok(mappings) => {
-            let changed = {
-                let mut shared = lock(shared);
-                let changed = shared.mappings != mappings;
-                shared.mappings = mappings;
-                changed
-            };
-            // The extension matches against the rules file, so a changed url_rule
-            // set lands on disk here too (the writer skips unchanged content).
-            if changed {
-                let mappings = lock(shared).mappings.clone();
-                if let Err(error) = crate::browser::write_rules_file(browser_dir, &mappings) {
-                    eprintln!("clock-in: could not write the browser rules file: {error}");
-                }
-            }
-        }
-        Err(error) if error.kind == ErrorKind::Auth => {
-            invalidate_auth_loss(
-                shared,
-                segments_path,
-                browser_dir,
-                recording,
-                identity_invalidated,
-                invalid_session_handler,
-            );
-            return;
-        }
-        Err(_) => complete = false,
+    if let Ok(mappings) = client.path_mappings(&token).await {
+        lock(shared).mappings = mappings;
+    } else {
+        complete = false;
     }
 
-    let timer_running = recovery.lock().await.running.is_some();
-    match drain_agent_spool(shared, client, &token, agent_path, timer_running).await {
-        UploadDrainResult::Complete => {}
-        UploadDrainResult::Incomplete => complete = false,
-        UploadDrainResult::AuthLost => {
-            invalidate_auth_loss(
-                shared,
-                segments_path,
-                browser_dir,
-                recording,
-                identity_invalidated,
-                invalid_session_handler,
-            );
-            return;
-        }
-    }
-    match drain_browser_spool(shared, client, &token, browser_path, timer_running).await {
-        UploadDrainResult::Complete => {}
-        UploadDrainResult::Incomplete => complete = false,
-        UploadDrainResult::AuthLost => {
-            invalidate_auth_loss(
-                shared,
-                segments_path,
-                browser_dir,
-                recording,
-                identity_invalidated,
-                invalid_session_handler,
-            );
-            return;
-        }
-    }
+    complete &= drain_agent_spool(shared, client, &token, agent_path).await;
+    complete &= upload_sessions(client, &token, sessions_path).await;
 
     if complete {
         lock(shared).last_upload_at = Some(iso8601(unix_now()));
     }
 }
 
-fn invalidate_auth_loss(
-    shared: &Arc<Mutex<MonitorShared>>,
-    segments_path: &Path,
-    browser_dir: &Path,
-    recording: &Arc<AtomicBool>,
-    identity_invalidated: &Arc<AtomicBool>,
-    invalid_session_handler: &InvalidSessionHandlerState,
-) {
-    complete_auth_loss(
-        || crate::monitor::flush_open_segment_to_spool(shared, segments_path, unix_now()),
-        || {
-            let _ = crate::browser::deactivate_collection(browser_dir);
-        },
-        crate::clear_session_token,
-        || {
-            deactivate_invalid_identity(
-                shared,
-                recording,
-                identity_invalidated,
-                invalid_session_handler,
-            )
-        },
-    );
-}
-
-fn complete_auth_loss(
-    flush_open_segment: impl FnOnce() -> bool,
-    deactivate_collection: impl FnOnce(),
-    clear_session_token: impl FnOnce(),
-    deactivate_identity: impl FnOnce(),
-) {
-    let _ = flush_open_segment();
-    deactivate_collection();
-    clear_session_token();
-    deactivate_identity();
-}
-
-fn deactivate_invalid_identity(
-    shared: &Arc<Mutex<MonitorShared>>,
-    recording: &Arc<AtomicBool>,
-    identity_invalidated: &Arc<AtomicBool>,
-    invalid_session_handler: &InvalidSessionHandlerState,
-) {
-    recording.store(false, Ordering::SeqCst);
-    identity_invalidated.store(true, Ordering::SeqCst);
-    let mut shared = lock(shared);
-    shared.builder = crate::monitor::SegmentBuilder::new();
-    shared.mappings.clear();
-    shared.agent = AgentTracking::default();
-    shared.browser = BrowserTracking::default();
-    shared.last_upload_at = None;
-    shared.clock_change_at = None;
-    let handler = lock(invalid_session_handler).clone();
-    drop(shared);
-    if let Some(handler) = handler {
-        handler();
-    }
-}
-
 /// Uploads every buffered segment in batches, then truncates the acked
 /// prefix. A mid-batch failure skips the truncation, so the whole spool
 /// replays next pass — safe because `clientId` makes replays idempotent.
-async fn upload_segments(client: &ApiClient, token: &str, path: &Path) -> UploadDrainResult {
-    let generations = match spool::seal_pending_spool_paths(path) {
-        Ok(generations) => generations,
-        Err(_) => return UploadDrainResult::Incomplete,
-    };
-    for generation in generations {
-        match upload_segment_generation(client, token, &generation).await {
-            UploadDrainResult::Complete => {}
-            result => return result,
-        }
-    }
-    UploadDrainResult::Complete
-}
-
-async fn upload_segment_generation(
-    client: &ApiClient,
-    token: &str,
-    path: &Path,
-) -> UploadDrainResult {
+async fn upload_segments(client: &ApiClient, token: &str, path: &Path) -> bool {
     let Ok((records, acked_bytes)) = spool::read_pending_lines::<SegmentRecord>(path) else {
-        return UploadDrainResult::Incomplete;
+        return false;
     };
     if records.is_empty() {
-        return if spool::truncate_acked(path, acked_bytes).is_ok() {
-            UploadDrainResult::Complete
-        } else {
-            UploadDrainResult::Incomplete
-        };
+        return true;
     }
     for chunk in records.chunks(UPLOAD_BATCH_SIZE) {
         match client.upload_segments(token, chunk).await {
@@ -348,57 +105,51 @@ async fn upload_segment_generation(
                     );
                 }
             }
-            Err(error) if error.kind == ErrorKind::Auth => return UploadDrainResult::AuthLost,
-            Err(_) => return UploadDrainResult::Incomplete,
+            Err(_) => return false,
         }
     }
-    if spool::truncate_acked(path, acked_bytes).is_ok() {
-        UploadDrainResult::Complete
-    } else {
-        UploadDrainResult::Incomplete
-    }
+    spool::truncate_acked(path, acked_bytes).is_ok()
 }
 
 /// Drains the agent spool: local tracking first (suggestions and the away
 /// override work offline), then the upload, then the truncation.
+/// Uploads finished sessions in batches, then truncates the acked prefix. A
+/// mid-batch failure skips the truncation, so the spool replays next pass —
+/// safe because the server ignores client ids it already stored.
+async fn upload_sessions(client: &ApiClient, token: &str, path: &Path) -> bool {
+    let Ok((sessions, acked_bytes)) = spool::read_pending_lines::<ObservedSession>(path) else {
+        return false;
+    };
+    if sessions.is_empty() {
+        return true;
+    }
+    for chunk in sessions.chunks(UPLOAD_BATCH_SIZE) {
+        match client.upload_observed_sessions(token, chunk).await {
+            Ok(rejected) => {
+                // A rejected row failed permanent validation; retrying it would
+                // reject forever, so it is dropped with the ack.
+                if rejected > 0 {
+                    eprintln!("clock-in: the server rejected {rejected} session(s); dropping them");
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    spool::truncate_acked(path, acked_bytes).is_ok()
+}
+
 async fn drain_agent_spool(
     shared: &Arc<Mutex<MonitorShared>>,
     client: &ApiClient,
     token: &str,
     path: &Path,
-    timer_running: bool,
-) -> UploadDrainResult {
-    let generations = match spool::seal_pending_spool_paths(path) {
-        Ok(generations) => generations,
-        Err(_) => return UploadDrainResult::Incomplete,
-    };
-    for generation in generations {
-        match drain_agent_spool_generation(shared, client, token, &generation, timer_running).await
-        {
-            UploadDrainResult::Complete => {}
-            result => return result,
-        }
-    }
-    UploadDrainResult::Complete
-}
-
-async fn drain_agent_spool_generation(
-    shared: &Arc<Mutex<MonitorShared>>,
-    client: &ApiClient,
-    token: &str,
-    path: &Path,
-    timer_running: bool,
-) -> UploadDrainResult {
+) -> bool {
     let pending = match spool::read_pending(path) {
         Ok(pending) => pending,
-        Err(_) => return UploadDrainResult::Incomplete,
+        Err(_) => return false,
     };
     if pending.events.is_empty() {
-        return if spool::truncate_acked(path, pending.acked_bytes).is_ok() {
-            UploadDrainResult::Complete
-        } else {
-            UploadDrainResult::Incomplete
-        };
+        return true;
     }
 
     {
@@ -406,7 +157,7 @@ async fn drain_agent_spool_generation(
         let MonitorShared {
             mappings, agent, ..
         } = &mut *shared;
-        track_agent_events(&pending.events, mappings, timer_running, agent);
+        track_agent_events(&pending.events, mappings, agent);
     }
 
     for chunk in pending.events.chunks(UPLOAD_BATCH_SIZE) {
@@ -417,211 +168,10 @@ async fn drain_agent_spool_generation(
                     eprintln!("clock-in: the server rejected {rejected} agent event(s)");
                 }
             }
-            Err(error) if error.kind == ErrorKind::Auth => return UploadDrainResult::AuthLost,
-            Err(_) => return UploadDrainResult::Incomplete,
+            Err(_) => return false,
         }
     }
-    if spool::truncate_acked(path, pending.acked_bytes).is_ok() {
-        UploadDrainResult::Complete
-    } else {
-        UploadDrainResult::Incomplete
-    }
-}
-
-/// Drains the browser spool on the same cadence and with the same
-/// ack-before-truncate discipline as the agent spool. Browser spans feed the
-/// suggested-start prompt, but never the away override — a focused tab says
-/// nothing once the human leaves, so they bypass `AgentTracking` entirely.
-async fn drain_browser_spool(
-    shared: &Arc<Mutex<MonitorShared>>,
-    client: &ApiClient,
-    token: &str,
-    path: &Path,
-    timer_running: bool,
-) -> UploadDrainResult {
-    let generations = match spool::seal_pending_spool_paths(path) {
-        Ok(generations) => generations,
-        Err(_) => return UploadDrainResult::Incomplete,
-    };
-    for generation in generations {
-        match drain_browser_spool_generation(shared, client, token, &generation, timer_running)
-            .await
-        {
-            UploadDrainResult::Complete => {}
-            result => return result,
-        }
-    }
-    UploadDrainResult::Complete
-}
-
-async fn drain_browser_spool_generation(
-    shared: &Arc<Mutex<MonitorShared>>,
-    client: &ApiClient,
-    token: &str,
-    path: &Path,
-    timer_running: bool,
-) -> UploadDrainResult {
-    let pending = match spool::read_pending(path) {
-        Ok(pending) => pending,
-        Err(_) => return UploadDrainResult::Incomplete,
-    };
-    if pending.events.is_empty() {
-        return if spool::truncate_acked(path, pending.acked_bytes).is_ok() {
-            UploadDrainResult::Complete
-        } else {
-            UploadDrainResult::Incomplete
-        };
-    }
-
-    {
-        let mut shared = lock(shared);
-        let MonitorShared {
-            mappings,
-            agent,
-            browser,
-            ..
-        } = &mut *shared;
-        track_browser_events(
-            &pending.events,
-            mappings,
-            timer_running,
-            unix_now(),
-            browser,
-            &mut agent.suggestion,
-        );
-    }
-
-    for chunk in pending.events.chunks(UPLOAD_BATCH_SIZE) {
-        match client.upload_agent_events(token, chunk).await {
-            Ok(results) => {
-                let rejected = results.iter().filter(|result| !result.accepted).count();
-                if rejected > 0 {
-                    eprintln!("clock-in: the server rejected {rejected} browser event(s)");
-                }
-            }
-            Err(error) if error.kind == ErrorKind::Auth => return UploadDrainResult::AuthLost,
-            Err(_) => return UploadDrainResult::Incomplete,
-        }
-    }
-    if spool::truncate_acked(path, pending.acked_bytes).is_ok() {
-        UploadDrainResult::Complete
-    } else {
-        UploadDrainResult::Incomplete
-    }
-}
-
-/// A mapped browser span must survive a glance before it may prompt: sixty
-/// seconds old, heartbeats included.
-const BROWSER_SUGGESTION_MIN_AGE_SECONDS: u64 = 60;
-
-/// The browser drain's local bookkeeping: resolve each span's `ruleId`
-/// against the cached `url_rule` mappings, and when a mapped span on no
-/// running timer is provably older than the glance threshold, raise the
-/// suggested-start prompt with the project preselected. Pure apart from the
-/// injected `now`; replays are safe because a suggestion is replaced only by
-/// a strictly newer one and a dismissed span is never re-raised.
-pub fn track_browser_events(
-    events: &[SpoolEvent],
-    mappings: &[PathMapping],
-    timer_running: bool,
-    _now: u64,
-    tracking: &mut BrowserTracking,
-    suggestion: &mut Option<PendingSuggestion>,
-) {
-    let mut ordered: Vec<(u64, &SpoolEvent)> = events
-        .iter()
-        .filter_map(|event| parse_iso8601(&event.occurred_at).map(|at| (at, event)))
-        .collect();
-    ordered.sort_by_key(|(at, _)| *at);
-
-    for (at, event) in ordered {
-        let span_id = &event.external_session_id;
-        match event.event {
-            AgentEventKind::Started => {
-                let Some(rule_id) = event.rule_id.as_deref() else {
-                    continue;
-                };
-                // A deleted or foreign rule resolves to nothing — the server
-                // leaves the span unattributed, and no suggestion is raised.
-                let Some(project_id) = resolve_rule(rule_id, mappings) else {
-                    continue;
-                };
-                tracking.spans.insert(
-                    span_id.clone(),
-                    BrowserSpan {
-                        started_at: at,
-                        last_seen: at,
-                        project_id,
-                    },
-                );
-            }
-            AgentEventKind::Heartbeat => {
-                if let Some(span) = tracking.spans.get_mut(span_id) {
-                    span.last_seen = span.last_seen.max(at);
-                }
-            }
-            // A closed span cannot prompt: the moment to ask "working on this?"
-            // passed when the user left the site.
-            AgentEventKind::Ended => {
-                tracking.spans.remove(span_id);
-            }
-        }
-    }
-
-    cap_browser_spans(tracking);
-
-    // The suggestion question: the newest open mapped span old enough to not
-    // be a glance, based only on lifecycle evidence observed from the browser.
-    if timer_running {
-        return;
-    }
-    let candidate = tracking
-        .spans
-        .iter()
-        .filter(|(span_id, span)| {
-            tracking.dismissed_span.as_ref() != Some(*span_id)
-                && span.last_seen.saturating_sub(span.started_at)
-                    >= BROWSER_SUGGESTION_MIN_AGE_SECONDS
-        })
-        .max_by_key(|(_, span)| span.started_at);
-    let Some((span_id, span)) = candidate else {
-        return;
-    };
-    let is_newer = suggestion
-        .as_ref()
-        .and_then(|current| parse_iso8601(&current.since))
-        .is_none_or(|since| span.started_at >= since);
-    if is_newer {
-        *suggestion = Some(PendingSuggestion {
-            project_id: span.project_id.clone(),
-            source: source_name(AgentSource::Browser).to_string(),
-            since: iso8601(span.started_at),
-            span_id: Some(span_id.clone()),
-        });
-    }
-}
-
-fn cap_browser_spans(tracking: &mut BrowserTracking) {
-    while tracking.spans.len() > 64 {
-        let Some(oldest) = tracking
-            .spans
-            .iter()
-            .min_by_key(|(_, span)| span.started_at)
-            .map(|(id, _)| id.clone())
-        else {
-            break;
-        };
-        tracking.spans.remove(&oldest);
-    }
-}
-
-/// A `ruleId` resolves to a project through the caller's own `url_rule`
-/// mappings — the same attribution the server applies on ingest.
-fn resolve_rule(rule_id: &str, mappings: &[PathMapping]) -> Option<String> {
-    mappings
-        .iter()
-        .find(|mapping| mapping.kind == MappingKind::UrlRule && mapping.id == rule_id)
-        .map(|mapping| mapping.project_id.clone())
+    spool::truncate_acked(path, pending.acked_bytes).is_ok()
 }
 
 /// The drain's local bookkeeping. Pure apart from the clocks inside the
@@ -631,7 +181,6 @@ fn resolve_rule(rule_id: &str, mappings: &[PathMapping]) -> Option<String> {
 pub fn track_agent_events(
     events: &[SpoolEvent],
     mappings: &[PathMapping],
-    timer_running: bool,
     tracking: &mut AgentTracking,
 ) {
     let mut ordered: Vec<(u64, &SpoolEvent)> = events
@@ -641,11 +190,6 @@ pub fn track_agent_events(
     ordered.sort_by_key(|(at, _)| *at);
 
     for (at, event) in ordered {
-        // Browser spans travel their own spool and never open the away
-        // override; a stray one here is skipped rather than trusted.
-        if event.source == AgentSource::Browser {
-            continue;
-        }
         tracking.last_event_at = tracking.last_event_at.max(at);
         match event.event {
             AgentEventKind::Started => {
@@ -677,28 +221,15 @@ pub fn track_agent_events(
                 tracking.active = None;
             }
         }
-        // A started agent in a mapped directory while no timer runs is the one
-        // prompt the desktop raises locally; the user confirms or dismisses.
-        if event.event == AgentEventKind::Started && !timer_running {
-            if let Some(project_id) = event
-                .cwd
-                .as_deref()
-                .and_then(|cwd| resolve_project(cwd, mappings))
-            {
-                let is_newer = tracking
-                    .suggestion
-                    .as_ref()
-                    .and_then(|suggestion| parse_iso8601(&suggestion.since))
-                    .is_none_or(|since| at >= since);
-                if is_newer {
-                    tracking.suggestion = Some(PendingSuggestion {
-                        project_id,
-                        source: source_name(event.source).to_string(),
-                        since: iso8601(at),
-                        span_id: None,
-                    });
+        // A started agent in a mapped directory is what attributes the open
+        // session to real work instead of to the default project.
+        match event.event {
+            AgentEventKind::Started | AgentEventKind::Heartbeat => {
+                if let Some(project_id) = resolve_project(&event.cwd, mappings) {
+                    tracking.project = Some(project_id);
                 }
             }
+            AgentEventKind::Ended => tracking.project = None,
         }
     }
 }
@@ -709,7 +240,6 @@ pub fn source_name(source: AgentSource) -> &'static str {
         AgentSource::Codex => "codex",
         AgentSource::KimiCode => "kimi_code",
         AgentSource::Cursor => "cursor",
-        AgentSource::Browser => "browser",
         AgentSource::Other => "other",
     }
 }
@@ -744,10 +274,6 @@ pub fn resolve_project(cwd: &str, mappings: &[PathMapping]) -> Option<String> {
     let mut best: Vec<&PathMapping> = Vec::new();
     let mut best_length: Option<usize> = None;
     for mapping in mappings {
-        // URL rules match browser hosts, never working directories.
-        if mapping.kind != MappingKind::PathPrefix {
-            continue;
-        }
         let prefix = normalize_path(&mapping.path_prefix);
         if !matches_boundary(&cwd, &prefix) {
             continue;
@@ -777,34 +303,9 @@ pub fn resolve_project(cwd: &str, mappings: &[PathMapping]) -> Option<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn auth_loss_tears_down_when_spooling_the_final_segment_fails() {
-        let actions = Arc::new(Mutex::new(Vec::new()));
-        let flushed = Arc::clone(&actions);
-        let collection = Arc::clone(&actions);
-        let token = Arc::clone(&actions);
-        let identity = Arc::clone(&actions);
-
-        complete_auth_loss(
-            move || {
-                lock(&flushed).push("flush");
-                false
-            },
-            move || lock(&collection).push("collection"),
-            move || lock(&token).push("token"),
-            move || lock(&identity).push("identity"),
-        );
-
-        assert_eq!(
-            *lock(&actions),
-            vec!["flush", "collection", "token", "identity"]
-        );
-    }
-
     fn mapping(id: &str, prefix: &str, project: &str) -> PathMapping {
         PathMapping {
             id: id.to_string(),
-            kind: MappingKind::PathPrefix,
             path_prefix: prefix.to_string(),
             repo_url: None,
             project_id: project.to_string(),
@@ -817,34 +318,7 @@ mod tests {
             external_session_id: "s1".to_string(),
             event: kind,
             occurred_at: occurred_at.to_string(),
-            cwd: Some(cwd.to_string()),
-            rule_id: None,
-        }
-    }
-
-    fn browser_event(
-        kind: AgentEventKind,
-        span: &str,
-        rule: &str,
-        occurred_at: &str,
-    ) -> SpoolEvent {
-        SpoolEvent {
-            source: AgentSource::Browser,
-            external_session_id: span.to_string(),
-            event: kind,
-            occurred_at: occurred_at.to_string(),
-            cwd: None,
-            rule_id: Some(rule.to_string()),
-        }
-    }
-
-    fn rule(id: &str, pattern: &str, project: &str) -> PathMapping {
-        PathMapping {
-            id: id.to_string(),
-            kind: MappingKind::UrlRule,
-            path_prefix: pattern.to_string(),
-            repo_url: None,
-            project_id: project.to_string(),
+            cwd: cwd.to_string(),
         }
     }
 
@@ -916,7 +390,6 @@ mod tests {
                 ),
             ],
             &[],
-            true,
             &mut tracking,
         );
         assert!(tracking.open);
@@ -940,7 +413,6 @@ mod tests {
                 "2026-08-07T11:00:00Z",
             )],
             &[],
-            true,
             &mut tracking,
         );
         assert!(!tracking.open);
@@ -948,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mapped_start_suggests_a_project_only_while_no_timer_runs() {
+    fn a_mapped_start_names_the_project_the_open_session_belongs_to() {
         let mappings = vec![mapping("m1", "C:/dev/clock-in", "p-clockin")];
         let mut tracking = AgentTracking::default();
 
@@ -959,66 +431,35 @@ mod tests {
                 "2026-08-07T10:00:00Z",
             )],
             &mappings,
-            true,
             &mut tracking,
         );
-        assert!(
-            tracking.suggestion.is_none(),
-            "a running timer suppresses it"
+        assert_eq!(tracking.project.as_deref(), Some("p-clockin"));
+
+        // An unmapped directory names nothing, so the last name stands until
+        // the session that carried it ends.
+        track_agent_events(
+            &[event(
+                AgentEventKind::Heartbeat,
+                "D:/unmapped",
+                "2026-08-07T11:00:00Z",
+            )],
+            &mappings,
+            &mut tracking,
         );
+        assert_eq!(tracking.project.as_deref(), Some("p-clockin"));
 
         track_agent_events(
             &[event(
-                AgentEventKind::Started,
+                AgentEventKind::Ended,
                 "C:/dev/clock-in",
                 "2026-08-07T12:00:00Z",
             )],
             &mappings,
-            false,
-            &mut tracking,
-        );
-        let suggestion = tracking.suggestion.clone().expect("a suggestion is raised");
-        assert_eq!(suggestion.project_id, "p-clockin");
-        assert_eq!(suggestion.source, "claude_code");
-        assert_eq!(suggestion.since, "2026-08-07T12:00:00Z");
-
-        // An unmapped or older start never displaces the pending suggestion.
-        track_agent_events(
-            &[
-                event(
-                    AgentEventKind::Started,
-                    "D:/unmapped",
-                    "2026-08-07T13:00:00Z",
-                ),
-                event(
-                    AgentEventKind::Started,
-                    "C:/dev/clock-in",
-                    "2026-08-07T11:00:00Z",
-                ),
-            ],
-            &mappings,
-            false,
             &mut tracking,
         );
         assert_eq!(
-            tracking.suggestion.as_ref().map(|s| s.since.as_str()),
-            Some("2026-08-07T12:00:00Z")
-        );
-
-        // A newer mapped start replaces it.
-        track_agent_events(
-            &[event(
-                AgentEventKind::Started,
-                "c:/dev/clock-in",
-                "2026-08-07T14:00:00Z",
-            )],
-            &mappings,
-            false,
-            &mut tracking,
-        );
-        assert_eq!(
-            tracking.suggestion.as_ref().map(|s| s.since.as_str()),
-            Some("2026-08-07T14:00:00Z")
+            tracking.project, None,
+            "with no agent running, time falls back to the default project"
         );
     }
 
@@ -1028,7 +469,7 @@ mod tests {
             open: true,
             last_event_at: parse_iso8601("2026-08-07T12:00:00Z").expect("timestamp parses"),
             active: None,
-            suggestion: None,
+            project: None,
         };
         // A replayed drain delivers the same older events; state must not regress.
         track_agent_events(
@@ -1038,7 +479,6 @@ mod tests {
                 "2026-08-07T10:00:00Z",
             )],
             &[],
-            true,
             &mut tracking,
         );
         assert_eq!(
@@ -1054,231 +494,8 @@ mod tests {
                 event(AgentEventKind::Started, "C:/dev", "2026-08-07T10:00:00Z"),
             ],
             &[],
-            true,
             &mut fresh,
         );
         assert!(!fresh.open, "the end landed after the start in time order");
-    }
-
-    #[test]
-    fn browser_events_never_open_the_agent_away_override() {
-        // A browser line that somehow lands in the agent drain is skipped:
-        // a focused tab must never suppress idle trimming or away auto-stop.
-        let mut tracking = AgentTracking::default();
-        track_agent_events(
-            &[browser_event(
-                AgentEventKind::Started,
-                "span-1",
-                "r1",
-                "2026-08-09T10:00:00Z",
-            )],
-            &[],
-            false,
-            &mut tracking,
-        );
-
-        assert_eq!(tracking, AgentTracking::default());
-    }
-
-    const DRAIN_NOW: &str = "2026-08-09T12:10:00Z";
-
-    fn drain_now() -> u64 {
-        parse_iso8601(DRAIN_NOW).expect("timestamp parses")
-    }
-
-    #[test]
-    fn a_mapped_browser_span_suggests_only_after_sixty_seconds() {
-        let mappings = vec![rule("r1", "github.com/acme/*", "p-clockin")];
-        let mut tracking = BrowserTracking::default();
-        let mut suggestion = None;
-
-        // A fresh span is a glance: no prompt.
-        track_browser_events(
-            &[browser_event(
-                AgentEventKind::Started,
-                "span-1",
-                "r1",
-                "2026-08-09T12:09:30Z",
-            )],
-            &mappings,
-            false,
-            drain_now(),
-            &mut tracking,
-            &mut suggestion,
-        );
-        assert!(suggestion.is_none(), "thirty seconds in is still a glance");
-
-        // A heartbeat at the one-minute mark proves the dwell: prompt.
-        track_browser_events(
-            &[browser_event(
-                AgentEventKind::Heartbeat,
-                "span-1",
-                "r1",
-                "2026-08-09T12:10:30Z",
-            )],
-            &mappings,
-            false,
-            drain_now(),
-            &mut tracking,
-            &mut suggestion,
-        );
-        let raised = suggestion.clone().expect("the suggestion is raised");
-        assert_eq!(raised.project_id, "p-clockin");
-        assert_eq!(raised.source, "browser");
-        assert_eq!(raised.since, "2026-08-09T12:09:30Z");
-        assert_eq!(raised.span_id.as_deref(), Some("span-1"));
-    }
-
-    #[test]
-    fn a_lone_stale_start_does_not_prove_browser_dwell() {
-        let mappings = vec![rule("r1", "quickbooks.com", "p-books")];
-        let mut tracking = BrowserTracking::default();
-        let mut suggestion = None;
-
-        track_browser_events(
-            &[browser_event(
-                AgentEventKind::Started,
-                "span-1",
-                "r1",
-                "2026-08-09T12:08:00Z",
-            )],
-            &mappings,
-            false,
-            drain_now(),
-            &mut tracking,
-            &mut suggestion,
-        );
-        assert!(suggestion.is_none());
-    }
-
-    #[test]
-    fn a_running_timer_or_an_ended_span_suppresses_the_browser_suggestion() {
-        let mappings = vec![rule("r1", "quickbooks.com", "p-books")];
-        let mut tracking = BrowserTracking::default();
-        let mut suggestion = None;
-
-        // Timer running: the prompt is for idle moments only.
-        track_browser_events(
-            &[browser_event(
-                AgentEventKind::Started,
-                "span-1",
-                "r1",
-                "2026-08-09T12:08:00Z",
-            )],
-            &mappings,
-            true,
-            drain_now(),
-            &mut tracking,
-            &mut suggestion,
-        );
-        assert!(suggestion.is_none());
-
-        // A span that ended inside the dwell threshold is forgotten entirely.
-        let mut tracking = BrowserTracking::default();
-        track_browser_events(
-            &[
-                browser_event(
-                    AgentEventKind::Started,
-                    "span-2",
-                    "r1",
-                    "2026-08-09T12:09:00Z",
-                ),
-                browser_event(
-                    AgentEventKind::Ended,
-                    "span-2",
-                    "r1",
-                    "2026-08-09T12:09:20Z",
-                ),
-            ],
-            &mappings,
-            false,
-            drain_now(),
-            &mut tracking,
-            &mut suggestion,
-        );
-        assert!(suggestion.is_none(), "a twenty-second visit never prompts");
-        assert!(!tracking.spans.contains_key("span-2"));
-    }
-
-    #[test]
-    fn browser_tracking_stays_bounded_while_a_timer_is_running() {
-        let mappings = vec![rule("r1", "quickbooks.com", "p-books")];
-        let mut tracking = BrowserTracking::default();
-        let mut suggestion = None;
-        let events = (0..65)
-            .map(|index| {
-                browser_event(
-                    AgentEventKind::Started,
-                    &format!("span-{index}"),
-                    "r1",
-                    &format!("2026-08-09T12:{:02}:{:02}Z", index / 60, index % 60),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        track_browser_events(
-            &events,
-            &mappings,
-            true,
-            drain_now(),
-            &mut tracking,
-            &mut suggestion,
-        );
-
-        assert_eq!(tracking.spans.len(), 64);
-        assert!(tracking.spans.contains_key("span-64"));
-        assert!(suggestion.is_none());
-    }
-
-    #[test]
-    fn an_unresolvable_rule_tracks_nothing_and_suggests_nothing() {
-        let mut tracking = BrowserTracking::default();
-        let mut suggestion = None;
-
-        track_browser_events(
-            &[browser_event(
-                AgentEventKind::Started,
-                "span-1",
-                "deleted-rule",
-                "2026-08-09T12:08:00Z",
-            )],
-            &[],
-            false,
-            drain_now(),
-            &mut tracking,
-            &mut suggestion,
-        );
-
-        assert!(tracking.spans.is_empty());
-        assert!(suggestion.is_none());
-    }
-
-    #[test]
-    fn a_dismissed_span_is_never_raised_again() {
-        let mappings = vec![rule("r1", "quickbooks.com", "p-books")];
-        let mut tracking = BrowserTracking {
-            dismissed_span: Some("span-1".to_string()),
-            ..BrowserTracking::default()
-        };
-        let mut suggestion = None;
-
-        track_browser_events(
-            &[browser_event(
-                AgentEventKind::Started,
-                "span-1",
-                "r1",
-                "2026-08-09T12:08:00Z",
-            )],
-            &mappings,
-            false,
-            drain_now(),
-            &mut tracking,
-            &mut suggestion,
-        );
-
-        assert!(
-            suggestion.is_none(),
-            "the dismissal is remembered for the span"
-        );
     }
 }
