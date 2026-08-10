@@ -1353,7 +1353,6 @@ impl Monitor {
     pub async fn deactivate_identity(&self) {
         self.stop().await;
         self.recording.store(false, Ordering::SeqCst);
-        self.identity_invalidated.store(false, Ordering::SeqCst);
         *lock(&self.identity) = None;
         self.clear_identity_state();
     }
@@ -2847,6 +2846,37 @@ mod tests {
         assert!(status.away.is_none());
         assert!(status.pending_suggestion.is_none());
         assert!(status.agent_active.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn invalid_session_remains_visible_after_deactivation() {
+        let dir = std::env::temp_dir().join(format!(
+            "clock-in-monitor-invalid-session-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let client = ApiClient::new(
+            "http://127.0.0.1:9/auth".to_string(),
+            "http://127.0.0.1:9".to_string(),
+        )
+        .expect("client builds");
+        let monitor = Monitor::new(MonitorConfig {
+            client,
+            settings_path: dir.join("settings.json"),
+            segments_path: dir.join("segments-spool.jsonl"),
+            agent_path: dir.join("agent-spool.jsonl"),
+            browser_dir: dir.clone(),
+            recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
+            recovery_path: dir.join("recovery.json"),
+        });
+
+        monitor.recording.store(true, Ordering::SeqCst);
+        monitor.identity_invalidated.store(true, Ordering::SeqCst);
+        monitor.deactivate_identity().await;
+        assert!(monitor.identity_invalidated());
+        assert!(!monitor.recording.load(Ordering::SeqCst));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -491,6 +491,14 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     dispatch({ type: "auth-failed", message });
   };
 
+  const beginWorkspaceRefresh = (): number => {
+    const workspaceEpoch = invalidateAccount();
+    currentAccountId.current = undefined;
+    clearAccountFields();
+    dispatch({ type: "workspace-reset" });
+    return workspaceEpoch;
+  };
+
   const applySnapshot = async (
     snapshot: BootstrapSnapshot,
     service: TimerBridge,
@@ -1441,6 +1449,24 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     }
   };
 
+  const retryWorkspaceRefresh = (): void => {
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const workspaceEpoch = beginWorkspaceRefresh();
+    bootstrapRequests.current.delete(service);
+    void service.bootstrap().then(
+      async (snapshot) => {
+        await applySnapshot(snapshot, service, () => isCurrent(service, generation), workspaceEpoch, true, true);
+      },
+      (error: unknown) => {
+        if (!isCurrent(service, generation, workspaceEpoch)) return;
+        const problem = bridgeError(error);
+        if (problem.kind === "auth") resetToSignIn(problem.message);
+        else dispatch({ type: "bootstrap-failed", message: problem.message });
+      },
+    );
+  };
+
   const joinWorkspace = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     if (joinBusy) return;
@@ -1451,26 +1477,38 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setJoinBusy(true);
     setOverviewError(undefined);
     setJoinRecovery(false);
+    let committedWorkspaceEpoch: number | undefined;
     try {
       const result = await service.orgJoin(joinCode.trim());
       if (isRequestCurrent()) {
+        committedWorkspaceEpoch = beginWorkspaceRefresh();
         const snapshot = await service.bootstrap();
-        if (!isRequestCurrent()) return;
-        const workspaceEpoch = await applySnapshot(snapshot, service, () => isCurrent(service, generation), epoch, true, true);
+        const workspaceEpoch = await applySnapshot(
+          snapshot,
+          service,
+          () => isCurrent(service, generation),
+          committedWorkspaceEpoch,
+          true,
+          true,
+        );
         if (workspaceEpoch === undefined || !isCurrent(service, generation, workspaceEpoch)) return;
         setOverview(result);
         setJoinCode("");
       }
     } catch (error: unknown) {
-      if (!isRequestCurrent()) return;
+      const requestEpoch = committedWorkspaceEpoch ?? epoch;
+      if (!isCurrent(service, generation, requestEpoch)) return;
       const problem = bridgeError(error);
       if (problem.kind === "auth") resetToSignIn(problem.message);
+      else if (committedWorkspaceEpoch !== undefined) {
+        dispatch({ type: "bootstrap-failed", message: problem.message });
+      }
       else {
         setOverviewError(problem.message);
         setJoinRecovery(problem.kind === "conflict" && problem.message.includes("unsynced work"));
       }
     } finally {
-      if (isCurrent(service, generation)) setJoinBusy(false);
+      if (committedWorkspaceEpoch === undefined && isCurrent(service, generation, epoch)) setJoinBusy(false);
     }
   };
 
@@ -1499,6 +1537,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         <Titlebar />
         <div className="center-stage" aria-busy={state.error === undefined}>
           <p className="boot-message" role="status">{state.error ?? "Connecting to clock service…"}</p>
+          {state.error !== undefined && <button className="outline-button" type="button" onClick={retryWorkspaceRefresh}>Retry connection</button>}
         </div>
       </main>
     );

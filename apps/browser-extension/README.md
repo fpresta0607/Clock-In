@@ -14,7 +14,7 @@ Three things never leave the machine at all:
 
 - The unmatched-origin tally (focus seconds per unmatched eTLD+1) lives in extension storage and is mirrored to the desktop's local needs-mapping view through the native host.
   It is never uploaded, and it is user-clearable.
-- The queued-verdict outbox (bounded ring, oldest dropped) sits in extension storage until the native host is reachable again.
+- The queued-verdict outbox holds up to 1,000 saved verdicts in extension storage until the native host is reachable again. At capacity, capture pauses until saved activity syncs; no saved verdict is dropped.
 - The span machine's in-flight state (open span, dwell candidate, session id) sits in extension storage so an MV3 service-worker eviction cannot strand an open span. A corrupt or unavailable read starts fresh; after an unobserved gap, the restored span closes at the last provable attention time before the extension rechecks browser focus and idle state.
 
 Off-the-record tabs are excluded via `tab.incognito` (Chrome's Guest windows report as off-the-record); Clock-In never asks for the browser's incognito toggle.
@@ -38,14 +38,14 @@ Framing (4-byte little-endian length-prefixed JSON) is handled by `chrome.runtim
 - `{"type":"span-event","collectionId","event":{"event","externalSessionId","ruleId","occurredAt"}}` - appended to the desktop's local browser spool. A `span-ack` returns the acknowledged event; `span-retry` keeps it queued, and `collection-state` means collection is unavailable.
 - `{"type":"tally","collectionId","weekStart","entries":[{"origin","seconds"}]}` - a snapshot of the local unmatched-origin tally; read-only passthrough, never uploaded. The host returns `collection-state` and may send `clear-tally` before it.
 
-When the host is unreachable, span events queue in a 1000-entry ring in extension storage and replay on reconnect (30 s backoff doubling to 60 s).
+When the host is unreachable, span events queue in a 1,000-entry persisted outbox and replay on reconnect (30 s backoff doubling to 60 s). At capacity, capture pauses and resumes only after the saved activity has synced and the user resumes tracking.
 
 ## Layout
 
 - `src/matching.ts` - longest-pattern-wins rule matching (pure).
 - `src/spans.ts` - the span state machine over an injected clock: 15 s dwell to open, sub-15 s gaps merge, 60 s heartbeats, `ended` on tab switch / blur / idle / lock / shutdown (pure).
 - `src/tally.ts` - the local unmatched eTLD+1 focus-time tally (pure).
-- `src/outbox.ts` - the bounded offline ring and reconnect backoff (pure).
+- `src/outbox.ts` - the bounded offline outbox and reconnect backoff (pure).
 - `src/background.ts` - the MV3 service worker: chrome.* adapters, durable alarms, and conservative startup recovery around the state machine.
 - `src/schedule.ts` / `src/startup.ts` - persistent MV3 cadence and validation at the extension-storage boundary.
 - `manifest.chrome.json` / `manifest.firefox.json` - build variants.

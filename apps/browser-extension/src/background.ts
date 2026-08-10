@@ -64,6 +64,7 @@ import {
   CAPTURE_PAUSED_STORAGE_KEY,
   LAST_TICK_STORAGE_KEY,
   MACHINE_STORAGE_KEY,
+  isSpanEvent,
   parseStartupStorage,
 } from "./startup.js";
 
@@ -348,21 +349,6 @@ function spanKey(event: SpanEvent): string {
 
 function sameSpanEvent(left: SpanEvent, right: SpanEvent): boolean {
   return spanKey(left) === spanKey(right);
-}
-
-function isSpanEvent(value: unknown): value is SpanEvent {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-  const event = value as Record<string, unknown>;
-  const occurredAt = event["occurredAt"];
-  return Object.keys(event).length === 4 &&
-    (event["event"] === "started" || event["event"] === "heartbeat" || event["event"] === "ended") &&
-    typeof event["externalSessionId"] === "string" && event["externalSessionId"].trim().length > 0 &&
-    typeof event["ruleId"] === "string" && event["ruleId"].trim().length > 0 &&
-    typeof occurredAt === "string" &&
-    Number.isFinite(Date.parse(occurredAt)) &&
-    new Date(occurredAt).toISOString() === occurredAt;
 }
 
 function isIdentityNamespace(value: unknown): value is string {

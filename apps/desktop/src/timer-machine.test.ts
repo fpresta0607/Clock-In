@@ -42,6 +42,11 @@ describe("timerReducer", () => {
     })).toEqual({ kind: "booting", error: "Could not disable browser attribution." });
   });
 
+  it("clears the prior workspace while a committed move refreshes", () => {
+    const active = { kind: "running", user, projects: [project], running } as const;
+    expect(timerReducer(active, { type: "workspace-reset" })).toEqual(initialTimerState);
+  });
+
   it("moves a signed-in bootstrap response to idle with active projects", () => {
     const state = timerReducer(initialTimerState, {
       type: "bootstrapped",
