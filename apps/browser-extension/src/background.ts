@@ -60,10 +60,12 @@ import {
 import { tickCredit } from "./tick.js";
 import {
   COLLECTION_ID_STORAGE_KEY,
+  COLLECTION_NAMESPACE_STORAGE_KEY,
   CAPTURE_PAUSED_NAMESPACES_STORAGE_KEY,
   CAPTURE_PAUSED_STORAGE_KEY,
   LAST_TICK_STORAGE_KEY,
   MACHINE_STORAGE_KEY,
+  isIdentityNamespace,
   isSpanEvent,
   parseStartupStorage,
 } from "./startup.js";
@@ -92,6 +94,7 @@ let storageWriteFailed = false;
 let pendingStorageWrites = 0;
 let storageWriteTail: Promise<void> = Promise.resolve();
 const capturePausedNamespaces = new Map<string, boolean>();
+const pendingSpansByNamespace = new Map<string, SpanEvent[]>();
 
 // The active tab's local verdict. `unmatchedOrigin` exists only to feed the
 // local tally; it is never part of an emitted event.
@@ -107,18 +110,54 @@ const inFlightSpans = new Set<string>();
 let lastTickAt = Date.now();
 let lastTallyFlushAt = 0;
 
+function pendingSpans(namespace: string | undefined): readonly SpanEvent[] {
+  return namespace === undefined ? [] : pendingSpansByNamespace.get(namespace) ?? [];
+}
+
+function queuedSnapshot(namespace: string, queued: Outbox<SpanEvent>): SpanEvent[] {
+  return [...queued.snapshot(), ...pendingSpans(namespace)];
+}
+
+function commitPersistedSpans(stagedByNamespace: ReadonlyMap<string, readonly SpanEvent[]>): void {
+  for (const [namespace, staged] of stagedByNamespace) {
+    const pending = pendingSpansByNamespace.get(namespace);
+    const queued = outboxes.get(namespace);
+    if (pending === undefined || queued === undefined) {
+      continue;
+    }
+    for (const event of staged) {
+      const pendingIndex = pending.findIndex((candidate) => sameSpanEvent(candidate, event));
+      if (pendingIndex === -1) {
+        continue;
+      }
+      if (!queued.snapshot().some((candidate) => sameSpanEvent(candidate, event)) && !queued.push(event)) {
+        continue;
+      }
+      pending.splice(pendingIndex, 1);
+    }
+    if (pending.length === 0) {
+      pendingSpansByNamespace.delete(namespace);
+    }
+  }
+}
+
 function persistState(): Promise<boolean> {
   pruneOutboxes();
   const savedAt = Date.now();
+  const activeNamespace = collectionNamespace;
+  const stagedByNamespace = new Map(
+    [...pendingSpansByNamespace.entries()].map(([namespace, events]) => [namespace, [...events]]),
+  );
   const state = {
     [TALLY_STORAGE_KEY]: tally,
-    [OUTBOX_STORAGE_KEY]: outbox.snapshot(),
+    [OUTBOX_STORAGE_KEY]: [...outbox.snapshot(), ...pendingSpans(activeNamespace)],
     [OUTBOX_NAMESPACES_STORAGE_KEY]: Object.fromEntries(
-      [...outboxes.entries()].map(([namespace, queued]) => [namespace, queued.snapshot()]),
+      [...outboxes.entries()].map(([namespace, queued]) => [namespace, queuedSnapshot(namespace, queued)]),
     ),
     [MACHINE_STORAGE_KEY]: snapshotMachine(machine, savedAt),
     [LAST_TICK_STORAGE_KEY]: lastTickAt,
     [COLLECTION_ID_STORAGE_KEY]: collectionId ?? null,
+    [COLLECTION_NAMESPACE_STORAGE_KEY]: activeNamespace ?? null,
     [CAPTURE_PAUSED_STORAGE_KEY]: capturePaused,
     [CAPTURE_PAUSED_NAMESPACES_STORAGE_KEY]: Object.fromEntries(capturePausedNamespaces),
   };
@@ -131,6 +170,7 @@ function persistState(): Promise<boolean> {
   return write.then(() => {
     pendingStorageWrites -= 1;
     storageWriteFailed = false;
+    commitPersistedSpans(stagedByNamespace);
     if (pendingStorageWrites === 0) {
       sendNamespaceCapacity();
       flushOutbox();
@@ -170,20 +210,20 @@ function sendNamespaceCapacity(): void {
 }
 
 function emitSpanEvents(events: readonly SpanEvent[]): void {
-  if (collectionId === undefined || capturePaused || captureResumePending || storageWriteFailed) {
+  const namespace = collectionNamespace;
+  if (collectionId === undefined || namespace === undefined || capturePaused || captureResumePending || storageWriteFailed) {
     return;
   }
-  if (events.length > outbox.remainingCapacity) {
+  const staged = pendingSpansByNamespace.get(namespace) ?? [];
+  if (events.length > outbox.remainingCapacity - staged.length) {
     pauseCapture();
     return;
   }
   for (const event of events) {
-    if (!outbox.push(event)) {
-      pauseCapture();
-      return;
-    }
+    staged.push(event);
   }
   if (events.length > 0) {
+    pendingSpansByNamespace.set(namespace, staged);
     void persistState();
   }
 }
@@ -386,10 +426,6 @@ function sameSpanEvent(left: SpanEvent, right: SpanEvent): boolean {
   return spanKey(left) === spanKey(right);
 }
 
-function isIdentityNamespace(value: unknown): value is string {
-  return typeof value === "string" && /^[A-Za-z0-9-]{1,128}:[A-Za-z0-9-]{1,128}$/.test(value);
-}
-
 function isStoredOutboxNamespace(value: unknown): value is string {
   return isIdentityNamespace(value) ||
     (collectionId !== undefined && value === `legacy:${collectionId}` &&
@@ -428,10 +464,19 @@ function migrateLegacyOutbox(namespace: string, id: string): boolean {
     return true;
   }
   const target = outboxes.get(namespace) ?? new Outbox<SpanEvent>();
-  if (target.remainingCapacity < legacy.size) {
+  const seen = new Set(target.snapshot().map(spanKey));
+  const additions = legacy.snapshot().filter((event) => {
+    const key = spanKey(event);
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+  if (target.remainingCapacity < additions.length) {
     return false;
   }
-  for (const event of legacy.snapshot()) {
+  for (const event of additions) {
     if (!target.push(event)) return false;
   }
   legacy.clear();
@@ -441,7 +486,7 @@ function migrateLegacyOutbox(namespace: string, id: string): boolean {
 }
 
 function activateOutbox(namespace: string, id: string): boolean {
-  if (!canActivateOutboxNamespace(outboxes, namespace, collectionNamespace)) {
+  if (!canActivateOutboxNamespace(outboxes, namespace, collectionNamespace, new Set(pendingSpansByNamespace.keys()))) {
     return false;
   }
   if (!migrateLegacyOutbox(namespace, id)) {
@@ -461,7 +506,7 @@ function activateOutbox(namespace: string, id: string): boolean {
 }
 
 function pruneOutboxes(): void {
-  pruneOutboxNamespaces(outboxes, collectionNamespace);
+  pruneOutboxNamespaces(outboxes, collectionNamespace, undefined, new Set(pendingSpansByNamespace.keys()));
   for (const namespace of capturePausedNamespaces.keys()) {
     if (!outboxes.has(namespace) && namespace !== collectionNamespace) {
       capturePausedNamespaces.delete(namespace);
@@ -866,18 +911,17 @@ ensurePeriodicAlarm(RULES_REFRESH_ALARM_NAME, RULES_REFRESH_PERIOD_MINUTES);
 
 async function initialize(): Promise<void> {
   const stored = await chrome.storage.local
-    .get([TALLY_STORAGE_KEY, OUTBOX_STORAGE_KEY, OUTBOX_NAMESPACES_STORAGE_KEY, MACHINE_STORAGE_KEY, LAST_TICK_STORAGE_KEY, COLLECTION_ID_STORAGE_KEY, CAPTURE_PAUSED_STORAGE_KEY, CAPTURE_PAUSED_NAMESPACES_STORAGE_KEY])
+    .get([TALLY_STORAGE_KEY, OUTBOX_STORAGE_KEY, OUTBOX_NAMESPACES_STORAGE_KEY, MACHINE_STORAGE_KEY, LAST_TICK_STORAGE_KEY, COLLECTION_ID_STORAGE_KEY, COLLECTION_NAMESPACE_STORAGE_KEY, CAPTURE_PAUSED_STORAGE_KEY, CAPTURE_PAUSED_NAMESPACES_STORAGE_KEY])
     .catch(() => undefined);
   const now = Date.now();
   const startup = parseStartupStorage(stored, now);
   tally = startup.tally;
   collectionId = startup.collectionId;
+  collectionNamespace = startup.collectionNamespace;
   const storedOutboxes = stored?.[OUTBOX_NAMESPACES_STORAGE_KEY];
-  let restoredOutboxState = false;
   if (typeof storedOutboxes === "object" && storedOutboxes !== null && !Array.isArray(storedOutboxes)) {
     for (const [namespace, queued] of Object.entries(storedOutboxes as Record<string, unknown>)) {
       if (isStoredOutboxNamespace(namespace) && Array.isArray(queued)) {
-        restoredOutboxState = true;
         const events = queued.filter(isSpanEvent);
         if (events.length > 0) {
           outboxes.set(namespace, new Outbox<SpanEvent>(undefined, events));
@@ -891,7 +935,18 @@ async function initialize(): Promise<void> {
       if (isStoredOutboxNamespace(namespace) && paused === true) capturePausedNamespaces.set(namespace, true);
     }
   }
-  if (!restoredOutboxState && collectionId !== undefined) {
+  if (collectionId !== undefined && collectionNamespace !== undefined) {
+    outbox = outboxes.get(collectionNamespace) ?? new Outbox<SpanEvent>();
+    outboxes.set(collectionNamespace, outbox);
+    for (const event of startup.queuedEvents) {
+      if (!outbox.snapshot().some((candidate) => sameSpanEvent(candidate, event)) && !outbox.push(event)) {
+        capturePaused = true;
+        capturePausedNamespaces.set(collectionNamespace, true);
+      }
+    }
+    capturePaused ||= capturePausedNamespaces.get(collectionNamespace) === true || outbox.remainingCapacity === 0;
+    pauseAwaitingHostConfirmation = capturePaused;
+  } else if (collectionId !== undefined) {
     activateOutbox(`legacy:${collectionId}`, collectionId);
     for (const event of startup.queuedEvents) {
       if (!outbox.push(event)) {
@@ -901,6 +956,10 @@ async function initialize(): Promise<void> {
     }
   }
   capturePaused ||= stored?.[CAPTURE_PAUSED_STORAGE_KEY] === true;
+  if (capturePaused && collectionNamespace !== undefined) {
+    capturePausedNamespaces.set(collectionNamespace, true);
+    pauseAwaitingHostConfirmation = true;
+  }
   lastTickAt = Math.min(now, startup.lastTickAt ?? now);
   const restored = restoreMachine(startup.machineSnapshot, now);
   machine = restored.machine;

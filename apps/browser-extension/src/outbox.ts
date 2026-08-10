@@ -66,12 +66,13 @@ export function pruneOutboxNamespaces<T>(
   outboxes: Map<string, Outbox<T>>,
   activeNamespace: string | undefined,
   limit: number = MAX_RETAINED_OUTBOX_NAMESPACES,
+  retainedNamespaces: ReadonlySet<string> = new Set(),
 ): void {
   for (const [namespace, outbox] of outboxes) {
     if (outboxes.size <= limit) {
       return;
     }
-    if (namespace !== activeNamespace && outbox.size === 0) {
+    if (namespace !== activeNamespace && outbox.size === 0 && !retainedNamespaces.has(namespace)) {
       outboxes.delete(namespace);
     }
   }
@@ -81,11 +82,12 @@ export function canActivateOutboxNamespace<T>(
   outboxes: Map<string, Outbox<T>>,
   namespace: string,
   activeNamespace: string | undefined,
+  retainedNamespaces: ReadonlySet<string> = new Set(),
 ): boolean {
   if (outboxes.has(namespace)) {
     return true;
   }
-  pruneOutboxNamespaces(outboxes, activeNamespace, MAX_RETAINED_OUTBOX_NAMESPACES - 1);
+  pruneOutboxNamespaces(outboxes, activeNamespace, MAX_RETAINED_OUTBOX_NAMESPACES - 1, retainedNamespaces);
   return outboxes.size < MAX_RETAINED_OUTBOX_NAMESPACES;
 }
 

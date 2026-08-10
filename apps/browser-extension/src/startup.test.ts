@@ -21,6 +21,7 @@ describe("parseStartupStorage", () => {
       machineSnapshot: undefined,
       lastTickAt: undefined,
       collectionId: undefined,
+      collectionNamespace: undefined,
     });
   });
 
@@ -31,7 +32,7 @@ describe("parseStartupStorage", () => {
         spanOutbox: 42,
         spanMachine: null,
       }, NOW),
-    ).toEqual({ tally: { weekStart: WEEK_START, entries: {}, remainderMilliseconds: {} }, queuedEvents: [], machineSnapshot: null, lastTickAt: undefined, collectionId: undefined });
+    ).toEqual({ tally: { weekStart: WEEK_START, entries: {}, remainderMilliseconds: {} }, queuedEvents: [], machineSnapshot: null, lastTickAt: undefined, collectionId: undefined, collectionNamespace: undefined });
   });
 
   it("keeps valid tally entries and drops malformed ones", () => {
@@ -76,5 +77,10 @@ describe("parseStartupStorage", () => {
   it("restores only a usable persisted collection identity", () => {
     expect(parseStartupStorage({ browserCollectionId: "collection-1" }, NOW).collectionId).toBe("collection-1");
     expect(parseStartupStorage({ browserCollectionId: "" }, NOW).collectionId).toBeUndefined();
+  });
+
+  it("restores only a valid persisted collection namespace", () => {
+    expect(parseStartupStorage({ browserCollectionNamespace: "account-1:organization-1" }, NOW).collectionNamespace).toBe("account-1:organization-1");
+    expect(parseStartupStorage({ browserCollectionNamespace: "not a namespace" }, NOW).collectionNamespace).toBeUndefined();
   });
 });
