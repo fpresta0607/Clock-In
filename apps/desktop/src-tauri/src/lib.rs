@@ -439,19 +439,28 @@ fn release_workspace_move_reservations(
     browser_dir: &Path,
     reservation: &spool::NamespaceReservation,
 ) -> ApiResult<()> {
-    let extension = browser::release_extension_namespace_reservation_for_workspace_move(
-        browser_dir,
-        reservation.source_identity(),
-        reservation.target_identity(),
-        reservation.extension_reservation_id(),
-    );
-    let desktop = spool::release_identity_namespace_reservation(reservation)
-        .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()));
-    match (extension, desktop) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), _) => Err(error),
-        (_, Err(error)) => Err(error),
-    }
+    release_workspace_move_reservations_with(
+        || {
+            browser::release_extension_namespace_reservation_for_workspace_move(
+                browser_dir,
+                reservation.source_identity(),
+                reservation.target_identity(),
+                reservation.extension_reservation_id(),
+            )
+        },
+        || {
+            spool::release_identity_namespace_reservation(reservation)
+                .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))
+        },
+    )
+}
+
+fn release_workspace_move_reservations_with(
+    release_extension: impl FnOnce() -> ApiResult<()>,
+    release_desktop: impl FnOnce() -> ApiResult<()>,
+) -> ApiResult<()> {
+    release_extension()?;
+    release_desktop()
 }
 
 fn rollback_workspace_move(browser_dir: &Path, reservation: &spool::NamespaceReservation) {
@@ -1311,6 +1320,23 @@ mod tests {
             revalidate_workspace_move(&source, &target, &foreign),
             WorkspaceMoveRevalidation::Indeterminate
         );
+    }
+
+    #[test]
+    fn failed_extension_release_retains_the_desktop_move_reservation() {
+        let desktop_released = std::cell::Cell::new(false);
+
+        let error = release_workspace_move_reservations_with(
+            || Err(BridgeError::unknown("extension release could not persist")),
+            || {
+                desktop_released.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("desktop release must wait for a durable extension release");
+
+        assert_eq!(error.kind, ErrorKind::Unknown);
+        assert!(!desktop_released.get());
     }
 
     #[test]
