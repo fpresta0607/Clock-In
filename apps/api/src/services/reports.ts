@@ -72,7 +72,6 @@ function normalizedQuery(filters: ReportRangeFilters & Partial<Pick<ReportFilter
     return {
       from,
       toExclusive,
-      clipToRange: true,
       ...(filters.projectId === undefined ? {} : { projectId: filters.projectId }),
       ...(filters.userId === undefined ? {} : { userId: filters.userId }),
     };
@@ -88,7 +87,6 @@ function normalizedQuery(filters: ReportRangeFilters & Partial<Pick<ReportFilter
   return {
     ...(from === undefined ? {} : { from }),
     ...(inclusiveTo === undefined ? {} : { toExclusive: new Date(inclusiveTo.getTime() + millisecondsPerDay) }),
-    ...(from === undefined && inclusiveTo === undefined ? {} : { clipToRange: true }),
     ...(filters.projectId === undefined ? {} : { projectId: filters.projectId }),
     ...(filters.userId === undefined ? {} : { userId: filters.userId }),
   };

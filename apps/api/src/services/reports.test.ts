@@ -112,7 +112,6 @@ describe("report service", () => {
       query: {
         from: new Date("2026-08-01T00:00:00.000Z"),
         toExclusive: new Date("2026-08-07T00:00:00.000Z"),
-        clipToRange: true,
         projectId: ids.project,
         userId: ids.user,
       },
@@ -142,7 +141,6 @@ describe("report service", () => {
     expect(reports.lastPage?.query).toEqual({
       from: new Date("2026-03-08T06:00:00.000Z"),
       toExclusive: new Date("2026-03-09T05:00:00.000Z"),
-      clipToRange: true,
     });
   });
 
@@ -295,7 +293,6 @@ describe("leaderboard", () => {
 
     expect(reports.lastLeaderboardQuery?.from).toEqual(new Date("2026-08-01T00:00:00.000Z"));
     expect(reports.lastLeaderboardQuery?.toExclusive).toEqual(new Date("2026-08-07T00:00:00.000Z"));
-    expect(reports.lastLeaderboardQuery?.clipToRange).toBe(true);
   });
 
   it("uses device-local instant bounds for clipped leaderboard totals", async () => {
@@ -310,7 +307,6 @@ describe("leaderboard", () => {
     expect(reports.lastLeaderboardQuery).toEqual({
       from: new Date("2026-03-08T06:00:00.000Z"),
       toExclusive: new Date("2026-03-09T05:00:00.000Z"),
-      clipToRange: true,
     });
   });
 
@@ -369,7 +365,6 @@ describe("me/stats", () => {
     expect(reports.lastProjectTotalsQuery).toEqual({
       from: new Date("2026-08-01T00:00:00.000Z"),
       toExclusive: new Date("2026-08-07T00:00:00.000Z"),
-      clipToRange: true,
       userId: ids.user,
     });
     expect(reports.lastAppTotalsQuery).toEqual(reports.lastProjectTotalsQuery);

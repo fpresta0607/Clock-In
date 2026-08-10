@@ -29,7 +29,7 @@ export { createReportRoutes } from "./routes/reports.js";
 export { createSessionRoutes } from "./routes/sessions.js";
 export { createActivityService } from "./services/activity.js";
 export { createAgentSessionReaper, createAgentSessionService } from "./services/agent-sessions.js";
-export { normalizePath, resolveProjectForCwd, resolveProjectForRuleId } from "./services/attribution.js";
+export { normalizePath, resolveProjectForCwd } from "./services/attribution.js";
 export { createPathMappingService } from "./services/path-mappings.js";
 export { listProjects } from "./services/projects.js";
 export { createReportService } from "./services/reports.js";
@@ -68,7 +68,7 @@ export type {
 } from "./repositories.js";
 export type { ActivityService, ActivityServiceDependencies, ActivitySegmentInput } from "./services/activity.js";
 export type { AgentSessionEventInput, AgentSessionReaper, AgentSessionService, AgentSessionServiceDependencies } from "./services/agent-sessions.js";
-export type { PathMappingCandidate, UrlRuleCandidate } from "./services/attribution.js";
+export type { PathMappingCandidate } from "./services/attribution.js";
 export type {
   CreatePathMappingInput,
   PathMappingService,
