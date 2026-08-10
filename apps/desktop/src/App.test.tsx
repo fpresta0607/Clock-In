@@ -1045,33 +1045,33 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Working on: Field work" })).toBeInTheDocument();
   });
 
-  it("shows one muted monitoring line when the host answers", async () => {
+  it("shows one muted recording line when the host answers", async () => {
     const bridge = bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(idleMonitorStatus) });
     render(<App bridge={bridge} />);
 
-    expect(await screen.findByText("Tracking is on")).toBeInTheDocument();
+    expect(await screen.findByText("Recording on")).toBeInTheDocument();
     // Hook badges and upload detail moved to settings; the line stays minimal.
     expect(screen.queryByText("Claude Code")).not.toBeInTheDocument();
     expect(screen.queryByText(/Last upload/)).not.toBeInTheDocument();
   });
 
-  it("says when monitoring is paused or off rather than implying it records", async () => {
+  it("says when recording is paused or off rather than implying it records", async () => {
     const bridge = bridgeFor({
       monitorStatus: vi.fn().mockResolvedValue({ ...idleMonitorStatus, running: false }),
     });
     const view = render(<App bridge={bridge} />);
-    expect(await screen.findByText("Monitoring paused")).toBeInTheDocument();
+    expect(await screen.findByText("Recording paused")).toBeInTheDocument();
 
     view.rerender(
       <App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue({ ...idleMonitorStatus, enabled: false, running: false }) })} />,
     );
-    expect(await screen.findByText("Monitoring off")).toBeInTheDocument();
+    expect(await screen.findByText("Recording off")).toBeInTheDocument();
   });
 
   it("renders no monitor surfaces when the host cannot report status", async () => {
     render(<App bridge={bridgeFor()} />);
-    await screen.findByRole("heading", { name: "Working on: Field work" });
-    await waitFor(() => expect(screen.queryByText(/^Monitoring (on|paused|off)$/)).not.toBeInTheDocument());
+    await screen.findByRole("heading", { name: "Start a timer" });
+    await waitFor(() => expect(screen.queryByText(/^Recording (on|paused|off)$/)).not.toBeInTheDocument());
   });
 
   it("lists per-CLI hook badges under settings when the host answers", async () => {
@@ -1341,7 +1341,7 @@ describe("App", () => {
     render(<App bridge={bridge} />);
 
     const panel = await screen.findByRole("region", { name: "Today so far" });
-    expect(await within(panel).findByText("No activity yet. Turn on monitoring in settings to see where your time goes.")).toBeInTheDocument();
+    expect(await within(panel).findByText("No activity yet. Turn on recording in settings to see where your time goes.")).toBeInTheDocument();
   });
 
   it("caps the app rows at eight and folds the rest into Everything else", async () => {
@@ -1620,16 +1620,16 @@ describe("App", () => {
     expect(screen.queryByRole("dialog", { name: "Settings" })).not.toBeInTheDocument();
   });
 
-  it("round-trips monitoring settings from the settings overlay", async () => {
+  it("round-trips recording settings from the settings overlay", async () => {
     const bridge = bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(idleMonitorStatus) });
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
     const dialog = await openSettings(person);
-    await waitFor(() => expect(bridge.settingsGet).toHaveBeenCalled());
-    expect(await within(dialog).findByLabelText("Activity monitoring")).toBeChecked();
+    await waitFor(() => expect(bridge.settingsGet).toHaveBeenCalledTimes(1));
+    expect(await within(dialog).findByLabelText("Record activity on this computer")).toBeChecked();
 
-    await person.click(within(dialog).getByLabelText("Activity monitoring"));
+    await person.click(within(dialog).getByLabelText("Record activity on this computer"));
     await waitFor(() => expect(bridge.monitorSetEnabled).toHaveBeenCalledWith(false));
 
     await person.click(within(dialog).getByLabelText("Count agent sessions as work while I'm away"));
@@ -1652,7 +1652,7 @@ describe("App", () => {
     render(<App bridge={bridge} />);
 
     const dialog = await openSettings(person);
-    await person.click(await within(dialog).findByLabelText("Activity monitoring"));
+    await person.click(await within(dialog).findByLabelText("Record activity on this computer"));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("Settings could not be saved");
     expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
   });
@@ -1721,16 +1721,75 @@ describe("App", () => {
     expect(screen.queryByText("Timer User")).not.toBeInTheDocument();
   });
 
-  it("states plainly what monitoring records and where evidence waits", async () => {
+  it("summarises what is recorded in settings and opens the full panel from there", async () => {
     const person = userEvent.setup();
-    render(<App bridge={bridgeFor()} />);
+    render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(idleMonitorStatus) })} />);
 
     const dialog = await openSettings(person);
-    const note = await within(dialog).findByText(/samples the foreground process name/);
-    expect(note).toHaveTextContent("never records window titles, URLs, document names, or keystrokes");
-    expect(note).toHaveTextContent("%APPDATA%");
-    expect(note).toHaveTextContent("not marked verified");
-    expect(note).not.toHaveTextContent(/uncorroborated/i);
+    const note = await within(dialog).findByText(/which app was in front, by name/);
+    expect(note).toHaveTextContent("never records what you type");
+    expect(note).toHaveTextContent("never stops your timer");
+    expect(note).not.toHaveTextContent(/uncorroborated|spool|process name/i);
+
+    await person.click(within(dialog).getByRole("button", { name: "See exactly what's recorded" }));
+
+    const panel = await screen.findByRole("dialog", { name: "What Clock-In is recording" });
+    expect(within(panel).getByText("Recording is on")).toBeInTheDocument();
+    // Escape closes the panel it belongs to, leaving settings open behind it.
+    await person.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "What Clock-In is recording" })).not.toBeInTheDocument());
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+  });
+
+  it("opens the what's-recorded panel from the recording line", async () => {
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(idleMonitorStatus) })} />);
+
+    await person.click(await screen.findByRole("button", { name: "What's recorded?" }));
+
+    const panel = await screen.findByRole("dialog", { name: "What Clock-In is recording" });
+    expect(within(panel).getByText("Claude Code").closest("li")).toHaveTextContent("Connected");
+    expect(within(panel).getByText("Codex").closest("li")).toHaveTextContent("Not connected");
+
+    await person.click(within(panel).getByRole("button", { name: "Close what's recorded" }));
+    expect(screen.queryByRole("dialog", { name: "What Clock-In is recording" })).not.toBeInTheDocument();
+  });
+
+  it("turns recording on from the panel when it is off", async () => {
+    const bridge = bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue({ ...idleMonitorStatus, enabled: false, running: false }),
+      monitorSetEnabled: vi.fn().mockResolvedValue({ ...monitorSettings, enabled: true }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "What's recorded?" }));
+    const panel = await screen.findByRole("dialog", { name: "What Clock-In is recording" });
+    expect(within(panel).getByText("Recording is off")).toBeInTheDocument();
+
+    await person.click(within(panel).getByRole("button", { name: "Turn recording on" }));
+    await waitFor(() => expect(bridge.monitorSetEnabled).toHaveBeenCalledWith(true));
+  });
+
+  it("connects an agent tool from the panel and shows what to paste when it cannot", async () => {
+    const bridge = bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(idleMonitorStatus),
+      hookRegister: vi.fn().mockResolvedValue({
+        status: "manual",
+        configPath: "C:/Users/dev/.codex/config.toml",
+        snippet: "notify = [\"clock-in-hook\"]",
+      }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "What's recorded?" }));
+    const panel = await screen.findByRole("dialog", { name: "What Clock-In is recording" });
+    await person.click(within(panel).getByRole("button", { name: "Connect" }));
+
+    await waitFor(() => expect(bridge.hookRegister).toHaveBeenCalledWith("codex"));
+    expect(await within(panel).findByText(/can't switch this one on by itself/)).toBeInTheDocument();
+    expect(within(panel).getByText('notify = ["clock-in-hook"]')).toBeInTheDocument();
   });
 
   const chromeRegistered = {

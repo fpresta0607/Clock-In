@@ -51,6 +51,15 @@ a.primary { display: inline-block; text-decoration: none; }
 .help-button { width: 32px; height: 32px; padding: 0; font-weight: 700; }
 
 .modal-overlay { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 20px; background: rgba(3, 5, 10, .72); }
-.modal { width: min(100%, 480px); }
+.modal { width: min(100%, 480px); max-height: calc(100vh - 60px); overflow-y: auto; }
 .help-steps { margin: 0; padding-left: 20px; display: grid; gap: 12px; color: var(--text-secondary); font-size: .93rem; }
 .help-steps strong { color: #ffffff; font-weight: 650; }
+.help-heading { margin: 22px 0 0; color: var(--text-secondary); font-size: .74rem; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
+
+/* Collected / never-collected lists, matching the desktop app's panel. */
+.record-list { display: grid; gap: 6px; margin: 9px 0 0; padding: 0; color: var(--text-secondary); font-size: .89rem; line-height: 1.5; list-style: none; }
+.record-list li { position: relative; padding-left: 19px; }
+.record-list.is-kept li::before { position: absolute; left: 1px; color: var(--mint); content: "✓"; }
+.record-list.is-never li::before { position: absolute; left: 2px; color: var(--red); content: "✕"; }
+.help-foot { margin: 22px 0 0; border-top: 1px solid rgba(163, 179, 194, .12); padding-top: 12px; color: var(--text-secondary); font-size: .84rem; line-height: 1.55; }
+.help-foot strong { color: #ffffff; font-weight: 650; }

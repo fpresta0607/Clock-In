@@ -89,6 +89,15 @@ describe("dashboard", () => {
     expect(dialog).toHaveTextContent("Install the desktop app");
     expect(within(dialog).getByRole("link", { name: /download/i })).toBeInTheDocument();
 
+    // The same story the desktop app's "what's recorded" panel tells.
+    expect(dialog).toHaveTextContent("Hours the notes back up are marked as backed up");
+    const kept = within(dialog).getByRole("heading", { name: "Clock-In writes down" }).nextElementSibling;
+    expect(kept).toHaveTextContent("The name only.");
+    const never = within(dialog).getByRole("heading", { name: "Clock-In never writes down" }).nextElementSibling;
+    expect(never).toHaveTextContent("Not one keystroke.");
+    expect(never).toHaveTextContent("Web addresses");
+    expect(dialog).toHaveTextContent("Everyone sees the same numbers.");
+
     await person.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 

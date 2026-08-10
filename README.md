@@ -51,7 +51,7 @@ The other half of the deal is that the tracked person sees everything the manage
 the desktop app has a "what's recorded" panel. Tracking you can interrogate is a tool;
 tracking you can't is surveillance.
 
-## How it works
+## Architecture
 
 ```mermaid
 flowchart LR
@@ -77,6 +77,139 @@ sockets — it appends one line under an interprocess lock and exits, so a hook 
 down or block the agent CLI, and events recorded while the desktop app is closed survive
 until it next runs. Uploads are idempotent on client-generated ids, so a crash mid-upload
 replays instead of losing or duplicating evidence.
+
+## How session tracking works
+
+Every hour Clock-In reports is two separate things, kept apart on purpose:
+
+| | Who starts it | What it means |
+|---|---|---|
+| **The claim** | a human presses **Start** | "I say I worked from here to here." |
+| **The evidence** | nobody: it runs by itself | "here is what this machine was doing during that window." |
+
+The evidence never becomes the claim. It is recorded beside it, and the report shows how much of
+the claim it backs.
+
+### The claim: the manual timer
+
+You pick a project and press start; you press stop when you are done. Nothing starts a timer for
+you. `POST /sessions` is idempotent on a client-generated `clientId`, so a retry after a dropped
+connection replays instead of double-counting, and the server (not the client) enforces one
+running timer per user, a 7-day backdating limit, no stops in the future, and a `needs_review`
+flag past 12 hours.
+
+Two automatic **stops** exist, both configurable and both visible in settings: locking the screen
+(`Stop the timer when the machine locks`, on by default) and staying away past the hard limit
+(60 minutes by default). Both stop the session at the last-active boundary rather than at "now",
+so the unattended tail is never billed. An open agent session suppresses both while *Count active
+agent sessions as work while away* is on (the default): an overnight agent run is unattended work,
+not an abandoned desk. Measured idle inside a session is trimmed at stop; answering the away
+prompt with **Keep** holds that one away span billable and trims the rest.
+
+### The evidence: two streams that run themselves
+
+Neither stream has a start button. While the desktop app is running and recording is on
+(`MonitorSettings.enabled`, **on by default**), both collect continuously, whether or not a timer
+is running. Turning recording off aborts the tasks, so a stopped recorder records nothing, and it
+never blocks the timer: that time simply arrives uncorroborated.
+
+**1. OS activity** (`apps/desktop/src-tauri/src/monitor.rs`)
+
+One task wakes every **30 seconds** and asks Windows two read-only questions: seconds since the
+last input (`GetLastInputInfo`) and the process name behind the foreground window
+(`GetForegroundWindow` then `QueryFullProcessImageNameW`). The **name only**, never the title.
+Lock and suspend do not need polling: they arrive as broadcasts on a hidden window
+(`WM_WTSSESSION_CHANGE`/`WTS_SESSION_LOCK`, `WM_POWERBROADCAST`/`PBT_APMSUSPEND`). Unlock and
+resume deliberately raise no event, because the next poll closes the span down the same code path.
+
+The signal stream folds into transition-based segments (`active`, `idle`, `locked`, `suspended`):
+repeats coalesce, so a workday is dozens of rows rather than thousands of ticks, and an `idle`
+signal backdates the transition to when input actually stopped rather than when the poll noticed.
+Closed segments append to a local spool immediately and upload in batches of up to 500 every five
+minutes. There are no input hooks, no injection, and no per-keystroke cost; everything above the
+`platform` module is pure logic over an injected clock, so the Win32 calls never run under test.
+
+The **phase-3 precision work** (event-driven foreground changes, UWP process resolution,
+clock-gap sleep detection, session-disconnect handling) is designed in
+[the phase 3 design](docs/plans/2026-08-09-phase-3-design.md) and is **not on this branch**.
+Today the 30-second poll is the only source of per-app boundaries, Store-packaged apps report as
+`ApplicationFrameHost.exe`, and Modern Standby sleep that never fires `PBT_APMSUSPEND` reads as
+idle rather than suspended.
+
+**2. Agent sessions** (`clock-in-hook`, `spool.rs`)
+
+Claude Code, Cursor, Codex, and Kimi Code fire lifecycle hooks that run `clock-in-hook`. It reads
+one JSON event from stdin (or the equivalent flags), appends **one line** to the local append-only
+spool under an interprocess lock (an advisory `File::try_lock` on a sibling `.lock` sentinel, so a
+holder that dies mid-append releases it), and exits. It holds no credentials and opens no sockets:
+the spool file is its entire interface, so a hook can never slow down or block the agent CLI, and
+events recorded while the desktop app is closed wait on disk until it next runs.
+
+The desktop drains that spool in two phases, truncating only what the server acknowledged, and
+every event upserts on `(organization, user, source, external session id)`. A crash mid-upload
+therefore replays rather than losing or duplicating evidence. Because `session-end` is never
+guaranteed (a crash, a `kill -9`), the server reaps agent sessions with no event for six hours and
+closes them at their last-seen timestamp.
+
+### Grouping and attribution
+
+Each agent event carries the **working directory** the CLI ran in. `resolveProjectForCwd` matches
+it against the user's path mappings by normalized longest prefix on path-segment boundaries, so
+`c:/dev/clock` matches `c:/dev/clock/src` but never `c:/dev/clock-in-extra`; equal-length ties
+resolve only when every winner names the same project, and are otherwise left unattributed.
+Attribution is server-authoritative. The desktop caches mappings to raise a local suggested-start
+prompt, but the stored mapping row is what the report reads.
+
+Time then rolls up **session → project → user → organization**: `GET /reports` lists sessions,
+`/reports/leaderboard` totals per member, and `/me/stats` totals the caller's own time per project
+and per foreground app. No token, cost, or model-usage statistics are collected on this branch:
+an agent event is a source, a session id, a lifecycle kind, a timestamp, and a working directory,
+and nothing else. Non-agent activity carries no project either, because a foreground process name
+proves the machine was working, not which project it was working on.
+
+**Browser attribution** is designed (the browser evaluates rules locally and reports only "rule N
+matched from here to here", never URLs or titles) and is **not built on this branch**. Nothing in
+the product reads your browser today.
+
+### Corroborated and uncorroborated time
+
+For one session, corroborated seconds are the overlap of `[startedAt, stoppedAt]` with the union
+of the member's fresh `active` segments and the agent sessions linked to that timer, floored and
+capped at `durationSeconds`. Evidence that arrives **more than seven days** after it occurred is
+stored but never corroborates, so history cannot be backfilled after the fact. Overlapping
+evidence intervals are summed rather than unioned and the cap absorbs the double count, so
+corroborated time can never exceed the session it backs.
+
+Uncorroborated time is never blocked, deleted, or penalized. It counts as hours. It just reads
+differently beside verified time, which is the entire posture: padding is not prevented, it is
+visible.
+
+### The symmetry rule
+
+`GET /me/stats` runs the same corroboration SQL over the same completed-session set as the
+organization report, scoped to the caller. The desktop app's **What Clock-In is recording** panel
+(the recording line on the main screen, or *See exactly what's recorded* in settings) shows live
+recording state, which evidence sources are switched on, and the collected and never-collected
+lists below, in the same words the dashboard's **How Clock-In works** dialog uses. The person
+being tracked sees the same math, and the same explanation, as the person reading the report.
+
+### What is never collected
+
+Not by policy, but because the code never reads it:
+
+- **Keystrokes and mouse input.** The monitor asks *how long since* the last input, never what it
+  was. There are no input hooks anywhere in the codebase.
+- **Screenshots**, of any kind.
+- **Window titles.** The foreground query returns a process name and stops there.
+- **URLs, browsing history, or page content.** Nothing in the product talks to a browser.
+- **Document names, file contents, message or email bodies.**
+- **Anything injected into another process.** The monitor is read-only Win32 queries plus
+  broadcasts delivered to Clock-In's own hidden window.
+
+What *is* collected: coarse activity segments with timestamps, the foreground process name, agent
+session boundaries with their working directory, and your own timer start and stop times. A
+working directory can contain a user name, so it is shown only to the owning user and org admins,
+and is redacted from logs.
 
 ## Repository layout
 
@@ -215,18 +348,16 @@ arrives before its `start` is tolerated by upsert, not rejected.
 
 ## Privacy
 
-The posture is deliberate, and it is the same in the code as it is here.
+The posture is deliberate, and it is the same in the code as it is here. The collected and
+never-collected lists live in
+[**What is never collected**](#what-is-never-collected) above; this section is the policy around
+them.
 
-**Collected:** coarse activity segments with timestamps; the foreground **process name** only;
-agent session boundaries with their working directory; matched browser-rule spans; your own timer
-start/stop.
-
-**Never collected:** keystrokes, mouse movement, screenshots, window titles, URLs, document
-names, file contents. The monitor takes no input hooks and injects into no process.
-
-- Monitoring is **off by default** and gated behind a setting; disabling it aborts the tasks,
-  so a paused monitor records nothing.
-- Pausing the monitor never blocks the timer — it just makes that time uncorroborated.
+- Recording is **on by default** for a new install and gated behind a setting; disabling it
+  aborts the tasks, so a stopped recorder records nothing.
+- Stopping the recorder never blocks the timer. It just makes that time uncorroborated.
+- The desktop app's **What Clock-In is recording** panel states, live, what is switched on and
+  what is being collected, and offers the one button that changes it.
 - A working directory can contain a user name, so it's shown only to the owning user and org
   admins, and redacted from logs like session descriptions are.
 - `clock-in-hook` holds no credentials and opens no sockets. The spool file is its entire
@@ -274,12 +405,13 @@ rejected and why.
 
 - [Phase 1 design](docs/plans/2026-08-06-phase-1-design.md) — the manual timer, its data model, and its guardrails
 - [Phase 2 design](docs/plans/2026-08-07-phase-2-design.md) — evidence, attribution, and the anti-manipulation stance
-- [Phase 3 design](docs/plans/2026-08-09-phase-3-design.md) - browser attribution and monitor precision
+- [Phase 3 design](docs/plans/2026-08-09-phase-3-design.md): browser attribution, monitor precision, and the grandmother test (designed, not built)
 - [Phase 1](docs/plans/2026-08-06-phase-1-implementation.md) · [Phase 2](docs/plans/2026-08-07-phase-2-implementation.md) · [Phase 3](docs/plans/2026-08-09-phase-3-implementation.md) implementation plans
 
 ## Status and known gaps
 
-Phases 1 through 3 are implemented. What's deliberately not built yet:
+Phases 1 and 2 are implemented; phase 3 is designed and not started. What's deliberately not
+built yet:
 
 - **Project lifecycle administration is API-only.** Any member can create a project; workspace
   admins can rename or archive one. The desktop currently exposes project creation, not the

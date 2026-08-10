@@ -72,11 +72,14 @@ h2 { font-size: 1.05rem; font-weight: 800; }
 .sign-in-panel label { margin-top: 14px; }
 .sign-in-panel .signal-button { margin-top: 18px; }
 
-/* One tiny muted monitoring line; the hook badges live in settings. */
+/* One tiny muted recording line; the hook badges live in settings. The
+   trailing button opens the "what's recorded" panel. */
 .monitor-line { display: flex; align-items: center; gap: 7px; margin: 0; color: var(--text-secondary); font-size: .73rem; }
 .monitor-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--text-secondary); }
 .monitor-dot.is-on { background: var(--accent-green); box-shadow: 0 0 8px rgba(0, 229, 155, .55); }
 .monitor-dot.is-paused { background: var(--accent-blue); }
+.monitor-explain { border: 0; padding: 0; background: transparent; color: var(--text-secondary); font-size: .73rem; letter-spacing: normal; text-decoration: underline; text-underline-offset: 3px; text-transform: none; }
+.monitor-explain:hover, .monitor-explain:focus-visible { color: #ffffff; }
 
 .hero { text-align: center; }
 .hero label { margin-top: 14px; text-align: left; }
@@ -265,6 +268,36 @@ select:disabled { opacity: .55; }
 .mapping-form { gap: 9px; margin-top: 13px; }
 .mapping-form .signal-button { min-height: 34px; }
 .privacy-note p { line-height: 1.55; }
+.privacy-open { min-height: 34px; margin-top: 11px; padding: 6px 13px; font-size: .72rem; }
+
+/* "What's recorded" panel: the transparency surface, stacked above settings. */
+.recording-overlay { z-index: 11; }
+.recording-panel h3 { margin: 20px 0 4px; color: var(--text-secondary); font-size: .74rem; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
+.recording-now { border: 1px solid var(--glass-border); border-radius: var(--radius); padding: 12px 14px; background: rgba(3, 5, 10, .45); }
+.recording-headline { display: flex; align-items: center; gap: 8px; margin: 0; font-size: .95rem; }
+.recording-now .subtle { margin-top: 6px; line-height: 1.55; }
+.recording-fix { width: 100%; min-height: 36px; margin-top: 12px; }
+
+.source-list { display: grid; gap: 8px; margin: 9px 0 0; padding: 0; list-style: none; }
+.source-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; font-size: .84rem; }
+.source-name { flex: 1; min-width: 8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-state { flex: none; color: var(--text-secondary); font-size: .78rem; }
+.source-state.is-on { color: var(--mint); }
+.source-fix { flex: none; min-height: 28px; border: 1px solid var(--glass-border); border-radius: var(--radius); padding: 2px 11px; background: rgba(3, 5, 10, .5); color: #ffffff; font-size: .7rem; letter-spacing: .06em; text-transform: uppercase; }
+.source-fix:hover, .source-fix:focus-visible { border-color: var(--glass-border-hover); }
+.source-note { flex-basis: 100%; margin: 4px 0 0; color: var(--text-secondary); font-size: .78rem; line-height: 1.5; }
+
+.record-list { display: grid; gap: 6px; margin: 9px 0 0; padding: 0 0 0 18px; color: var(--text-secondary); font-size: .84rem; line-height: 1.5; }
+.record-list.is-kept { list-style: none; padding-left: 0; }
+.record-list.is-kept li { position: relative; padding-left: 18px; }
+.record-list.is-kept li::before { position: absolute; left: 1px; color: var(--mint); content: "✓"; }
+.record-list.is-never { list-style: none; padding-left: 0; }
+.record-list.is-never li { position: relative; padding-left: 18px; }
+.record-list.is-never li::before { position: absolute; left: 2px; color: var(--red); content: "✕"; }
+
+.recording-panel .help-steps { display: grid; gap: 10px; margin: 9px 0 0; padding-left: 19px; color: var(--text-secondary); font-size: .84rem; line-height: 1.5; }
+.recording-panel .help-steps strong { color: #ffffff; font-weight: 650; }
+.recording-foot { margin: 19px 0 0; border-top: 1px solid rgba(163, 179, 194, .12); padding-top: 10px; color: var(--text-secondary); font-size: .74rem; line-height: 1.5; }
 
 @media (max-width: 390px) {
   .screen { padding: 12px 15px 22px; }

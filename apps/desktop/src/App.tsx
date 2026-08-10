@@ -19,7 +19,8 @@ import {
 } from "./bridge.js";
 import { QuotaDial } from "./QuotaDial.js";
 import { formatDuration } from "@clock-in/shared";
-import { narrowedPattern, planRule } from "./patterns.js";
+import { sourceLabel } from "./agent-sources.js";
+import { RecordingPanel } from "./RecordingPanel.js";
 import {
   initialTimerState,
   stopIdleSeconds,
@@ -41,35 +42,6 @@ const elapsedSeconds = (startedAt: string, now: number): number =>
 /// prompt latency this buys is fine for a tray utility.
 const MONITOR_POLL_MS = 15_000;
 
-const CALENDAR_TIME_ZONE_POLL_MS = 60_000;
-
-/// Browser cards must flip to "connected" on their own while onboarding is on
-/// screen, so that screen polls faster than the steady-state monitor poll.
-const ONBOARDING_POLL_MS = 2_500;
-
-/// Quota polls are this cheap on purpose: the host answers every one of them
-/// from cache and only re-reads a provider once its own TTL lapses, so this
-/// interval decides how fast a fresh reading reaches the dial, not how often
-/// the machine is asked.
-const QUOTA_POLL_MS = 15_000;
-
-/// What the UI holds when the host cannot answer at all — an older desktop
-/// build with no `quota_status` command, or a signed-out session. Every dial
-/// then draws its unknown face instead of waiting forever on a reading.
-const QUOTA_UNREADABLE: QuotaSnapshot = { status: "unavailable", checkedAt: null, detail: null, providers: [] };
-
-/// The reading for one agent source (`claude_code` → the `claude` provider).
-const quotaFor = (snapshot: QuotaSnapshot | undefined, source: string): AgentQuota | undefined =>
-  snapshot?.providers.find((provider) => provider.sources.includes(source));
-
-const AGENT_SOURCE_LABELS: Record<string, string> = {
-  claude_code: "Claude Code",
-  codex: "Codex",
-  kimi_code: "Kimi Code",
-  cursor: "Cursor",
-};
-
-const sourceLabel = (source: string): string => AGENT_SOURCE_LABELS[source] ?? source;
 
 /// Agent CLI executables surface in the foreground-process stats under their
 /// binary name; they fold into a single row labelled via AGENT_SOURCE_LABELS.
@@ -363,6 +335,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [monitorStatus, setMonitorStatus] = useState<MonitorStatus | undefined>();
   const [quota, setQuota] = useState<QuotaSnapshot | undefined>();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [recordingOpen, setRecordingOpen] = useState(false);
   const [statsRange, setStatsRange] = useState<StatsRange>("today");
   const [statsCalendarVersion, setStatsCalendarVersion] = useState(0);
   const [workspaceVersion, setWorkspaceVersion] = useState(0);
@@ -490,6 +463,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setClearAnswersMessage(undefined);
     setHookSnippets({});
     setSettingsOpen(false);
+    setRecordingOpen(false);
     if (clearEmail) setEmail("");
   };
 
@@ -902,14 +876,16 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   }, [bridge, settingsOpen, workspaceVersion]);
 
   // The settings overlay closes on Escape, like the web app's help dialog.
+  // The "what's recorded" panel opens over the top of it and owns Escape while
+  // it is up, so one press closes one dialog.
   useEffect(() => {
-    if (!settingsOpen) return undefined;
+    if (!settingsOpen || recordingOpen) return undefined;
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === "Escape") setSettingsOpen(false);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [settingsOpen]);
+  }, [settingsOpen, recordingOpen]);
 
   const submitAuth = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -1784,7 +1760,12 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         {monitorStatus && monitorState && (
           <p className="monitor-line">
             <span className={`monitor-dot is-${monitorState}`} aria-hidden="true" />
-            {monitorState === "on" ? "Tracking is on" : monitorState === "paused" ? "Monitoring paused" : "Monitoring off"}
+            <span className="monitor-state">
+              {monitorState === "on" ? "Recording on" : monitorState === "paused" ? "Recording paused" : "Recording off"}
+            </span>
+            <button className="monitor-explain" type="button" onClick={() => setRecordingOpen(true)}>
+              What's recorded?
+            </button>
           </p>
         )}
         {accountError && !settingsOpen && <p className="form-error" role="alert">{accountError}</p>}
@@ -1937,7 +1918,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             <>
               <p className="today-total"><strong>{formatCompact(stats.totalDurationSeconds)}</strong> tracked</p>
               {appRows.length === 0 ? (
-                <p className="subtle">No activity yet. Turn on monitoring in settings to see where your time goes.</p>
+                <p className="subtle">No activity yet. Turn on recording in settings to see where your time goes.</p>
               ) : (
                 <ul className="app-list">
                   {appRows.map((row) => (
@@ -1995,7 +1976,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
               <>
                 <div className="setting-rows">
                   <label className="toggle-row">
-                    <span>Activity monitoring</span>
+                    <span>Record activity on this computer</span>
                     <input type="checkbox" checked={settings.enabled} onChange={(event) => void applyMonitoringEnabled(event.target.checked)} />
                   </label>
                   <label className="toggle-row">
@@ -2237,14 +2218,13 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                 <div className="privacy-note">
                   <h3>What&apos;s recorded</h3>
                   <p className="subtle">
-                    While monitoring is on, Clock-In samples the foreground process name every 30 seconds and notes idle,
-                    lock, and sleep transitions. It never records window titles, URLs, document names, or keystrokes.
-                    Agent tools report only session start and end with their working directory. The browser extension
-                    reports only which of your approved site rules matched - never addresses or history. Evidence waits
-                    in a local spool file under %APPDATA%\clock-in and uploads in batches every few minutes. Pausing
-                    monitoring never stops your timer - time your computer can&apos;t confirm still counts, it&apos;s
-                    just not marked verified.
+                    Clock-In notes when this computer was busy and which app was in front, by name. It never records
+                    what you type, pictures of your screen, window titles, or web addresses. Turning recording off
+                    never stops your timer: time nobody can back up still counts.
                   </p>
+                  <button className="outline-button privacy-open" type="button" onClick={() => setRecordingOpen(true)}>
+                    See exactly what&apos;s recorded
+                  </button>
                 </div>
                 <button className="link-button" type="button" disabled={logoutBusy} onClick={() => void logout()}>{logoutBusy ? "Logging out…" : "Log out"}</button>
               </>
@@ -2252,6 +2232,15 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           </section>
         </div>
       )}
+
+      <RecordingPanel
+        open={recordingOpen}
+        onClose={() => setRecordingOpen(false)}
+        status={monitorStatus}
+        hookSnippets={hookSnippets}
+        onTurnOnRecording={() => void applyMonitoringEnabled(true)}
+        onConnectAgent={(source) => void registerHook(source)}
+      />
     </main>
   );
 };
