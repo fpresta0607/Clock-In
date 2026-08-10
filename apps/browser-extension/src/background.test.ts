@@ -354,6 +354,61 @@ describe("background startup", () => {
     }));
   });
 
+  it("does not retain a prior rule while a rules refresh read is pending", async () => {
+    vi.useFakeTimers();
+    const start = Date.parse("2026-08-09T12:00:00.000Z");
+    vi.setSystemTime(start);
+    let delayRefresh = false;
+    let resolveRefresh: (tab: chrome.tabs.Tab | undefined) => void = () => undefined;
+    const tab = { id: 1, windowId: 1, url: "https://github.com/acme/project", incognito: false };
+    const harness = backgroundHarness(
+      [tab],
+      undefined,
+      undefined,
+      () => delayRefresh
+        ? new Promise((resolve) => { resolveRefresh = resolve; })
+        : Promise.resolve(tab),
+    );
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      rules: [{ id: "rule-one", pattern: "github.com/acme/*" }],
+    } as never);
+    await settle();
+
+    delayRefresh = true;
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      rules: [{ id: "rule-two", pattern: "github.com/acme/*" }],
+    } as never);
+    await settle();
+    await vi.advanceTimersByTimeAsync(15_000);
+    harness.alarm.emit({ name: SPAN_ADVANCE_ALARM_NAME } as never);
+    await settle();
+
+    expect(spanMessages(harness.port)).toHaveLength(0);
+
+    resolveRefresh(tab);
+    await settle();
+    await vi.advanceTimersByTimeAsync(15_000);
+    harness.alarm.emit({ name: SPAN_ADVANCE_ALARM_NAME } as never);
+    await settle();
+
+    expect(spanMessages(harness.port)).toContainEqual(expect.objectContaining({
+      event: expect.objectContaining({
+        event: "started",
+        ruleId: "rule-two",
+        occurredAt: new Date(start + 15_000).toISOString(),
+      }),
+    }));
+  });
+
   it("does not retain a prior tab while a focused-window read is pending", async () => {
     vi.useFakeTimers();
     const start = Date.parse("2026-08-09T12:00:00.000Z");
