@@ -75,6 +75,7 @@ impl Browser {
 
     /// Maps the process that launched the host onto a browser, so the
     /// handshake marker knows which card to flip.
+    #[cfg(any(windows, test))]
     fn from_process_name(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
             "chrome.exe" | "chrome" => Some(Browser::Chrome),
@@ -296,10 +297,10 @@ fn read_collection_authorization(dir: &Path) -> Option<BrowserCollectionAuthoriz
 }
 
 fn collection_is_revoked(dir: &Path) -> bool {
-    match std::fs::metadata(collection_revocation_path(dir)) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-        _ => true,
-    }
+    !matches!(
+        std::fs::metadata(collection_revocation_path(dir)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound
+    )
 }
 
 pub fn admitted_collection_id(dir: &Path) -> Option<String> {
@@ -591,6 +592,7 @@ fn parent_browser() -> Option<Browser> {
 }
 
 /// One process-table row: pid, parent pid, executable name.
+#[cfg(any(windows, test))]
 struct ProcessEntry {
     pid: u32,
     parent_pid: u32,
@@ -603,6 +605,7 @@ struct ProcessEntry {
 /// Parents usually enumerate *before* their children, so the snapshot must
 /// be collected whole before the lookup; a single forward pass that expects
 /// the parent after the child misses the typical case entirely.
+#[cfg(any(windows, test))]
 fn parent_name_from_entries(entries: &[ProcessEntry], self_pid: u32) -> Option<String> {
     let parent_pid = entries
         .iter()

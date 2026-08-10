@@ -61,6 +61,7 @@ struct HostPaths {
     dir: PathBuf,
     spool: PathBuf,
     rules: PathBuf,
+    #[cfg(test)]
     tally: PathBuf,
 }
 
@@ -74,6 +75,7 @@ impl HostPaths {
             dir: dir.to_path_buf(),
             spool: dir.join("browser-spool.jsonl"),
             rules: dir.join("browser-rules.json"),
+            #[cfg(test)]
             tally: dir.join("unmatched-tally.json"),
         }
     }
@@ -102,11 +104,11 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
     match message.get("type").and_then(|kind| kind.as_str()) {
         Some("get-rules") => {
             let state = collection_state(paths);
-            let rules = state["collectionEnabled"]
-                .as_bool()
-                .unwrap_or(false)
-                .then(|| load_rules(&paths.rules))
-                .unwrap_or_default();
+            let rules = if state["collectionEnabled"].as_bool().unwrap_or(false) {
+                load_rules(&paths.rules)
+            } else {
+                Vec::new()
+            };
             let reply = rules_reply(state, rules);
             match native_messaging::write_json(writer, &reply) {
                 Ok(()) => Ok(()),

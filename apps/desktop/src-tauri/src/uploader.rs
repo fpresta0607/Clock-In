@@ -84,11 +84,11 @@ async fn upload_once(
     let token = match client.fetch_access_token(&session).await {
         Ok(token) => token,
         Err(error) => {
-            if error.kind == ErrorKind::Auth {
-                if crate::browser::revoke_collection(browser_dir).is_ok() {
-                    crate::clear_session_token();
-                    let _ = crate::browser::discard_collection(browser_dir);
-                }
+            if error.kind == ErrorKind::Auth
+                && crate::browser::revoke_collection(browser_dir).is_ok()
+            {
+                crate::clear_session_token();
+                let _ = crate::browser::discard_collection(browser_dir);
             }
             return;
         }
