@@ -84,6 +84,7 @@ let unmatchedOrigin: string | null = null;
 let focusedWindowId: number | null = null;
 let tabReadGeneration = 0;
 let attentionGeneration = 0;
+let attentionConfirmed = false;
 const inFlightSpans = new Set<string>();
 let lastTickAt = Date.now();
 let lastTallyFlushAt = 0;
@@ -145,6 +146,7 @@ function resetLocalCollectionState(now: number = Date.now()): void {
   focusedWindowId = null;
   tabReadGeneration += 1;
   attentionGeneration += 1;
+  attentionConfirmed = false;
   inFlightSpans.clear();
   lastTickAt = now;
   lastTallyFlushAt = 0;
@@ -175,6 +177,7 @@ function fenceUnobservedGap(now: number, deadlineMissed: boolean = false): boole
   unmatchedOrigin = null;
   tabReadGeneration += 1;
   attentionGeneration += 1;
+  attentionConfirmed = false;
   emitSpanEvents([
     ...handleInput(machine, { type: "window-focus", focused: false }, lastProvableAt),
     ...advance(machine, now),
@@ -215,6 +218,24 @@ function feedMachine(input: SpanInput, now: number = Date.now(), settle: boolean
   // still survive an eviction.
   persistState();
   scheduleMachineAdvance();
+}
+
+function invalidateTabVerdict(now: number): void {
+  currentTabId = null;
+  unmatchedOrigin = null;
+  tabReadGeneration += 1;
+  lastTickAt = now;
+  emitSpanEvents(handleInput(machine, { type: "active-tab", ruleId: null }, now));
+  persistState();
+  scheduleMachineAdvance();
+}
+
+function failClosedAttention(now: number): void {
+  attentionConfirmed = false;
+  focusedWindowId = null;
+  invalidateTabVerdict(now);
+  feedMachine({ type: "idle", state: "idle" }, now, false);
+  feedMachine({ type: "window-focus", focused: false }, now, false);
 }
 
 function requestRules(): void {
@@ -423,7 +444,8 @@ function beginTabRead(now: number = Date.now()): number | null {
 }
 
 function canApplyTabRead(tab: chrome.tabs.Tab, windowId: number, generation: number): boolean {
-  return tabReadGeneration === generation &&
+  return attentionConfirmed &&
+    tabReadGeneration === generation &&
     focusedWindowId === windowId &&
     tab.windowId === windowId;
 }
@@ -471,27 +493,24 @@ function reApplyActiveTab(): void {
  * Re-derives attention from the platform after a gap (timer sleep, worker
  * restart): the remembered idle/focus state may be hours stale.
  */
-function revalidateAttention(): void {
+function revalidateAttention(focusedWindow: number | null = null): void {
   const generation = attentionGeneration + 1;
   attentionGeneration = generation;
-  void chrome.idle.queryState(IDLE_DETECTION_SECONDS)
-    .then((state) => {
-      if (attentionGeneration !== generation) {
-        return;
-      }
-      feedMachine({ type: "idle", state: state as IdleState });
-    })
-    .catch(() => {
-      // Keep the restored state suspended; expiry closes it at savedAt.
-    });
-  void chrome.windows.getLastFocused()
-    .then((win) => {
+  attentionConfirmed = false;
+  invalidateTabVerdict(Date.now());
+  const window = focusedWindow === null
+    ? chrome.windows.getLastFocused()
+    : Promise.resolve({ focused: true, id: focusedWindow } as chrome.windows.Window);
+  void Promise.all([chrome.idle.queryState(IDLE_DETECTION_SECONDS), window])
+    .then(([state, win]) => {
       if (attentionGeneration !== generation) {
         return;
       }
       const focused = win.focused === true && win.id !== undefined;
       focusedWindowId = focused ? (win.id ?? null) : null;
+      feedMachine({ type: "idle", state: state as IdleState });
       feedMachine({ type: "window-focus", focused });
+      attentionConfirmed = true;
       if (focused && win.id !== undefined) {
         watchActiveTab(win.id);
       }
@@ -500,13 +519,19 @@ function revalidateAttention(): void {
       if (attentionGeneration !== generation) {
         return;
       }
-      focusedWindowId = null;
-      feedMachine({ type: "window-focus", focused: false });
+      failClosedAttention(Date.now());
     });
 }
 
 chrome.tabs.onActivated.addListener((activeInfo) => {
   void initialized.then(() => {
+    if (!attentionConfirmed) {
+      const generation = beginTabRead();
+      if (generation !== null) {
+        revalidateAttention();
+      }
+      return;
+    }
     // A tab switch in a window the user is not looking at must not move the
     // state machine.
     if (!shouldApplyTabActivation(activeInfo.windowId, focusedWindowId)) {
@@ -550,6 +575,15 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
       return;
     }
     attentionGeneration += 1;
+    if (!attentionConfirmed) {
+      if (!focused) {
+        focusedWindowId = null;
+        feedMachine({ type: "window-focus", focused: false }, Date.now(), false);
+        return;
+      }
+      revalidateAttention(windowId);
+      return;
+    }
     focusedWindowId = focused ? windowId : null;
     feedMachine({ type: "window-focus", focused }, Date.now(), false);
     if (focused) {
@@ -562,6 +596,10 @@ chrome.idle.setDetectionInterval(IDLE_DETECTION_SECONDS);
 chrome.idle.onStateChanged.addListener((state) => {
   void initialized.then(() => {
     attentionGeneration += 1;
+    if (!attentionConfirmed) {
+      revalidateAttention();
+      return;
+    }
     feedMachine({ type: "idle", state: state as IdleState });
   });
 });

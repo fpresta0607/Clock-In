@@ -19,6 +19,8 @@ function backgroundHarness(
   queryTabs?: (query: chrome.tabs.QueryInfo) => Promise<chrome.tabs.Tab[]>,
   getLastFocused: () => Promise<chrome.windows.Window> = () => Promise.resolve({ focused: true, id: 1 }),
   getTab?: (tabId: number) => Promise<chrome.tabs.Tab | undefined>,
+  getIdleState: () => Promise<"active" | "idle" | "locked"> = () => Promise.resolve("active"),
+  stored: Record<string, unknown> = {},
 ) {
   const alarm = listeners();
   const activated = listeners();
@@ -35,7 +37,7 @@ function backgroundHarness(
     onDisconnect: portDisconnect,
   };
   vi.stubGlobal("chrome", {
-    storage: { local: { get: vi.fn(() => Promise.resolve({})), set: vi.fn(() => Promise.resolve()) } },
+    storage: { local: { get: vi.fn(() => Promise.resolve(stored)), set: vi.fn(() => Promise.resolve()) } },
     alarms: { onAlarm: alarm, clear: vi.fn(() => Promise.resolve(true)), create: vi.fn(), get: vi.fn(() => Promise.resolve(undefined)) },
     tabs: {
       onActivated: activated,
@@ -44,7 +46,7 @@ function backgroundHarness(
       query: vi.fn((query: chrome.tabs.QueryInfo) => queryTabs?.(query) ?? Promise.resolve(activeTabId === undefined ? [] : [tabsById.get(activeTabId)])),
     },
     windows: { WINDOW_ID_CURRENT: -2, WINDOW_ID_NONE: -1, onFocusChanged: focusChanged, getLastFocused: vi.fn(getLastFocused) },
-    idle: { setDetectionInterval: vi.fn(), onStateChanged: idleChanged, queryState: vi.fn(() => Promise.resolve("active")) },
+    idle: { setDetectionInterval: vi.fn(), onStateChanged: idleChanged, queryState: vi.fn(getIdleState) },
     runtime: { connectNative: vi.fn(() => port) },
   });
   return {
@@ -127,6 +129,58 @@ describe("background startup", () => {
     expect(set).toHaveBeenCalled();
     const persisted = set.mock.calls.at(-1)?.[0] as { spanMachine: { suspended: Array<{ sessionId: string }> } };
     expect(persisted.spanMachine.suspended).toContainEqual(expect.objectContaining({ sessionId: "durable-span" }));
+  });
+
+  it("does not resume a restored span after idle revalidation fails", async () => {
+    vi.useFakeTimers();
+    const start = Date.parse("2026-08-09T12:00:00.000Z");
+    vi.setSystemTime(start);
+    const savedAt = start - 1_000;
+    const harness = backgroundHarness(
+      [{ id: 1, windowId: 1, url: "https://github.com/acme/project", incognito: false }],
+      undefined,
+      undefined,
+      undefined,
+      () => Promise.reject(new Error("idle unavailable")),
+      {
+        browserCollectionId: "collection-one",
+        lastTickAt: savedAt,
+        spanMachine: {
+          version: 2,
+          savedAt,
+          active: {
+            ruleId: "rule-1",
+            since: savedAt - 60_000,
+            sessionId: "durable-span",
+            lastHeartbeatAt: savedAt,
+            gapSince: null,
+          },
+          suspended: [],
+        },
+      },
+    );
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      rules: [{ id: "rule-1", pattern: "github.com/acme/*" }],
+    } as never);
+    await settle();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    harness.alarm.emit({ name: SPAN_ADVANCE_ALARM_NAME } as never);
+    await settle();
+
+    const messages = spanMessages(harness.port);
+    expect(messages).not.toContainEqual(expect.objectContaining({
+      event: expect.objectContaining({ event: "heartbeat", externalSessionId: "durable-span" }),
+    }));
+    expect(messages).toContainEqual(expect.objectContaining({
+      event: expect.objectContaining({ event: "ended", externalSessionId: "durable-span", occurredAt: new Date(savedAt).toISOString() }),
+    }));
   });
 
   it("closes stale attention before a delayed span alarm can revive it", async () => {
