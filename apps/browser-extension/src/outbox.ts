@@ -65,9 +65,10 @@ export class Outbox<T> {
 export function pruneOutboxNamespaces<T>(
   outboxes: Map<string, Outbox<T>>,
   activeNamespace: string | undefined,
+  limit: number = MAX_RETAINED_OUTBOX_NAMESPACES,
 ): void {
   for (const [namespace, outbox] of outboxes) {
-    if (outboxes.size <= MAX_RETAINED_OUTBOX_NAMESPACES) {
+    if (outboxes.size <= limit) {
       return;
     }
     if (namespace !== activeNamespace && outbox.size === 0) {
@@ -84,7 +85,7 @@ export function canActivateOutboxNamespace<T>(
   if (outboxes.has(namespace)) {
     return true;
   }
-  pruneOutboxNamespaces(outboxes, activeNamespace);
+  pruneOutboxNamespaces(outboxes, activeNamespace, MAX_RETAINED_OUTBOX_NAMESPACES - 1);
   return outboxes.size < MAX_RETAINED_OUTBOX_NAMESPACES;
 }
 

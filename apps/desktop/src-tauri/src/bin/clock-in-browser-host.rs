@@ -189,6 +189,16 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
             }
             write_collection_state(writer, &paths)
         }
+        Some("namespace-capacity") => {
+            if let Err(error) = store_extension_namespace_capacity(
+                message.get("namespaces"),
+                message.get("collectionId"),
+                &paths,
+            ) {
+                eprintln!("clock-in-browser-host: could not record browser namespace capacity: {error}");
+            }
+            write_collection_state(writer, &paths)
+        }
         // Unknown message types are ignored.
         _ => Ok(()),
     }
@@ -309,6 +319,25 @@ fn message_collection_id(value: Option<&serde_json::Value>) -> Option<&str> {
     value
         .and_then(|value| value.as_str())
         .filter(|id| !id.trim().is_empty())
+}
+
+fn store_extension_namespace_capacity(
+    namespaces: Option<&serde_json::Value>,
+    collection_id: Option<&serde_json::Value>,
+    paths: &HostPaths,
+) -> Result<(), String> {
+    let Some(collection_id) = message_collection_id(collection_id) else {
+        return Ok(());
+    };
+    let Some(namespaces) = namespaces else {
+        return Ok(());
+    };
+    let namespaces = serde_json::from_value::<Vec<browser::ExtensionNamespaceCapacity>>(
+        namespaces.clone(),
+    )
+    .map_err(|error| error.to_string())?;
+    browser::record_extension_namespace_capacity(&paths.dir, collection_id, namespaces)
+        .map_err(|error| error.to_string())
 }
 
 enum SpanAppendOutcome {
@@ -474,6 +503,15 @@ mod tests {
             "collectionId": browser::collection_id(&paths.dir).expect("collection id exists"),
             "weekStart": 1785801600000u64,
             "entries": entries,
+        }))
+        .expect("the message serializes")
+    }
+
+    fn namespace_capacity_message(paths: &HostPaths, namespaces: serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "type": "namespace-capacity",
+            "collectionId": browser::collection_id(&paths.dir).expect("collection id exists"),
+            "namespaces": namespaces,
         }))
         .expect("the message serializes")
     }
@@ -910,6 +948,30 @@ mod tests {
             .as_array()
             .expect("entries is an array")
             .is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn namespace_capacity_rejects_a_new_workspace_before_a_move() {
+        let dir = temp_dir("namespace-capacity");
+        let paths = configured_paths(&dir);
+        let mut namespaces = vec![serde_json::json!({ "namespace": "u1:legacy", "pending": 1 })];
+        namespaces.extend((1..8).map(|index| {
+            serde_json::json!({
+                "namespace": format!("account-{index}:organization-{index}"),
+                "pending": 1,
+            })
+        }));
+        let message = namespace_capacity_message(&paths, serde_json::Value::Array(namespaces));
+        let mut out = Vec::new();
+
+        dispatch(&message, &paths, &mut out).expect("capacity is handled");
+        let target = spool::EvidenceIdentity::new("account-next", "organization-next")
+            .expect("target identity is valid");
+
+        assert!(browser::ensure_extension_namespace_capacity(&dir, &target).is_err());
+        assert_eq!(reply_values(&out)[0]["collectionEnabled"], true);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -377,6 +377,7 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
         .ok_or_else(|| BridgeError::unknown("Could not identify the destination workspace."))?;
     spool::ensure_identity_namespace_capacity(&target_identity)
         .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
+    browser::ensure_extension_namespace_capacity(&state.monitor.browser_dir(), &target_identity)?;
     let previous = state.active_identity.lock().await.clone();
     state.deactivate_identity().await?;
     if let Err(error) = state

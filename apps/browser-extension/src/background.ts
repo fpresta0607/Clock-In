@@ -119,6 +119,7 @@ function persistState(): void {
     // A later alarm or browser event retries. The in-memory state remains
     // authoritative for this worker lifetime.
   });
+  sendNamespaceCapacity();
 }
 
 function sendToHost(message: unknown): boolean {
@@ -131,6 +132,19 @@ function sendToHost(message: unknown): boolean {
   } catch {
     return false;
   }
+}
+
+function sendNamespaceCapacity(): void {
+  if (collectionId === undefined || !isIdentityNamespace(collectionNamespace)) {
+    return;
+  }
+  sendToHost({
+    type: "namespace-capacity",
+    collectionId,
+    namespaces: [...outboxes.entries()]
+      .filter(([namespace]) => isIdentityNamespace(namespace))
+      .map(([namespace, queued]) => ({ namespace, pending: queued.size })),
+  });
 }
 
 function emitSpanEvents(events: readonly SpanEvent[]): void {
@@ -341,10 +355,24 @@ function isSpanEvent(value: unknown): value is SpanEvent {
     return false;
   }
   const event = value as Record<string, unknown>;
-  return (event["event"] === "started" || event["event"] === "heartbeat" || event["event"] === "ended") &&
-    typeof event["externalSessionId"] === "string" &&
-    typeof event["ruleId"] === "string" &&
-    typeof event["occurredAt"] === "string";
+  const occurredAt = event["occurredAt"];
+  return Object.keys(event).length === 4 &&
+    (event["event"] === "started" || event["event"] === "heartbeat" || event["event"] === "ended") &&
+    typeof event["externalSessionId"] === "string" && event["externalSessionId"].trim().length > 0 &&
+    typeof event["ruleId"] === "string" && event["ruleId"].trim().length > 0 &&
+    typeof occurredAt === "string" &&
+    Number.isFinite(Date.parse(occurredAt)) &&
+    new Date(occurredAt).toISOString() === occurredAt;
+}
+
+function isIdentityNamespace(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9-]{1,128}:[A-Za-z0-9-]{1,128}$/.test(value);
+}
+
+function isStoredOutboxNamespace(value: unknown): value is string {
+  return isIdentityNamespace(value) ||
+    (collectionId !== undefined && value === `legacy:${collectionId}` &&
+      /^legacy:[A-Za-z0-9-]{1,128}$/.test(value));
 }
 
 function isRule(value: unknown): value is UrlRule {
@@ -359,7 +387,7 @@ function collectionDetails(message: Record<string, unknown>): { enabled: boolean
   const id = message["collectionId"];
   const namespace = message["collectionNamespace"];
   const usableId = typeof id === "string" && id.length > 0 ? id : undefined;
-  const usableNamespace = typeof namespace === "string" && /^[^:\s]+:[^:\s]+$/.test(namespace)
+  const usableNamespace = isIdentityNamespace(namespace)
     ? namespace
     : undefined;
   return {
@@ -809,15 +837,18 @@ async function initialize(): Promise<void> {
   const storedOutboxes = stored?.[OUTBOX_NAMESPACES_STORAGE_KEY];
   if (typeof storedOutboxes === "object" && storedOutboxes !== null && !Array.isArray(storedOutboxes)) {
     for (const [namespace, queued] of Object.entries(storedOutboxes as Record<string, unknown>)) {
-      if (Array.isArray(queued)) {
-        outboxes.set(namespace, new Outbox<SpanEvent>(undefined, queued.filter(isSpanEvent)));
+      if (isStoredOutboxNamespace(namespace) && Array.isArray(queued)) {
+        const events = queued.filter(isSpanEvent);
+        if (events.length > 0) {
+          outboxes.set(namespace, new Outbox<SpanEvent>(undefined, events));
+        }
       }
     }
   }
   const storedPaused = stored?.[CAPTURE_PAUSED_NAMESPACES_STORAGE_KEY];
   if (typeof storedPaused === "object" && storedPaused !== null && !Array.isArray(storedPaused)) {
     for (const [namespace, paused] of Object.entries(storedPaused as Record<string, unknown>)) {
-      if (paused === true) capturePausedNamespaces.set(namespace, true);
+      if (isStoredOutboxNamespace(namespace) && paused === true) capturePausedNamespaces.set(namespace, true);
     }
   }
   if (collectionId !== undefined) {
