@@ -2174,7 +2174,11 @@ mod tests {
             Some("another-operation"),
         )
         .expect("foreign completion cannot consume the reservation");
-        assert!(pending_extension_namespace_reservation(&dir).is_some());
+        assert_eq!(
+            extension_namespace_reservation_acknowledgement(&dir, &reservation)
+                .expect("acknowledgement remains readable"),
+            Some(ExtensionNamespaceReservationAcknowledgement::Reserved)
+        );
 
         complete_extension_namespace_reservation_for_workspace_move(
             &dir,
@@ -2183,7 +2187,11 @@ mod tests {
             Some(&reservation.request_id),
         )
         .expect("matching completion consumes the reservation");
-        assert!(pending_extension_namespace_reservation(&dir).is_none());
+        assert_eq!(
+            extension_namespace_reservation_acknowledgement(&dir, &reservation)
+                .expect("consumed acknowledgement reads"),
+            None
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
