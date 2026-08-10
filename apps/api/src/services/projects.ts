@@ -9,7 +9,7 @@ function compareOrdinal(left: string, right: string): number {
 }
 
 export async function listProjects(repository: ProjectRepository, subject: AuthenticatedSubject): Promise<{
-  projects: Array<{ id: string; name: string; isArchived: boolean }>;
+  projects: Array<{ id: string; name: string; createdAt: string; isArchived: boolean }>;
 }> {
   const projects = await repository.listForMember(subject);
   return {
@@ -25,6 +25,7 @@ export async function listProjects(repository: ProjectRepository, subject: Authe
 export async function createProject(repository: ProjectRepository, subject: AuthenticatedSubject, name: string): Promise<{
   id: string;
   name: string;
+  createdAt: string;
   isArchived: boolean;
 }> {
   const project = await repository.createForMember(subject, name);
