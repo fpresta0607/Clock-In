@@ -283,7 +283,8 @@ describe("today", () => {
     render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(status) })} />);
 
     const panel = await screen.findByLabelText("Today so far");
-    expect(within(panel).getByText("2h")).toBeInTheDocument();
+    // The card renders before the stats land, so wait for the figure itself.
+    expect(await within(panel).findByText("2h")).toBeInTheDocument();
     expect(within(panel).getByTestId("unattributed-foot")).toHaveTextContent(
       "30m of it landed in Field work, because nothing said which project it was for.",
     );
@@ -295,7 +296,7 @@ describe("today", () => {
     render(<App bridge={bridge} />);
 
     const panel = await screen.findByLabelText("Today so far");
-    await person.click(within(panel).getByRole("button", { name: "This week" }));
+    await person.click(await within(panel).findByRole("button", { name: "This week" }));
 
     await waitFor(() => expect(bridge.meStats).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole("heading", { name: "This week" })).toBeInTheDocument();
@@ -313,7 +314,7 @@ describe("today", () => {
     })} />);
 
     const panel = await screen.findByLabelText("Today so far");
-    expect(within(panel).getByText("Claude Code")).toBeInTheDocument();
+    expect(await within(panel).findByText("Claude Code")).toBeInTheDocument();
     expect(within(panel).getByText("VS Code")).toBeInTheDocument();
   });
 });
