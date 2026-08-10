@@ -249,12 +249,26 @@ fn invalidate_auth_loss(
     identity_invalidated: &Arc<AtomicBool>,
     invalid_session_handler: &Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 ) {
-    if !crate::monitor::flush_open_segment_to_spool(shared, segments_path, unix_now()) {
-        return;
-    }
-    let _ = crate::browser::deactivate_collection(browser_dir);
-    crate::clear_session_token();
-    deactivate_invalid_identity(shared, recording, identity_invalidated, invalid_session_handler);
+    complete_auth_loss(
+        || crate::monitor::flush_open_segment_to_spool(shared, segments_path, unix_now()),
+        || {
+            let _ = crate::browser::deactivate_collection(browser_dir);
+        },
+        crate::clear_session_token,
+        || deactivate_invalid_identity(shared, recording, identity_invalidated, invalid_session_handler),
+    );
+}
+
+fn complete_auth_loss(
+    flush_open_segment: impl FnOnce() -> bool,
+    deactivate_collection: impl FnOnce(),
+    clear_session_token: impl FnOnce(),
+    deactivate_identity: impl FnOnce(),
+) {
+    let _ = flush_open_segment();
+    deactivate_collection();
+    clear_session_token();
+    deactivate_identity();
 }
 
 fn deactivate_invalid_identity(
@@ -744,6 +758,27 @@ pub fn resolve_project(cwd: &str, mappings: &[PathMapping]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_loss_tears_down_when_spooling_the_final_segment_fails() {
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let flushed = Arc::clone(&actions);
+        let collection = Arc::clone(&actions);
+        let token = Arc::clone(&actions);
+        let identity = Arc::clone(&actions);
+
+        complete_auth_loss(
+            move || {
+                lock(&flushed).push("flush");
+                false
+            },
+            move || lock(&collection).push("collection"),
+            move || lock(&token).push("token"),
+            move || lock(&identity).push("identity"),
+        );
+
+        assert_eq!(*lock(&actions), vec!["flush", "collection", "token", "identity"]);
+    }
 
     fn mapping(id: &str, prefix: &str, project: &str) -> PathMapping {
         PathMapping {

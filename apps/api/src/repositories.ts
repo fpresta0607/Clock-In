@@ -16,6 +16,7 @@ export interface SessionRecord {
   userId: string;
   clientId: string;
   projectId: string;
+  deviceId?: string;
   description: string | null;
   status: "running" | "stopped" | "needs_review";
   startedAt: Date;
@@ -46,6 +47,7 @@ export interface CreateRunningSession {
   userId: string;
   clientId: string;
   projectId: string;
+  deviceId?: string;
   description: string | null;
   startedAt: Date;
 }

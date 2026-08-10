@@ -164,6 +164,7 @@ export const sessionStartRequestSchema = z
   .object({
     clientId: idSchema,
     projectId: idSchema.optional(),
+    deviceId: idSchema.optional(),
     description: z.string().max(1_000).optional(),
     startedAt: timestampSchema.optional(),
   })

@@ -15,6 +15,8 @@ pub const MAX_PENDING_STOPS: usize = 100;
 pub struct StartIntent {
     pub client_id: String,
     pub project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
     pub description: String,
     pub started_at: String,
 }
@@ -160,6 +162,7 @@ mod tests {
         StartIntent {
             client_id: client_id.to_string(),
             project_id: "11111111-1111-4111-8111-111111111111".to_string(),
+            device_id: None,
             description: "Writing".to_string(),
             started_at: "2026-08-06T14:00:00.000Z".to_string(),
         }

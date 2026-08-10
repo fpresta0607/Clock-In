@@ -96,10 +96,11 @@ describe("session contracts", () => {
       sessionStartRequestSchema.parse({
         clientId: ids.client,
         projectId: ids.project,
+        deviceId: ids.user,
         description: "Prepare the landing page",
         startedAt,
       }),
-    ).toMatchObject({ clientId: ids.client, projectId: ids.project });
+    ).toMatchObject({ clientId: ids.client, projectId: ids.project, deviceId: ids.user });
   });
 
   it("allows a start to use the member's selected default project", () => {

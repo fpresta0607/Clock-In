@@ -80,6 +80,8 @@ describe("database schema", () => {
     expect(timeSessions.userId.notNull).toBe(true);
     expect(timeSessions.projectId.notNull).toBe(true);
     expect(timeSessions.clientId.notNull).toBe(true);
+    expect(timeSessions.deviceId.notNull).toBe(false);
+    expect(timeSessions.deviceId.columnType).toBe("PgUUID");
     expect(timeSessions.description.notNull).toBe(false);
     expect(timeSessions.description.columnType).toBe("PgText");
     expect(timeSessions.status.enumValues).toEqual(["running", "stopped", "needs_review"]);

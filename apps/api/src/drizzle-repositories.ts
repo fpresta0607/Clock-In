@@ -66,6 +66,7 @@ function asSessionRecord(row: typeof timeSessions.$inferSelect): SessionRecord {
     userId: row.userId,
     clientId: row.clientId,
     projectId: row.projectId,
+    ...(row.deviceId === null ? {} : { deviceId: row.deviceId }),
     description: row.description,
     status: row.status,
     startedAt: row.startedAt,
@@ -853,6 +854,8 @@ function inactiveDurationSecondsSql(sessionStart: SQL, sessionEnd: SQL) {
             from ${activitySegments}
             where ${activitySegments.organizationId} = ${timeSessions.organizationId}
               and ${activitySegments.userId} = ${timeSessions.userId}
+              and ${timeSessions.deviceId} is not null
+              and ${activitySegments.deviceId} = ${timeSessions.deviceId}
               and ${activitySegments.kind} <> 'active'
               and ${activitySegments.startedAt} < ${sessionEnd}
               and ${activitySegments.endedAt} > ${sessionStart}
@@ -920,6 +923,8 @@ function corroboratedSecondsSql(range: ClippedRange | null = null) {
                 from ${activitySegments}
                 where ${activitySegments.organizationId} = ${timeSessions.organizationId}
                   and ${activitySegments.userId} = ${timeSessions.userId}
+                  and ${timeSessions.deviceId} is not null
+                  and ${activitySegments.deviceId} = ${timeSessions.deviceId}
                   and ${activitySegments.kind} = 'active'
                   and ${activitySegments.startedAt} < ${sessionEnd}
                   and ${activitySegments.endedAt} > ${sessionStart}

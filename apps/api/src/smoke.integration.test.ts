@@ -646,10 +646,11 @@ integration(integrationDescription, () => {
     expect(rule.status).toBe(200);
     const ruleId = (await rule.json()).id;
 
+    const timerDeviceId = randomUUID();
     const started = await app.request("/sessions", {
       method: "POST",
       headers: authorized,
-      body: JSON.stringify({ clientId: randomUUID(), projectId, description: "Browser-backed work", startedAt: at(0) }),
+      body: JSON.stringify({ clientId: randomUUID(), projectId, deviceId: timerDeviceId, description: "Browser-backed work", startedAt: at(0) }),
     });
     expect(started.status).toBe(200);
     const timerId = (await started.json()).session.id;
@@ -700,7 +701,7 @@ integration(integrationDescription, () => {
         segments: [
           {
             clientId: randomUUID(),
-            deviceId: randomUUID(),
+            deviceId: timerDeviceId,
             kind: "active",
             processName: "chrome.exe",
             startedAt: at(0),
@@ -749,12 +750,13 @@ integration(integrationDescription, () => {
 
     // Corroboration is the active-segment overlap only; the linked browser span adds nothing.
     const project = body.projects.find((entry: { project: { id: string } }) => entry.project.id === projectId);
-    expect(project).toMatchObject({ durationSeconds: 600, corroboratedSeconds: 300, sessionCount: 1 });
+    expect(project).toMatchObject({ durationSeconds: 600, corroboratedSeconds: 210, sessionCount: 1 });
 
+    const idleTimerDeviceId = randomUUID();
     const idleTimer = await app.request("/sessions", {
       method: "POST",
       headers: authorized,
-      body: JSON.stringify({ clientId: randomUUID(), projectId, description: "Idle-boundary work", startedAt: at(0) }),
+      body: JSON.stringify({ clientId: randomUUID(), projectId, deviceId: idleTimerDeviceId, description: "Idle-boundary work", startedAt: at(0) }),
     });
     expect(idleTimer.status).toBe(200);
     const idleTimerId = (await idleTimer.json()).session.id;
@@ -764,10 +766,16 @@ integration(integrationDescription, () => {
       body: JSON.stringify({
         segments: [{
           clientId: randomUUID(),
-          deviceId: randomUUID(),
+          deviceId: idleTimerDeviceId,
           kind: "idle",
           startedAt: at(0),
           endedAt: at(300_000),
+        }, {
+          clientId: randomUUID(),
+          deviceId: randomUUID(),
+          kind: "idle",
+          startedAt: at(300_000),
+          endedAt: at(600_000),
         }],
       }),
     });
