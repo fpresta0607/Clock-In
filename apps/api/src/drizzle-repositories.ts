@@ -5,6 +5,7 @@ import { and, asc, count, desc, eq, gt, gte, isNotNull, lt, ne, or, sql, sum } f
 import {
   activitySegments,
   agentSessions,
+  organizationAdminClaims,
   organizations,
   projectMemberships,
   projectPathMappings,
@@ -20,6 +21,7 @@ import type {
   AuthenticatedSubject,
   AuthenticatedUser,
   AuthIdentity,
+  FirstAdminClaimResult,
   OrganizationRecord,
 } from "./auth.js";
 import { AppError } from "./errors.js";
@@ -487,6 +489,41 @@ export class DrizzleAccountStore implements AccountStore {
     });
   }
 
+  public async claimFirstAdmin(subject: AuthenticatedSubject): Promise<FirstAdminClaimResult> {
+    return this.db.transaction(async (tx) => {
+      const [member] = await tx
+        .select({ role: users.role })
+        .from(users)
+        .where(and(eq(users.id, subject.userId), eq(users.organizationId, subject.organizationId)))
+        .limit(1);
+      if (member === undefined) return { kind: "not_member" };
+      if (member.role === "admin") return { kind: "already_claimed" };
+
+      const [claim] = await tx
+        .insert(organizationAdminClaims)
+        .values({
+          organizationId: subject.organizationId,
+          userId: subject.userId,
+          kind: "legacy_first_admin",
+        })
+        .onConflictDoNothing()
+        .returning({ organizationId: organizationAdminClaims.organizationId });
+      if (claim === undefined) return { kind: "already_claimed" };
+
+      const [user] = await tx
+        .update(users)
+        .set({ role: "admin", updatedAt: new Date() })
+        .where(and(
+          eq(users.id, subject.userId),
+          eq(users.organizationId, subject.organizationId),
+          eq(users.role, "member"),
+        ))
+        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role });
+      if (user === undefined) throw new Error("The first-admin claimant was no longer an active member.");
+      return { kind: "claimed", user };
+    });
+  }
+
   public async findOrganization(organizationId: string): Promise<OrganizationRecord | null> {
     const rows = await this.db
       .select({ id: organizations.id, name: organizations.name, inviteCode: organizations.inviteCode })
@@ -583,6 +620,10 @@ export class DrizzleAccountStore implements AccountStore {
         })
         .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role });
       if (user === undefined) throw new Error("Failed to create a user for a new account.");
+
+      await tx
+        .insert(organizationAdminClaims)
+        .values({ organizationId: organization.id, userId: user.id, kind: "creator" });
 
       const [project] = await tx
         .insert(projects)

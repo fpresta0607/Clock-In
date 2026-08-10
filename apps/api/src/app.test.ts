@@ -30,11 +30,13 @@ const account: AuthenticatedUser = {
 const now = new Date("2026-08-06T14:00:00.000Z");
 let keys: JWTVerifyGetKey;
 let bearer: () => Promise<string>;
+let bearerFor: (userId: string) => Promise<string>;
 
 beforeAll(async () => {
   const auth = await createTestAuth(config, now);
   keys = auth.keys;
   bearer = () => auth.bearer(ids.user);
+  bearerFor = (userId) => auth.bearer(userId);
 });
 
 function createTestApp(options: { bodyLimitBytes?: number; accounts?: AccountStore } = {}) {
@@ -255,6 +257,79 @@ describe("API composition", () => {
     const { app } = createTestApp();
 
     expect((await app.request("http://api.test/organization")).status).toBe(401);
+  });
+
+  it("lets exactly one active legacy member claim the first administrator role", async () => {
+    const secondUserId = "f1e7c513-b094-4d4c-ae55-21790ae019a4";
+    const members = new Map<string, AuthenticatedUser>([
+      [ids.user, account],
+      [secondUserId, {
+        id: secondUserId,
+        email: "casey@example.com",
+        name: "Casey",
+        organizationId: ids.organization,
+        role: "member",
+      }],
+    ]);
+    const audit: string[] = [];
+    const accounts: AccountStore = {
+      resolve: async (identity) => {
+        const member = members.get(identity.authUserId);
+        if (member === undefined) throw new Error("Unknown member");
+        return member;
+      },
+      findOrganization: async (id) => ({ id, name: "SIQstack", inviteCode: "ACDEF-GHJKM" }),
+      joinOrganization: async () => account,
+      claimFirstAdmin: async (subject) => {
+        const member = members.get(subject.userId);
+        if (member === undefined || member.organizationId !== subject.organizationId) return { kind: "not_member" };
+        if ([...members.values()].some((user) => user.organizationId === subject.organizationId && user.role === "admin")) {
+          return { kind: "already_claimed" };
+        }
+        const claimed = { ...member, role: "admin" as const };
+        members.set(member.id, claimed);
+        audit.push(member.id);
+        return { kind: "claimed", user: claimed };
+      },
+    };
+    const { app } = createTestApp({ accounts });
+    const [firstAuthorization, secondAuthorization] = await Promise.all([bearer(), bearerFor(secondUserId)]);
+    const [first, second] = await Promise.all([
+      app.request("http://api.test/organization/claim-admin", { method: "POST", headers: { authorization: firstAuthorization } }),
+      app.request("http://api.test/organization/claim-admin", { method: "POST", headers: { authorization: secondAuthorization } }),
+    ]);
+
+    expect([first.status, second.status].sort()).toEqual([200, 409]);
+    expect(audit).toHaveLength(1);
+    const winner = first.status === 200 ? first : second;
+    await expect(winner.json()).resolves.toMatchObject({ user: { role: "admin", organizationId: ids.organization } });
+
+    const repeated = await app.request("http://api.test/organization/claim-admin", {
+      method: "POST",
+      headers: { authorization: await bearer() },
+    });
+    expect(repeated.status).toBe(409);
+  });
+
+  it("refuses a first-admin claim from a nonmember", async () => {
+    const { app } = createTestApp({
+      accounts: {
+        resolve: async () => account,
+        findOrganization: async (id) => ({ id, name: "SIQstack", inviteCode: "ACDEF-GHJKM" }),
+        joinOrganization: async () => account,
+        claimFirstAdmin: async () => ({ kind: "not_member" }),
+      },
+    });
+
+    const response = await app.request("http://api.test/organization/claim-admin", {
+      method: "POST",
+      headers: { authorization: await bearer() },
+    });
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({
+      error: { code: "forbidden", message: "Only an active workspace member can claim the first administrator role." },
+    });
   });
 
   it("moves an existing account into a workspace, however the code was typed", async () => {

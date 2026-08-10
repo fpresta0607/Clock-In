@@ -214,6 +214,19 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
     if (organization === null) throw new AppError("not_found", "Organization not found.");
     return context.json(organizationResponseSchema.parse({ organization }));
   });
+  app.post("/organization/claim-admin", async (context) => {
+    if (dependencies.accounts.claimFirstAdmin === undefined) {
+      throw new AppError("internal_error", "First-admin claims are unavailable.");
+    }
+    const result = await dependencies.accounts.claimFirstAdmin(getAuthenticatedSubject(context));
+    if (result.kind === "claimed") {
+      return context.json(meResponseSchema.parse({ user: result.user }));
+    }
+    if (result.kind === "not_member") {
+      throw new AppError("forbidden", "Only an active workspace member can claim the first administrator role.");
+    }
+    throw new AppError("conflict", "A workspace administrator already exists.");
+  });
 
   if (dependencies.projectRepository !== undefined) {
     app.use("/projects", authenticate);

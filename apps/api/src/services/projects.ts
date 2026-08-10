@@ -53,7 +53,10 @@ export async function updateProject(
   input: { name?: string; isArchived?: boolean; replacementProjectId?: string },
 ): Promise<{ id: string; name: string; isArchived: boolean; isDefault: boolean }> {
   if (subject.role !== "admin") {
-    throw new AppError("forbidden", "Only workspace admins can change projects.");
+    throw new AppError(
+      "forbidden",
+      "Only workspace admins can change projects. In an ownerless legacy workspace, an active member can claim the first admin role.",
+    );
   }
   if (repository.updateForAdmin === undefined) {
     throw new AppError("internal_error", "Project administration is unavailable.");

@@ -65,7 +65,7 @@ integration(integrationDescription, () => {
     }
   });
 
-  it("backfills legacy defaults, memberships, and an administrator exactly once", async () => {
+  it("backfills legacy defaults and memberships without assigning an arbitrary administrator", async () => {
     if (!database) return;
     const legacyOrganizationId = randomUUID();
     const legacyFirstUserId = randomUUID();
@@ -102,12 +102,16 @@ integration(integrationDescription, () => {
     const legacyRoles = await database.client`
       select role from users where organization_id = ${legacyOrganizationId} order by role
     `;
-    expect(legacyRoles.map((user) => user.role)).toEqual(["admin", "member"]);
+    expect(legacyRoles.map((user) => user.role)).toEqual(["member", "member"]);
     const legacyMemberships = await database.client`
       select user_id from project_memberships
       where organization_id = ${legacyOrganizationId} and project_id = ${legacyDefaults[0]!.id}
     `;
     expect(legacyMemberships).toHaveLength(2);
+    const legacyClaims = await database.client`
+      select user_id from organization_admin_claims where organization_id = ${legacyOrganizationId}
+    `;
+    expect(legacyClaims).toEqual([]);
     const existingDefaults = await database.client`
       select id, name from projects
       where organization_id = ${existingOrganizationId} and is_default and not archived

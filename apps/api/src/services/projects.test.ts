@@ -75,7 +75,10 @@ describe("project service", () => {
     await expect(updateProject(repository, subject, "a1e7c513-b094-4d4c-ae55-21790ae019a4", {
       isArchived: true,
       replacementProjectId: replacement,
-    })).rejects.toMatchObject({ code: "forbidden" });
+    })).rejects.toMatchObject({
+      code: "forbidden",
+      message: "Only workspace admins can change projects. In an ownerless legacy workspace, an active member can claim the first admin role.",
+    });
     expect(calls).toEqual([]);
 
     await expect(updateProject(repository, { ...subject, role: "admin" }, "a1e7c513-b094-4d4c-ae55-21790ae019a4", {
