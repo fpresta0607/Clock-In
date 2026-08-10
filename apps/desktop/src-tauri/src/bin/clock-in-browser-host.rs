@@ -13,14 +13,8 @@
 //! fails closed to an empty rule set — the failure mode is silence, never
 //! leakage.
 //!
-//! Wire shapes (the extension in `apps/browser-extension` is the peer):
-//! - `{"type":"get-rules"}` is answered with
-//!   `{"type":"rules","collectionEnabled":…,"collectionId":…, "rules":[{"id":…,"pattern":…}]}`.
-//! - `{"type":"span-event","collectionId":…, "event":{"event":…,"externalSessionId":…,"ruleId":…,"occurredAt":…}}`
-//!   is appended to the browser spool with `source` stamped here and receives
-//!   `span-ack` after the append or `span-retry` when it must remain queued.
-//! - `{"type":"tally","collectionId":…, "weekStart":…, "entries":[…]}` replaces the local tally file
-//!   and receives `collection-state`, with `clear-tally` first when needed.
+//! The native-messaging protocol, including identity isolation and
+//! backpressure, is documented in `apps/browser-extension/README.md`.
 //!
 //! Being launched at all is the handshake: startup drops a marker beside the
 //! spools naming the parent browser, which flips that browser's card to

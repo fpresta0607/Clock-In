@@ -73,7 +73,7 @@
 - Create: `src/matching.ts`, `src/spans.ts`, `src/tally.ts` (pure), `src/background.ts` (chrome adapters), tests beside each
 
 **Steps:**
-1. Pure-module tests: longest-wins case-insensitive-host matching with glob bounds; the span state machine over injected clock/event streams — 15 s dwell to open, sub-15 s gaps merge, `ended` on tab switch/blur/idle/lock, heartbeat every 60 s; unmatched eTLD+1 tally accumulation and clearing; bounded offline ring (oldest dropped) when the host is unreachable.
+1. Pure-module tests: longest-wins case-insensitive-host matching with glob bounds; the span state machine over injected clock/event streams: 15 s dwell to open, sub-15 s gaps merge, `ended` on tab switch/blur/idle/lock, heartbeat every 60 s; unmatched eTLD+1 tally accumulation and clearing; a bounded offline outbox that pauses capture rather than dropping saved evidence when the host is unreachable.
 2. `background.ts`: `tabs.onActivated`/`tabs.onUpdated`/`windows.onFocusChanged`/`idle.onStateChanged` feeding the state machine; `connectNative` with reconnect backoff; rules fetched on connect and every 5 minutes. URLs never leave this package's process — events carry `ruleId`, span id, timestamps only.
 3. Wire the package into the workspace (`pnpm test`/`typecheck`/`build` recursively); produce the Chrome/Edge zip and Firefox variant as build outputs.
 
@@ -104,7 +104,7 @@
 
 **Steps:**
 1. Extend the smoke test: upload a synthetic browser-span event with a live `url_rule` → verify attribution, timer linking, `sites` on `/me/stats`, and unchanged corroboration totals.
-2. Full gate: `pnpm typecheck && pnpm test && pnpm build`, Rust fmt/clippy/test, `tauri build` with signing where available.
+2. Full gate: `pnpm typecheck && pnpm test && pnpm build`, Rust fmt/clippy/test, and a production Tauri build with the required signing credentials.
 3. Review the diff for privacy posture (no URL leaves the extension; tally and never-suggest list local-only) and scope.
 
 ## Manual verification checklist (post-build, real machine)
