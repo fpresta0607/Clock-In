@@ -160,9 +160,10 @@ start procurement before the release, not after:
 
 All three desktop binaries (the app, `clock-in-hook`, and
 `clock-in-browser-host`) sign with the same certificate. On Windows the
-workflow builds the helper binaries, signs them with `signtool`, and lets
-`tauri-action` sign the app and the installers with the same `.pfx`; on macOS
-the bundler deep-signs everything inside the `.app` and notarizes it.
+workflow imports the `.pfx` into the runner's certificate store, or uses the
+configured store thumbprint directly, then signs the helpers with `signtool`
+and configures Tauri to sign the app and installers with that thumbprint; on
+macOS the bundler deep-signs everything inside the `.app` and notarizes it.
 
 Both helpers ship inside the installer via `externalBin` in
 `apps/desktop/src-tauri/tauri.conf.json`: the workflow stages them as

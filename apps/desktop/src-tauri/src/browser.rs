@@ -17,6 +17,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Datelike, Duration, Local, LocalResult, TimeZone};
 use serde::{Deserialize, Serialize};
 
 use crate::api::{ApiResult, BridgeError, MappingKind, PathMapping};
@@ -671,9 +672,39 @@ pub struct TallyEntry {
 }
 
 fn tally_week_start(now: u64) -> u64 {
-    let days = now / 86_400;
-    let days_since_monday = (days + 3) % 7;
-    (days - days_since_monday) * 86_400_000
+    let Ok(seconds) = i64::try_from(now) else {
+        return 0;
+    };
+    Local
+        .timestamp_opt(seconds, 0)
+        .single()
+        .map(|local| tally_week_start_at(&local))
+        .unwrap_or(0)
+}
+
+fn tally_week_start_at<Tz: TimeZone>(now: &DateTime<Tz>) -> u64 {
+    let days_since_monday = i64::from(now.weekday().num_days_from_monday());
+    let Some(monday) = now
+        .date_naive()
+        .checked_sub_signed(Duration::days(days_since_monday))
+    else {
+        return 0;
+    };
+    let Some(midnight) = monday.and_hms_opt(0, 0, 0) else {
+        return 0;
+    };
+    let timezone = now.timezone();
+    let start = (0..=1_440).find_map(|minute| {
+        let local_time = midnight.checked_add_signed(Duration::minutes(minute))?;
+        match timezone.from_local_datetime(&local_time) {
+            LocalResult::Single(value) | LocalResult::Ambiguous(value, _) => Some(value),
+            LocalResult::None => None,
+        }
+    });
+    start
+        .and_then(|start| u64::try_from(start.timestamp()).ok())
+        .and_then(|seconds| seconds.checked_mul(1_000))
+        .unwrap_or(0)
 }
 
 /// The tally minus anything already answered: never-suggest origins and
@@ -1137,6 +1168,26 @@ mod tests {
         assert!(read_suggestions(&dir, &[]).is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tally_week_start_uses_local_monday_instead_of_utc_monday() {
+        use chrono::{FixedOffset, TimeZone};
+
+        let chicago_summer = FixedOffset::west_opt(5 * 60 * 60).expect("offset is valid");
+        let local_monday = chicago_summer
+            .with_ymd_and_hms(2026, 8, 10, 0, 1, 0)
+            .single()
+            .expect("local instant is valid");
+        let expected = chicago_summer
+            .with_ymd_and_hms(2026, 8, 10, 0, 0, 0)
+            .single()
+            .expect("local monday is valid")
+            .timestamp() as u64
+            * 1_000;
+
+        assert_eq!(tally_week_start_at(&local_monday), expected);
+        assert_eq!(expected, 1_786_338_000_000);
     }
 
     #[test]

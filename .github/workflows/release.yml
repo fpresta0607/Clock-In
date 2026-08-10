@@ -75,13 +75,42 @@ jobs:
           TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
         run: cargo build --release --manifest-path apps/desktop/src-tauri/Cargo.toml
 
-      - name: Sign helper binaries (Authenticode)
+      - name: Prepare Windows signing identity
+        id: windows_signing
         if: matrix.target == 'windows' && steps.signing.outputs.windows == 'true'
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:WINDOWS_CERTIFICATE) {
+            $pfx = Join-Path $env:RUNNER_TEMP 'clock-in-codesign.pfx'
+            try {
+              [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+              $password = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+              $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password |
+                Where-Object { $_.HasPrivateKey } |
+                Select-Object -First 1
+            } finally {
+              Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+            }
+          } else {
+            $certificate = Get-ChildItem Cert:\CurrentUser\My |
+              Where-Object { $_.Thumbprint -eq $env:WINDOWS_CERTIFICATE_THUMBPRINT } |
+              Select-Object -First 1
+          }
+          if ($null -eq $certificate -or -not $certificate.HasPrivateKey) {
+            throw 'The configured Windows code-signing certificate is unavailable or lacks a private key.'
+          }
+          "thumbprint=$($certificate.Thumbprint)" >> $env:GITHUB_OUTPUT
+
+      - name: Sign helper binaries (Authenticode)
+        if: matrix.target == 'windows' && steps.signing.outputs.windows == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ steps.windows_signing.outputs.thumbprint }}
           WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
         run: |
           $ErrorActionPreference = 'Stop'
@@ -89,22 +118,12 @@ jobs:
             Sort-Object { $_.VersionInfo.ProductVersion } -Descending |
             Select-Object -First 1 -ExpandProperty FullName
           $ts = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
-          $pfx = $null
-          $certArgs = @()
-          if ($env:WINDOWS_CERTIFICATE) {
-            $pfx = Join-Path $env:RUNNER_TEMP 'clock-in-codesign.pfx'
-            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-            $certArgs = @('/f', $pfx, '/p', $env:WINDOWS_CERTIFICATE_PASSWORD)
-          } else {
-            # Thumbprint flow: the certificate is already in the runner's store.
-            $certArgs = @('/sha1', $env:WINDOWS_CERTIFICATE_THUMBPRINT)
-          }
+          $certArgs = @('/sha1', $env:WINDOWS_CERTIFICATE_THUMBPRINT)
           foreach ($bin in 'clock-in-hook.exe', 'clock-in-browser-host.exe') {
             $path = Join-Path 'apps/desktop/src-tauri/target/release' $bin
             & $signtool sign /fd sha256 /td sha256 /tr $ts @certArgs $path
             if ($LASTEXITCODE -ne 0) { throw "signtool failed for $bin" }
           }
-          if ($pfx) { Remove-Item $pfx -Force }
 
       # externalBin resolves `binaries/<name>-<target-triple>`; stage the
       # (signed, on Windows) helpers under those names for the bundler.
@@ -127,6 +146,15 @@ jobs:
             cp "apps/desktop/src-tauri/target/release/$bin" "apps/desktop/src-tauri/binaries/$bin-aarch64-apple-darwin"
           done
 
+      - name: Create Tauri bundle configuration
+        id: tauri_config
+        env:
+          CLOCK_IN_UPDATER_ENABLED: ${{ steps.signing.outputs.updater }}
+          CLOCK_IN_WINDOWS_SIGNING: ${{ steps.signing.outputs.windows }}
+          CLOCK_IN_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ steps.windows_signing.outputs.thumbprint }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: node scripts/release-tauri-config.mjs
+
       # These are read at compile time, so they must be set before the build.
       # Without them the installer ships pointing at localhost.
       - uses: tauri-apps/tauri-action@v0
@@ -137,14 +165,7 @@ jobs:
           # createUpdaterArtifacts requires the signing key, and tauri build
           # FAILS without it, so enable updater artifacts only when the key
           # exists; the unsigned fallback keeps producing plain installers.
-          TAURI_CONFIG: ${{ steps.signing.outputs.updater == 'true' && '{"bundle":{"createUpdaterArtifacts":true}}' || '{}' }}
-          # Windows Authenticode. Empty values mean an unsigned build.
-          # The .pfx pair or, for a certificate already in the runner's store
-          # (Azure Key Vault / SafeNet flow), the thumbprint alone.
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
-          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+          TAURI_CONFIG: ${{ steps.tauri_config.outputs.config }}
           # macOS signing and notarization. Empty values mean an unsigned,
           # unnotarized build.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
