@@ -457,6 +457,30 @@ export class DrizzleAccountStore implements AccountStore {
       }
 
       const previousOrganizationId = current.organizationId;
+      const [legacyClaim] = await tx
+        .select({ organizationId: organizationAdminClaims.organizationId })
+        .from(organizationAdminClaims)
+        .where(and(
+          eq(organizationAdminClaims.organizationId, previousOrganizationId),
+          eq(organizationAdminClaims.userId, subject.userId),
+          eq(organizationAdminClaims.kind, "legacy_first_admin"),
+        ))
+        .limit(1);
+      if (legacyClaim !== undefined) {
+        const [remaining] = await tx
+          .select({ total: count(users.id) })
+          .from(users)
+          .where(and(
+            eq(users.organizationId, previousOrganizationId),
+            ne(users.id, subject.userId),
+          ));
+        if (Number(remaining?.total ?? 0) > 0) {
+          throw new AppError(
+            "conflict",
+            "The first administrator cannot leave a legacy workspace while it still has members.",
+          );
+        }
+      }
       await tx.delete(projectMemberships).where(eq(projectMemberships.userId, subject.userId));
       const [moved] = await tx
         .update(users)

@@ -1166,9 +1166,12 @@ pub struct MonitorStatus {
 
 /// Lines (≈ pending rows) in a spool file, for the backlog counters.
 fn count_lines(path: &Path) -> u32 {
-    std::fs::read(path)
+    spool::pending_spool_paths(path)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|generation| std::fs::read(generation).ok())
         .map(|bytes| bytes.iter().filter(|byte| **byte == b'\n').count() as u32)
-        .unwrap_or(0)
+        .sum()
 }
 
 pub struct MonitorConfig {

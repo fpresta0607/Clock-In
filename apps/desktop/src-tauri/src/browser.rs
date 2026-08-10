@@ -2,12 +2,11 @@
 //! per-browser health, the rules file the host serves, the local suggestion
 //! tally, and the handshake marker the host drops when the extension connects.
 //!
-//! Registration is silent and idempotent: for every detected browser the app
-//! writes a host manifest beside the spools (its `allowed_origins` pins the
-//! extension id) and points the browser's HKCU `NativeMessagingHosts` key at
-//! it, at first run and again on every launch. The keys are Clock-In's own,
-//! need no elevation, and are inert until the user installs the extension from
-//! its store page - the one click no native app can perform for them.
+//! Registration is silent and idempotent: for every detected browser with a
+//! configured released extension id, the app writes a host manifest beside the
+//! spools (its `allowed_origins` pins the extension id) and points the
+//! browser's HKCU `NativeMessagingHosts` key at it. The keys are Clock-In's
+//! own and need no elevation.
 //!
 //! The manifest's `path` is the `clock-in-browser-host` binary installed next
 //! to the app executable (both ship as `externalBin` siblings, exactly like
@@ -26,15 +25,6 @@ use crate::spool;
 /// The native-messaging host name the extension connects to. Changing it is a
 /// breaking change for every registered browser and the extension build.
 pub const HOST_NAME: &str = "com.clock_in.browser_host";
-
-/// Store listing ids are assigned at submission time; until then registration
-/// pins these placeholders, and [Connect] opens the store home page. One spot
-/// to update when the listings land.
-const CHROME_EXTENSION_ID: &str = "pending-chrome-web-store-id";
-const EDGE_EXTENSION_ID: &str = "pending-edge-add-ons-id";
-/// The Firefox variant declares its id in its own manifest
-/// (`apps/browser-extension/manifest.firefox.json`); keep these in sync.
-const FIREFOX_EXTENSION_ID: &str = "browser-extension@clock-in.app";
 
 const CHROME_STORE_URL: &str = "https://chromewebstore.google.com/";
 const EDGE_STORE_URL: &str = "https://microsoftedge.microsoft.com/addons/";
@@ -95,7 +85,7 @@ impl Browser {
         format!(r"{root}\{HOST_NAME}")
     }
 
-    /// The page [Connect] opens. Placeholders until the store listings exist.
+    /// The page [Connect] opens after a released extension is configured.
     pub fn store_url(self) -> &'static str {
         match self {
             Browser::Chrome => CHROME_STORE_URL,
@@ -143,12 +133,36 @@ impl Browser {
     }
 }
 
+fn extension_id(browser: Browser) -> Option<&'static str> {
+    let value = match browser {
+        Browser::Chrome => option_env!("CLOCK_IN_CHROME_EXTENSION_ID"),
+        Browser::Edge => option_env!("CLOCK_IN_EDGE_EXTENSION_ID"),
+        Browser::Firefox => option_env!("CLOCK_IN_FIREFOX_EXTENSION_ID"),
+    }?;
+    let value = value.trim();
+    valid_extension_id(browser, value).then_some(value)
+}
+
+fn valid_extension_id(browser: Browser, value: &str) -> bool {
+    match browser {
+        Browser::Chrome | Browser::Edge => {
+            value.len() == 32 && value.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+        }
+        Browser::Firefox => {
+            !value.is_empty()
+                && value.contains('@')
+                && !value.chars().any(char::is_whitespace)
+        }
+    }
+}
+
 /// How one browser's connection stands, in the order a setup flows through
 /// them. `Registered` means the plumbing is done and only the store install
 /// is left - the card keeps offering [Connect], never an error to interpret.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HealthState {
+    Disabled,
     NeverRegistered,
     BinaryMissing,
     Registered,
@@ -211,17 +225,17 @@ fn manifest_path(dir: &Path, browser: Browser) -> PathBuf {
 
 /// The manifest content: the host path plus the extension pin. Chrome and
 /// Edge pin by `allowed_origins`; Firefox uses `allowed_extensions`.
-fn host_manifest(browser: Browser, host_binary: &Path) -> String {
+fn host_manifest(browser: Browser, host_binary: &Path, extension_id: &str) -> String {
     // Backslashes in the Windows install path must survive JSON encoding.
     let path = host_binary.to_string_lossy().replace('\\', "\\\\");
     let pinned = match browser {
         Browser::Chrome => {
-            format!(r#""allowed_origins": ["chrome-extension://{CHROME_EXTENSION_ID}/"]"#)
+            format!(r#""allowed_origins": ["chrome-extension://{extension_id}/"]"#)
         }
         Browser::Edge => {
-            format!(r#""allowed_origins": ["chrome-extension://{EDGE_EXTENSION_ID}/"]"#)
+            format!(r#""allowed_origins": ["chrome-extension://{extension_id}/"]"#)
         }
-        Browser::Firefox => format!(r#""allowed_extensions": ["{FIREFOX_EXTENSION_ID}"]"#),
+        Browser::Firefox => format!(r#""allowed_extensions": ["{extension_id}"]"#),
     };
     format!(
         "{{\n  \"name\": \"{HOST_NAME}\",\n  \"description\": \"Clock-In browser attribution host\",\n  \"path\": \"{path}\",\n  \"type\": \"stdio\",\n  {pinned}\n}}\n"
@@ -451,12 +465,17 @@ pub fn renew_collection_authorization(dir: &Path) -> ApiResult<()> {
 }
 
 /// Silent first-run-and-every-launch registration: rewrite the manifests and
-/// repair any missing registry keys for the browsers on the machine. Nothing
-/// here may fail the app - a broken registration surfaces on the browser card
-/// with a [Fix] button instead.
+/// repair any missing registry keys for configured browsers on the machine.
+/// Nothing here may fail the app - a broken registration surfaces on the
+/// browser card with a [Fix] button instead.
 pub fn ensure_registered(dir: &Path) {
     for browser in detected_browsers() {
-        if let Err(error) = register(dir, browser) {
+        let result = if extension_id(browser).is_some() {
+            register(dir, browser)
+        } else {
+            unregister(dir, browser)
+        };
+        if let Err(error) = result {
             eprintln!(
                 "clock-in: could not register the browser host for {}: {error}",
                 browser.id()
@@ -468,13 +487,20 @@ pub fn ensure_registered(dir: &Path) {
 /// Writes the manifest and points the browser's registry key at it. Idempotent:
 /// an already-correct key is left alone.
 fn register(dir: &Path, browser: Browser) -> io::Result<()> {
+    let extension_id = extension_id(browser)
+        .ok_or_else(|| io::Error::other("The released browser extension id is not configured."))?;
     let host_binary = host_binary_path().map_err(|error| io::Error::other(error.message))?;
     let manifest = manifest_path(dir, browser);
     if let Some(parent) = manifest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    write_if_changed(&manifest, host_manifest(browser, &host_binary).as_bytes())?;
+    write_if_changed(&manifest, host_manifest(browser, &host_binary, extension_id).as_bytes())?;
     registry::ensure_key(&browser.registry_key_path(), &manifest.to_string_lossy())
+}
+
+fn unregister(dir: &Path, browser: Browser) -> io::Result<()> {
+    remove_if_exists(&manifest_path(dir, browser))?;
+    registry::remove_key(&browser.registry_key_path())
 }
 
 /// The [Fix] button's repair: register again, then report the resulting
@@ -482,6 +508,9 @@ fn register(dir: &Path, browser: Browser) -> io::Result<()> {
 pub fn repair(dir: &Path, browser_id: &str) -> ApiResult<BrowserHealth> {
     let browser = Browser::from_id(browser_id)
         .ok_or_else(|| BridgeError::new(crate::api::ErrorKind::Validation, "Unknown browser."))?;
+    if extension_id(browser).is_none() {
+        return Ok(health(browser, HealthState::Disabled));
+    }
     register(dir, browser)
         .map_err(|_| BridgeError::unknown("The connection could not be repaired."))?;
     Ok(health_of(dir, browser))
@@ -496,6 +525,9 @@ pub fn health_all(dir: &Path) -> Vec<BrowserHealth> {
 }
 
 fn health_of(dir: &Path, browser: Browser) -> BrowserHealth {
+    if extension_id(browser).is_none() {
+        return health(browser, HealthState::Disabled);
+    }
     let Some(registered_manifest) = registry::read_key(&browser.registry_key_path()) else {
         return health(browser, HealthState::NeverRegistered);
     };
@@ -560,7 +592,7 @@ fn handshake_path(dir: &Path, browser: Browser) -> PathBuf {
 /// the extension is connected. Best-effort - the marker feeds a UI badge and
 /// nothing else.
 pub fn record_handshake(dir: &Path) {
-    let Some(browser) = parent_browser() else {
+    let Some(browser) = parent_browser().filter(|browser| extension_id(*browser).is_some()) else {
         return;
     };
     record_handshake_for(dir, browser);
@@ -942,10 +974,10 @@ fn open_url(url: &str) -> ApiResult<()> {
 mod registry {
     use std::io;
 
-    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegCreateKeyExW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
-        HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ,
+        RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegOpenKeyExW, RegQueryValueExW,
+        RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ,
     };
 
     fn wide(text: &str) -> Vec<u16> {
@@ -990,6 +1022,16 @@ mod registry {
                 return Err(io::Error::from_raw_os_error(status as i32));
             }
             Ok(())
+        }
+    }
+
+    pub fn remove_key(key: &str) -> io::Result<()> {
+        unsafe {
+            let path = wide(key);
+            match RegDeleteKeyW(HKEY_CURRENT_USER, path.as_ptr()) {
+                ERROR_SUCCESS | ERROR_FILE_NOT_FOUND => Ok(()),
+                status => Err(io::Error::from_raw_os_error(status as i32)),
+            }
         }
     }
 
@@ -1047,6 +1089,10 @@ mod registry {
         Ok(())
     }
 
+    pub fn remove_key(_key: &str) -> io::Result<()> {
+        Ok(())
+    }
+
     pub fn read_key(_key: &str) -> Option<String> {
         None
     }
@@ -1077,11 +1123,21 @@ mod tests {
     }
 
     #[test]
-    fn chrome_and_edge_manifests_pin_origins_and_firefox_pins_extensions() {
+    fn native_messaging_requires_valid_released_extension_ids() {
         let binary = PathBuf::from(r"C:\Program Files\Clock-In\clock-in-browser-host.exe");
+        let chrome_id = "abcdefghijklmnopabcdefghijklmnop";
+        let edge_id = "ponmlkjihgfedcbaponmlkjihgfedcba";
+        let firefox_id = "browser-extension@clock-in.app";
+
+        assert!(valid_extension_id(Browser::Chrome, chrome_id));
+        assert!(valid_extension_id(Browser::Edge, edge_id));
+        assert!(valid_extension_id(Browser::Firefox, firefox_id));
+        assert!(!valid_extension_id(Browser::Chrome, "pending-chrome-web-store-id"));
+        assert!(!valid_extension_id(Browser::Edge, "not-an-extension-id"));
+        assert!(!valid_extension_id(Browser::Firefox, "browser extension"));
 
         let chrome: serde_json::Value =
-            serde_json::from_str(&host_manifest(Browser::Chrome, &binary))
+            serde_json::from_str(&host_manifest(Browser::Chrome, &binary, chrome_id))
                 .expect("manifest parses");
         assert_eq!(chrome["name"], HOST_NAME);
         assert_eq!(chrome["type"], "stdio");
@@ -1091,20 +1147,20 @@ mod tests {
         );
         assert_eq!(
             chrome["allowed_origins"][0],
-            format!("chrome-extension://{CHROME_EXTENSION_ID}/")
+            format!("chrome-extension://{chrome_id}/")
         );
 
         let edge: serde_json::Value =
-            serde_json::from_str(&host_manifest(Browser::Edge, &binary)).expect("manifest parses");
+            serde_json::from_str(&host_manifest(Browser::Edge, &binary, edge_id)).expect("manifest parses");
         assert_eq!(
             edge["allowed_origins"][0],
-            format!("chrome-extension://{EDGE_EXTENSION_ID}/")
+            format!("chrome-extension://{edge_id}/")
         );
 
         let firefox: serde_json::Value =
-            serde_json::from_str(&host_manifest(Browser::Firefox, &binary))
+            serde_json::from_str(&host_manifest(Browser::Firefox, &binary, firefox_id))
                 .expect("manifest parses");
-        assert_eq!(firefox["allowed_extensions"][0], FIREFOX_EXTENSION_ID);
+        assert_eq!(firefox["allowed_extensions"][0], firefox_id);
         assert!(firefox.get("allowed_origins").is_none());
     }
 

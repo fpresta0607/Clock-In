@@ -2,12 +2,7 @@ name: Release desktop
 
 # Tag a release to publish installers:  git tag v0.1.0 && git push origin v0.1.0
 #
-# Signing: when the signing secrets documented in DEPLOY.md ("Code signing and
-# auto-update") are absent, this workflow still builds and publishes UNSIGNED
-# installers and just annotates the run with warnings, so the pipeline works
-# while the certificates are being procured. Shipping to non-engineers is
-# blocked until signing is on - SmartScreen and Gatekeeper are where a
-# novice's setup ends.
+# Production releases require installer and updater signing credentials.
 on:
   push:
     tags: ["v*"]
@@ -39,24 +34,39 @@ jobs:
           workspaces: apps/desktop/src-tauri
       - run: pnpm install --frozen-lockfile
 
-      # secrets.* is not allowed in step `if:` conditions, so sniff them once
-      # into step outputs. Empty secret = build unsigned.
-      - name: Detect signing configuration
-        id: signing
+      - name: Verify production signing configuration
         shell: bash
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
-          {
-            # Signing-capable with either the .pfx pair or a certificate
-            # already in the runner's store (thumbprint flow).
-            echo "windows=$([ -n "$WINDOWS_CERTIFICATE$WINDOWS_CERTIFICATE_THUMBPRINT" ] && echo true || echo false)"
-            echo "macos=$([ -n "$APPLE_CERTIFICATE" ] && echo true || echo false)"
-            echo "updater=$([ -n "$TAURI_SIGNING_PRIVATE_KEY" ] && echo true || echo false)"
-          } >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          missing=()
+          [ -n "$TAURI_SIGNING_PRIVATE_KEY" ] || missing+=(TAURI_SIGNING_PRIVATE_KEY)
+          if [ "${{ matrix.target }}" = windows ]; then
+            if [ -z "$WINDOWS_CERTIFICATE" ] && [ -z "$WINDOWS_CERTIFICATE_THUMBPRINT" ]; then
+              missing+=(WINDOWS_CERTIFICATE-or-WINDOWS_CERTIFICATE_THUMBPRINT)
+            fi
+            if [ -n "$WINDOWS_CERTIFICATE" ] && [ -z "$WINDOWS_CERTIFICATE_PASSWORD" ]; then
+              missing+=(WINDOWS_CERTIFICATE_PASSWORD)
+            fi
+          else
+            for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+              [ -n "${!name}" ] || missing+=("$name")
+            done
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Refusing to publish an unsigned or non-updatable production release. Configure: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
 
       # tauri-action signs the app binary and the installers itself, but the
       # helper binaries (clock-in-hook, clock-in-browser-host) are ours to
@@ -64,7 +74,7 @@ jobs:
       # subsequent tauri-action build reuses the untouched cargo artifacts,
       # so the signed binaries are what end up in the installer. The build is
       # unconditional: both helpers ship inside the installer as externalBin
-      # siblings of the app, signed or not.
+      # siblings of the app.
       # TAURI_CONFIG neutralizes bundle.externalBin for this step only:
       # tauri-build would otherwise try to copy binaries/<name>-<triple>,
       # which does not exist until the staging steps below run.
@@ -72,12 +82,15 @@ jobs:
         env:
           CLOCK_IN_AUTH_URL: ${{ vars.CLOCK_IN_AUTH_URL }}
           CLOCK_IN_API_URL: ${{ vars.CLOCK_IN_API_URL }}
+          CLOCK_IN_CHROME_EXTENSION_ID: ${{ vars.CLOCK_IN_CHROME_EXTENSION_ID }}
+          CLOCK_IN_EDGE_EXTENSION_ID: ${{ vars.CLOCK_IN_EDGE_EXTENSION_ID }}
+          CLOCK_IN_FIREFOX_EXTENSION_ID: ${{ vars.CLOCK_IN_FIREFOX_EXTENSION_ID }}
           TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
         run: cargo build --release --manifest-path apps/desktop/src-tauri/Cargo.toml
 
       - name: Prepare Windows signing identity
         id: windows_signing
-        if: matrix.target == 'windows' && steps.signing.outputs.windows == 'true'
+        if: matrix.target == 'windows'
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
@@ -107,7 +120,7 @@ jobs:
           "thumbprint=$($certificate.Thumbprint)" >> $env:GITHUB_OUTPUT
 
       - name: Sign helper binaries (Authenticode)
-        if: matrix.target == 'windows' && steps.signing.outputs.windows == 'true'
+        if: matrix.target == 'windows'
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ steps.windows_signing.outputs.thumbprint }}
@@ -149,8 +162,8 @@ jobs:
       - name: Create Tauri bundle configuration
         id: tauri_config
         env:
-          CLOCK_IN_UPDATER_ENABLED: ${{ steps.signing.outputs.updater }}
-          CLOCK_IN_WINDOWS_SIGNING: ${{ steps.signing.outputs.windows }}
+          CLOCK_IN_UPDATER_ENABLED: "true"
+          CLOCK_IN_WINDOWS_SIGNING: ${{ matrix.target == 'windows' && 'true' || 'false' }}
           CLOCK_IN_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ steps.windows_signing.outputs.thumbprint }}
           WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
         run: node scripts/release-tauri-config.mjs
@@ -161,13 +174,11 @@ jobs:
         env:
           CLOCK_IN_AUTH_URL: ${{ vars.CLOCK_IN_AUTH_URL }}
           CLOCK_IN_API_URL: ${{ vars.CLOCK_IN_API_URL }}
+          CLOCK_IN_CHROME_EXTENSION_ID: ${{ vars.CLOCK_IN_CHROME_EXTENSION_ID }}
+          CLOCK_IN_EDGE_EXTENSION_ID: ${{ vars.CLOCK_IN_EDGE_EXTENSION_ID }}
+          CLOCK_IN_FIREFOX_EXTENSION_ID: ${{ vars.CLOCK_IN_FIREFOX_EXTENSION_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # createUpdaterArtifacts requires the signing key, and tauri build
-          # FAILS without it, so enable updater artifacts only when the key
-          # exists; the unsigned fallback keeps producing plain installers.
           TAURI_CONFIG: ${{ steps.tauri_config.outputs.config }}
-          # macOS signing and notarization. Empty values mean an unsigned,
-          # unnotarized build.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -202,16 +213,3 @@ jobs:
             -Path 'apps/desktop/src-tauri/target/release/clock-in-hook.exe', 'apps/desktop/src-tauri/target/release/clock-in-browser-host.exe' `
             -DestinationPath 'clock-in-helpers-windows.zip' -Force
           gh release upload $env:GITHUB_REF_NAME 'clock-in-helpers-windows.zip' --clobber
-
-      - name: Report unsigned build
-        shell: bash
-        run: |
-          if [ "${{ matrix.target }}" = windows ] && [ "${{ steps.signing.outputs.windows }}" != true ]; then
-            echo "::warning::Neither WINDOWS_CERTIFICATE nor WINDOWS_CERTIFICATE_THUMBPRINT is set; shipping an UNSIGNED installer. Fine for internal testing, blocked for non-engineer distribution (SmartScreen). See DEPLOY.md."
-          fi
-          if [ "${{ matrix.target }}" = macos ] && [ "${{ steps.signing.outputs.macos }}" != true ]; then
-            echo "::warning::APPLE_CERTIFICATE is not set; shipping an UNSIGNED, unnotarized app. Gatekeeper will refuse to open it normally. See DEPLOY.md."
-          fi
-          if [ "${{ steps.signing.outputs.updater }}" != true ]; then
-            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not set; no updater artifacts (.sig / latest.json) are published, so auto-update has nothing to verify against. See DEPLOY.md."
-          fi

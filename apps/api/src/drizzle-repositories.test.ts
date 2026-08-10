@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import { projectMemberships, projects, type DatabaseConnection } from "@clock-in/database";
 
-import { DrizzlePathMappingRepository, DrizzleProjectRepository, DrizzleReportRepository, DrizzleSessionRepository } from "./drizzle-repositories.js";
+import {
+  DrizzleAccountStore,
+  DrizzlePathMappingRepository,
+  DrizzleProjectRepository,
+  DrizzleReportRepository,
+  DrizzleSessionRepository,
+} from "./drizzle-repositories.js";
 
 const input = {
   organizationId: "0e59dfd6-3d1f-4795-9420-3ab65f0df843",
@@ -23,6 +29,52 @@ describe("Drizzle session repository", () => {
     const repository = new DrizzleSessionRepository(db);
 
     await expect(repository.createRunning(input)).rejects.toMatchObject({ conflict: "session_already_running" });
+  });
+});
+
+describe("Drizzle account store", () => {
+  it("refuses to move a legacy first administrator away from active members", async () => {
+    const targetOrganizationId = "a1c7e513-b094-4d4c-ae55-21790ae019a4";
+    const currentOrganizationId = "b1c7e513-b094-4d4c-ae55-21790ae019a4";
+    const deleted: unknown[] = [];
+    let selectStep = 0;
+    const limited = (rows: unknown[]) => ({
+      from: () => ({ where: () => ({ limit: async () => rows }) }),
+    });
+    const transaction = {
+      select: () => {
+        selectStep += 1;
+        if (selectStep === 1) return limited([{ id: targetOrganizationId }]);
+        if (selectStep === 2) {
+          return limited([{
+            id: input.userId,
+            email: "legacy@example.com",
+            name: "Legacy Admin",
+            organizationId: currentOrganizationId,
+            role: "admin",
+          }]);
+        }
+        if (selectStep === 3) return { from: () => ({ where: async () => [{ total: 0 }] }) };
+        if (selectStep === 4) return limited([{ organizationId: currentOrganizationId }]);
+        if (selectStep === 5) return { from: () => ({ where: async () => [{ total: 1 }] }) };
+        throw new Error(`unexpected select ${selectStep}`);
+      },
+      delete: (table: unknown) => {
+        deleted.push(table);
+        return { where: async () => undefined };
+      },
+    };
+    const db = {
+      transaction: async (callback: (handle: typeof transaction) => Promise<unknown>) => callback(transaction),
+    } as unknown as DatabaseConnection["db"];
+    const accounts = new DrizzleAccountStore(db);
+
+    await expect(accounts.joinOrganization({ organizationId: currentOrganizationId, userId: input.userId }, "ACDEF-GHJKM"))
+      .rejects.toMatchObject({
+        code: "conflict",
+        message: "The first administrator cannot leave a legacy workspace while it still has members.",
+      });
+    expect(deleted).toEqual([]);
   });
 });
 

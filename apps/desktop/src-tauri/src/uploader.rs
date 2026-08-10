@@ -136,11 +136,24 @@ async fn upload_once(
 /// prefix. A mid-batch failure skips the truncation, so the whole spool
 /// replays next pass — safe because `clientId` makes replays idempotent.
 async fn upload_segments(client: &ApiClient, token: &str, path: &Path) -> bool {
+    let generations = match spool::pending_spool_paths(path) {
+        Ok(generations) => generations,
+        Err(_) => return false,
+    };
+    for generation in generations {
+        if !upload_segment_generation(client, token, &generation).await {
+            return false;
+        }
+    }
+    spool::remove_empty_rotated(path).is_ok()
+}
+
+async fn upload_segment_generation(client: &ApiClient, token: &str, path: &Path) -> bool {
     let Ok((records, acked_bytes)) = spool::read_pending_lines::<SegmentRecord>(path) else {
         return false;
     };
     if records.is_empty() {
-        return true;
+        return spool::truncate_acked(path, acked_bytes).is_ok();
     }
     for chunk in records.chunks(UPLOAD_BATCH_SIZE) {
         match client.upload_segments(token, chunk).await {
@@ -169,12 +182,31 @@ async fn drain_agent_spool(
     path: &Path,
     timer_running: bool,
 ) -> bool {
+    let generations = match spool::pending_spool_paths(path) {
+        Ok(generations) => generations,
+        Err(_) => return false,
+    };
+    for generation in generations {
+        if !drain_agent_spool_generation(shared, client, token, &generation, timer_running).await {
+            return false;
+        }
+    }
+    spool::remove_empty_rotated(path).is_ok()
+}
+
+async fn drain_agent_spool_generation(
+    shared: &Arc<Mutex<MonitorShared>>,
+    client: &ApiClient,
+    token: &str,
+    path: &Path,
+    timer_running: bool,
+) -> bool {
     let pending = match spool::read_pending(path) {
         Ok(pending) => pending,
         Err(_) => return false,
     };
     if pending.events.is_empty() {
-        return true;
+        return spool::truncate_acked(path, pending.acked_bytes).is_ok();
     }
 
     {
@@ -210,12 +242,31 @@ async fn drain_browser_spool(
     path: &Path,
     timer_running: bool,
 ) -> bool {
+    let generations = match spool::pending_spool_paths(path) {
+        Ok(generations) => generations,
+        Err(_) => return false,
+    };
+    for generation in generations {
+        if !drain_browser_spool_generation(shared, client, token, &generation, timer_running).await {
+            return false;
+        }
+    }
+    spool::remove_empty_rotated(path).is_ok()
+}
+
+async fn drain_browser_spool_generation(
+    shared: &Arc<Mutex<MonitorShared>>,
+    client: &ApiClient,
+    token: &str,
+    path: &Path,
+    timer_running: bool,
+) -> bool {
     let pending = match spool::read_pending(path) {
         Ok(pending) => pending,
         Err(_) => return false,
     };
     if pending.events.is_empty() {
-        return true;
+        return spool::truncate_acked(path, pending.acked_bytes).is_ok();
     }
 
     {

@@ -43,20 +43,23 @@ test("emits a final-artifact signing configuration for thumbprint releases", asy
   });
 });
 
-test("keeps an unsigned fallback free of signing and updater artifacts", async () => {
-  const config = await runConfig({
-    CLOCK_IN_UPDATER_ENABLED: "false",
-    CLOCK_IN_WINDOWS_SIGNING: "false",
-  });
-
-  assert.deepEqual(config, { bundle: {} });
+test("rejects a release configuration without updater signing", () => {
+  assert.throws(() => execFileSync(process.execPath, [script], {
+    env: {
+      ...process.env,
+      CLOCK_IN_UPDATER_ENABLED: "false",
+      CLOCK_IN_WINDOWS_SIGNING: "false",
+      GITHUB_OUTPUT: path.join(tmpdir(), "clock-in-release-config-missing-updater"),
+    },
+    stdio: "pipe",
+  }));
 });
 
 test("rejects a claimed Windows signing release without an imported certificate", () => {
   assert.throws(() => execFileSync(process.execPath, [script], {
     env: {
       ...process.env,
-      CLOCK_IN_UPDATER_ENABLED: "false",
+      CLOCK_IN_UPDATER_ENABLED: "true",
       CLOCK_IN_WINDOWS_SIGNING: "true",
       GITHUB_OUTPUT: path.join(tmpdir(), "clock-in-release-config-missing-thumbprint"),
     },

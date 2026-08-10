@@ -1582,6 +1582,24 @@ describe("App", () => {
     expect(await screen.findByRole("button", { name: "Connect Chrome" })).toBeInTheDocument();
   });
 
+  it("does not offer native messaging before an extension release is configured", async () => {
+    const bridge = bridgeFor({
+      settingsGet: vi.fn().mockResolvedValue({ ...monitorSettings, onboarded: false }),
+      monitorSetEnabled: vi.fn().mockResolvedValue({ ...monitorSettings, onboarded: false }),
+      monitorStatus: vi.fn().mockResolvedValue({
+        ...idleMonitorStatus,
+        browsers: [{ ...chromeRegistered, state: "disabled" }],
+      }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    await person.click(await screen.findByRole("button", { name: "Turn on" }));
+
+    expect(await screen.findByText("Browser attribution is unavailable until its verified extension is released.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Connect Chrome|Fix/ })).not.toBeInTheDocument();
+  });
+
   it("lets a persistent Turn on failure be skipped to the main screen", async () => {
     const bridge = bridgeFor({
       settingsGet: vi.fn().mockResolvedValue({ ...monitorSettings, onboarded: false }),
