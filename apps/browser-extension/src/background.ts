@@ -94,7 +94,8 @@ let storageWriteFailed = false;
 let pendingStorageWrites = 0;
 let storageWriteTail: Promise<void> = Promise.resolve();
 const capturePausedNamespaces = new Map<string, boolean>();
-const pendingSpansByNamespace = new Map<string, SpanEvent[]>();
+let eventCommitPending = false;
+const deferredHostMessages: Record<string, unknown>[] = [];
 
 // The active tab's local verdict. `unmatchedOrigin` exists only to feed the
 // local tally; it is never part of an emitted event.
@@ -110,49 +111,41 @@ const inFlightSpans = new Set<string>();
 let lastTickAt = Date.now();
 let lastTallyFlushAt = 0;
 
-function pendingSpans(namespace: string | undefined): readonly SpanEvent[] {
-  return namespace === undefined ? [] : pendingSpansByNamespace.get(namespace) ?? [];
+interface StagedSpanCommit {
+  namespace: string;
+  events: readonly SpanEvent[];
 }
 
-function queuedSnapshot(namespace: string, queued: Outbox<SpanEvent>): SpanEvent[] {
-  return [...queued.snapshot(), ...pendingSpans(namespace)];
+function queuedSnapshot(namespace: string, queued: Outbox<SpanEvent>, staged: StagedSpanCommit | undefined): SpanEvent[] {
+  return namespace === staged?.namespace
+    ? [...queued.snapshot(), ...staged.events]
+    : queued.snapshot();
 }
 
-function commitPersistedSpans(stagedByNamespace: ReadonlyMap<string, readonly SpanEvent[]>): void {
-  for (const [namespace, staged] of stagedByNamespace) {
-    const pending = pendingSpansByNamespace.get(namespace);
-    const queued = outboxes.get(namespace);
-    if (pending === undefined || queued === undefined) {
-      continue;
-    }
-    for (const event of staged) {
-      const pendingIndex = pending.findIndex((candidate) => sameSpanEvent(candidate, event));
-      if (pendingIndex === -1) {
-        continue;
-      }
-      if (!queued.snapshot().some((candidate) => sameSpanEvent(candidate, event)) && !queued.push(event)) {
-        continue;
-      }
-      pending.splice(pendingIndex, 1);
-    }
-    if (pending.length === 0) {
-      pendingSpansByNamespace.delete(namespace);
+function commitStagedSpans(staged: StagedSpanCommit): boolean {
+  const queued = outboxes.get(staged.namespace);
+  if (queued === undefined) {
+    return false;
+  }
+  for (const event of staged.events) {
+    if (!queued.snapshot().some((candidate) => sameSpanEvent(candidate, event)) && !queued.push(event)) {
+      return false;
     }
   }
+  return true;
 }
 
-function persistState(): Promise<boolean> {
+function persistState(staged: StagedSpanCommit | undefined = undefined): Promise<boolean> {
   pruneOutboxes();
   const savedAt = Date.now();
   const activeNamespace = collectionNamespace;
-  const stagedByNamespace = new Map(
-    [...pendingSpansByNamespace.entries()].map(([namespace, events]) => [namespace, [...events]]),
-  );
   const state = {
     [TALLY_STORAGE_KEY]: tally,
-    [OUTBOX_STORAGE_KEY]: [...outbox.snapshot(), ...pendingSpans(activeNamespace)],
+    [OUTBOX_STORAGE_KEY]: staged !== undefined && activeNamespace === staged.namespace
+      ? [...outbox.snapshot(), ...staged.events]
+      : outbox.snapshot(),
     [OUTBOX_NAMESPACES_STORAGE_KEY]: Object.fromEntries(
-      [...outboxes.entries()].map(([namespace, queued]) => [namespace, queuedSnapshot(namespace, queued)]),
+      [...outboxes.entries()].map(([namespace, queued]) => [namespace, queuedSnapshot(namespace, queued, staged)]),
     ),
     [MACHINE_STORAGE_KEY]: snapshotMachine(machine, savedAt),
     [LAST_TICK_STORAGE_KEY]: lastTickAt,
@@ -170,7 +163,17 @@ function persistState(): Promise<boolean> {
   return write.then(() => {
     pendingStorageWrites -= 1;
     storageWriteFailed = false;
-    commitPersistedSpans(stagedByNamespace);
+    if (staged !== undefined) {
+      eventCommitPending = false;
+      if (!commitStagedSpans(staged)) {
+        pauseCapture();
+        drainDeferredHostMessages();
+        return false;
+      }
+      drainDeferredHostMessages();
+      requestRules();
+      revalidateAttention();
+    }
     if (pendingStorageWrites === 0) {
       sendNamespaceCapacity();
       flushOutbox();
@@ -178,8 +181,12 @@ function persistState(): Promise<boolean> {
     return true;
   }, () => {
     pendingStorageWrites -= 1;
+    if (staged !== undefined) {
+      eventCommitPending = false;
+    }
     storageWriteFailed = true;
     pauseCapture();
+    drainDeferredHostMessages();
     return false;
   });
 }
@@ -209,23 +216,24 @@ function sendNamespaceCapacity(): void {
   });
 }
 
-function emitSpanEvents(events: readonly SpanEvent[]): void {
+function emitSpanEvents(events: readonly SpanEvent[]): boolean {
+  if (events.length === 0) {
+    return false;
+  }
   const namespace = collectionNamespace;
-  if (collectionId === undefined || namespace === undefined || capturePaused || captureResumePending || storageWriteFailed) {
-    return;
+  if (eventCommitPending) {
+    return true;
   }
-  const staged = pendingSpansByNamespace.get(namespace) ?? [];
-  if (events.length > outbox.remainingCapacity - staged.length) {
+  if (collectionId === undefined || namespace === undefined || capturePaused || captureResumePending) {
+    return false;
+  }
+  if (storageWriteFailed || events.length > outbox.remainingCapacity) {
     pauseCapture();
-    return;
+    return true;
   }
-  for (const event of events) {
-    staged.push(event);
-  }
-  if (events.length > 0) {
-    pendingSpansByNamespace.set(namespace, staged);
-    void persistState();
-  }
+  eventCommitPending = true;
+  void persistState({ namespace, events: [...events] });
+  return true;
 }
 
 function pauseCapture(): void {
@@ -314,6 +322,9 @@ function settleTally(now: number): void {
 }
 
 function fenceUnobservedGap(now: number, deadlineMissed: boolean = false): boolean {
+  if (eventCommitPending) {
+    return true;
+  }
   if (!deadlineMissed && !tickCredit(now, lastTickAt, TICK_MS).gapExceeded) {
     return false;
   }
@@ -324,17 +335,22 @@ function fenceUnobservedGap(now: number, deadlineMissed: boolean = false): boole
   tabReadGeneration += 1;
   attentionGeneration += 1;
   attentionConfirmed = false;
-  emitSpanEvents([
+  const committed = emitSpanEvents([
     ...handleInput(machine, { type: "window-focus", focused: false }, lastProvableAt),
     ...advance(machine, now),
   ]);
-  persistState();
+  if (!committed) {
+    persistState();
+  }
   scheduleMachineAdvance();
   revalidateAttention();
   return true;
 }
 
 function prepareMachineTransition(now: number): boolean {
+  if (eventCommitPending) {
+    return false;
+  }
   const deadline = nextAdvanceAt(machine);
   const deadlineMissed = deadline !== null && now - deadline >= machine.gapMergeMs;
   const tallyIntervalLate = unmatchedOrigin !== null && now - lastTickAt >= TICK_MS + machine.gapMergeMs;
@@ -355,24 +371,34 @@ function advanceMachine(now: number): boolean {
 }
 
 function feedMachine(input: SpanInput, now: number = Date.now(), settle: boolean = true): void {
+  if (eventCommitPending) {
+    return;
+  }
   if (settle && !prepareMachineTransition(now)) {
     return;
   }
   // Expire stale merge windows before a newly observed tab can resume them.
-  emitSpanEvents([...advance(machine, now), ...handleInput(machine, input, now)]);
+  const committed = emitSpanEvents([...advance(machine, now), ...handleInput(machine, input, now)]);
   // Subject changes (candidate starts, suspensions) emit no events but must
   // still survive an eviction.
-  persistState();
+  if (!committed) {
+    persistState();
+  }
   scheduleMachineAdvance();
 }
 
 function invalidateTabVerdict(now: number): void {
+  if (eventCommitPending) {
+    return;
+  }
   currentTabId = null;
   unmatchedOrigin = null;
   tabReadGeneration += 1;
   lastTickAt = now;
-  emitSpanEvents(handleInput(machine, { type: "active-tab", ruleId: null }, now));
-  persistState();
+  const committed = emitSpanEvents(handleInput(machine, { type: "active-tab", ruleId: null }, now));
+  if (!committed) {
+    persistState();
+  }
   scheduleMachineAdvance();
 }
 
@@ -486,7 +512,7 @@ function migrateLegacyOutbox(namespace: string, id: string): boolean {
 }
 
 function activateOutbox(namespace: string, id: string): boolean {
-  if (!canActivateOutboxNamespace(outboxes, namespace, collectionNamespace, new Set(pendingSpansByNamespace.keys()))) {
+  if (!canActivateOutboxNamespace(outboxes, namespace, collectionNamespace)) {
     return false;
   }
   if (!migrateLegacyOutbox(namespace, id)) {
@@ -506,7 +532,7 @@ function activateOutbox(namespace: string, id: string): boolean {
 }
 
 function pruneOutboxes(): void {
-  pruneOutboxNamespaces(outboxes, collectionNamespace, undefined, new Set(pendingSpansByNamespace.keys()));
+  pruneOutboxNamespaces(outboxes, collectionNamespace);
   for (const namespace of capturePausedNamespaces.keys()) {
     if (!outboxes.has(namespace) && namespace !== collectionNamespace) {
       capturePausedNamespaces.delete(namespace);
@@ -591,53 +617,11 @@ function connect(): void {
       return;
     }
     const payload = message as Record<string, unknown>;
-    if (payload["type"] === "span-ack" && payload["collectionId"] === collectionId && isSpanEvent(payload["event"])) {
-      const event = payload["event"];
-      inFlightSpans.delete(spanKey(event));
-      if (outbox.remove((candidate) => sameSpanEvent(candidate, event))) {
-        persistState();
-      }
-      flushOutbox();
+    if (eventCommitPending) {
+      deferredHostMessages.push(payload);
       return;
     }
-    if (payload["type"] === "span-retry" && payload["collectionId"] === collectionId && isSpanEvent(payload["event"])) {
-      inFlightSpans.delete(spanKey(payload["event"]));
-      scheduleReconnect();
-      return;
-    }
-    if (payload["type"] === "clear-tally") {
-      clearTally(tally);
-      lastTickAt = Date.now();
-      persistState();
-      sendTally();
-      return;
-    }
-    if (payload["type"] === "collection-state") {
-      if (applyCollectionState(payload) === "changed" && collectionEnabled) {
-        requestRules();
-      }
-      applyCapturePause(payload);
-      return;
-    }
-    if (payload["type"] === "rules") {
-      const collectionChanged = applyCollectionState(payload);
-      if (collectionChanged === "blocked") {
-        return;
-      }
-      applyCapturePause(payload);
-      const list = payload["rules"];
-      // Fail closed: an unusable rule set matches nothing.
-      rules = collectionEnabled && !capturePaused && !captureResumePending && Array.isArray(list) ? list.filter(isRule) : [];
-      reconnectAttempt = 0;
-      // A new rule set changes the verdict of the tab already open.
-      if (collectionChanged === "changed") {
-        revalidateAttention();
-      } else {
-        reApplyActiveTab();
-      }
-      flushOutbox();
-      sendTally();
-    }
+    handleHostMessage(payload);
   });
   opened.onDisconnect.addListener(() => {
     if (port === opened) {
@@ -647,6 +631,63 @@ function connect(): void {
     scheduleReconnect();
   });
   requestRules();
+}
+
+function handleHostMessage(payload: Record<string, unknown>): void {
+  if (payload["type"] === "span-ack" && payload["collectionId"] === collectionId && isSpanEvent(payload["event"])) {
+    const event = payload["event"];
+    inFlightSpans.delete(spanKey(event));
+    if (outbox.remove((candidate) => sameSpanEvent(candidate, event))) {
+      persistState();
+    }
+    flushOutbox();
+    return;
+  }
+  if (payload["type"] === "span-retry" && payload["collectionId"] === collectionId && isSpanEvent(payload["event"])) {
+    inFlightSpans.delete(spanKey(payload["event"]));
+    scheduleReconnect();
+    return;
+  }
+  if (payload["type"] === "clear-tally") {
+    clearTally(tally);
+    lastTickAt = Date.now();
+    persistState();
+    sendTally();
+    return;
+  }
+  if (payload["type"] === "collection-state") {
+    if (applyCollectionState(payload) === "changed" && collectionEnabled) {
+      requestRules();
+    }
+    applyCapturePause(payload);
+    return;
+  }
+  if (payload["type"] === "rules") {
+    const collectionChanged = applyCollectionState(payload);
+    if (collectionChanged === "blocked") {
+      return;
+    }
+    applyCapturePause(payload);
+    const list = payload["rules"];
+    rules = collectionEnabled && !capturePaused && !captureResumePending && Array.isArray(list) ? list.filter(isRule) : [];
+    reconnectAttempt = 0;
+    if (collectionChanged === "changed") {
+      revalidateAttention();
+    } else {
+      reApplyActiveTab();
+    }
+    flushOutbox();
+    sendTally();
+  }
+}
+
+function drainDeferredHostMessages(): void {
+  while (!eventCommitPending && deferredHostMessages.length > 0) {
+    const payload = deferredHostMessages.shift();
+    if (payload !== undefined) {
+      handleHostMessage(payload);
+    }
+  }
 }
 
 function scheduleReconnect(): void {
@@ -854,6 +895,9 @@ chrome.idle.onStateChanged.addListener((state) => {
 // worker eviction. The wall-clock delta is clamped and gaps trigger
 // re-validation, so laptop sleep cannot credit hours to a stale origin.
 function runTick(): void {
+  if (eventCommitPending) {
+    return;
+  }
   if (storageWriteFailed) {
     if (pendingStorageWrites === 0) void persistState();
     return;
