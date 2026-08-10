@@ -35,11 +35,12 @@ Clock-In keeps the manual timer — a human still decides when work starts — b
   tiny binary that spools them locally. A session's working directory resolves to a project,
   so an hour on the leaderboard can name *what* produced it.
 
-Agent-attributed activity also carries a small dial: how much of that tool's plan is left,
-read from the machine's own credentials and never uploaded. The figure describes the account
-signed in to that provider **right now**, not the one that recorded the row beside it, and the
-dial says so when you open it. Anything unreadable — no quota tooling, signed out, a locked
-state file — reads as an explicit unknown rather than an error.
+The desktop's Today activity card can also show a small dial beside recognized agent CLI
+activity: how much of that tool's plan is left, read from the machine's local quota
+information. The figure describes the account signed in to that provider **right now**, not
+the one that recorded the row beside it, and the dial says so when you open it. Anything
+unreadable, such as missing quota tooling, a signed-out provider, or a locked state file,
+reads as an explicit unknown rather than an error.
 
 Reports then split every total into **corroborated** and **uncorroborated** seconds. Manual
 time still counts — it just reads differently next to verified time. That's the whole posture:
@@ -235,6 +236,8 @@ names, file contents. The monitor takes no input hooks and injects into no proce
   boundary and local-storage behavior.
 - The desktop app never persists the session token: Rust keeps it in the OS credential store,
   and the webview never sees it.
+- Quota readings and any provider identity used to label them remain on the machine. The
+  desktop app does not send them to the API.
 
 Deploying this on employees' machines is a decision with legal weight that varies by
 jurisdiction. Disclosure and consent are the deploying company's obligation, not the
