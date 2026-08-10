@@ -38,6 +38,8 @@ const elapsedSeconds = (startedAt: string, now: number): number =>
 /// prompt latency this buys is fine for a tray utility.
 const MONITOR_POLL_MS = 15_000;
 
+const CALENDAR_TIME_ZONE_POLL_MS = 60_000;
+
 /// Browser cards must flip to "connected" on their own while onboarding is on
 /// screen, so that screen polls faster than the steady-state monitor poll.
 const ONBOARDING_POLL_MS = 2_500;
@@ -239,6 +241,15 @@ export const statsRangeBounds = (range: StatsRange, now = new Date()): { fromAt:
   return { fromAt: start.toISOString(), toExclusiveAt: toExclusive.toISOString() };
 };
 
+export const nextLocalCalendarBoundaryAt = (now = new Date()): number => {
+  const next = new Date(now);
+  next.setHours(0, 0, 0, 0);
+  next.setDate(next.getDate() + 1);
+  return next.getTime();
+};
+
+const localTimeZone = (): string | undefined => Intl.DateTimeFormat().resolvedOptions().timeZone;
+
 type BrowserCardProps = {
   health: BrowserHealth;
   busy: boolean;
@@ -326,6 +337,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [monitorStatus, setMonitorStatus] = useState<MonitorStatus | undefined>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [statsRange, setStatsRange] = useState<StatsRange>("today");
+  const [statsCalendarVersion, setStatsCalendarVersion] = useState(0);
   const [stats, setStats] = useState<MeStats | undefined>();
   const [statsError, setStatsError] = useState<string | undefined>();
   const [confirmedStops, setConfirmedStops] = useState(0);
@@ -568,6 +580,41 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     return () => window.clearInterval(timer);
   }, [state.kind]);
 
+  useEffect(() => {
+    if (state.kind === "booting" || state.kind === "sign-in") return undefined;
+    let timeZone = localTimeZone();
+    let boundaryTimer: number | undefined;
+    const refresh = (): void => setStatsCalendarVersion((version) => version + 1);
+    const scheduleBoundary = (): void => {
+      if (boundaryTimer !== undefined) window.clearTimeout(boundaryTimer);
+      boundaryTimer = window.setTimeout(() => {
+        refresh();
+        scheduleBoundary();
+      }, Math.max(1, nextLocalCalendarBoundaryAt() - Date.now()));
+    };
+    const refreshForTimeZoneChange = (): void => {
+      const nextTimeZone = localTimeZone();
+      if (nextTimeZone !== timeZone) {
+        timeZone = nextTimeZone;
+        refresh();
+        scheduleBoundary();
+      }
+    };
+    const refreshWhenVisible = (): void => {
+      if (document.visibilityState === "visible") refreshForTimeZoneChange();
+    };
+    scheduleBoundary();
+    const timeZoneTimer = window.setInterval(refreshForTimeZoneChange, CALENDAR_TIME_ZONE_POLL_MS);
+    window.addEventListener("focus", refreshForTimeZoneChange);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      if (boundaryTimer !== undefined) window.clearTimeout(boundaryTimer);
+      window.clearInterval(timeZoneTimer);
+      window.removeEventListener("focus", refreshForTimeZoneChange);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [state.kind === "booting" || state.kind === "sign-in"]);
+
   // The team board lives in settings now, so it loads with the overlay. A
   // failed read only blanks the team section, never the timer.
   useEffect(() => {
@@ -617,7 +664,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       },
     );
     return () => { active = false; };
-  }, [bridge, statsRange, confirmedStops, state.kind === "idle", state.kind === "booting" || state.kind === "sign-in"]);
+  }, [bridge, statsRange, statsCalendarVersion, confirmedStops, state.kind === "idle", state.kind === "booting" || state.kind === "sign-in"]);
 
   // Monitor status poll: fires on every state change (so a sign-in, start, or
   // stop refreshes it immediately, and a fresh account epoch is captured after

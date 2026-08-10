@@ -165,8 +165,8 @@ function settleTally(now: number): void {
   lastTickAt = now;
 }
 
-function fenceUnobservedGap(now: number): boolean {
-  if (!tickCredit(now, lastTickAt, TICK_MS).gapExceeded) {
+function fenceUnobservedGap(now: number, deadlineMissed: boolean = false): boolean {
+  if (!deadlineMissed && !tickCredit(now, lastTickAt, TICK_MS).gapExceeded) {
     return false;
   }
   const lastProvableAt = Math.min(lastTickAt, now);
@@ -193,12 +193,18 @@ function prepareMachineTransition(now: number): boolean {
   return true;
 }
 
-function advanceMachine(now: number): void {
+function advanceMachine(now: number): boolean {
+  const deadline = nextAdvanceAt(machine);
+  if (deadline !== null && now - deadline >= machine.gapMergeMs) {
+    fenceUnobservedGap(now, true);
+    return false;
+  }
   if (!prepareMachineTransition(now)) {
-    return;
+    return false;
   }
   emitSpanEvents(advance(machine, now));
   scheduleMachineAdvance();
+  return true;
 }
 
 function feedMachine(input: SpanInput, now: number = Date.now(), settle: boolean = true): void {
@@ -548,14 +554,12 @@ chrome.idle.onStateChanged.addListener((state) => {
 // re-validation, so laptop sleep cannot credit hours to a stale origin.
 function runTick(): void {
   const now = Date.now();
-  if (!prepareMachineTransition(now)) {
+  if (!advanceMachine(now)) {
     return;
   }
   if (rollTallyIntoCurrentWeek(tally, now)) {
     persistState();
   }
-  emitSpanEvents(advance(machine, now));
-  scheduleMachineAdvance();
   if (now - lastTallyFlushAt >= TALLY_FLUSH_MS) {
     lastTallyFlushAt = now;
     persistState();

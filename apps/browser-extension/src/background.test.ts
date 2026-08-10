@@ -168,6 +168,41 @@ describe("background startup", () => {
     expect((starts[1]?.["event"] as Record<string, unknown>)["occurredAt"]).toBe(new Date(start + 135_001).toISOString());
   });
 
+  it("closes at the last tick when a heartbeat deadline arrives late", async () => {
+    vi.useFakeTimers();
+    const start = Date.parse("2026-08-09T12:00:00.000Z");
+    vi.setSystemTime(start);
+    const harness = backgroundHarness([{ id: 1, url: "https://github.com/acme/project", incognito: false }]);
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      rules: [{ id: "rule-1", pattern: "github.com/acme/*" }],
+    } as never);
+    await settle();
+    await vi.advanceTimersByTimeAsync(15_000);
+    harness.alarm.emit({ name: SPAN_ADVANCE_ALARM_NAME } as never);
+    await settle();
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    harness.alarm.emit({ name: TICK_ALARM_NAME } as never);
+    await settle();
+    await vi.advanceTimersByTimeAsync(31_000);
+    harness.alarm.emit({ name: SPAN_ADVANCE_ALARM_NAME } as never);
+    await settle();
+
+    const messages = spanMessages(harness.port);
+    expect(messages).not.toContainEqual(expect.objectContaining({
+      event: expect.objectContaining({ event: "heartbeat" }),
+    }));
+    expect(messages).toContainEqual(expect.objectContaining({
+      event: expect.objectContaining({ event: "ended", occurredAt: new Date(start + 45_000).toISOString() }),
+    }));
+  });
+
   it("starts a fresh machine when collection ownership changes", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-09T12:00:00.000Z"));
@@ -308,23 +343,30 @@ describe("background startup", () => {
     expect(spanMessages(harness.port)).toHaveLength(0);
   });
 
-  it("splits unmatched focus time at the UTC week boundary", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-09T23:59:30.000Z"));
-    const harness = backgroundHarness([{ id: 1, url: "https://a.example.com", incognito: false }]);
+  it("splits unmatched focus time at the local week boundary", async () => {
+    const originalTimezone = process.env.TZ;
+    try {
+      process.env.TZ = "America/Chicago";
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-10T04:59:30.000Z"));
+      const harness = backgroundHarness([{ id: 1, url: "https://a.example.com", incognito: false }]);
 
-    await import("./background.js");
-    await settle();
-    harness.portMessages.emit({ type: "rules", collectionEnabled: true, collectionId: "collection-one", rules: [] } as never);
-    await settle();
-    await vi.advanceTimersByTimeAsync(60_000);
-    harness.alarm.emit({ name: TICK_ALARM_NAME } as never);
-    await settle();
+      await import("./background.js");
+      await settle();
+      harness.portMessages.emit({ type: "rules", collectionEnabled: true, collectionId: "collection-one", rules: [] } as never);
+      await settle();
+      await vi.advanceTimersByTimeAsync(60_000);
+      harness.alarm.emit({ name: TICK_ALARM_NAME } as never);
+      await settle();
 
-    const tally = hostMessages(harness.port).findLast((message) => message["type"] === "tally");
-    expect(tally).toEqual(expect.objectContaining({
-      entries: [{ origin: "example.com", seconds: 30 }],
-    }));
+      const tally = hostMessages(harness.port).findLast((message) => message["type"] === "tally");
+      expect(tally).toEqual(expect.objectContaining({
+        entries: [{ origin: "example.com", seconds: 30 }],
+      }));
+    } finally {
+      if (originalTimezone === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTimezone;
+    }
   });
 
   it("retries span delivery until the host acknowledges its durable append", async () => {

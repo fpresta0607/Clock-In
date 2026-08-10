@@ -3,7 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { App, statsRangeBounds } from "./App.js";
+import { App, nextLocalCalendarBoundaryAt, statsRangeBounds } from "./App.js";
 import type { TimerBridge } from "./bridge.js";
 
 vi.mock("./WebGLShader.js", () => ({ WebGLShader: () => null }));
@@ -1237,12 +1237,39 @@ describe("App", () => {
         fromAt: "2026-03-09T05:00:00.000Z",
         toExclusiveAt: "2026-03-13T05:00:00.000Z",
       });
+      expect(nextLocalCalendarBoundaryAt(new Date("2026-03-08T18:00:00.000Z")))
+        .toBe(Date.parse("2026-03-09T05:00:00.000Z"));
 
       process.env.TZ = "Asia/Tokyo";
       expect(statsRangeBounds("today", new Date("2026-08-09T14:00:00.000Z"))).toEqual({
         fromAt: "2026-08-08T15:00:00.000Z",
         toExclusiveAt: "2026-08-09T15:00:00.000Z",
       });
+    } finally {
+      if (originalTimezone === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTimezone;
+    }
+  });
+
+  it("refreshes stats at local midnight and after a timezone change", async () => {
+    const originalTimezone = process.env.TZ;
+    try {
+      process.env.TZ = "America/Chicago";
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      vi.setSystemTime(new Date("2026-08-10T04:59:59.000Z"));
+      const bridge = bridgeFor();
+      render(<App bridge={bridge} />);
+
+      await screen.findByRole("region", { name: "Today so far" });
+      await waitFor(() => expect(bridge.meStats).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(1_000);
+      await waitFor(() => expect(bridge.meStats).toHaveBeenCalledTimes(2));
+      expect(bridge.meStats).toHaveBeenLastCalledWith("2026-08-10T05:00:00.000Z", "2026-08-11T05:00:00.000Z");
+
+      process.env.TZ = "Asia/Tokyo";
+      await vi.advanceTimersByTimeAsync(60_000);
+      await waitFor(() => expect(bridge.meStats).toHaveBeenCalledTimes(3));
+      expect(bridge.meStats).toHaveBeenLastCalledWith("2026-08-09T15:00:00.000Z", "2026-08-10T15:00:00.000Z");
     } finally {
       if (originalTimezone === undefined) delete process.env.TZ;
       else process.env.TZ = originalTimezone;
