@@ -301,6 +301,16 @@ pub fn admitted_collection_id(dir: &Path) -> Option<String> {
 }
 
 fn admitted_collection_id_at(dir: &Path, now: u64) -> Option<String> {
+    spool::with_lock(&browser_spool_path(dir), || Ok(admitted_collection_id_at_locked(dir, now)))
+        .ok()
+        .flatten()
+}
+
+pub fn admitted_collection_id_locked(dir: &Path) -> Option<String> {
+    admitted_collection_id_at_locked(dir, crate::monitor::unix_now())
+}
+
+fn admitted_collection_id_at_locked(dir: &Path, now: u64) -> Option<String> {
     if collection_is_revoked(dir) {
         return None;
     }
