@@ -364,9 +364,8 @@ fn remove_if_exists(path: &Path) -> io::Result<()> {
 
 fn discard_browser_evidence(dir: &Path) -> io::Result<()> {
     let spool = browser_spool_path(dir);
+    spool::discard_locked(&spool)?;
     for path in [
-        spool.clone(),
-        spool.with_extension("old.jsonl"),
         dir.join("unmatched-tally.json"),
         dir.join("never-suggest.json"),
         tally_clear_path(dir),
@@ -1505,13 +1504,16 @@ mod tests {
         let dir = temp_dir("collection");
         enable_collection(&dir, "user-one").expect("first account enables collection");
         let first_id = collection_id(&dir).expect("collection id exists");
-        std::fs::write(dir.join("browser-spool.jsonl"), "old evidence\n").expect("spool writes");
+        let spool = dir.join("browser-spool.jsonl");
+        spool::append_line(&spool, b"old evidence\n", 1).expect("spool writes");
+        spool::append_line(&spool, b"older evidence\n", 1).expect("spool rotates");
         std::fs::write(dir.join("unmatched-tally.json"), "old tally").expect("tally writes");
 
         enable_collection(&dir, "user-two").expect("second account enables collection");
         let second_id = collection_id(&dir).expect("new collection id exists");
         assert_ne!(first_id, second_id);
         assert!(!dir.join("browser-spool.jsonl").exists());
+        assert!(spool::pending_spool_paths(&spool).expect("spool reads").is_empty());
         assert!(!dir.join("unmatched-tally.json").exists());
 
         disable_collection(&dir).expect("logout disables collection");

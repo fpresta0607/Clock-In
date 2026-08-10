@@ -294,6 +294,71 @@ integration(integrationDescription, () => {
     `;
     expect(administratorAfterBlockedMove).toEqual([{ organization_id: organizationId, role: "admin" }]);
 
+    const soloOrganizationId = randomUUID();
+    const soloUserId = randomUUID();
+    const joiningUserId = randomUUID();
+    const soloInviteCode = "JKLMN-PQRST";
+    await database.client`
+      insert into organizations (id, name, invite_code)
+      values (${soloOrganizationId}, 'Solo legacy workspace', ${soloInviteCode})
+    `;
+    await database.client`
+      insert into users (id, organization_id, email, name)
+      values (${soloUserId}, ${soloOrganizationId}, 'solo-legacy@clock-in.test', 'Solo Legacy')
+    `;
+    await expect(legacyAccounts.claimFirstAdmin({ organizationId: soloOrganizationId, userId: soloUserId }))
+      .resolves.toMatchObject({ kind: "claimed" });
+
+    const mover = createDatabase(databaseUrl, { max: 1 });
+    const joiner = createDatabase(databaseUrl, { max: 1 });
+    try {
+      const moverAuth = await createTestAuth(config, new Date());
+      const joinerAuth = await createTestAuth(config, new Date());
+      const moverApp = createApp({ config, keys: moverAuth.keys, accounts: new DrizzleAccountStore(mover.db) });
+      const joinerApp = createApp({ config, keys: joinerAuth.keys, accounts: new DrizzleAccountStore(joiner.db) });
+      const moverHeaders = {
+        authorization: await moverAuth.bearer(soloUserId, { email: "solo-legacy@clock-in.test", name: "Solo Legacy" }),
+        "content-type": "application/json",
+      };
+      const joinerHeaders = {
+        authorization: await joinerAuth.bearer(joiningUserId, { email: "joining@clock-in.test", name: "Joining Member" }),
+        "content-type": "application/json",
+      };
+      const [move, join] = await Promise.all([
+        moverApp.request("/organization/join", {
+          method: "POST",
+          headers: moverHeaders,
+          body: JSON.stringify({ inviteCode: otherInviteCode }),
+        }),
+        joinerApp.request("/accounts", {
+          method: "POST",
+          headers: joinerHeaders,
+          body: JSON.stringify({ inviteCode: soloInviteCode }),
+        }),
+      ]);
+
+      expect([[200, 404], [200, 409]]).toContainEqual([move.status, join.status].sort());
+      const remaining = await database.client`
+        select id, role from users where organization_id = ${soloOrganizationId} order by id
+      `;
+      if (move.status === 200) {
+        expect(join.status).toBe(404);
+        expect(remaining).toEqual([]);
+      } else {
+        expect(move.status).toBe(409);
+        expect(join.status).toBe(200);
+        expect(remaining).toEqual([
+          { id: joiningUserId, role: "member" },
+          { id: soloUserId, role: "admin" },
+        ].sort((left, right) => left.id.localeCompare(right.id)));
+      }
+    } finally {
+      await Promise.all([
+        mover.client.end({ timeout: 5 }),
+        joiner.client.end({ timeout: 5 }),
+      ]);
+    }
+
     const defaultStart = await administratorApp.request("/sessions", {
       method: "POST",
       headers: administratorHeaders,
