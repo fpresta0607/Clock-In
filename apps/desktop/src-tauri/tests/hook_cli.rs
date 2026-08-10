@@ -2,10 +2,10 @@
 //! canonical spool line, invalid input exits non-zero and writes nothing.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use clock_in_desktop_lib::spool::MAX_SPOOL_RECORD_BYTES;
+use clock_in_desktop_lib::spool::{self, MAX_SPOOL_RECORD_BYTES};
 
 fn temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("clock-in-hook-test-{}-{tag}", std::process::id()));
@@ -14,10 +14,26 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
-fn run_hook(spool: &PathBuf, args: &[&str], stdin: Option<&str>) -> std::process::Output {
+fn active_agent_spool(root: &Path) -> PathBuf {
+    let identity =
+        spool::EvidenceIdentity::new("cli-user", "cli-organization").expect("identity is valid");
+    let dir = root
+        .join("evidence")
+        .join(&identity.account_id)
+        .join(&identity.organization_id);
+    std::fs::create_dir_all(&dir).expect("active evidence namespace creates");
+    std::fs::write(
+        root.join("active-identity.json"),
+        serde_json::to_vec(&identity).expect("active identity serializes"),
+    )
+    .expect("active identity writes");
+    dir.join("agent-spool.jsonl")
+}
+
+fn run_hook(root: &Path, args: &[&str], stdin: Option<&str>) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_clock-in-hook"))
         .args(args)
-        .env("CLOCK_IN_SPOOL", spool)
+        .env("CLOCK_IN_SPOOL", root.join("agent-spool.jsonl"))
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
@@ -40,10 +56,10 @@ fn run_hook(spool: &PathBuf, args: &[&str], stdin: Option<&str>) -> std::process
 #[test]
 fn a_valid_stdin_event_lands_as_one_canonical_line() {
     let dir = temp_dir("stdin");
-    let spool = dir.join("agent-spool.jsonl");
+    let spool = active_agent_spool(&dir);
 
     let output = run_hook(
-        &spool,
+        &dir,
         &[],
         Some(
             r#"{"version":1,"source":"claude-code","event":"session-start","sessionId":"s1","cwd":"C:/dev/Clock-In","occurredAt":"2026-08-07T12:00:00Z"}"#,
@@ -66,10 +82,10 @@ fn a_valid_stdin_event_lands_as_one_canonical_line() {
 #[test]
 fn a_claude_native_stdin_payload_is_translated_and_spooled() {
     let dir = temp_dir("claude-native");
-    let spool = dir.join("agent-spool.jsonl");
+    let spool = active_agent_spool(&dir);
 
     let output = run_hook(
-        &spool,
+        &dir,
         &[],
         Some(
             r#"{"session_id":"s1","transcript_path":"/tmp/t.jsonl","cwd":"C:/dev/Clock-In","hook_event_name":"SessionStart","source":"startup"}"#,
@@ -97,10 +113,10 @@ fn a_claude_native_stdin_payload_is_translated_and_spooled() {
 #[test]
 fn an_untracked_claude_event_exits_zero_and_writes_nothing() {
     let dir = temp_dir("claude-ignored");
-    let spool = dir.join("agent-spool.jsonl");
+    let spool = active_agent_spool(&dir);
 
     let output = run_hook(
-        &spool,
+        &dir,
         &[],
         Some(r#"{"session_id":"s1","cwd":"/x","hook_event_name":"Notification"}"#),
     );
@@ -114,10 +130,10 @@ fn an_untracked_claude_event_exits_zero_and_writes_nothing() {
 #[test]
 fn a_claude_payload_without_a_session_id_exits_non_zero() {
     let dir = temp_dir("claude-invalid");
-    let spool = dir.join("agent-spool.jsonl");
+    let spool = active_agent_spool(&dir);
 
     let output = run_hook(
-        &spool,
+        &dir,
         &[],
         Some(r#"{"cwd":"/x","hook_event_name":"SessionStart"}"#),
     );
@@ -133,9 +149,9 @@ fn a_claude_payload_without_a_session_id_exits_non_zero() {
 #[test]
 fn malformed_stdin_exits_non_zero_and_writes_nothing() {
     let dir = temp_dir("malformed");
-    let spool = dir.join("agent-spool.jsonl");
+    let spool = active_agent_spool(&dir);
 
-    let output = run_hook(&spool, &[], Some(r#"{"version":2,"source":"codex"}"#));
+    let output = run_hook(&dir, &[], Some(r#"{"version":2,"source":"codex"}"#));
 
     assert!(!output.status.success());
     assert!(!spool.exists());
@@ -148,10 +164,10 @@ fn malformed_stdin_exits_non_zero_and_writes_nothing() {
 #[test]
 fn oversized_stdin_exits_non_zero_without_creating_a_spool() {
     let dir = temp_dir("oversized");
-    let spool = dir.join("agent-spool.jsonl");
+    let spool = active_agent_spool(&dir);
     let input = "x".repeat(MAX_SPOOL_RECORD_BYTES + 1);
 
-    let output = run_hook(&spool, &[], Some(&input));
+    let output = run_hook(&dir, &[], Some(&input));
 
     assert!(!output.status.success());
     assert!(!spool.exists());
@@ -162,10 +178,10 @@ fn oversized_stdin_exits_non_zero_without_creating_a_spool() {
 #[test]
 fn argv_flags_are_a_fallback_for_clis_that_cannot_pipe() {
     let dir = temp_dir("argv");
-    let spool = dir.join("agent-spool.jsonl");
+    let spool = active_agent_spool(&dir);
 
     let output = run_hook(
-        &spool,
+        &dir,
         &[
             "--source",
             "kimi-code",
@@ -197,10 +213,10 @@ fn argv_flags_are_a_fallback_for_clis_that_cannot_pipe() {
 #[test]
 fn a_missing_flag_value_exits_non_zero_and_writes_nothing() {
     let dir = temp_dir("argv-missing");
-    let spool = dir.join("agent-spool.jsonl");
+    let spool = active_agent_spool(&dir);
 
     // --session-id without the rest of the identity flags is incomplete.
-    let output = run_hook(&spool, &["--source", "codex", "--session-id", "s1"], None);
+    let output = run_hook(&dir, &["--source", "codex", "--session-id", "s1"], None);
 
     assert!(!output.status.success());
     assert!(!spool.exists());
@@ -211,10 +227,10 @@ fn a_missing_flag_value_exits_non_zero_and_writes_nothing() {
 #[test]
 fn cursor_flags_with_a_native_payload_spool_an_event() {
     let dir = temp_dir("cursor-native");
-    let spool = dir.join("agent-spool.jsonl");
+    let spool = active_agent_spool(&dir);
 
     let output = run_hook(
-        &spool,
+        &dir,
         &["--source", "cursor", "--event", "session-start"],
         Some(r#"{"conversation_id":"c1","workspace_roots":["C:/dev/Clock-In"]}"#),
     );
@@ -240,10 +256,10 @@ fn cursor_flags_with_a_native_payload_spool_an_event() {
 #[test]
 fn a_cursor_payload_without_a_session_id_exits_zero_and_writes_nothing() {
     let dir = temp_dir("cursor-ignored");
-    let spool = dir.join("agent-spool.jsonl");
+    let spool = active_agent_spool(&dir);
 
     let output = run_hook(
-        &spool,
+        &dir,
         &["--source", "cursor", "--event", "session-end"],
         Some(r#"{"cwd":"/x"}"#),
     );

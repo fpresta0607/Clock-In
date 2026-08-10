@@ -68,6 +68,7 @@ jobs:
             dpkg-deb -x "$package" "$deps/root"
           done < <(find "$deps/cache/archives" -name '*.deb' -print0)
           echo "PKG_CONFIG_PATH=$deps/root/usr/lib/x86_64-linux-gnu/pkgconfig:$deps/root/usr/share/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_SYSROOT_DIR=$deps/root" >> "$GITHUB_ENV"
           echo "LIBRARY_PATH=$deps/root/usr/lib/x86_64-linux-gnu" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$deps/root/usr/lib/x86_64-linux-gnu" >> "$GITHUB_ENV"
           echo "PATH=$deps/root/usr/bin:$PATH" >> "$GITHUB_ENV"

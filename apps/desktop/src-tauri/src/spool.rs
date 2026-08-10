@@ -2388,6 +2388,8 @@ mod tests {
                 .join(format!("account-{index}"))
                 .join(format!("organization-{index}"))
                 .join("agent-spool.jsonl");
+            std::fs::create_dir_all(pending.parent().expect("pending namespace exists"))
+                .expect("pending namespace creates");
             append(&pending, &event(&format!("pending-{index}"))).expect("pending evidence writes");
         }
         let source = EvidenceIdentity::new("account-source", "organization-source")
@@ -2595,6 +2597,8 @@ mod tests {
                 .join(format!("account-{index}"))
                 .join(format!("organization-{index}"))
                 .join("agent-spool.jsonl");
+            std::fs::create_dir_all(path.parent().expect("pending namespace exists"))
+                .expect("pending namespace creates");
             append(&path, &event(&format!("pending-{index}"))).expect("pending evidence writes");
         }
 

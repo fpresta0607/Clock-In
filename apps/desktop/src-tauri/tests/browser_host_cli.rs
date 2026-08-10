@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-use clock_in_desktop_lib::browser;
+use clock_in_desktop_lib::{browser, spool};
 
 fn temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -43,9 +43,31 @@ fn parse_frames(bytes: &[u8]) -> Vec<serde_json::Value> {
     values
 }
 
-fn enable_collection(dir: &Path) -> String {
-    browser::enable_collection(dir, "cli-user").expect("collection enables");
-    browser::collection_id(dir).expect("collection id exists")
+fn evidence_identity() -> spool::EvidenceIdentity {
+    spool::EvidenceIdentity::new("cli-user", "cli-organization").expect("identity is valid")
+}
+
+fn active_browser_dir(root: &Path) -> PathBuf {
+    let identity = evidence_identity();
+    let dir = root
+        .join("evidence")
+        .join(&identity.account_id)
+        .join(&identity.organization_id);
+    std::fs::create_dir_all(&dir).expect("active evidence namespace creates");
+    std::fs::write(
+        root.join("active-identity.json"),
+        serde_json::to_vec(&identity).expect("active identity serializes"),
+    )
+    .expect("active identity writes");
+    dir
+}
+
+fn enable_collection(root: &Path) -> (PathBuf, String) {
+    let dir = active_browser_dir(root);
+    browser::enable_collection_for_identity(&dir, &evidence_identity())
+        .expect("collection enables");
+    let collection_id = browser::collection_id(&dir).expect("collection id exists");
+    (dir, collection_id)
 }
 
 struct Host {
@@ -86,8 +108,9 @@ impl Host {
 #[test]
 fn host_without_a_durable_authorization_fails_closed_to_empty_rules() {
     let dir = temp_dir("get-rules");
+    let active_dir = active_browser_dir(&dir);
     std::fs::write(
-        dir.join("browser-rules.json"),
+        active_dir.join("browser-rules.json"),
         r#"{"rules":[{"id":"r1","pattern":"github.com/acme/*"}]}"#,
     )
     .expect("rules file writes");
@@ -112,9 +135,10 @@ fn host_without_a_durable_authorization_fails_closed_to_empty_rules() {
 fn get_rules_fails_closed_when_the_file_is_missing_or_corrupt() {
     for (tag, contents) in [("missing", None), ("corrupt", Some("{not json"))] {
         let dir = temp_dir(tag);
-        enable_collection(&dir);
+        let (active_dir, _) = enable_collection(&dir);
         if let Some(contents) = contents {
-            std::fs::write(dir.join("browser-rules.json"), contents).expect("rules file writes");
+            std::fs::write(active_dir.join("browser-rules.json"), contents)
+                .expect("rules file writes");
         }
 
         let mut host = Host::spawn(&dir);
@@ -136,7 +160,7 @@ fn get_rules_fails_closed_when_the_file_is_missing_or_corrupt() {
 #[test]
 fn an_authorized_host_acknowledges_span_events() {
     let dir = temp_dir("span-event");
-    let collection_id = enable_collection(&dir);
+    let (active_dir, collection_id) = enable_collection(&dir);
 
     let mut host = Host::spawn(&dir);
     host.send(&[framed(
@@ -153,7 +177,7 @@ fn an_authorized_host_acknowledges_span_events() {
     assert_eq!(replies[0]["collectionEnabled"], true);
     assert_eq!(replies[0]["event"]["externalSessionId"], "s1");
     let spool: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(dir.join("browser-spool.jsonl")).expect("span is spooled"),
+        &std::fs::read_to_string(active_dir.join("browser-spool.jsonl")).expect("span is spooled"),
     )
     .expect("spooled event parses");
     assert_eq!(spool["externalSessionId"], "s1");
@@ -164,7 +188,7 @@ fn an_authorized_host_acknowledges_span_events() {
 #[test]
 fn an_authorized_host_stores_tallies() {
     let dir = temp_dir("tally");
-    let collection_id = enable_collection(&dir);
+    let (active_dir, collection_id) = enable_collection(&dir);
 
     let mut host = Host::spawn(&dir);
     host.send(&[framed(
@@ -180,7 +204,7 @@ fn an_authorized_host_stores_tallies() {
     assert_eq!(replies[0]["type"], "collection-state");
     assert_eq!(replies[0]["collectionEnabled"], true);
     let tally: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(dir.join("unmatched-tally.json")).expect("tally is stored"),
+        &std::fs::read(active_dir.join("unmatched-tally.json")).expect("tally is stored"),
     )
     .expect("tally parses");
     assert_eq!(tally["entries"][0]["origin"], "quickbooks.com");
@@ -191,8 +215,8 @@ fn an_authorized_host_stores_tallies() {
 #[test]
 fn signed_out_host_rejects_browser_evidence() {
     let dir = temp_dir("signed-out");
-    let collection_id = enable_collection(&dir);
-    browser::revoke_collection(&dir).expect("collection revokes");
+    let (active_dir, collection_id) = enable_collection(&dir);
+    browser::revoke_collection(&active_dir).expect("collection revokes");
 
     let mut host = Host::spawn(&dir);
     host.send(&[
@@ -211,8 +235,8 @@ fn signed_out_host_rejects_browser_evidence() {
         assert_eq!(reply["type"], "collection-state");
         assert_eq!(reply["collectionEnabled"], false);
     }
-    assert!(!dir.join("browser-spool.jsonl").exists());
-    assert!(!dir.join("unmatched-tally.json").exists());
+    assert!(!active_dir.join("browser-spool.jsonl").exists());
+    assert!(!active_dir.join("unmatched-tally.json").exists());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -220,6 +244,7 @@ fn signed_out_host_rejects_browser_evidence() {
 #[test]
 fn unknown_types_and_bad_frames_never_kill_the_port() {
     let dir = temp_dir("resilient");
+    let active_dir = active_browser_dir(&dir);
     let oversize = vec![b'x'; 64 * 1024 + 1];
 
     let mut host = Host::spawn(&dir);
@@ -235,7 +260,7 @@ fn unknown_types_and_bad_frames_never_kill_the_port() {
     // Only the get-rules behind the bad frames gets an answer.
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0]["type"], "rules");
-    assert!(!dir.join("browser-spool.jsonl").exists());
+    assert!(!active_dir.join("browser-spool.jsonl").exists());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -243,7 +268,7 @@ fn unknown_types_and_bad_frames_never_kill_the_port() {
 #[test]
 fn concurrent_authorized_hosts_append_every_span() {
     let dir = temp_dir("concurrent");
-    let collection_id = enable_collection(&dir);
+    let (active_dir, collection_id) = enable_collection(&dir);
 
     let handles: Vec<_> = (0..3)
         .map(|host_index| {
@@ -272,7 +297,7 @@ fn concurrent_authorized_hosts_append_every_span() {
     }
 
     let lines =
-        std::fs::read_to_string(dir.join("browser-spool.jsonl")).expect("spans are spooled");
+        std::fs::read_to_string(active_dir.join("browser-spool.jsonl")).expect("spans are spooled");
     assert_eq!(lines.lines().count(), 15);
 
     let _ = std::fs::remove_dir_all(&dir);
