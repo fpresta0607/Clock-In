@@ -1454,6 +1454,11 @@ impl Monitor {
         lock(&self.paths).browser_dir.clone()
     }
 
+    pub fn trusted_device_id(&self) -> Option<String> {
+        let device_id = lock(&self.shared).settings.device_id.clone();
+        uuid::Uuid::parse_str(&device_id).ok().map(|_| device_id)
+    }
+
     /// Asks the upload task to run now instead of at the next 5-minute tick
     /// (timer stop, an auto-stop enqueue). Coalesces with a run in flight.
     pub fn request_upload(&self) {

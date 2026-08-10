@@ -14,6 +14,7 @@ const reviewThresholdSeconds = 12 * 60 * 60;
 export interface StartSessionInput {
   clientId: string;
   projectId?: string;
+  deviceId?: string;
   description?: string;
   startedAt?: Date;
 }
@@ -26,6 +27,7 @@ export interface StopSessionInput {
 interface NormalizedStartInput {
   clientId: string;
   projectId: string;
+  deviceId?: string;
   description: string | null;
   startedAt: Date;
   requestedStartedAt?: Date;
@@ -69,6 +71,7 @@ export function createSessionService(dependencies: SessionServiceDependencies): 
       const normalized: NormalizedStartInput = {
         clientId: input.clientId,
         projectId: input.projectId ?? preferred!.id,
+        ...(input.deviceId === undefined ? {} : { deviceId: input.deviceId }),
         description: input.description ?? null,
         startedAt,
         ...(input.startedAt === undefined ? {} : { requestedStartedAt: input.startedAt }),
@@ -104,6 +107,7 @@ export function createSessionService(dependencies: SessionServiceDependencies): 
           userId: subject.userId,
           clientId: normalized.clientId,
           projectId: normalized.projectId,
+          ...(normalized.deviceId === undefined ? {} : { deviceId: normalized.deviceId }),
           description: normalized.description,
           startedAt: normalized.startedAt,
         });

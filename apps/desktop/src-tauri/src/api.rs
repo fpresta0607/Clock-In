@@ -724,16 +724,20 @@ impl ApiClient {
         access_token: &str,
         intent: &StartIntent,
     ) -> ApiResult<RunningTimer> {
+        let mut request = serde_json::json!({
+            "clientId": intent.client_id,
+            "projectId": intent.project_id,
+            "description": intent.description,
+            "startedAt": intent.started_at,
+        });
+        if let Some(device_id) = &intent.device_id {
+            request["deviceId"] = serde_json::Value::String(device_id.clone());
+        }
         let response = self
             .http
             .post(format!("{}/sessions", self.api_base_url))
             .bearer_auth(access_token)
-            .json(&serde_json::json!({
-                "clientId": intent.client_id,
-                "projectId": intent.project_id,
-                "description": intent.description,
-                "startedAt": intent.started_at,
-            }))
+            .json(&request)
             .send()
             .await
             .map_err(|error| classify_transport(&error))?;

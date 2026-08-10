@@ -1,0 +1,1 @@
+ALTER TABLE "time_sessions" ADD COLUMN "device_id" uuid;

@@ -162,6 +162,7 @@ export const timeSessions = pgTable(
     userId: uuid("user_id").notNull(),
     projectId: uuid("project_id").notNull(),
     clientId: uuid("client_id").notNull(),
+    deviceId: uuid("device_id"),
     description: text("description"),
     status: sessionStatus("status").default("running").notNull(),
     startedAt: timestamp("started_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),

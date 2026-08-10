@@ -20,6 +20,7 @@ const ids = {
   otherProject: "b1c7e513-b094-4d4c-ae55-21790ae019a4",
   client: "c1c7e513-b094-4d4c-ae55-21790ae019a4",
   session: "d1c7e513-b094-4d4c-ae55-21790ae019a4",
+  device: "f1c7e513-b094-4d4c-ae55-21790ae019a4",
 };
 const subject: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.user };
 const now = new Date("2026-08-06T14:00:00.000Z");
@@ -80,6 +81,7 @@ class MemorySessions implements SessionRepository {
   public readonly records: SessionRecord[];
   public nextCreateError: SessionRepositoryError | null = null;
   public raceRecord: SessionRecord | null = null;
+  public createdInput: CreateRunningSession | null = null;
 
   public constructor(records: SessionRecord[] = []) {
     this.records = records;
@@ -98,6 +100,7 @@ class MemorySessions implements SessionRepository {
   }
 
   public async createRunning(input: CreateRunningSession): Promise<SessionRecord> {
+    this.createdInput = input;
     if (this.nextCreateError !== null) {
       if (this.raceRecord !== null) this.records.push(this.raceRecord);
       throw this.nextCreateError;
@@ -137,6 +140,14 @@ describe("session service", () => {
 
     expect(sessions.records[0]).toMatchObject({ projectId: ids.project, organizationId: ids.organization, userId: ids.user });
     expect(projects.selectedFor(ids.user)).toBe(ids.project);
+  });
+
+  it("persists the trusted recording device with a timer start", async () => {
+    const { service, sessions } = createService();
+
+    await service.start(subject, { clientId: ids.client, projectId: ids.project, deviceId: ids.device });
+
+    expect(sessions.createdInput).toMatchObject({ deviceId: ids.device });
   });
 
   it("returns the persisted session for a compatible idempotent start before authorization checks", async () => {
