@@ -151,6 +151,54 @@ describe("background startup", () => {
     expect(spanMessages(harness.port)).toEqual([]);
   });
 
+  it("discards malformed restored queues without blocking a valid workspace", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-09T12:00:00.000Z"));
+    const invalidQueues: Array<[string, unknown]> = Array.from(
+      { length: 8 },
+      (_, index) => [
+        `account-${index}:organization-${index}`,
+        [{ event: "started", externalSessionId: "", ruleId: "rule-1", occurredAt: "not-a-timestamp" }],
+      ],
+    );
+    invalidQueues.push([
+      "not an identity namespace",
+      [{
+        event: "started",
+        externalSessionId: "stranded-span",
+        ruleId: "rule-1",
+        occurredAt: "2026-08-09T12:00:00.000Z",
+      }],
+    ]);
+    const storedOutboxes = Object.fromEntries(invalidQueues);
+    const harness = backgroundHarness(
+      [{ id: 1, url: "https://github.com/acme/project", incognito: false }],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { spanOutboxesByNamespace: storedOutboxes },
+    );
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      rules: [{ id: "rule-1", pattern: "github.com/acme/*" }],
+    } as never);
+    await settle();
+    await vi.advanceTimersByTimeAsync(15_000);
+    harness.alarm.emit({ name: SPAN_ADVANCE_ALARM_NAME } as never);
+    await settle();
+
+    expect(spanMessages(harness.port)).toContainEqual(expect.objectContaining({
+      collectionId: "collection-one",
+      event: expect.objectContaining({ event: "started" }),
+    }));
+  });
+
   it("does not let an alarm overwrite restored state before initialization completes", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-09T12:00:00.000Z"));

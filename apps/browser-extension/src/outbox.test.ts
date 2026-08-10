@@ -68,6 +68,17 @@ describe("Outbox", () => {
     expect(outboxes.size).toBe(MAX_RETAINED_OUTBOX_NAMESPACES);
     expect(canActivateOutboxNamespace(outboxes, "pending-3", "pending-0")).toBe(true);
   });
+
+  it("makes room with drained inactive queues before activating a new namespace", () => {
+    const outboxes = new Map<string, Outbox<number>>();
+    for (let index = 0; index < MAX_RETAINED_OUTBOX_NAMESPACES; index += 1) {
+      outboxes.set(`drained-${index}`, new Outbox<number>());
+    }
+
+    expect(canActivateOutboxNamespace(outboxes, "new-workspace", "drained-0")).toBe(true);
+    expect(outboxes.size).toBe(MAX_RETAINED_OUTBOX_NAMESPACES - 1);
+    expect(outboxes.has("drained-0")).toBe(true);
+  });
 });
 
 describe("reconnectBackoffMs", () => {

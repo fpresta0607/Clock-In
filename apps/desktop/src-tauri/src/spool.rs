@@ -774,6 +774,21 @@ fn numbered_generation_paths_locked(path: &Path) -> SpoolResult<Vec<PathBuf>> {
     Ok(generations.into_iter().map(|(_, path)| path).collect())
 }
 
+fn recover_numbered_generation_rewrite_files_locked(path: &Path) -> SpoolResult<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut generations = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(parent)? {
+        let candidate = entry?.path();
+        if let Some((_, generation)) = numbered_generation_path(path, &candidate) {
+            generations.insert(generation);
+        }
+    }
+    for generation in generations {
+        recover_rewrite_files_locked(&generation)?;
+    }
+    Ok(())
+}
+
 fn next_generation_path_locked(path: &Path) -> SpoolResult<PathBuf> {
     let highest_existing = numbered_generation_paths_locked(path)?
         .iter()
@@ -818,6 +833,16 @@ fn generation_number(path: &Path, candidate: &Path) -> Option<u64> {
     name.strip_prefix(&format!("{stem}.generation-"))?
         .strip_suffix(".jsonl")?
         .parse()
+}
+
+fn numbered_generation_path(path: &Path, candidate: &Path) -> Option<(u64, PathBuf)> {
+    let name = candidate.file_name()?.to_str()?;
+    let final_name = name
+        .strip_suffix(".tmp")
+        .or_else(|| name.strip_suffix(".bak"))
+        .unwrap_or(name);
+    let generation = candidate.with_file_name(final_name);
+    Some((generation_number(path, &generation)?, generation))
 }
 
 fn has_pending_bytes(path: &Path) -> SpoolResult<bool> {
@@ -893,6 +918,7 @@ pub fn with_lock<T>(path: &Path, action: impl FnOnce() -> SpoolResult<T>) -> Spo
     }
     let _guard = acquire_lock(path)?;
     recover_rewrite_files_locked(path)?;
+    recover_numbered_generation_rewrite_files_locked(path)?;
     action()
 }
 
@@ -1368,6 +1394,39 @@ mod tests {
 
         assert_eq!(pending.events, vec![event("recovered")]);
         assert!(!sibling(&path, ".tmp").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn numbered_generation_rewrite_recovers_before_ordered_drain() {
+        let dir = temp_dir("generation-rewrite-recovery");
+        let path = dir.join("agent-spool.jsonl");
+        let generation = path.with_extension("generation-00000000000000000001.jsonl");
+        let mut remaining = serde_json::to_vec(&event("remaining")).expect("event serializes");
+        remaining.push(b'\n');
+        let mut live = serde_json::to_vec(&event("live")).expect("event serializes");
+        live.push(b'\n');
+        std::fs::write(sibling(&generation, ".tmp"), remaining).expect("temp writes");
+        std::fs::write(sibling(&generation, ".bak"), b"acknowledged\n").expect("backup writes");
+        std::fs::write(&path, live).expect("live writes");
+
+        let pending = pending_spool_paths(&path).expect("pending paths recover generation");
+        let sessions = pending
+            .iter()
+            .flat_map(|candidate| {
+                read_pending(candidate)
+                    .expect("pending generation reads")
+                    .events
+            })
+            .map(|event| event.external_session_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(pending, vec![generation.clone(), path.clone()]);
+        assert_eq!(sessions, vec!["remaining", "live"]);
+        assert!(generation.exists());
+        assert!(!sibling(&generation, ".tmp").exists());
+        assert!(!sibling(&generation, ".bak").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

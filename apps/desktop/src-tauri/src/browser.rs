@@ -248,7 +248,9 @@ const COLLECTION_AUTHORIZATION_FILE: &str = "browser-collection-authorization.js
 const TALLY_CLEAR_FILE: &str = "browser-tally-clear.json";
 const CAPTURE_PAUSED_FILE: &str = "browser-capture-paused.json";
 const CAPTURE_RESUME_FILE: &str = "browser-capture-resume";
+const EXTENSION_NAMESPACE_CAPACITY_FILE: &str = "browser-extension-namespace-capacity.json";
 const COLLECTION_AUTHORIZATION_SECONDS: u64 = 10 * 60;
+const MAX_RETAINED_EXTENSION_NAMESPACES: usize = 8;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -265,6 +267,20 @@ struct BrowserCollection {
 struct BrowserCollectionAuthorization {
     admission_id: String,
     expires_at: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionNamespaceCapacity {
+    pub namespace: String,
+    pub pending: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtensionNamespaceCapacitySnapshot {
+    collection_id: String,
+    namespaces: Vec<ExtensionNamespaceCapacity>,
 }
 
 fn collection_path(dir: &Path) -> PathBuf {
@@ -291,6 +307,10 @@ fn capture_resume_path(dir: &Path) -> PathBuf {
     dir.join(CAPTURE_RESUME_FILE)
 }
 
+fn extension_namespace_capacity_path(dir: &Path) -> PathBuf {
+    dir.join(EXTENSION_NAMESPACE_CAPACITY_FILE)
+}
+
 fn browser_spool_path(dir: &Path) -> PathBuf {
     dir.join("browser-spool.jsonl")
 }
@@ -308,6 +328,115 @@ fn read_collection(dir: &Path) -> Option<BrowserCollection> {
         && !collection.collection_id.trim().is_empty()
         && !collection.admission_id.trim().is_empty())
     .then_some(collection)
+}
+
+fn collection_namespace(collection: &BrowserCollection) -> String {
+    format!("{}:{}", collection.account_id, collection.organization_id)
+}
+
+fn extension_namespace_is_valid(namespace: &str) -> bool {
+    let Some((account_id, organization_id)) = namespace.split_once(':') else {
+        return false;
+    };
+    !organization_id.contains(':')
+        && spool::EvidenceIdentity::new(account_id, organization_id).is_some()
+}
+
+fn capacity_snapshot_is_valid(
+    snapshot: &ExtensionNamespaceCapacitySnapshot,
+    collection: &BrowserCollection,
+) -> bool {
+    if snapshot.collection_id != collection.collection_id || snapshot.namespaces.is_empty() {
+        return false;
+    }
+    let mut namespaces = std::collections::BTreeSet::new();
+    snapshot.namespaces.iter().all(|entry| {
+        extension_namespace_is_valid(&entry.namespace) && namespaces.insert(entry.namespace.clone())
+    }) && namespaces.contains(&collection_namespace(collection))
+}
+
+fn extension_capacity_error() -> BridgeError {
+    BridgeError::new(
+        crate::api::ErrorKind::Conflict,
+        "We saved unsynced work for another workspace. Sign back into that workspace and let Clock-In finish syncing before adding a new account.",
+    )
+}
+
+fn extension_capacity_tracking_is_active(dir: &Path) -> bool {
+    Browser::ALL
+        .into_iter()
+        .any(|browser| handshake_path(dir, browser).exists())
+}
+
+pub fn record_extension_namespace_capacity(
+    dir: &Path,
+    collection_id: &str,
+    namespaces: Vec<ExtensionNamespaceCapacity>,
+) -> io::Result<()> {
+    spool::with_lock(&browser_spool_path(dir), || {
+        if admitted_collection_id_locked(dir).as_deref() != Some(collection_id) {
+            return Ok(());
+        }
+        let Some(collection) = read_collection(dir) else {
+            return Ok(());
+        };
+        let snapshot = ExtensionNamespaceCapacitySnapshot {
+            collection_id: collection_id.to_string(),
+            namespaces,
+        };
+        if !capacity_snapshot_is_valid(&snapshot, &collection) {
+            return Err(io::Error::other("browser extension namespace capacity is invalid"));
+        }
+        let bytes = serde_json::to_vec(&snapshot).map_err(io::Error::other)?;
+        write_if_changed_locked(&extension_namespace_capacity_path(dir), &bytes)
+    })
+}
+
+pub fn ensure_extension_namespace_capacity(
+    dir: &Path,
+    target: &spool::EvidenceIdentity,
+) -> ApiResult<()> {
+    spool::with_lock(&browser_spool_path(dir), || {
+        let Some(collection) = read_collection(dir) else {
+            return Ok(());
+        };
+        let capacity = extension_namespace_capacity_path(dir);
+        let snapshot = match std::fs::read(capacity) {
+            Ok(bytes) => serde_json::from_slice::<ExtensionNamespaceCapacitySnapshot>(&bytes)
+                .map_err(|_| io::Error::other("browser extension namespace capacity is unavailable"))?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if extension_capacity_tracking_is_active(dir) {
+                    return Err(io::Error::other("browser extension namespace capacity is unavailable"));
+                }
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        if !capacity_snapshot_is_valid(&snapshot, &collection) {
+            return Err(io::Error::other("browser extension namespace capacity is unavailable"));
+        }
+        let target_namespace = format!("{}:{}", target.account_id, target.organization_id);
+        if snapshot
+            .namespaces
+            .iter()
+            .any(|entry| entry.namespace == target_namespace)
+        {
+            return Ok(());
+        }
+        let active_namespace = collection_namespace(&collection);
+        let mut namespaces = snapshot.namespaces;
+        while namespaces.len() >= MAX_RETAINED_EXTENSION_NAMESPACES {
+            let Some(index) = namespaces
+                .iter()
+                .position(|entry| entry.namespace != active_namespace && entry.pending == 0)
+            else {
+                return Err(io::Error::other("browser extension namespace capacity is full"));
+            };
+            namespaces.remove(index);
+        }
+        Ok(())
+    })
+    .map_err(|_| extension_capacity_error())
 }
 
 pub fn collection_id(dir: &Path) -> Option<String> {
@@ -1625,6 +1754,56 @@ mod tests {
 
         deactivate_collection(&dir).expect("logout deactivates collection");
         assert!(collection_id(&dir).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extension_capacity_blocks_a_new_namespace_before_collection_replacement() {
+        let dir = temp_dir("extension-capacity");
+        let identity = spool::EvidenceIdentity::new("account-0", "organization-0")
+            .expect("identity is valid");
+        enable_collection_for_identity(&dir, &identity).expect("collection enables");
+        let initial_collection_id = collection_id(&dir).expect("collection id exists");
+        let mut namespaces = vec![ExtensionNamespaceCapacity {
+            namespace: "account-0:organization-0".to_string(),
+            pending: 1,
+        }];
+        namespaces.extend((1..MAX_RETAINED_EXTENSION_NAMESPACES).map(|index| {
+            ExtensionNamespaceCapacity {
+                namespace: format!("account-{index}:organization-{index}"),
+                pending: 1,
+            }
+        }));
+        record_extension_namespace_capacity(&dir, &initial_collection_id, namespaces)
+            .expect("capacity records");
+        let target = spool::EvidenceIdentity::new("account-next", "organization-next")
+            .expect("target identity is valid");
+
+        let error = ensure_extension_namespace_capacity(&dir, &target)
+            .expect_err("new namespace is blocked before a move");
+
+        assert_eq!(error.kind, crate::api::ErrorKind::Conflict);
+        assert_eq!(collection_id(&dir), Some(initial_collection_id));
+        assert!(ensure_extension_namespace_capacity(&dir, &identity).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn connected_extension_requires_a_capacity_snapshot_before_a_move() {
+        let dir = temp_dir("extension-capacity-snapshot");
+        let identity = spool::EvidenceIdentity::new("account-one", "organization-one")
+            .expect("identity is valid");
+        enable_collection_for_identity(&dir, &identity).expect("collection enables");
+        record_handshake_for(&dir, Browser::Chrome);
+        let target = spool::EvidenceIdentity::new("account-next", "organization-next")
+            .expect("target identity is valid");
+
+        let error = ensure_extension_namespace_capacity(&dir, &target)
+            .expect_err("connected extension must report capacity");
+
+        assert_eq!(error.kind, crate::api::ErrorKind::Conflict);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
