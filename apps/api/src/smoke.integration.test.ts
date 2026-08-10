@@ -192,17 +192,27 @@ integration(integrationDescription, () => {
       "content-type": "application/json",
     };
 
-    const responses = await Promise.all([
+    const firstResponses = await Promise.all([
       legacyApp.request("/projects", { headers: firstHeaders }),
       legacyApp.request("/projects", { headers: firstHeaders }),
-      secondApp.request("/projects", { headers: secondHeaders }),
     ]);
-    const lists = await Promise.all(responses.map((response) => response.json()));
-    const defaultIds = lists.map((list) => list.selectedProjectId);
+    const firstLists = await Promise.all(firstResponses.map((response) => response.json()));
+    const defaultIds = firstLists.map((list) => list.selectedProjectId);
     expect(new Set(defaultIds).size).toBe(1);
-    expect(lists.every((list) => list.projects.length === 1 && list.projects[0].name === "General Work" && list.projects[0].isDefault)).toBe(true);
+    expect(firstLists.every((list) => list.projects.length === 1 && list.projects[0].name === "General Work" && list.projects[0].isDefault)).toBe(true);
 
     const defaultProjectId = defaultIds[0] as string;
+    const defaultMemberships = await database.client`
+      select user_id from project_memberships
+      where organization_id = ${organizationId} and project_id = ${defaultProjectId}
+    `;
+    expect(defaultMemberships.map((membership) => membership.user_id).sort()).toEqual(
+      [firstUserId, secondUserId].sort(),
+    );
+    const secondList = await secondApp.request("/projects", { headers: secondHeaders });
+    const secondProjectsBeforeReplacement = await secondList.json();
+    expect(secondProjectsBeforeReplacement.selectedProjectId).toBe(defaultProjectId);
+
     const defaultStart = await legacyApp.request("/sessions", {
       method: "POST",
       headers: firstHeaders,
@@ -210,6 +220,15 @@ integration(integrationDescription, () => {
     });
     expect(defaultStart.status).toBe(200);
     expect((await defaultStart.json()).session.projectId).toBe(defaultProjectId);
+
+    await database.client`update users set role = 'admin' where id = ${firstUserId}`;
+    const renamed = await legacyApp.request(`/projects/${defaultProjectId}`, {
+      method: "PATCH",
+      headers: firstHeaders,
+      body: JSON.stringify({ name: "Shared Work" }),
+    });
+    expect(renamed.status).toBe(200);
+    expect(await renamed.json()).toMatchObject({ id: defaultProjectId, name: "Shared Work", isDefault: true });
 
     const privateCreate = await legacyApp.request("/projects", {
       method: "POST",
@@ -219,8 +238,19 @@ integration(integrationDescription, () => {
     const privateProject = await privateCreate.json();
     const secondBeforeReplacement = await secondApp.request("/projects", { headers: secondHeaders });
     expect((await secondBeforeReplacement.json()).projects.map((project: { id: string }) => project.id)).not.toContain(privateProject.id);
+    const restrictedCreate = await secondApp.request("/projects", {
+      method: "POST",
+      headers: secondHeaders,
+      body: JSON.stringify({ name: "Teammate-only work" }),
+    });
+    const restrictedProject = await restrictedCreate.json();
 
-    await database.client`update users set role = 'admin' where id = ${firstUserId}`;
+    const inaccessibleReplacement = await legacyApp.request(`/projects/${defaultProjectId}`, {
+      method: "PATCH",
+      headers: firstHeaders,
+      body: JSON.stringify({ isArchived: true, replacementProjectId: restrictedProject.id }),
+    });
+    expect(inaccessibleReplacement.status).toBe(400);
     const replacement = await legacyApp.request(`/projects/${defaultProjectId}`, {
       method: "PATCH",
       headers: firstHeaders,

@@ -72,7 +72,9 @@ async fn upload_once(
     recovery: &Arc<tokio::sync::Mutex<RecoveryState>>,
 ) {
     let Some(session) = crate::read_session_token() else {
-        let _ = crate::browser::revoke_collection(browser_dir);
+        if let Err(error) = crate::browser::revoke_collection(browser_dir) {
+            eprintln!("clock-in: could not revoke browser attribution: {}", error.message);
+        }
         let _ = crate::browser::discard_collection(browser_dir);
         return;
     };
@@ -300,6 +302,8 @@ pub fn track_browser_events(
         }
     }
 
+    cap_browser_spans(tracking);
+
     // The suggestion question: the newest open mapped span old enough to not
     // be a glance, based only on lifecycle evidence observed from the browser.
     if timer_running {
@@ -330,8 +334,9 @@ pub fn track_browser_events(
         });
     }
 
-    // The map is in-memory and spans are short-lived, but cap it anyway so a
-    // pathological spool cannot grow it without bound.
+}
+
+fn cap_browser_spans(tracking: &mut BrowserTracking) {
     while tracking.spans.len() > 64 {
         let Some(oldest) = tracking
             .spans
@@ -904,6 +909,27 @@ mod tests {
         );
         assert!(suggestion.is_none(), "a twenty-second visit never prompts");
         assert!(!tracking.spans.contains_key("span-2"));
+    }
+
+    #[test]
+    fn browser_tracking_stays_bounded_while_a_timer_is_running() {
+        let mappings = vec![rule("r1", "quickbooks.com", "p-books")];
+        let mut tracking = BrowserTracking::default();
+        let mut suggestion = None;
+        let events = (0..65)
+            .map(|index| browser_event(
+                AgentEventKind::Started,
+                &format!("span-{index}"),
+                "r1",
+                &format!("2026-08-09T12:{:02}:{:02}Z", index / 60, index % 60),
+            ))
+            .collect::<Vec<_>>();
+
+        track_browser_events(&events, &mappings, true, drain_now(), &mut tracking, &mut suggestion);
+
+        assert_eq!(tracking.spans.len(), 64);
+        assert!(tracking.spans.contains_key("span-64"));
+        assert!(suggestion.is_none());
     }
 
     #[test]

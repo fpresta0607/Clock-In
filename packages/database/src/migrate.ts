@@ -10,11 +10,12 @@ const migrationsFolder = fileURLToPath(new URL("../migrations", import.meta.url)
 
 export async function runMigrations(
   database: DatabaseConnection,
-  options?: { migrationsSchema?: string },
+  options?: { migrationsSchema?: string; migrationsFolder?: string },
 ): Promise<void> {
+  const { migrationsFolder: selectedMigrationsFolder = migrationsFolder, ...migrateOptions } = options ?? {};
   // ponytail: migrationsSchema keeps the journal inside a disposable test schema
   // so it is dropped with it; production leaves it at drizzle's default.
-  await migrate(database.db, { migrationsFolder, ...options });
+  await migrate(database.db, { migrationsFolder: selectedMigrationsFolder, ...migrateOptions });
 }
 
 async function main(): Promise<void> {
