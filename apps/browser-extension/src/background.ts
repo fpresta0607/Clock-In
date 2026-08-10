@@ -186,7 +186,9 @@ function fenceUnobservedGap(now: number, deadlineMissed: boolean = false): boole
 }
 
 function prepareMachineTransition(now: number): boolean {
-  if (fenceUnobservedGap(now)) {
+  const deadline = nextAdvanceAt(machine);
+  const deadlineMissed = deadline !== null && now - deadline >= machine.gapMergeMs;
+  if (fenceUnobservedGap(now, deadlineMissed)) {
     return false;
   }
   settleTally(now);
@@ -194,11 +196,6 @@ function prepareMachineTransition(now: number): boolean {
 }
 
 function advanceMachine(now: number): boolean {
-  const deadline = nextAdvanceAt(machine);
-  if (deadline !== null && now - deadline >= machine.gapMergeMs) {
-    fenceUnobservedGap(now, true);
-    return false;
-  }
   if (!prepareMachineTransition(now)) {
     return false;
   }

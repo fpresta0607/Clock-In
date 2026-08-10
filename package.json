@@ -9,7 +9,8 @@
   "scripts": {
     "build": "pnpm --recursive --workspace-concurrency=1 --if-present build",
     "test": "pnpm --recursive --workspace-concurrency=1 test",
-    "typecheck": "pnpm --recursive --workspace-concurrency=1 typecheck"
+    "typecheck": "pnpm --recursive --workspace-concurrency=1 typecheck",
+    "test:release-workflow": "node --test scripts/release-tauri-config.test.mjs"
   },
   "devDependencies": {
     "typescript": "^5.9.2",

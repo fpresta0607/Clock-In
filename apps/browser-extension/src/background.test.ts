@@ -49,6 +49,7 @@ function backgroundHarness(
   return {
     alarm,
     activated,
+    updated,
     focusChanged,
     port,
     portMessages,
@@ -200,6 +201,40 @@ describe("background startup", () => {
     }));
     expect(messages).toContainEqual(expect.objectContaining({
       event: expect.objectContaining({ event: "ended", occurredAt: new Date(start + 45_000).toISOString() }),
+    }));
+  });
+
+  it("does not revive a span when a tab update arrives after a missed deadline", async () => {
+    vi.useFakeTimers();
+    const start = Date.parse("2026-08-09T12:00:00.000Z");
+    vi.setSystemTime(start);
+    const harness = backgroundHarness([{ id: 1, url: "https://github.com/acme/project", incognito: false }]);
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      rules: [{ id: "rule-1", pattern: "github.com/acme/*" }],
+    } as never);
+    await settle();
+
+    await vi.advanceTimersByTimeAsync(31_000);
+    harness.updated.emit(
+      1 as never,
+      { url: "https://github.com/acme/changed" } as never,
+      { id: 1, windowId: 1, url: "https://github.com/acme/changed", incognito: false } as never,
+    );
+    await settle();
+    expect(spanMessages(harness.port)).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    harness.alarm.emit({ name: SPAN_ADVANCE_ALARM_NAME } as never);
+    await settle();
+
+    expect(spanMessages(harness.port)).toContainEqual(expect.objectContaining({
+      event: expect.objectContaining({ event: "started", occurredAt: new Date(start + 31_000).toISOString() }),
     }));
   });
 
