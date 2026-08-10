@@ -18,6 +18,11 @@ export interface AuthenticatedSubject {
   role?: "admin" | "member";
 }
 
+export type FirstAdminClaimResult =
+  | { kind: "claimed"; user: AuthenticatedUser }
+  | { kind: "already_claimed" }
+  | { kind: "not_member" };
+
 /** A signed-in Neon Auth identity, before it is mapped onto a Clock-In account. */
 export interface AuthIdentity {
   authUserId: string;
@@ -39,6 +44,12 @@ export interface AccountStore {
    * someone who signed up before they were given one.
    */
   joinOrganization(subject: AuthenticatedSubject, inviteCode: string): Promise<AuthenticatedUser>;
+  /**
+   * Lets one active member explicitly bootstrap an ownerless legacy workspace.
+   * Production stores make this a tenant-scoped atomic claim; test stores may
+   * omit it when they do not expose organization administration routes.
+   */
+  claimFirstAdmin?(subject: AuthenticatedSubject): Promise<FirstAdminClaimResult>;
 }
 
 export interface OrganizationRecord {

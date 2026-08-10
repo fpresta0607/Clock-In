@@ -6,6 +6,7 @@ export {
   agentSessions,
   agentSessionStatus,
   agentSource,
+  organizationAdminClaims,
   organizations,
   projectMemberships,
   projectPathMappings,

@@ -233,11 +233,11 @@ describe("App", () => {
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
     await screen.findByRole("option", { name: "Field work" });
-    await person.selectOptions(screen.getByLabelText("Project"), project.id);
+    await person.selectOptions(screen.getByLabelText("Change project"), project.id);
     await person.type(screen.getByLabelText(/Description/), "Inspect relay");
     await person.click(screen.getByRole("button", { name: "Start timer" }));
     await waitFor(() => expect(bridge.start).toHaveBeenCalledTimes(1));
-    expect(await screen.findByRole("button", { name: "Stop timer" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "Pause tracking" })).toBeVisible();
   });
 
   it("disables duplicate starts while the optimistic start is unconfirmed", async () => {
@@ -246,7 +246,7 @@ describe("App", () => {
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
     await screen.findByRole("option", { name: "Field work" });
-    await person.selectOptions(screen.getByLabelText("Project"), project.id);
+    await person.selectOptions(screen.getByLabelText("Change project"), project.id);
     await person.click(screen.getByRole("button", { name: "Start timer" }));
     expect(screen.getByRole("button", { name: "Starting…" })).toBeDisabled();
     expect(bridge.start).toHaveBeenCalledTimes(1);
@@ -270,7 +270,7 @@ describe("App", () => {
 
     await waitFor(() => expect(bridge.projectCreate).toHaveBeenCalledWith({ name: "Client work" }));
     expect(await screen.findByRole("option", { name: "Client work" })).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue(newProject.id));
+    await waitFor(() => expect(screen.getByLabelText("Change project")).toHaveValue(newProject.id));
     expect(screen.queryByLabelText("New project name")).not.toBeInTheDocument();
   });
 
@@ -310,7 +310,7 @@ describe("App", () => {
     });
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
-    await person.click(await screen.findByRole("button", { name: "Stop timer" }));
+    await person.click(await screen.findByRole("button", { name: "Pause tracking" }));
     await waitFor(() => expect(bridge.stop).toHaveBeenCalledWith({
       sessionId: running.sessionId,
       stoppedAt: expect.stringMatching(/Z$/),
@@ -328,7 +328,7 @@ describe("App", () => {
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
-    const picker = await screen.findByLabelText("Project");
+    const picker = await screen.findByLabelText("Move this time to....");
     expect(picker).toHaveValue(project.id);
     await person.selectOptions(picker, projectB.id);
 
@@ -343,8 +343,8 @@ describe("App", () => {
     const stopOrder = vi.mocked(bridge.stop).mock.invocationCallOrder[0] ?? 0;
     const startOrder = vi.mocked(bridge.start).mock.invocationCallOrder[0] ?? 0;
     expect(stopOrder).toBeLessThan(startOrder);
-    expect(await screen.findByText("Recording · Account B work")).toBeInTheDocument();
-    expect(screen.getByLabelText("Project")).toHaveValue(projectB.id);
+    expect(await screen.findByText("Working on: Account B work")).toBeInTheDocument();
+    expect(screen.getByLabelText("Move this time to....")).toHaveValue(projectB.id);
   });
 
   it("refreshes today's stats after a mid-timer project switch", async () => {
@@ -359,7 +359,7 @@ describe("App", () => {
     await waitFor(() => expect(bridge.meStats).toHaveBeenCalledTimes(1));
     // The board lives in settings now, so nothing fetches it on the main screen.
     expect(bridge.orgOverview).not.toHaveBeenCalled();
-    await person.selectOptions(await screen.findByLabelText("Project"), projectB.id);
+    await person.selectOptions(await screen.findByLabelText("Move this time to...."), projectB.id);
 
     await waitFor(() => expect(bridge.meStats).toHaveBeenCalledTimes(2));
     await openSettings(person);
@@ -374,11 +374,11 @@ describe("App", () => {
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
-    await person.selectOptions(await screen.findByLabelText("Project"), projectB.id);
+    await person.selectOptions(await screen.findByLabelText("Move this time to...."), projectB.id);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Stop failed");
     expect(bridge.start).not.toHaveBeenCalled();
-    expect(screen.getByText("Recording · Field work")).toBeInTheDocument();
+    expect(screen.getByText("Working on: Field work")).toBeInTheDocument();
   });
 
   it("removes the running timer and exposes pending sync retry after transient stop failure", async () => {
@@ -389,7 +389,7 @@ describe("App", () => {
     });
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
-    await person.click(await screen.findByRole("button", { name: "Stop timer" }));
+    await person.click(await screen.findByRole("button", { name: "Pause tracking" }));
     expect(await screen.findByRole("status")).toHaveTextContent("Saved locally; will retry");
     expect(screen.queryByTestId("elapsed-time")).not.toBeInTheDocument();
     await person.click(screen.getByRole("button", { name: "Retry sync" }));
@@ -477,14 +477,14 @@ describe("App", () => {
     await person.type(screen.getByLabelText("Password"), "not-stored-here");
     await person.click(screen.getByRole("button", { name: "Sign in" }));
     await waitFor(() => expect(bridge.retryLocalStart).toHaveBeenCalledWith(start));
-    expect(await screen.findByRole("heading", { name: "What are you working on?" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Working on: Field work" })).toBeVisible();
     expect(screen.getByRole("alert")).toHaveTextContent("Local start cannot be resumed");
   });
 
   it("uses one bootstrap request during StrictMode effect replay", async () => {
     const bridge = bridgeFor();
     render(<StrictMode><App bridge={bridge} /></StrictMode>);
-    await screen.findByRole("heading", { name: "What are you working on?" });
+    await screen.findByRole("heading", { name: "Working on: Field work" });
     expect(bridge.bootstrap).toHaveBeenCalledTimes(1);
   });
 
@@ -559,7 +559,7 @@ describe("App", () => {
     const person = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     render(<App bridge={bridge} />);
     expect(await screen.findByTestId("elapsed-time")).toHaveTextContent("00:00:05");
-    await person.click(screen.getByRole("button", { name: "Stop timer" }));
+    await person.click(screen.getByRole("button", { name: "Pause tracking" }));
     expect(screen.getByRole("button", { name: "Stopping…" })).toBeDisabled();
     await vi.advanceTimersByTimeAsync(2_000);
     expect(screen.getByTestId("elapsed-time")).toHaveTextContent("00:00:05");
@@ -571,7 +571,7 @@ describe("App", () => {
     const secondBridge = bridgeFor({ bootstrap: vi.fn().mockResolvedValue({ kind: "signed-out" }) });
     const person = userEvent.setup();
     const view = render(<App bridge={firstBridge} />);
-    await person.selectOptions(await screen.findByLabelText("Project"), project.id);
+    await person.selectOptions(await screen.findByLabelText("Change project"), project.id);
     await person.click(screen.getByRole("button", { name: "Start timer" }));
     view.rerender(<App bridge={secondBridge} />);
     expect(await screen.findByRole("heading", { name: "Clock in" })).toBeVisible();
@@ -589,7 +589,7 @@ describe("App", () => {
     const secondBridge = bridgeFor({ bootstrap: vi.fn().mockResolvedValue({ kind: "signed-out" }) });
     const person = userEvent.setup();
     const view = render(<App bridge={firstBridge} />);
-    await person.click(await screen.findByRole("button", { name: "Stop timer" }));
+    await person.click(await screen.findByRole("button", { name: "Pause tracking" }));
     view.rerender(<App bridge={secondBridge} />);
     expect(await screen.findByRole("heading", { name: "Clock in" })).toBeVisible();
     request.resolve(undefined);
@@ -609,7 +609,7 @@ describe("App", () => {
     expect(bridge.logout).toHaveBeenCalledTimes(1);
     request.reject({ kind: "transient", message: "Unable to sign out right now" });
     expect(await screen.findByRole("alert")).toHaveTextContent("Unable to sign out right now");
-    expect(screen.getByRole("heading", { name: "What are you working on?" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Working on: Field work" })).toBeInTheDocument();
   });
 
   it("allows a pending start to settle when logout fails", async () => {
@@ -621,14 +621,14 @@ describe("App", () => {
     });
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
-    await person.selectOptions(await screen.findByLabelText("Project"), project.id);
+    await person.selectOptions(await screen.findByLabelText("Change project"), project.id);
     await person.click(screen.getByRole("button", { name: "Start timer" }));
     const dialog = await openSettings(person);
     await person.click(await within(dialog).findByRole("button", { name: "Log out" }));
     logoutRequest.reject({ kind: "transient", message: "Unable to sign out right now" });
     expect(await screen.findByRole("alert")).toHaveTextContent("Unable to sign out right now");
     startRequest.resolve(running);
-    expect(await screen.findByRole("button", { name: "Stop timer" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Pause tracking" })).toBeInTheDocument();
   });
 
   it("ignores a logout failure after unmount", async () => {
@@ -654,7 +654,7 @@ describe("App", () => {
     });
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
-    await person.selectOptions(await screen.findByLabelText("Project"), project.id);
+    await person.selectOptions(await screen.findByLabelText("Change project"), project.id);
     await person.click(screen.getByRole("button", { name: "Start timer" }));
     const dialog = await openSettings(person);
     await person.click(await within(dialog).findByRole("button", { name: "Log out" }));
@@ -666,7 +666,7 @@ describe("App", () => {
     accountAStart.resolve(running);
     await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
     expect(screen.getByRole("button", { name: "Starting…" })).toBeDisabled();
-    expect(screen.queryByRole("button", { name: "Stop timer" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Pause tracking" })).not.toBeInTheDocument();
   });
 
   it("clears account-bound form values before account B can start account A's project", async () => {
@@ -675,7 +675,7 @@ describe("App", () => {
     });
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
-    await person.selectOptions(await screen.findByLabelText("Project"), project.id);
+    await person.selectOptions(await screen.findByLabelText("Change project"), project.id);
     await person.type(screen.getByLabelText(/Description/), "Account A work");
     const dialog = await openSettings(person);
     await person.click(await within(dialog).findByRole("button", { name: "Log out" }));
@@ -685,11 +685,13 @@ describe("App", () => {
     await person.type(screen.getByLabelText("Password"), "not-stored-here");
     await person.click(screen.getByRole("button", { name: "Sign in" }));
     expect(await screen.findByRole("option", { name: "Account B work" })).toBeVisible();
-    expect(screen.getByLabelText("Project")).toHaveValue("");
+    expect(screen.getByLabelText("Change project")).toHaveValue(projectB.id);
     expect(screen.getByLabelText(/Description/)).toHaveValue("");
-    expect(screen.getByRole("button", { name: "Start timer" })).toBeDisabled();
     await person.click(screen.getByRole("button", { name: "Start timer" }));
-    expect(bridge.start).not.toHaveBeenCalled();
+    await waitFor(() => expect(bridge.start).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: projectB.id,
+      description: "",
+    })));
   });
 
   it("retries a persisted local start after its prior recovery request fails", async () => {
@@ -751,7 +753,7 @@ describe("App", () => {
       password: "long-enough-password",
       name: "Alex Morgan",
     }));
-    expect(await screen.findByRole("heading", { name: "What are you working on?" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Working on: Field work" })).toBeInTheDocument();
   });
 
   it("shows an actionable error when the email is already registered", async () => {
@@ -801,7 +803,7 @@ describe("App", () => {
   it("keeps invite codes and join forms off the main screen", async () => {
     render(<App bridge={bridgeFor()} />);
 
-    await screen.findByRole("heading", { name: "What are you working on?" });
+    await screen.findByRole("heading", { name: "Working on: Field work" });
     await waitFor(() => expect(screen.queryByText("ACDEF-GHJKM")).not.toBeInTheDocument());
     expect(screen.queryByRole("button", { name: "Join" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/Invite code to join/)).not.toBeInTheDocument();
@@ -881,7 +883,7 @@ describe("App", () => {
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
-    expect(await screen.findByRole("heading", { name: "What are you working on?" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Working on: Field work" })).toBeInTheDocument();
     const dialog = await openSettings(person);
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("Board unavailable");
   });
@@ -925,14 +927,14 @@ describe("App", () => {
     await person.click(within(dialog).getByRole("button", { name: "Join" }));
 
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("does not match a workspace");
-    expect(screen.getByRole("heading", { name: "What are you working on?" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Working on: Field work" })).toBeInTheDocument();
   });
 
   it("shows one muted monitoring line when the host answers", async () => {
     const bridge = bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(idleMonitorStatus) });
     render(<App bridge={bridge} />);
 
-    expect(await screen.findByText("Monitoring on")).toBeInTheDocument();
+    expect(await screen.findByText("Tracking is on")).toBeInTheDocument();
     // Hook badges and upload detail moved to settings; the line stays minimal.
     expect(screen.queryByText("Claude Code")).not.toBeInTheDocument();
     expect(screen.queryByText(/Last upload/)).not.toBeInTheDocument();
@@ -953,7 +955,7 @@ describe("App", () => {
 
   it("renders no monitor surfaces when the host cannot report status", async () => {
     render(<App bridge={bridgeFor()} />);
-    await screen.findByRole("heading", { name: "What are you working on?" });
+    await screen.findByRole("heading", { name: "Working on: Field work" });
     await waitFor(() => expect(screen.queryByText(/^Monitoring (on|paused|off)$/)).not.toBeInTheDocument());
   });
 
@@ -1042,7 +1044,7 @@ describe("App", () => {
     expect(screen.getByText("Field work", { selector: "strong" })).toBeInTheDocument();
     await person.click(screen.getByRole("button", { name: "Start" }));
     await waitFor(() => expect(bridge.start).toHaveBeenCalledWith(expect.objectContaining({ projectId: project.id })));
-    expect(await screen.findByRole("button", { name: "Stop timer" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "Pause tracking" })).toBeVisible();
     expect(screen.queryByText(/Codex active - start tracking/)).not.toBeInTheDocument();
   });
 
@@ -1090,7 +1092,7 @@ describe("App", () => {
     expect(await screen.findByText(/You were away 25 minutes/)).toBeInTheDocument();
     await person.click(screen.getByRole("button", { name: "Yes" }));
     expect(screen.getByText("Away time kept - it stays on the timer.")).toBeInTheDocument();
-    await person.click(screen.getByRole("button", { name: "Stop timer" }));
+    await person.click(screen.getByRole("button", { name: "Pause tracking" }));
     await waitFor(() => expect(bridge.stop).toHaveBeenCalledWith(expect.objectContaining({ idleSeconds: 600 })));
   });
 
@@ -1102,7 +1104,7 @@ describe("App", () => {
     expect(await screen.findByText(/You were away 25 minutes/)).toBeInTheDocument();
     await person.click(screen.getByRole("button", { name: "No" }));
     expect(screen.getByText("Away time will be trimmed at stop.")).toBeInTheDocument();
-    await person.click(screen.getByRole("button", { name: "Stop timer" }));
+    await person.click(screen.getByRole("button", { name: "Pause tracking" }));
     await waitFor(() => expect(bridge.stop).toHaveBeenCalledWith(expect.objectContaining({ idleSeconds: null })));
   });
 
@@ -1115,7 +1117,7 @@ describe("App", () => {
 
     expect(await screen.findByText(/You were away 25 minutes/)).toBeInTheDocument();
     await person.click(screen.getByRole("button", { name: "Yes" }));
-    await person.click(screen.getByRole("button", { name: "Stop timer" }));
+    await person.click(screen.getByRole("button", { name: "Pause tracking" }));
     // Authoritative 0: the host must not re-measure and flip keep into discard.
     await waitFor(() => expect(bridge.stop).toHaveBeenCalledWith(expect.objectContaining({ idleSeconds: 0 })));
   });
@@ -1281,7 +1283,7 @@ describe("App", () => {
     render(<App bridge={bridge} />);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Stats unavailable");
-    expect(screen.getByRole("heading", { name: "What are you working on?" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Working on: Field work" })).toBeInTheDocument();
   });
 
   it("shows the verified footer only when monitoring is on and some of today is verified", async () => {
@@ -1375,7 +1377,7 @@ describe("App", () => {
 
     // Settings load with the account (the first-run flow keys off them), so
     // only the mappings wait for the overlay.
-    await screen.findByRole("heading", { name: "What are you working on?" });
+    await screen.findByRole("heading", { name: "Working on: Field work" });
     await waitFor(() => expect(bridge.settingsGet).toHaveBeenCalledTimes(1));
     expect(bridge.pathMappingsList).not.toHaveBeenCalled();
 
@@ -1538,7 +1540,7 @@ describe("App", () => {
 
     await person.click(screen.getByRole("button", { name: "Start using Clock-In" }));
     await waitFor(() => expect(bridge.settingsUpdate).toHaveBeenCalledWith({ onboarded: true }));
-    expect(await screen.findByRole("heading", { name: "What are you working on?" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Working on: Field work" })).toBeInTheDocument();
   });
 
   it("shows a neutral browser check while onboarding status is still loading", async () => {
@@ -1594,7 +1596,7 @@ describe("App", () => {
     // The failure must not be a dead end: skipping lands on the main app.
     await person.click(screen.getByRole("button", { name: "Skip for now" }));
     await waitFor(() => expect(bridge.settingsUpdate).toHaveBeenCalledWith({ onboarded: true }));
-    expect(await screen.findByRole("heading", { name: "What are you working on?" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Working on: Field work" })).toBeInTheDocument();
   });
 
   it("returns to sign-in when Turn on hits an auth failure", async () => {

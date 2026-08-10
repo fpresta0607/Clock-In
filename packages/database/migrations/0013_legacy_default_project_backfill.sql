@@ -1,25 +1,3 @@
-WITH organizations_without_admin AS (
-  SELECT organizations.id
-  FROM organizations
-  WHERE NOT EXISTS (
-    SELECT 1
-    FROM users
-    WHERE users.organization_id = organizations.id
-      AND users.role = 'admin'
-  )
-), ranked_members AS (
-  SELECT users.id,
-         row_number() OVER (PARTITION BY users.organization_id ORDER BY users.created_at, users.id) AS rank
-  FROM users
-  INNER JOIN organizations_without_admin
-    ON organizations_without_admin.id = users.organization_id
-)
-UPDATE users
-SET role = 'admin'
-FROM ranked_members
-WHERE users.id = ranked_members.id
-  AND ranked_members.rank = 1;
---> statement-breakpoint
 INSERT INTO projects (organization_id, name, is_default)
 SELECT organizations.id, 'General Work', true
 FROM organizations

@@ -57,6 +57,28 @@ export const users = pgTable(
   ],
 );
 
+// Immutable record of the one administrator bootstrap for a workspace. A
+// personal-workspace creator is recorded at provisioning; an ownerless legacy
+// workspace can record one explicit first-admin claim instead. Keeping the
+// organization id unique makes the claim a tenant-scoped compare-and-set.
+export const organizationAdminClaims = pgTable(
+  "organization_admin_claims",
+  {
+    organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    // The user id has a global primary key. A direct reference keeps this
+    // immutable audit record valid when an account moves organizations; the
+    // claim operation itself verifies the member belongs to organizationId.
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<"creator" | "legacy_first_admin">().notNull(),
+    claimedAt: timestamp("claimed_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    unique("organization_admin_claims_organization_id_unique").on(table.organizationId),
+    check("organization_admin_claims_kind_valid", sql`${table.kind} in ('creator', 'legacy_first_admin')`),
+    index("organization_admin_claims_user_id_idx").on(table.userId),
+  ],
+);
+
 export const projects = pgTable(
   "projects",
   {

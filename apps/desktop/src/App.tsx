@@ -373,6 +373,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [answeredOrigins, setAnsweredOrigins] = useState<readonly string[]>([]);
   const [siteProjectId, setSiteProjectId] = useState("");
   const [siteNarrowing, setSiteNarrowing] = useState(false);
+  const [siteNarrowingOrigin, setSiteNarrowingOrigin] = useState<string | undefined>();
   const [siteSegment, setSiteSegment] = useState("");
   const [siteBusy, setSiteBusy] = useState(false);
   const [siteError, setSiteError] = useState<string | undefined>();
@@ -441,6 +442,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setAnsweredOrigins([]);
     setSiteProjectId("");
     setSiteNarrowing(false);
+    setSiteNarrowingOrigin(undefined);
     setSiteSegment("");
     setSiteError(undefined);
     setClearAnswersMessage(undefined);
@@ -573,6 +575,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   // open. Never carry a segment typed for one origin into the next origin.
   useEffect(() => {
     setSiteNarrowing(false);
+    setSiteNarrowingOrigin(undefined);
     setSiteSegment("");
     setSiteError(undefined);
   }, [suggestedOrigin]);
@@ -1274,6 +1277,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       setMappings((current) => current === undefined ? current : [...current, created]);
       setAnsweredOrigins((current) => [...current, origin]);
       setSiteNarrowing(false);
+      setSiteNarrowingOrigin(undefined);
       setSiteSegment("");
     } catch (error: unknown) {
       if (isRequestCurrent()) setSiteError(bridgeError(error).message);
@@ -1292,6 +1296,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     if (plan.kind === "path-narrowed") {
       // One site spans many projects here; ask which part before ruling.
       setSiteNarrowing(true);
+      setSiteNarrowingOrigin(origin);
+      setSiteSegment("");
       setSiteError(undefined);
       return;
     }
@@ -1322,6 +1328,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       if (!isRequestCurrent()) return;
       setAnsweredOrigins((current) => [...current, origin]);
       setSiteNarrowing(false);
+      setSiteNarrowingOrigin(undefined);
       setSiteSegment("");
     } catch (error: unknown) {
       if (isRequestCurrent()) setSiteError(bridgeError(error).message);
@@ -1604,14 +1611,14 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             <p className="eyebrow">New site</p>
             <p>You spent {siteTimeLabel(siteSuggestion.seconds)} on {siteSuggestion.origin} this week. Is that work?</p>
             {siteError && <p className="form-error" role="alert">{siteError}</p>}
-            {siteNarrowing ? (
+            {siteNarrowing && siteNarrowingOrigin === siteSuggestion.origin ? (
               <form className="site-narrow-form" onSubmit={(event) => void submitNarrowedSite(event, siteSuggestion.origin, siteChoice)}>
                 <label>Organization or team name
                   <input value={siteSegment} onChange={(event) => setSiteSegment(event.target.value)} autoComplete="off" spellCheck={false} required />
                 </label>
                 <div className="prompt-actions">
                   <button className="signal-button" type="submit" disabled={siteBusy}>{siteBusy ? "Saving…" : "Yes, track it"}</button>
-                  <button className="outline-button" type="button" disabled={siteBusy} onClick={() => { setSiteNarrowing(false); setSiteSegment(""); setSiteError(undefined); }}>Back</button>
+                  <button className="outline-button" type="button" disabled={siteBusy} onClick={() => { setSiteNarrowing(false); setSiteNarrowingOrigin(undefined); setSiteSegment(""); setSiteError(undefined); }}>Back</button>
                 </div>
               </form>
             ) : (

@@ -85,6 +85,13 @@ integration(integrationDescription, () => {
     expect(user).toMatchObject({ id: authUserId, email: "smoke@clock-in.test", name: "Smoke User" });
     expect(user.organizationId).toMatch(/^[0-9a-f-]{36}$/i);
 
+    const creatorClaims = await database.client`
+      select user_id, kind from organization_admin_claims where organization_id = ${user.organizationId}
+    `;
+    expect(creatorClaims).toEqual([{ user_id: authUserId, kind: "creator" }]);
+    const creatorClaim = await app.request("/organization/claim-admin", { method: "POST", headers: authorized });
+    expect(creatorClaim.status).toBe(409);
+
     // A second request must reuse the provisioned account rather than create another.
     const repeat = await app.request("/me", { headers: authorized });
     expect((await repeat.json()).user.organizationId).toBe(user.organizationId);
@@ -157,22 +164,28 @@ integration(integrationDescription, () => {
     const organizationId = randomUUID();
     const firstUserId = randomUUID();
     const secondUserId = randomUUID();
+    const otherOrganizationId = randomUUID();
+    const otherUserId = randomUUID();
     await database.client`
       insert into organizations (id, name, invite_code)
-      values (${organizationId}, 'Legacy workspace', ${randomUUID().replaceAll("-", "")})
+      values
+        (${organizationId}, 'Legacy workspace', ${randomUUID().replaceAll("-", "")}),
+        (${otherOrganizationId}, 'Other workspace', ${randomUUID().replaceAll("-", "")})
     `;
     await database.client`
       insert into users (id, organization_id, email, name)
       values
         (${firstUserId}, ${organizationId}, 'legacy-first@clock-in.test', 'Legacy First'),
-        (${secondUserId}, ${organizationId}, 'legacy-second@clock-in.test', 'Legacy Second')
+        (${secondUserId}, ${organizationId}, 'legacy-second@clock-in.test', 'Legacy Second'),
+        (${otherUserId}, ${otherOrganizationId}, 'other@clock-in.test', 'Other User')
     `;
     const firstAuth = await createTestAuth(config, new Date());
     const secondAuth = await createTestAuth(config, new Date());
+    const legacyAccounts = new DrizzleAccountStore(database.db);
     const legacyApp = createApp({
       config,
       keys: firstAuth.keys,
-      accounts: new DrizzleAccountStore(database.db),
+      accounts: legacyAccounts,
       projectRepository: new DrizzleProjectRepository(database.db),
       sessionRepository: new DrizzleSessionRepository(database.db),
     });
@@ -183,7 +196,7 @@ integration(integrationDescription, () => {
     const secondApp = createApp({
       config,
       keys: secondAuth.keys,
-      accounts: new DrizzleAccountStore(database.db),
+      accounts: legacyAccounts,
       projectRepository: new DrizzleProjectRepository(database.db),
       sessionRepository: new DrizzleSessionRepository(database.db),
     });
@@ -209,9 +222,50 @@ integration(integrationDescription, () => {
     expect(defaultMemberships.map((membership) => membership.user_id).sort()).toEqual(
       [firstUserId, secondUserId].sort(),
     );
+    const legacyRoles = await database.client`
+      select user_id, role from users where organization_id = ${organizationId} order by user_id
+    `;
+    expect(legacyRoles).toEqual([
+      { user_id: firstUserId, role: "member" },
+      { user_id: secondUserId, role: "member" },
+    ].sort((left, right) => left.user_id.localeCompare(right.user_id)));
+    await expect(legacyAccounts.claimFirstAdmin({ organizationId, userId: otherUserId })).resolves.toEqual({ kind: "not_member" });
     const secondList = await secondApp.request("/projects", { headers: secondHeaders });
     const secondProjectsBeforeReplacement = await secondList.json();
     expect(secondProjectsBeforeReplacement.selectedProjectId).toBe(defaultProjectId);
+
+    const lockedRename = await legacyApp.request(`/projects/${defaultProjectId}`, {
+      method: "PATCH",
+      headers: firstHeaders,
+      body: JSON.stringify({ name: "Shared Work" }),
+    });
+    expect(lockedRename.status).toBe(403);
+    await expect(lockedRename.json()).resolves.toMatchObject({
+      error: { code: "forbidden", message: expect.stringContaining("claim the first admin role") },
+    });
+
+    const firstClaimant = createDatabase(databaseUrl, { max: 1 });
+    const secondClaimant = createDatabase(databaseUrl, { max: 1 });
+    try {
+      const firstClaimApp = createApp({ config, keys: firstAuth.keys, accounts: new DrizzleAccountStore(firstClaimant.db) });
+      const secondClaimApp = createApp({ config, keys: secondAuth.keys, accounts: new DrizzleAccountStore(secondClaimant.db) });
+      const [firstClaim, secondClaim] = await Promise.all([
+        firstClaimApp.request("/organization/claim-admin", { method: "POST", headers: firstHeaders }),
+        secondClaimApp.request("/organization/claim-admin", { method: "POST", headers: secondHeaders }),
+      ]);
+      expect([firstClaim.status, secondClaim.status].sort()).toEqual([200, 409]);
+      const winningClaim = firstClaim.status === 200 ? firstClaim : secondClaim;
+      const winningUser = (await winningClaim.json()).user.id;
+      const claims = await database.client`
+        select user_id, kind from organization_admin_claims where organization_id = ${organizationId}
+      `;
+      expect(claims).toEqual([{ user_id: winningUser, kind: "legacy_first_admin" }]);
+    } finally {
+      await Promise.all([
+        firstClaimant.client.end({ timeout: 5 }),
+        secondClaimant.client.end({ timeout: 5 }),
+      ]);
+    }
 
     const defaultStart = await legacyApp.request("/sessions", {
       method: "POST",
@@ -221,7 +275,6 @@ integration(integrationDescription, () => {
     expect(defaultStart.status).toBe(200);
     expect((await defaultStart.json()).session.projectId).toBe(defaultProjectId);
 
-    await database.client`update users set role = 'admin' where id = ${firstUserId}`;
     const renamed = await legacyApp.request(`/projects/${defaultProjectId}`, {
       method: "PATCH",
       headers: firstHeaders,
