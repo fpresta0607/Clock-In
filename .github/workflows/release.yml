@@ -85,6 +85,16 @@ jobs:
           CLOCK_IN_CHROME_EXTENSION_ID: ${{ vars.CLOCK_IN_CHROME_EXTENSION_ID }}
           CLOCK_IN_EDGE_EXTENSION_ID: ${{ vars.CLOCK_IN_EDGE_EXTENSION_ID }}
           CLOCK_IN_FIREFOX_EXTENSION_ID: ${{ vars.CLOCK_IN_FIREFOX_EXTENSION_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
         run: cargo build --release --manifest-path apps/desktop/src-tauri/Cargo.toml
 
@@ -179,6 +189,7 @@ jobs:
           CLOCK_IN_FIREFOX_EXTENSION_ID: ${{ vars.CLOCK_IN_FIREFOX_EXTENSION_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_CONFIG: ${{ steps.tauri_config.outputs.config }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ steps.windows_signing.outputs.thumbprint }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}

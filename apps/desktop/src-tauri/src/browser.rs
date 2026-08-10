@@ -349,7 +349,7 @@ fn browser_spool_path(dir: &Path) -> PathBuf {
 }
 
 fn ensure_browser_dir(dir: &Path) -> io::Result<()> {
-    std::fs::create_dir_all(dir)
+    spool::ensure_namespace_directory(dir)
 }
 
 fn read_collection(dir: &Path) -> Option<BrowserCollection> {
@@ -916,7 +916,7 @@ fn register(dir: &Path, browser: Browser) -> io::Result<()> {
     let host_binary = host_binary_path().map_err(|error| io::Error::other(error.message))?;
     let manifest = manifest_path(dir, browser);
     if let Some(parent) = manifest.parent() {
-        std::fs::create_dir_all(parent)?;
+        spool::ensure_namespace_directory(parent)?;
     }
     write_if_changed(&manifest, host_manifest(browser, &host_binary, extension_id).as_bytes())?;
     registry::ensure_key(&browser.registry_key_path(), &manifest.to_string_lossy())

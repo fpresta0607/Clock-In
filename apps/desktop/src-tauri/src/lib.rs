@@ -57,11 +57,7 @@ pub(crate) fn clear_session_token() {
 pub(crate) fn write_recovery_file(path: &Path, state: &RecoveryState) -> ApiResult<()> {
     let encoded = serde_json::to_vec(state)
         .map_err(|_| BridgeError::unknown("Could not record the timer locally."))?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|_| BridgeError::unknown("Could not record the timer locally."))?;
-    }
-    std::fs::write(path, encoded)
+    spool::write_atomically(path, &encoded)
         .map_err(|_| BridgeError::unknown("Could not record the timer locally."))
 }
 
