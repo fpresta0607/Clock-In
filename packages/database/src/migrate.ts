@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 
 import { createDatabase, type DatabaseConnection } from "./client.js";
+import { backfillTrustedLegacySessionDevices } from "./legacy-session-devices.js";
 
 const migrationsFolder = fileURLToPath(new URL("../migrations", import.meta.url));
 
@@ -16,6 +17,7 @@ export async function runMigrations(
   // ponytail: migrationsSchema keeps the journal inside a disposable test schema
   // so it is dropped with it; production leaves it at drizzle's default.
   await migrate(database.db, { migrationsFolder: selectedMigrationsFolder, ...migrateOptions });
+  await backfillTrustedLegacySessionDevices(database.db);
 }
 
 async function main(): Promise<void> {

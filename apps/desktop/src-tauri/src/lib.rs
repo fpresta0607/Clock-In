@@ -947,15 +947,27 @@ async fn path_mappings_list(state: State<'_, AppState>) -> ApiResult<Vec<PathMap
     Ok(mappings)
 }
 
+fn apply_mapping_cache_refresh(
+    result: ApiResult<Vec<PathMapping>>,
+    cache: impl FnOnce(Vec<PathMapping>),
+) -> ApiResult<()> {
+    match result {
+        Ok(mappings) => {
+            cache(mappings);
+            Ok(())
+        }
+        Err(error) if error.kind == ErrorKind::Auth => Err(error),
+        Err(_) => Ok(()),
+    }
+}
+
 /// Refreshes the monitor's local mapping cache after a change, so suggested
 /// starts resolve against current data without waiting for the upload tick.
-async fn refresh_mapping_cache(state: &State<'_, AppState>, access_token: &str) {
-    if let Ok(mappings) = state
+async fn refresh_mapping_cache(state: &State<'_, AppState>, access_token: &str) -> ApiResult<()> {
+    let result = state
         .authenticated_result(state.client.path_mappings(access_token).await)
-        .await
-    {
-        state.monitor.cache_mappings(mappings);
-    }
+        .await;
+    apply_mapping_cache_refresh(result, |mappings| state.monitor.cache_mappings(mappings))
 }
 
 #[tauri::command]
@@ -971,7 +983,7 @@ async fn path_mappings_create(
             .await,
     )
     .await?;
-    refresh_mapping_cache(&state, &access_token).await;
+    refresh_mapping_cache(&state, &access_token).await?;
     Ok(mapping)
 }
 
@@ -989,7 +1001,7 @@ async fn path_mappings_update(
             .await,
     )
     .await?;
-    refresh_mapping_cache(&state, &access_token).await;
+    refresh_mapping_cache(&state, &access_token).await?;
     Ok(mapping)
 }
 
@@ -999,7 +1011,7 @@ async fn path_mappings_delete(state: State<'_, AppState>, id: String) -> ApiResu
     state
         .authenticated_result(state.client.delete_path_mapping(&access_token, &id).await)
         .await?;
-    refresh_mapping_cache(&state, &access_token).await;
+    refresh_mapping_cache(&state, &access_token).await?;
     Ok(())
 }
 
@@ -1418,6 +1430,25 @@ mod tests {
 
         assert_eq!(error.kind, ErrorKind::Auth);
         assert!(teardown_ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn mapping_cache_refresh_propagates_auth_and_keeps_other_failures_best_effort() {
+        let cached = std::cell::Cell::new(false);
+        let auth_error = apply_mapping_cache_refresh(
+            Err(BridgeError::auth("session expired")),
+            |_| cached.set(true),
+        )
+        .expect_err("an authentication failure must reach the renderer");
+        assert_eq!(auth_error.kind, ErrorKind::Auth);
+        assert!(!cached.get());
+
+        apply_mapping_cache_refresh(
+            Err(BridgeError::transient("retry later")),
+            |_| cached.set(true),
+        )
+        .expect("non-auth refresh failures remain best effort");
+        assert!(!cached.get());
     }
 
     #[test]

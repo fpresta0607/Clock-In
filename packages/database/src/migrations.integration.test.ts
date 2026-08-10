@@ -66,7 +66,7 @@ integration(integrationDescription, () => {
     if (cleanupError !== undefined) throw cleanupError;
   });
 
-  it("backfills legacy defaults and memberships without assigning an arbitrary administrator", async () => {
+  it("backfills legacy defaults, memberships, and trusted timer devices without assigning an arbitrary administrator", async () => {
     if (!database) return;
     const legacyOrganizationId = randomUUID();
     const legacyFirstUserId = randomUUID();
@@ -74,6 +74,11 @@ integration(integrationDescription, () => {
     const existingOrganizationId = randomUUID();
     const existingUserId = randomUUID();
     const existingProjectId = randomUUID();
+    const legacyTimedProjectId = randomUUID();
+    const legacySessionId = randomUUID();
+    const legacyDeviceId = randomUUID();
+    const legacyStartedAt = new Date("2026-08-01T10:00:00.000Z");
+    const legacyStoppedAt = new Date("2026-08-01T12:00:00.000Z");
 
     await database.client`
       insert into organizations (id, name, invite_code)
@@ -90,7 +95,31 @@ integration(integrationDescription, () => {
     `;
     await database.client`
       insert into projects (id, organization_id, name, is_default)
-      values (${existingProjectId}, ${existingOrganizationId}, 'Existing Default', true)
+      values
+        (${existingProjectId}, ${existingOrganizationId}, 'Existing Default', true),
+        (${legacyTimedProjectId}, ${legacyOrganizationId}, 'Legacy timer project', false)
+    `;
+    await database.client`
+      insert into project_memberships (organization_id, project_id, user_id)
+      values (${legacyOrganizationId}, ${legacyTimedProjectId}, ${legacyFirstUserId})
+    `;
+    await database.client`
+      insert into time_sessions (
+        id, organization_id, user_id, project_id, client_id, status,
+        started_at, stopped_at, idle_seconds, duration_seconds
+      ) values (
+        ${legacySessionId}, ${legacyOrganizationId}, ${legacyFirstUserId}, ${legacyTimedProjectId}, ${randomUUID()}, 'stopped',
+        ${legacyStartedAt.toISOString()}, ${legacyStoppedAt.toISOString()}, 3600, 3600
+      )
+    `;
+    await database.client`
+      insert into activity_segments (
+        organization_id, user_id, client_id, device_id, kind,
+        started_at, ended_at, received_at
+      ) values (
+        ${legacyOrganizationId}, ${legacyFirstUserId}, ${randomUUID()}, ${legacyDeviceId}, 'idle',
+        ${legacyStartedAt.toISOString()}, ${new Date("2026-08-01T11:00:00.000Z").toISOString()}, ${new Date("2026-08-01T11:01:00.000Z").toISOString()}
+      )
     `;
 
     await runMigrations(database);
@@ -123,6 +152,10 @@ integration(integrationDescription, () => {
       where organization_id = ${existingOrganizationId} and project_id = ${existingProjectId}
     `;
     expect(existingMemberships).toEqual([{ user_id: existingUserId }]);
+    const legacySession = await database.client`
+      select device_id from time_sessions where id = ${legacySessionId}
+    `;
+    expect(legacySession).toEqual([{ device_id: legacyDeviceId }]);
 
     await runMigrations(database);
     const rerunDefaults = await database.client`

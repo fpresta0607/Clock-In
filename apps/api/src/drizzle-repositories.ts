@@ -1,10 +1,11 @@
 import { randomBytes } from "node:crypto";
 
 import { generateInviteCode, type AgentSource } from "@clock-in/shared";
-import { and, asc, count, desc, eq, gt, gte, isNotNull, lt, ne, or, sql, sum, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lt, ne, or, sql, sum, type SQL } from "drizzle-orm";
 import {
   activitySegments,
   agentSessions,
+  backfillTrustedLegacySessionDevices,
   organizationAdminClaims,
   organizations,
   projectMemberships,
@@ -992,6 +993,38 @@ export class DrizzleReportRepository implements ReportRepository {
     return conditions;
   }
 
+  private async assertExactRangeSupport(
+    db: Pick<DatabaseConnection["db"], "select" | "execute">,
+    subject: AuthenticatedSubject,
+    query: ReportQuery,
+  ): Promise<void> {
+    const range = clippedRange(query);
+    if (range === null) return;
+    await backfillTrustedLegacySessionDevices(db, subject);
+    const clippedAtBoundary = [
+      range.from === undefined
+        ? undefined
+        : and(lt(timeSessions.startedAt, range.from), gt(timeSessions.stoppedAt, range.from)),
+      range.toExclusive === undefined
+        ? undefined
+        : and(lt(timeSessions.startedAt, range.toExclusive), gt(timeSessions.stoppedAt, range.toExclusive)),
+    ].filter((condition): condition is SQL => condition !== undefined);
+    if (clippedAtBoundary.length === 0) return;
+    const unsupported = await db
+      .select({ id: timeSessions.id })
+      .from(timeSessions)
+      .where(and(
+        ...this.predicates(subject, query),
+        isNull(timeSessions.deviceId),
+        gt(timeSessions.idleSeconds, 0),
+        or(...clippedAtBoundary),
+      ))
+      .limit(1);
+    if (unsupported.length > 0) {
+      throw new AppError("validation_error", "This range includes legacy time without enough activity evidence to clip exactly.");
+    }
+  }
+
   private async summaryFor(db: Pick<DatabaseConnection["db"], "select">, subject: AuthenticatedSubject, query: ReportQuery): Promise<ReportSummaryRecord> {
     const totalDuration = sum(sessionDurationSecondsSql(clippedRange(query)));
     const rows = await db
@@ -1068,7 +1101,7 @@ export class DrizzleReportRepository implements ReportRepository {
   ): Promise<LeaderboardRowRecord[]> {
     const range = clippedRange(query);
     const totalDuration = sum(sessionDurationSecondsSql(range));
-    return this.snapshot(subject, async (db) => {
+    return this.snapshot(subject, query, async (db) => {
       const rows = await db
         .select({
           userId: users.id,
@@ -1104,7 +1137,7 @@ export class DrizzleReportRepository implements ReportRepository {
     const range = clippedRange(query);
     const sessionDuration = sessionDurationSecondsSql(range);
     const totalDuration = sum(sessionDuration);
-    return this.snapshot(subject, async (db) => {
+    return this.snapshot(subject, query, async (db) => {
       const rows = await db
         .select({
           projectId: projects.id,
@@ -1156,7 +1189,7 @@ export class DrizzleReportRepository implements ReportRepository {
       least(${activitySegments.endedAt}, ${rangeEnd})
       - greatest(${activitySegments.startedAt}, ${rangeStart})
     )))))`;
-    return this.snapshot(subject, async (db) => {
+    return this.snapshot(subject, query, async (db) => {
       const rows = await db
         .select({
           processName: activitySegments.processName,
@@ -1297,20 +1330,24 @@ export class DrizzleReportRepository implements ReportRepository {
 
   private async snapshot<T>(
     subject: AuthenticatedSubject,
+    query: ReportQuery,
     callback: (db: Pick<DatabaseConnection["db"], "select">) => Promise<T>,
   ): Promise<T> {
-    return withLiveSubject(this.db, subject, callback);
+    return withLiveSubject(this.db, subject, async (db) => {
+      await this.assertExactRangeSupport(db, subject, query);
+      return callback(db);
+    });
   }
 
   public readPageForOrganization(subject: AuthenticatedSubject, query: ReportQuery, options: ReportPageOptions): Promise<ReportPageRead> {
-    return this.snapshot(subject, async (db) => ({
+    return this.snapshot(subject, query, async (db) => ({
       summary: await this.summaryFor(db, subject, query),
       rows: await this.rowsFor(db, subject, query, options),
     }));
   }
 
   public readExportForOrganization(subject: AuthenticatedSubject, query: ReportQuery, maxRows: number): Promise<ReportExportRead> {
-    return this.snapshot(subject, async (db) => {
+    return this.snapshot(subject, query, async (db) => {
       const summary = await this.summaryFor(db, subject, query);
       const totalRows = typeof summary.totalRows === "bigint"
         ? summary.totalRows
@@ -1348,6 +1385,10 @@ export class DrizzleActivitySegmentRepository implements ActivitySegmentReposito
       .onConflictDoNothing({
         target: [activitySegments.organizationId, activitySegments.userId, activitySegments.clientId],
       });
+    await backfillTrustedLegacySessionDevices(db, {
+      organizationId: first.organizationId,
+      userId: first.userId,
+    });
     });
   }
 }

@@ -985,4 +985,63 @@ integration(integrationDescription, () => {
       sessionCount: 1,
     }));
   }, 60_000);
+
+  it("backfills legacy device evidence before clipping its idle range", async () => {
+    const me = await app.request("/me", { headers: authorized });
+    expect(me.status).toBe(200);
+    const { user } = await me.json();
+
+    const created = await app.request("/projects", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({ name: "Legacy Idle Range Project" }),
+    });
+    expect(created.status).toBe(201);
+    const projectId = (await created.json()).id;
+    const sessionId = randomUUID();
+    const deviceId = randomUUID();
+    const startedAt = new Date("2026-08-02T10:00:00.000Z");
+    const stoppedAt = new Date("2026-08-02T12:00:00.000Z");
+
+    await database.client`
+      insert into time_sessions (
+        id, organization_id, user_id, project_id, client_id, status,
+        started_at, stopped_at, idle_seconds, duration_seconds
+      ) values (
+        ${sessionId}, ${user.organizationId}, ${user.id}, ${projectId}, ${randomUUID()}, 'stopped',
+        ${startedAt.toISOString()}, ${stoppedAt.toISOString()}, 3600, 3600
+      )
+    `;
+    const activity = await app.request("/activity/segments", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({
+        segments: [{
+          clientId: randomUUID(),
+          deviceId,
+          kind: "idle",
+          startedAt: startedAt.toISOString(),
+          endedAt: new Date("2026-08-02T11:00:00.000Z").toISOString(),
+        }],
+      }),
+    });
+    expect(activity.status).toBe(200);
+
+    const stored = await database.client`
+      select device_id from time_sessions where id = ${sessionId}
+    `;
+    expect(stored).toEqual([{ device_id: deviceId }]);
+
+    const response = await app.request(
+      `/reports?projectId=${projectId}&fromAt=2026-08-02T10%3A00%3A00.000Z&toExclusiveAt=2026-08-02T11%3A00%3A00.000Z&page=1&pageSize=50`,
+      { headers: authorized },
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.totalDurationSeconds).toBe(0);
+    expect(body.rows).toEqual([expect.objectContaining({
+      id: sessionId,
+      durationSeconds: 0,
+    })]);
+  }, 60_000);
 });

@@ -1559,6 +1559,23 @@ describe("App", () => {
     expect(within(dialog).getByText("C:/dev/Clock-In")).toBeInTheDocument();
   });
 
+  it("returns to sign-in when a mapping refresh reports authentication loss", async () => {
+    const bridge = bridgeFor({
+      pathMappingsCreate: vi.fn().mockRejectedValue({ kind: "auth", message: "Your session expired. Sign in again." }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const dialog = await openSettings(person);
+    await openAdvanced(person, dialog);
+    await person.type(within(dialog).getByLabelText("Path prefix"), "C:/dev/lost-session");
+    await person.selectOptions(within(dialog).getAllByLabelText("Project")[0]!, project.id);
+    await person.click(within(dialog).getByRole("button", { name: "Add mapping" }));
+
+    expect(await screen.findByRole("heading", { name: "Clock in" })).toBeVisible();
+    expect(screen.queryByText("Timer User")).not.toBeInTheDocument();
+  });
+
   it("states plainly what monitoring records and where evidence waits", async () => {
     const person = userEvent.setup();
     render(<App bridge={bridgeFor()} />);
