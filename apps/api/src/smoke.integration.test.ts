@@ -247,6 +247,7 @@ integration(integrationDescription, () => {
     if (databaseUrl === undefined) throw new Error("The smoke database URL is required for this test.");
     const firstClaimant = createDatabase(databaseUrl, { max: 1 });
     const secondClaimant = createDatabase(databaseUrl, { max: 1 });
+    let firstClaimWon = false;
     try {
       const firstClaimApp = createApp({ config, keys: firstAuth.keys, accounts: new DrizzleAccountStore(firstClaimant.db) });
       const secondClaimApp = createApp({ config, keys: secondAuth.keys, accounts: new DrizzleAccountStore(secondClaimant.db) });
@@ -255,6 +256,7 @@ integration(integrationDescription, () => {
         secondClaimApp.request("/organization/claim-admin", { method: "POST", headers: secondHeaders }),
       ]);
       expect([firstClaim.status, secondClaim.status].sort()).toEqual([200, 409]);
+      firstClaimWon = firstClaim.status === 200;
       const winningClaim = firstClaim.status === 200 ? firstClaim : secondClaim;
       const winningUser = (await winningClaim.json()).user.id;
       const claims = await database.client`
@@ -268,55 +270,70 @@ integration(integrationDescription, () => {
       ]);
     }
 
-    const defaultStart = await legacyApp.request("/sessions", {
+    // Either concurrent active member may win the tenant-scoped first-admin
+    // claim. The winner can administer the default project immediately; the
+    // losing member remains unable to do so.
+    const administratorApp = firstClaimWon ? legacyApp : secondApp;
+    const administratorHeaders = firstClaimWon ? firstHeaders : secondHeaders;
+    const memberApp = firstClaimWon ? secondApp : legacyApp;
+    const memberHeaders = firstClaimWon ? secondHeaders : firstHeaders;
+
+    const defaultStart = await administratorApp.request("/sessions", {
       method: "POST",
-      headers: firstHeaders,
+      headers: administratorHeaders,
       body: JSON.stringify({ clientId: randomUUID(), description: "Legacy default" }),
     });
     expect(defaultStart.status).toBe(200);
     expect((await defaultStart.json()).session.projectId).toBe(defaultProjectId);
 
-    const renamed = await legacyApp.request(`/projects/${defaultProjectId}`, {
+    const renamed = await administratorApp.request(`/projects/${defaultProjectId}`, {
       method: "PATCH",
-      headers: firstHeaders,
+      headers: administratorHeaders,
       body: JSON.stringify({ name: "Shared Work" }),
     });
     expect(renamed.status).toBe(200);
     expect(await renamed.json()).toMatchObject({ id: defaultProjectId, name: "Shared Work", isDefault: true });
 
-    const privateCreate = await legacyApp.request("/projects", {
+    const memberRename = await memberApp.request(`/projects/${defaultProjectId}`, {
+      method: "PATCH",
+      headers: memberHeaders,
+      body: JSON.stringify({ name: "Member cannot rename" }),
+    });
+    expect(memberRename.status).toBe(403);
+
+    const privateCreate = await administratorApp.request("/projects", {
       method: "POST",
-      headers: firstHeaders,
+      headers: administratorHeaders,
       body: JSON.stringify({ name: "Restricted work" }),
     });
     const privateProject = await privateCreate.json();
-    const secondBeforeReplacement = await secondApp.request("/projects", { headers: secondHeaders });
-    expect((await secondBeforeReplacement.json()).projects.map((project: { id: string }) => project.id)).not.toContain(privateProject.id);
-    const restrictedCreate = await secondApp.request("/projects", {
+    const memberBeforeReplacement = await memberApp.request("/projects", { headers: memberHeaders });
+    expect((await memberBeforeReplacement.json()).projects.map((project: { id: string }) => project.id)).not.toContain(privateProject.id);
+    const restrictedCreate = await memberApp.request("/projects", {
       method: "POST",
-      headers: secondHeaders,
+      headers: memberHeaders,
       body: JSON.stringify({ name: "Teammate-only work" }),
     });
     const restrictedProject = await restrictedCreate.json();
 
-    const inaccessibleReplacement = await legacyApp.request(`/projects/${defaultProjectId}`, {
+    const inaccessibleReplacement = await administratorApp.request(`/projects/${defaultProjectId}`, {
       method: "PATCH",
-      headers: firstHeaders,
+      headers: administratorHeaders,
       body: JSON.stringify({ isArchived: true, replacementProjectId: restrictedProject.id }),
     });
     expect(inaccessibleReplacement.status).toBe(400);
-    const replacement = await legacyApp.request(`/projects/${defaultProjectId}`, {
+    const replacement = await administratorApp.request(`/projects/${defaultProjectId}`, {
       method: "PATCH",
-      headers: firstHeaders,
+      headers: administratorHeaders,
       body: JSON.stringify({ isArchived: true, replacementProjectId: privateProject.id }),
     });
     expect(replacement.status).toBe(200);
     expect((await replacement.json())).toMatchObject({ id: defaultProjectId, isArchived: true, isDefault: false });
 
-    const secondAfterReplacement = await secondApp.request("/projects", { headers: secondHeaders });
-    const secondProjects = await secondAfterReplacement.json();
-    expect(secondProjects.selectedProjectId).toBe(privateProject.id);
-    expect(secondProjects.projects).toContainEqual(expect.objectContaining({ id: privateProject.id, isDefault: true }));
+    const memberAfterReplacement = await memberApp.request("/projects", { headers: memberHeaders });
+    const memberProjects = await memberAfterReplacement.json();
+    expect(memberProjects.selectedProjectId).toBe(privateProject.id);
+    expect(memberProjects.projects).toContainEqual(expect.objectContaining({ id: privateProject.id, isDefault: true }));
   }, 60_000);
 
   it("keeps another account's data out of this account's projects and reports", async () => {
