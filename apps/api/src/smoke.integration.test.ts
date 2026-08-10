@@ -895,5 +895,32 @@ integration(integrationDescription, () => {
       corroboratedSeconds: 1_800,
       sessionCount: 1,
     });
+
+    const reports = await app.request(
+      "/reports?fromAt=2026-03-08T06%3A00%3A00.000Z&toExclusiveAt=2026-03-09T05%3A00%3A00.000Z",
+      { headers: authorized },
+    );
+    expect(reports.status).toBe(200);
+    const reportBody = await reports.json();
+    expect(reportBody.totalDurationSeconds).toBe(1_800);
+    expect(reportBody.rows).toContainEqual(expect.objectContaining({
+      project: { id: projectId, name: "DST Boundary Project" },
+      durationSeconds: 1_800,
+      corroboratedSeconds: 1_800,
+    }));
+
+    const leaderboard = await app.request(
+      "/reports/leaderboard?fromAt=2026-03-08T06%3A00%3A00.000Z&toExclusiveAt=2026-03-09T05%3A00%3A00.000Z",
+      { headers: authorized },
+    );
+    expect(leaderboard.status).toBe(200);
+    const leaderboardBody = await leaderboard.json();
+    expect(leaderboardBody.totalDurationSeconds).toBe(1_800);
+    expect(leaderboardBody.entries).toContainEqual(expect.objectContaining({
+      user: { id: user.id, name: user.name },
+      durationSeconds: 1_800,
+      corroboratedSeconds: 1_800,
+      sessionCount: 1,
+    }));
   }, 60_000);
 });

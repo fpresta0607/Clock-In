@@ -142,6 +142,20 @@ pub struct AppState {
     pending_update: std::sync::Mutex<Option<(tauri_plugin_updater::Update, Vec<u8>)>>,
 }
 
+async fn teardown_after_auth_failure<T, F, Fut>(result: ApiResult<T>, teardown: F) -> ApiResult<T>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ApiResult<()>>,
+{
+    match result {
+        Err(error) if error.kind == ErrorKind::Auth => {
+            teardown().await?;
+            Err(error)
+        }
+        result => result,
+    }
+}
+
 impl AppState {
     /// Reads the session token the OS is holding for us, if any.
     fn session_token(&self) -> Option<String> {
@@ -162,17 +176,19 @@ impl AppState {
     // ponytail: one extra round-trip per user action beats tracking expiry; cache
     // the JWT against its exp claim if action latency ever matters.
     async fn access_token(&self) -> ApiResult<String> {
-        let session = self
-            .session_token()
-            .ok_or_else(|| BridgeError::auth("Sign in to continue."))?;
-        self.client.fetch_access_token(&session).await
+        let result = match self.session_token() {
+            Some(session) => self.client.fetch_access_token(&session).await,
+            None => Err(BridgeError::auth("Sign in to continue.")),
+        };
+        self.authenticated_result(result).await
     }
 
     async fn load_account(&self, access_token: &str) -> ApiResult<Account> {
-        let ((user, identity), selection) = tokio::try_join!(
+        let result = tokio::try_join!(
             self.client.me_with_identity(access_token),
             self.client.projects(access_token)
-        )?;
+        );
+        let ((user, identity), selection) = self.authenticated_result(result).await?;
         Ok(Account {
             user,
             identity,
@@ -267,6 +283,10 @@ impl AppState {
         self.deactivate_identity().await
     }
 
+    async fn authenticated_result<T>(&self, result: ApiResult<T>) -> ApiResult<T> {
+        teardown_after_auth_failure(result, || self.deactivate_invalid_session()).await
+    }
+
     async fn enable_active_collection(&self) -> ApiResult<()> {
         let identity = self.active_identity.lock().await.clone().ok_or_else(|| {
             BridgeError::unknown("Could not identify the signed-in account.")
@@ -291,7 +311,9 @@ impl AppState {
             }
             None => self.bind_identity(account.identity.clone()).await?,
         }
-        let server_running = self.client.current_session(access_token).await?;
+        let server_running = self
+            .authenticated_result(self.client.current_session(access_token).await)
+            .await?;
         let state = self.read_recovery().await;
         Ok(Snapshot::account(
             reconcile(&state, server_running.as_ref()),
@@ -313,18 +335,12 @@ async fn timer_bootstrap(state: State<'_, AppState>) -> ApiResult<Snapshot> {
         Ok(token) => token,
         // No stored session, or the stored one no longer works: show sign-in
         // rather than an error the user cannot act on.
-        Err(error) if error.kind == ErrorKind::Auth => {
-            state.deactivate_invalid_session().await?;
-            return Ok(Snapshot::signed_out());
-        }
+        Err(error) if error.kind == ErrorKind::Auth => return Ok(Snapshot::signed_out()),
         Err(error) => return Err(error),
     };
     let snapshot = match state.snapshot(&access_token).await {
         Ok(snapshot) => snapshot,
-        Err(error) if error.kind == ErrorKind::Auth => {
-            state.deactivate_invalid_session().await?;
-            return Ok(Snapshot::signed_out());
-        }
+        Err(error) if error.kind == ErrorKind::Auth => return Ok(Snapshot::signed_out()),
         Err(error) => return Err(error),
     };
     state.enable_active_collection().await?;
@@ -337,7 +353,9 @@ async fn timer_bootstrap(state: State<'_, AppState>) -> ApiResult<Snapshot> {
 #[tauri::command]
 async fn auth_login(state: State<'_, AppState>, input: LoginInput) -> ApiResult<Snapshot> {
     let session = state.client.sign_in(&input.email, &input.password).await?;
-    let access_token = state.client.fetch_access_token(&session).await?;
+    let access_token = state
+        .authenticated_result(state.client.fetch_access_token(&session).await)
+        .await?;
     let snapshot = state.snapshot(&access_token).await?;
     state.store_session_token(&session)?;
     state.enable_active_collection().await?;
@@ -370,7 +388,9 @@ async fn auth_signup(state: State<'_, AppState>, input: SignupInput) -> ApiResul
         .client
         .sign_up(&input.email, &input.password, &input.name)
         .await?;
-    let access_token = state.client.fetch_access_token(&session).await?;
+    let access_token = state
+        .authenticated_result(state.client.fetch_access_token(&session).await)
+        .await?;
 
     // Provision explicitly and first: any other authenticated call would create a
     // personal workspace before the invite code could be applied.
@@ -379,7 +399,9 @@ async fn auth_signup(state: State<'_, AppState>, input: SignupInput) -> ApiResul
         .as_deref()
         .map(str::trim)
         .filter(|code| !code.is_empty());
-    state.client.provision_account(&access_token, code).await?;
+    state
+        .authenticated_result(state.client.provision_account(&access_token, code).await)
+        .await?;
 
     let snapshot = state.snapshot(&access_token).await?;
     state.store_session_token(&session)?;
@@ -503,11 +525,16 @@ fn revalidate_workspace_move(
 #[tauri::command]
 async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<OrganizationOverview> {
     let access_token = state.access_token().await?;
-    let current_identity = state.client.identity(&access_token).await?;
-    let target = state
-        .client
-        .preview_organization_join(&access_token, input.invite_code.trim())
+    let current_identity = state
+        .authenticated_result(state.client.identity(&access_token).await)
         .await?;
+    let target = state.authenticated_result(
+        state
+            .client
+            .preview_organization_join(&access_token, input.invite_code.trim())
+            .await,
+    )
+    .await?;
     let target_identity = spool::EvidenceIdentity::new(&current_identity.account_id, &target.id)
         .ok_or_else(|| BridgeError::unknown("Could not identify the destination workspace."))?;
     let desktop_reservation = spool::reserve_identity_namespace(&current_identity, &target_identity)
@@ -531,17 +558,23 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
         rollback_workspace_move(&browser_dir, &desktop_reservation);
         return Err(error);
     }
-    if let Err(error) = state
-        .client
-        .join_organization(&access_token, input.invite_code.trim(), &target.id)
-        .await
+    if let Err(error) = state.authenticated_result(
+        state
+            .client
+            .join_organization(&access_token, input.invite_code.trim(), &target.id)
+            .await,
+    )
+    .await
     {
-        let observed = match state.client.identity(&access_token).await {
+        if error.kind == ErrorKind::Auth {
+            return Err(error);
+        }
+        let observed = match state
+            .authenticated_result(state.client.identity(&access_token).await)
+            .await
+        {
             Ok(identity) => identity,
-            Err(revalidation_error) if revalidation_error.kind == ErrorKind::Auth => {
-                state.deactivate_invalid_session().await?;
-                return Err(revalidation_error);
-            }
+            Err(revalidation_error) if revalidation_error.kind == ErrorKind::Auth => return Err(revalidation_error),
             Err(_) => {
                 return Err(BridgeError::new(
                     ErrorKind::Conflict,
@@ -595,10 +628,11 @@ pub struct JoinInput {
 #[tauri::command]
 async fn org_overview(state: State<'_, AppState>) -> ApiResult<OrganizationOverview> {
     let access_token = state.access_token().await?;
-    let (organization, entries) = tokio::try_join!(
+    let result = tokio::try_join!(
         state.client.organization(&access_token),
         state.client.leaderboard(&access_token)
-    )?;
+    );
+    let (organization, entries) = state.authenticated_result(result).await?;
     Ok(OrganizationOverview {
         organization,
         entries,
@@ -623,7 +657,9 @@ async fn timer_start(state: State<'_, AppState>, input: StartIntent) -> ApiResul
     pending.local_start = Some(input.clone());
     state.write_recovery(pending).await?;
 
-    let running = state.client.start_session(&access_token, &input).await?;
+    let running = state
+        .authenticated_result(state.client.start_session(&access_token, &input).await)
+        .await?;
 
     let mut confirmed = state.read_recovery().await;
     confirmed.local_start = None;
@@ -675,7 +711,10 @@ async fn timer_stop(state: State<'_, AppState>, input: StopInput) -> ApiResult<(
     // A stop is the natural moment to flush buffered evidence.
     state.monitor.request_upload();
 
-    match state.client.stop_session(&access_token, &stop).await {
+    match state
+        .authenticated_result(state.client.stop_session(&access_token, &stop).await)
+        .await
+    {
         Ok(()) => {
             let mut next = state.read_recovery().await;
             next.running = None;
@@ -705,7 +744,9 @@ async fn timer_retry_pending(state: State<'_, AppState>) -> ApiResult<PendingRet
         };
         // Retries send the byte-identical payload, so a stop that did land the
         // first time is absorbed by the server rather than double-counted.
-        state.client.stop_session(&access_token, &stop).await?;
+        state
+            .authenticated_result(state.client.stop_session(&access_token, &stop).await)
+            .await?;
         let mut next = state.read_recovery().await;
         next.confirm_oldest_stop();
         state.write_recovery(next).await?;
@@ -748,7 +789,9 @@ async fn timer_retry_local_start(
     input: StartIntent,
 ) -> ApiResult<Snapshot> {
     let access_token = state.access_token().await?;
-    let running = state.client.start_session(&access_token, &input).await?;
+    let running = state
+        .authenticated_result(state.client.start_session(&access_token, &input).await)
+        .await?;
 
     let mut next = state.read_recovery().await;
     next.local_start = None;
@@ -857,14 +900,15 @@ async fn me_stats(
     to_exclusive_at: Option<String>,
 ) -> ApiResult<MeStats> {
     let access_token = state.access_token().await?;
-    state
-        .client
-        .me_stats(
+    state.authenticated_result(
+        state.client.me_stats(
             &access_token,
             from_at.as_deref(),
             to_exclusive_at.as_deref(),
         )
-        .await
+        .await,
+    )
+    .await
 }
 
 #[derive(serde::Deserialize)]
@@ -886,13 +930,17 @@ async fn project_create(
         ));
     }
     let access_token = state.access_token().await?;
-    state.client.create_project(&access_token, name).await
+    state
+        .authenticated_result(state.client.create_project(&access_token, name).await)
+        .await
 }
 
 #[tauri::command]
 async fn path_mappings_list(state: State<'_, AppState>) -> ApiResult<Vec<PathMapping>> {
     let access_token = state.access_token().await?;
-    let mappings = state.client.path_mappings(&access_token).await?;
+    let mappings = state
+        .authenticated_result(state.client.path_mappings(&access_token).await)
+        .await?;
     state.monitor.cache_mappings(mappings.clone());
     Ok(mappings)
 }
@@ -900,7 +948,10 @@ async fn path_mappings_list(state: State<'_, AppState>) -> ApiResult<Vec<PathMap
 /// Refreshes the monitor's local mapping cache after a change, so suggested
 /// starts resolve against current data without waiting for the upload tick.
 async fn refresh_mapping_cache(state: &State<'_, AppState>, access_token: &str) {
-    if let Ok(mappings) = state.client.path_mappings(access_token).await {
+    if let Ok(mappings) = state
+        .authenticated_result(state.client.path_mappings(access_token).await)
+        .await
+    {
         state.monitor.cache_mappings(mappings);
     }
 }
@@ -911,10 +962,13 @@ async fn path_mappings_create(
     input: PathMappingCreateInput,
 ) -> ApiResult<PathMapping> {
     let access_token = state.access_token().await?;
-    let mapping = state
-        .client
-        .create_path_mapping(&access_token, &input)
-        .await?;
+    let mapping = state.authenticated_result(
+        state
+            .client
+            .create_path_mapping(&access_token, &input)
+            .await,
+    )
+    .await?;
     refresh_mapping_cache(&state, &access_token).await;
     Ok(mapping)
 }
@@ -926,10 +980,13 @@ async fn path_mappings_update(
     input: PathMappingUpdateInput,
 ) -> ApiResult<PathMapping> {
     let access_token = state.access_token().await?;
-    let mapping = state
-        .client
-        .update_path_mapping(&access_token, &id, &input)
-        .await?;
+    let mapping = state.authenticated_result(
+        state
+            .client
+            .update_path_mapping(&access_token, &id, &input)
+            .await,
+    )
+    .await?;
     refresh_mapping_cache(&state, &access_token).await;
     Ok(mapping)
 }
@@ -937,7 +994,9 @@ async fn path_mappings_update(
 #[tauri::command]
 async fn path_mappings_delete(state: State<'_, AppState>, id: String) -> ApiResult<()> {
     let access_token = state.access_token().await?;
-    state.client.delete_path_mapping(&access_token, &id).await?;
+    state
+        .authenticated_result(state.client.delete_path_mapping(&access_token, &id).await)
+        .await?;
     refresh_mapping_cache(&state, &access_token).await;
     Ok(())
 }
@@ -1337,6 +1396,25 @@ mod tests {
 
         assert_eq!(error.kind, ErrorKind::Unknown);
         assert!(!desktop_released.get());
+    }
+
+    #[tokio::test]
+    async fn auth_failure_runs_the_shared_identity_teardown() {
+        let teardown_ran = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&teardown_ran);
+
+        let error = teardown_after_auth_failure::<(), _, _>(
+            Err(BridgeError::auth("session expired")),
+            move || async move {
+                observed.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .expect_err("auth failures must not bypass identity teardown");
+
+        assert_eq!(error.kind, ErrorKind::Auth);
+        assert!(teardown_ran.load(Ordering::SeqCst));
     }
 
     #[test]

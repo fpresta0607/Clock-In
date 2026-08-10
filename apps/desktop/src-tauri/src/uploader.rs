@@ -31,6 +31,13 @@ const UPLOAD_BATCH_SIZE: usize = 500;
 /// enough that the monitor stays below notice.
 const UPLOAD_INTERVAL_SECONDS: u64 = 300;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UploadDrainResult {
+    Complete,
+    Incomplete,
+    AuthLost,
+}
+
 pub async fn upload_loop(
     shared: Arc<Mutex<MonitorShared>>,
     client: ApiClient,
@@ -88,22 +95,26 @@ async fn upload_once(
     invalid_session_handler: &Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 ) {
     let Some(session) = crate::read_session_token() else {
-        if let Err(error) = crate::browser::deactivate_collection(browser_dir) {
-            eprintln!(
-                "clock-in: could not revoke browser attribution: {}",
-                error.message
-            );
-        }
-        deactivate_invalid_identity(shared, recording, identity_invalidated, invalid_session_handler);
+        invalidate_auth_loss(
+            shared,
+            browser_dir,
+            recording,
+            identity_invalidated,
+            invalid_session_handler,
+        );
         return;
     };
     let token = match client.fetch_access_token(&session).await {
         Ok(token) => token,
         Err(error) => {
             if error.kind == ErrorKind::Auth {
-                let _ = crate::browser::deactivate_collection(browser_dir);
-                crate::clear_session_token();
-                deactivate_invalid_identity(shared, recording, identity_invalidated, invalid_session_handler);
+                invalidate_auth_loss(
+                    shared,
+                    browser_dir,
+                    recording,
+                    identity_invalidated,
+                    invalid_session_handler,
+                );
             }
             return;
         }
@@ -111,15 +122,24 @@ async fn upload_once(
     match client.identity(&token).await {
         Ok(current) if current == *identity => {}
         Ok(_) => {
-            let _ = crate::browser::deactivate_collection(browser_dir);
-            deactivate_invalid_identity(shared, recording, identity_invalidated, invalid_session_handler);
+            invalidate_auth_loss(
+                shared,
+                browser_dir,
+                recording,
+                identity_invalidated,
+                invalid_session_handler,
+            );
             return;
         }
         Err(error) => {
             if error.kind == ErrorKind::Auth {
-                let _ = crate::browser::deactivate_collection(browser_dir);
-                crate::clear_session_token();
-                deactivate_invalid_identity(shared, recording, identity_invalidated, invalid_session_handler);
+                invalidate_auth_loss(
+                    shared,
+                    browser_dir,
+                    recording,
+                    identity_invalidated,
+                    invalid_session_handler,
+                );
             }
             return;
         }
@@ -131,36 +151,98 @@ async fn upload_once(
         );
     }
 
-    let mut complete = upload_segments(client, &token, segments_path).await;
+    let mut complete = match upload_segments(client, &token, segments_path).await {
+        UploadDrainResult::Complete => true,
+        UploadDrainResult::Incomplete => false,
+        UploadDrainResult::AuthLost => {
+            invalidate_auth_loss(
+                shared,
+                browser_dir,
+                recording,
+                identity_invalidated,
+                invalid_session_handler,
+            );
+            return;
+        }
+    };
 
     // Refresh the local mapping cache before the drain resolves suggestions.
     // A failed refresh keeps last pass's cache — stale mappings beat none.
-    if let Ok(mappings) = client.path_mappings(&token).await {
-        let changed = {
-            let mut shared = lock(shared);
-            let changed = shared.mappings != mappings;
-            shared.mappings = mappings;
-            changed
-        };
-        // The extension matches against the rules file, so a changed url_rule
-        // set lands on disk here too (the writer skips unchanged content).
-        if changed {
-            let mappings = lock(shared).mappings.clone();
-            if let Err(error) = crate::browser::write_rules_file(browser_dir, &mappings) {
-                eprintln!("clock-in: could not write the browser rules file: {error}");
+    match client.path_mappings(&token).await {
+        Ok(mappings) => {
+            let changed = {
+                let mut shared = lock(shared);
+                let changed = shared.mappings != mappings;
+                shared.mappings = mappings;
+                changed
+            };
+            // The extension matches against the rules file, so a changed url_rule
+            // set lands on disk here too (the writer skips unchanged content).
+            if changed {
+                let mappings = lock(shared).mappings.clone();
+                if let Err(error) = crate::browser::write_rules_file(browser_dir, &mappings) {
+                    eprintln!("clock-in: could not write the browser rules file: {error}");
+                }
             }
         }
-    } else {
-        complete = false;
+        Err(error) if error.kind == ErrorKind::Auth => {
+            invalidate_auth_loss(
+                shared,
+                browser_dir,
+                recording,
+                identity_invalidated,
+                invalid_session_handler,
+            );
+            return;
+        }
+        Err(_) => complete = false,
     }
 
     let timer_running = recovery.lock().await.running.is_some();
-    complete &= drain_agent_spool(shared, client, &token, agent_path, timer_running).await;
-    complete &= drain_browser_spool(shared, client, &token, browser_path, timer_running).await;
+    match drain_agent_spool(shared, client, &token, agent_path, timer_running).await {
+        UploadDrainResult::Complete => {}
+        UploadDrainResult::Incomplete => complete = false,
+        UploadDrainResult::AuthLost => {
+            invalidate_auth_loss(
+                shared,
+                browser_dir,
+                recording,
+                identity_invalidated,
+                invalid_session_handler,
+            );
+            return;
+        }
+    }
+    match drain_browser_spool(shared, client, &token, browser_path, timer_running).await {
+        UploadDrainResult::Complete => {}
+        UploadDrainResult::Incomplete => complete = false,
+        UploadDrainResult::AuthLost => {
+            invalidate_auth_loss(
+                shared,
+                browser_dir,
+                recording,
+                identity_invalidated,
+                invalid_session_handler,
+            );
+            return;
+        }
+    }
 
     if complete {
         lock(shared).last_upload_at = Some(iso8601(unix_now()));
     }
+}
+
+fn invalidate_auth_loss(
+    shared: &Arc<Mutex<MonitorShared>>,
+    browser_dir: &Path,
+    recording: &Arc<AtomicBool>,
+    identity_invalidated: &Arc<AtomicBool>,
+    invalid_session_handler: &Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+) {
+    let _ = crate::browser::deactivate_collection(browser_dir);
+    crate::clear_session_token();
+    deactivate_invalid_identity(shared, recording, identity_invalidated, invalid_session_handler);
 }
 
 fn deactivate_invalid_identity(
@@ -188,25 +270,30 @@ fn deactivate_invalid_identity(
 /// Uploads every buffered segment in batches, then truncates the acked
 /// prefix. A mid-batch failure skips the truncation, so the whole spool
 /// replays next pass — safe because `clientId` makes replays idempotent.
-async fn upload_segments(client: &ApiClient, token: &str, path: &Path) -> bool {
+async fn upload_segments(client: &ApiClient, token: &str, path: &Path) -> UploadDrainResult {
     let generations = match spool::seal_pending_spool_paths(path) {
         Ok(generations) => generations,
-        Err(_) => return false,
+        Err(_) => return UploadDrainResult::Incomplete,
     };
     for generation in generations {
-        if !upload_segment_generation(client, token, &generation).await {
-            return false;
+        match upload_segment_generation(client, token, &generation).await {
+            UploadDrainResult::Complete => {}
+            result => return result,
         }
     }
-    true
+    UploadDrainResult::Complete
 }
 
-async fn upload_segment_generation(client: &ApiClient, token: &str, path: &Path) -> bool {
+async fn upload_segment_generation(client: &ApiClient, token: &str, path: &Path) -> UploadDrainResult {
     let Ok((records, acked_bytes)) = spool::read_pending_lines::<SegmentRecord>(path) else {
-        return false;
+        return UploadDrainResult::Incomplete;
     };
     if records.is_empty() {
-        return spool::truncate_acked(path, acked_bytes).is_ok();
+        return if spool::truncate_acked(path, acked_bytes).is_ok() {
+            UploadDrainResult::Complete
+        } else {
+            UploadDrainResult::Incomplete
+        };
     }
     for chunk in records.chunks(UPLOAD_BATCH_SIZE) {
         match client.upload_segments(token, chunk).await {
@@ -220,10 +307,15 @@ async fn upload_segment_generation(client: &ApiClient, token: &str, path: &Path)
                     );
                 }
             }
-            Err(_) => return false,
+            Err(error) if error.kind == ErrorKind::Auth => return UploadDrainResult::AuthLost,
+            Err(_) => return UploadDrainResult::Incomplete,
         }
     }
-    spool::truncate_acked(path, acked_bytes).is_ok()
+    if spool::truncate_acked(path, acked_bytes).is_ok() {
+        UploadDrainResult::Complete
+    } else {
+        UploadDrainResult::Incomplete
+    }
 }
 
 /// Drains the agent spool: local tracking first (suggestions and the away
@@ -234,17 +326,18 @@ async fn drain_agent_spool(
     token: &str,
     path: &Path,
     timer_running: bool,
-) -> bool {
+) -> UploadDrainResult {
     let generations = match spool::seal_pending_spool_paths(path) {
         Ok(generations) => generations,
-        Err(_) => return false,
+        Err(_) => return UploadDrainResult::Incomplete,
     };
     for generation in generations {
-        if !drain_agent_spool_generation(shared, client, token, &generation, timer_running).await {
-            return false;
+        match drain_agent_spool_generation(shared, client, token, &generation, timer_running).await {
+            UploadDrainResult::Complete => {}
+            result => return result,
         }
     }
-    true
+    UploadDrainResult::Complete
 }
 
 async fn drain_agent_spool_generation(
@@ -253,13 +346,17 @@ async fn drain_agent_spool_generation(
     token: &str,
     path: &Path,
     timer_running: bool,
-) -> bool {
+) -> UploadDrainResult {
     let pending = match spool::read_pending(path) {
         Ok(pending) => pending,
-        Err(_) => return false,
+        Err(_) => return UploadDrainResult::Incomplete,
     };
     if pending.events.is_empty() {
-        return spool::truncate_acked(path, pending.acked_bytes).is_ok();
+        return if spool::truncate_acked(path, pending.acked_bytes).is_ok() {
+            UploadDrainResult::Complete
+        } else {
+            UploadDrainResult::Incomplete
+        };
     }
 
     {
@@ -278,10 +375,15 @@ async fn drain_agent_spool_generation(
                     eprintln!("clock-in: the server rejected {rejected} agent event(s)");
                 }
             }
-            Err(_) => return false,
+            Err(error) if error.kind == ErrorKind::Auth => return UploadDrainResult::AuthLost,
+            Err(_) => return UploadDrainResult::Incomplete,
         }
     }
-    spool::truncate_acked(path, pending.acked_bytes).is_ok()
+    if spool::truncate_acked(path, pending.acked_bytes).is_ok() {
+        UploadDrainResult::Complete
+    } else {
+        UploadDrainResult::Incomplete
+    }
 }
 
 /// Drains the browser spool on the same cadence and with the same
@@ -294,17 +396,18 @@ async fn drain_browser_spool(
     token: &str,
     path: &Path,
     timer_running: bool,
-) -> bool {
+) -> UploadDrainResult {
     let generations = match spool::seal_pending_spool_paths(path) {
         Ok(generations) => generations,
-        Err(_) => return false,
+        Err(_) => return UploadDrainResult::Incomplete,
     };
     for generation in generations {
-        if !drain_browser_spool_generation(shared, client, token, &generation, timer_running).await {
-            return false;
+        match drain_browser_spool_generation(shared, client, token, &generation, timer_running).await {
+            UploadDrainResult::Complete => {}
+            result => return result,
         }
     }
-    true
+    UploadDrainResult::Complete
 }
 
 async fn drain_browser_spool_generation(
@@ -313,13 +416,17 @@ async fn drain_browser_spool_generation(
     token: &str,
     path: &Path,
     timer_running: bool,
-) -> bool {
+) -> UploadDrainResult {
     let pending = match spool::read_pending(path) {
         Ok(pending) => pending,
-        Err(_) => return false,
+        Err(_) => return UploadDrainResult::Incomplete,
     };
     if pending.events.is_empty() {
-        return spool::truncate_acked(path, pending.acked_bytes).is_ok();
+        return if spool::truncate_acked(path, pending.acked_bytes).is_ok() {
+            UploadDrainResult::Complete
+        } else {
+            UploadDrainResult::Incomplete
+        };
     }
 
     {
@@ -348,10 +455,15 @@ async fn drain_browser_spool_generation(
                     eprintln!("clock-in: the server rejected {rejected} browser event(s)");
                 }
             }
-            Err(_) => return false,
+            Err(error) if error.kind == ErrorKind::Auth => return UploadDrainResult::AuthLost,
+            Err(_) => return UploadDrainResult::Incomplete,
         }
     }
-    spool::truncate_acked(path, pending.acked_bytes).is_ok()
+    if spool::truncate_acked(path, pending.acked_bytes).is_ok() {
+        UploadDrainResult::Complete
+    } else {
+        UploadDrainResult::Incomplete
+    }
 }
 
 /// A mapped browser span must survive a glance before it may prompt: sixty
