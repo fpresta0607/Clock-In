@@ -129,6 +129,7 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   start: vi.fn().mockResolvedValue(running),
   stop: vi.fn().mockResolvedValue(undefined),
   retryPending: vi.fn().mockResolvedValue({ remaining: 0 }),
+  offlineSyncRetry: vi.fn().mockResolvedValue(undefined),
   useServerTimer: vi.fn().mockResolvedValue({ kind: "running", user, projects: [project], running, source: "server-only" }),
   retryLocalStart: vi.fn().mockResolvedValue({ kind: "running", user, projects: [project], running, source: "local-server-match" }),
   orgOverview: vi.fn().mockResolvedValue({
@@ -910,6 +911,33 @@ describe("App", () => {
     await waitFor(() => expect(orgJoin).toHaveBeenCalledWith("acdef-ghjkm"));
     expect(await within(dialog).findByText("Joined Team")).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Join" })).toBeEnabled();
+  });
+
+  it("keeps the current workspace available when retained offline work blocks a switch", async () => {
+    const offlineSyncRetry = vi.fn().mockResolvedValue(undefined);
+    const bridge = bridgeFor({
+      orgJoin: vi.fn().mockRejectedValue({
+        kind: "conflict",
+        message: "We saved unsynced work for another workspace. Sign back into that workspace and let Clock-In finish syncing before adding a new account.",
+      }),
+      offlineSyncRetry,
+      monitorStatus: vi.fn().mockResolvedValue(idleMonitorStatus),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+    const dialog = await openSettings(person);
+    await person.type(within(dialog).getByLabelText("Invite code to join a teammate"), "acdef-ghjkm");
+    await person.click(within(dialog).getByRole("button", { name: "Join" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("unsynced work");
+    expect(within(dialog).getByRole("button", { name: "Retry sync" })).toBeEnabled();
+    expect(within(dialog).getByRole("button", { name: "Cancel switch" })).toBeEnabled();
+    await person.click(within(dialog).getByRole("button", { name: "Retry sync" }));
+    await waitFor(() => expect(offlineSyncRetry).toHaveBeenCalledTimes(1));
+    await person.click(within(dialog).getByRole("button", { name: "Cancel switch" }));
+    expect(within(dialog).queryByRole("button", { name: "Retry sync" })).not.toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Invite code to join a teammate")).toHaveValue("");
+    expect(screen.getByRole("heading", { name: "Working on: Field work" })).toBeInTheDocument();
   });
 
   it("keeps the timer usable when a join is refused", async () => {

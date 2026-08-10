@@ -88,16 +88,51 @@ function mapCreateError(error: unknown): SessionRepositoryError | null {
   return null;
 }
 
+type TenantDatabase = Pick<DatabaseConnection["db"], "select" | "insert" | "update" | "delete" | "execute">;
+
+async function withLiveSubject<T>(
+  db: DatabaseConnection["db"],
+  subject: AuthenticatedSubject,
+  callback: (transaction: TenantDatabase) => Promise<T>,
+): Promise<T> {
+  return db.transaction(
+    async (transaction) => {
+      const members = await transaction.execute(sql`
+        select ${users.organizationId} as organization_id, ${users.role} as role
+        from ${users}
+        where ${users.id} = ${subject.userId}
+        for update
+      `) as unknown as Array<{ organization_id: string; role: "admin" | "member" }>;
+      if (
+        members[0]?.organization_id !== subject.organizationId
+        || (subject.role !== undefined && members[0]?.role !== subject.role)
+      ) {
+        throw new AppError("forbidden", "Workspace access has changed.");
+      }
+      return callback(transaction);
+    },
+    { isolationLevel: "repeatable read" },
+  );
+}
+
 export class DrizzleProjectRepository implements ProjectRepository {
   public constructor(private readonly db: DatabaseConnection["db"]) {}
 
-  private async ensureDefaultForMember(subject: AuthenticatedSubject): Promise<ProjectRecord> {
-    return this.db.transaction(async (tx) => {
-      await tx
+  private async ensureDefaultForMember(db: TenantDatabase, subject: AuthenticatedSubject): Promise<ProjectRecord> {
+      const organization = await db.execute(sql`
+        select ${organizations.id}
+        from ${organizations}
+        where ${organizations.id} = ${subject.organizationId}
+        for update
+      `);
+      if (organization.length === 0) {
+        throw new AppError("not_found", "Organization not found.");
+      }
+      await db
         .insert(projects)
         .values({ organizationId: subject.organizationId, name: "General Work", isDefault: true })
         .onConflictDoNothing();
-      const rows = await tx
+      const rows = await db
         .select({
           id: projects.id,
           organizationId: projects.organizationId,
@@ -114,12 +149,12 @@ export class DrizzleProjectRepository implements ProjectRepository {
         .limit(1);
       const project = rows[0];
       if (project === undefined) throw new Error("The organization has no usable default project.");
-      const members = await tx
+      const members = await db
         .select({ id: users.id })
         .from(users)
         .where(eq(users.organizationId, subject.organizationId));
       if (members.length > 0) {
-        await tx
+        await db
           .insert(projectMemberships)
           .values(members.map((member) => ({
             organizationId: subject.organizationId,
@@ -129,12 +164,12 @@ export class DrizzleProjectRepository implements ProjectRepository {
           .onConflictDoNothing();
       }
       return project;
-    });
   }
 
   public async listForMember(subject: AuthenticatedSubject): Promise<ProjectRecord[]> {
-    await this.ensureDefaultForMember(subject);
-    return this.db
+    return withLiveSubject(this.db, subject, async (db) => {
+      await this.ensureDefaultForMember(db, subject);
+      return db
       .select({
         id: projects.id,
         organizationId: projects.organizationId,
@@ -154,11 +189,13 @@ export class DrizzleProjectRepository implements ProjectRepository {
         eq(projects.archived, false),
       ))
       .orderBy(asc(projects.name), asc(projects.id));
+    });
   }
 
   public async findForMember(subject: AuthenticatedSubject, projectId: string): Promise<ProjectRecord | null> {
-    await this.ensureDefaultForMember(subject);
-    const rows = await this.db
+    return withLiveSubject(this.db, subject, async (db) => {
+      await this.ensureDefaultForMember(db, subject);
+      const rows = await db
       .select({
         id: projects.id,
         organizationId: projects.organizationId,
@@ -178,12 +215,13 @@ export class DrizzleProjectRepository implements ProjectRepository {
         eq(projectMemberships.userId, subject.userId),
       ))
       .limit(1);
-    return rows[0] ?? null;
+      return rows[0] ?? null;
+    });
   }
 
   public async createForMember(subject: AuthenticatedSubject, name: string): Promise<ProjectRecord> {
-    return this.db.transaction(async (tx) => {
-      const [project] = await tx
+    return withLiveSubject(this.db, subject, async (db) => {
+      const [project] = await db
         .insert(projects)
         .values({ organizationId: subject.organizationId, name })
         .returning({
@@ -194,7 +232,7 @@ export class DrizzleProjectRepository implements ProjectRepository {
           isDefault: projects.isDefault,
         });
       if (project === undefined) throw new Error("Failed to create the project.");
-      await tx
+      await db
         .insert(projectMemberships)
         .values({ organizationId: subject.organizationId, projectId: project.id, userId: subject.userId });
       return project;
@@ -202,8 +240,9 @@ export class DrizzleProjectRepository implements ProjectRepository {
   }
 
   public async preferredForMember(subject: AuthenticatedSubject): Promise<ProjectRecord | null> {
-    const fallback = await this.ensureDefaultForMember(subject);
-    const selected = await this.db
+    return withLiveSubject(this.db, subject, async (db) => {
+    const fallback = await this.ensureDefaultForMember(db, subject);
+    const selected = await db
       .select({
         id: projects.id,
         organizationId: projects.organizationId,
@@ -223,18 +262,36 @@ export class DrizzleProjectRepository implements ProjectRepository {
       ))
       .limit(1);
     return selected[0] ?? fallback;
+    });
   }
 
   public async rememberSelection(subject: AuthenticatedSubject, projectId: string): Promise<void> {
-    const project = await this.findForMember(subject, projectId);
-    if (project === null || project.archived) return;
-    await this.db
+    await withLiveSubject(this.db, subject, async (db) => {
+    await this.ensureDefaultForMember(db, subject);
+    const rows = await db
+      .select({ id: projects.id, archived: projects.archived })
+      .from(projects)
+      .innerJoin(projectMemberships, and(
+        eq(projectMemberships.organizationId, projects.organizationId),
+        eq(projectMemberships.projectId, projects.id),
+      ))
+      .where(and(
+        eq(projects.id, projectId),
+        eq(projects.organizationId, subject.organizationId),
+        eq(projectMemberships.organizationId, subject.organizationId),
+        eq(projectMemberships.userId, subject.userId),
+      ))
+      .limit(1);
+    const project = rows[0];
+    if (project === undefined || project.archived) return;
+    await db
       .insert(userProjectSelections)
       .values({ organizationId: subject.organizationId, userId: subject.userId, projectId: project.id })
       .onConflictDoUpdate({
         target: [userProjectSelections.organizationId, userProjectSelections.userId],
         set: { projectId: project.id, updatedAt: new Date() },
       });
+    });
   }
 
   public async updateForAdmin(
@@ -245,17 +302,7 @@ export class DrizzleProjectRepository implements ProjectRepository {
     if (subject.role !== "admin") {
       throw new AppError("forbidden", "Only workspace admins can change projects.");
     }
-    return this.db.transaction(async (tx) => {
-      const liveMembers = await tx.execute(sql`
-        select ${users.organizationId} as organization_id, ${users.role} as role
-        from ${users}
-        where ${users.id} = ${subject.userId}
-        for update
-      `) as unknown as Array<{ organization_id: string; role: "admin" | "member" }>;
-      const liveMember = liveMembers[0];
-      if (liveMember?.organization_id !== subject.organizationId || liveMember.role !== "admin") {
-        throw new AppError("forbidden", "Only workspace admins can change projects.");
-      }
+    return withLiveSubject(this.db, subject, async (tx) => {
       const targetRows = await tx
         .select({
           id: projects.id,
@@ -345,35 +392,44 @@ export class DrizzleSessionRepository implements SessionRepository {
   public constructor(private readonly db: DatabaseConnection["db"]) {}
 
   public async findByClientId(subject: AuthenticatedSubject, clientId: string): Promise<SessionRecord | null> {
-    const rows = await this.db.select().from(timeSessions).where(and(
+    return withLiveSubject(this.db, subject, async (db) => {
+    const rows = await db.select().from(timeSessions).where(and(
       eq(timeSessions.organizationId, subject.organizationId),
       eq(timeSessions.userId, subject.userId),
       eq(timeSessions.clientId, clientId),
     )).limit(1);
     return rows[0] === undefined ? null : asSessionRecord(rows[0]);
+    });
   }
 
   public async findRunning(subject: AuthenticatedSubject): Promise<SessionRecord | null> {
-    const rows = await this.db.select().from(timeSessions).where(and(
+    return withLiveSubject(this.db, subject, async (db) => {
+    const rows = await db.select().from(timeSessions).where(and(
       eq(timeSessions.organizationId, subject.organizationId),
       eq(timeSessions.userId, subject.userId),
       eq(timeSessions.status, "running"),
     )).limit(1);
     return rows[0] === undefined ? null : asSessionRecord(rows[0]);
+    });
   }
 
   public async findById(subject: AuthenticatedSubject, sessionId: string): Promise<SessionRecord | null> {
-    const rows = await this.db.select().from(timeSessions).where(and(
+    return withLiveSubject(this.db, subject, async (db) => {
+    const rows = await db.select().from(timeSessions).where(and(
       eq(timeSessions.id, sessionId),
       eq(timeSessions.organizationId, subject.organizationId),
       eq(timeSessions.userId, subject.userId),
     )).limit(1);
     return rows[0] === undefined ? null : asSessionRecord(rows[0]);
+    });
   }
 
   public async createRunning(input: CreateRunningSession): Promise<SessionRecord> {
     try {
-      const rows = await this.db.transaction(async (transaction) => transaction
+      const rows = await withLiveSubject(this.db, {
+        organizationId: input.organizationId,
+        userId: input.userId,
+      }, async (transaction) => transaction
         .insert(timeSessions)
         .values({ ...input, status: "running", stoppedAt: null, idleSeconds: 0, durationSeconds: null })
         .returning());
@@ -386,7 +442,7 @@ export class DrizzleSessionRepository implements SessionRepository {
   }
 
   public async stopRunning(subject: AuthenticatedSubject, sessionId: string, input: StopRunningSession): Promise<SessionRecord | null> {
-    const rows = await this.db.transaction(async (transaction) => transaction
+    const rows = await withLiveSubject(this.db, subject, async (transaction) => transaction
       .update(timeSessions)
       .set({
         status: input.status,
@@ -433,7 +489,7 @@ export class DrizzleAccountStore implements AccountStore {
     subject: AuthenticatedSubject,
     inviteCode: string,
   ): Promise<AuthenticatedUser> {
-    return this.db.transaction(async (tx) => {
+    return withLiveSubject(this.db, subject, async (tx) => {
       const [target] = await tx
         .select({ id: organizations.id })
         .from(organizations)
@@ -592,13 +648,19 @@ export class DrizzleAccountStore implements AccountStore {
     });
   }
 
-  public async findOrganization(organizationId: string): Promise<OrganizationRecord | null> {
-    const rows = await this.db
+  public async findOrganization(
+    organizationId: string,
+    subject?: AuthenticatedSubject,
+  ): Promise<OrganizationRecord | null> {
+    const read = async (db: Pick<DatabaseConnection["db"], "select">): Promise<OrganizationRecord | null> => {
+    const rows = await db
       .select({ id: organizations.id, name: organizations.name, inviteCode: organizations.inviteCode })
       .from(organizations)
       .where(eq(organizations.id, organizationId))
       .limit(1);
     return rows[0] ?? null;
+    };
+    return subject === undefined ? read(this.db) : withLiveSubject(this.db, subject, read);
   }
 
   /**
@@ -803,21 +865,25 @@ export class DrizzleReportRepository implements ReportRepository {
   public constructor(private readonly db: DatabaseConnection["db"]) {}
 
   public async findProjectForOrganization(subject: AuthenticatedSubject, projectId: string): Promise<ReportLookupRecord | null> {
-    const rows = await this.db
+    return withLiveSubject(this.db, subject, async (db) => {
+    const rows = await db
       .select({ id: projects.id, name: projects.name })
       .from(projects)
       .where(and(eq(projects.id, projectId), eq(projects.organizationId, subject.organizationId)))
       .limit(1);
     return rows[0] ?? null;
+    });
   }
 
   public async findUserForOrganization(subject: AuthenticatedSubject, userId: string): Promise<ReportLookupRecord | null> {
-    const rows = await this.db
+    return withLiveSubject(this.db, subject, async (db) => {
+    const rows = await db
       .select({ id: users.id, name: users.name })
       .from(users)
       .where(and(eq(users.id, userId), eq(users.organizationId, subject.organizationId)))
       .limit(1);
     return rows[0] ?? null;
+    });
   }
 
   private predicates(subject: AuthenticatedSubject, query: ReportQuery) {
@@ -1052,7 +1118,7 @@ export class DrizzleReportRepository implements ReportRepository {
     // Overlapping and touching intervals collapse into islands via the running
     // max of previous ends. Spans partition by rule; active segments union
     // across devices because site totals represent focused wall-clock time.
-    return this.withLiveSubject(subject, async (db) => {
+    return withLiveSubject(this.db, subject, async (db) => {
       const rows = await db.execute(sql`
         with spans as (
         select rule_id, started_at, coalesce(ended_at, last_event_at) as ended_at
@@ -1138,35 +1204,11 @@ export class DrizzleReportRepository implements ReportRepository {
     });
   }
 
-  private async withLiveSubject<T>(
-    subject: AuthenticatedSubject,
-    callback: (db: Pick<DatabaseConnection["db"], "select" | "execute">) => Promise<T>,
-  ): Promise<T> {
-    return this.db.transaction(
-      async (transaction) => {
-        const liveMembers = await transaction.execute(sql`
-          select ${users.organizationId} as organization_id, ${users.role} as role
-          from ${users}
-          where ${users.id} = ${subject.userId}
-          for update
-        `) as unknown as Array<{ organization_id: string; role: "admin" | "member" }>;
-        if (
-          liveMembers[0]?.organization_id !== subject.organizationId
-          || (subject.role !== undefined && liveMembers[0]?.role !== subject.role)
-        ) {
-          throw new AppError("forbidden", "Workspace access has changed.");
-        }
-        return callback(transaction);
-      },
-      { isolationLevel: "repeatable read" },
-    );
-  }
-
   private async snapshot<T>(
     subject: AuthenticatedSubject,
     callback: (db: Pick<DatabaseConnection["db"], "select">) => Promise<T>,
   ): Promise<T> {
-    return this.withLiveSubject(subject, callback);
+    return withLiveSubject(this.db, subject, callback);
   }
 
   public readPageForOrganization(subject: AuthenticatedSubject, query: ReportQuery, options: ReportPageOptions): Promise<ReportPageRead> {
@@ -1199,12 +1241,23 @@ export class DrizzleActivitySegmentRepository implements ActivitySegmentReposito
   /** Replay-safe: the (organization, user, client) unique key makes re-uploads no-ops. */
   public async insertBatch(segments: ActivitySegmentInsert[]): Promise<void> {
     if (segments.length === 0) return;
-    await this.db
+    const first = segments[0]!;
+    if (segments.some((segment) => (
+      segment.organizationId !== first.organizationId || segment.userId !== first.userId
+    ))) {
+      throw new AppError("forbidden", "Activity evidence must belong to one workspace member.");
+    }
+    await withLiveSubject(this.db, {
+      organizationId: first.organizationId,
+      userId: first.userId,
+    }, async (db) => {
+    await db
       .insert(activitySegments)
       .values(segments)
       .onConflictDoNothing({
         target: [activitySegments.organizationId, activitySegments.userId, activitySegments.clientId],
       });
+    });
   }
 }
 
@@ -1237,17 +1290,23 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
   public constructor(private readonly db: DatabaseConnection["db"]) {}
 
   public async findByExternalKey(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string): Promise<AgentSessionRecord | null> {
-    const rows = await this.db.select().from(agentSessions).where(and(
+    return withLiveSubject(this.db, subject, async (db) => {
+    const rows = await db.select().from(agentSessions).where(and(
       eq(agentSessions.organizationId, subject.organizationId),
       eq(agentSessions.userId, subject.userId),
       eq(agentSessions.source, source),
       eq(agentSessions.externalSessionId, externalSessionId),
     )).limit(1);
     return rows[0] === undefined ? null : asAgentSessionRecord(rows[0]);
+    });
   }
 
   public async upsertStarted(input: UpsertStartedAgentSession): Promise<AgentSessionRecord> {
-    const rows = await this.db
+    return withLiveSubject(this.db, {
+      organizationId: input.organizationId,
+      userId: input.userId,
+    }, async (db) => {
+    const rows = await db
       .insert(agentSessions)
       .values({
         organizationId: input.organizationId,
@@ -1290,10 +1349,12 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
       })
       .returning();
     return asAgentSessionRecord(rows[0]!);
+    });
   }
 
   public async closeRunning(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, endedAt: Date, now: Date): Promise<AgentSessionRecord | null> {
-    const rows = await this.db
+    return withLiveSubject(this.db, subject, async (db) => {
+    const rows = await db
       .update(agentSessions)
       .set({
         status: "ended",
@@ -1317,10 +1378,15 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
       ))
       .returning();
     return rows[0] === undefined ? null : asAgentSessionRecord(rows[0]);
+    });
   }
 
   public async insertEnded(input: InsertEndedAgentSession): Promise<void> {
-    await this.db
+    await withLiveSubject(this.db, {
+      organizationId: input.organizationId,
+      userId: input.userId,
+    }, async (db) => {
+    await db
       .insert(agentSessions)
       .values({
         organizationId: input.organizationId,
@@ -1337,10 +1403,12 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         receivedAt: input.receivedAt,
       })
       .onConflictDoNothing({ target: agentSessionKey });
+    });
   }
 
   public async advanceLastEvent(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, occurredAt: Date, now: Date): Promise<boolean> {
-    const rows = await this.db
+    return withLiveSubject(this.db, subject, async (db) => {
+    const rows = await db
       .update(agentSessions)
       .set({
         status: sql`case
@@ -1376,6 +1444,7 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
       ))
       .returning({ id: agentSessions.id });
     return rows.length > 0;
+    });
   }
 
   public async reapStale(
@@ -1383,7 +1452,8 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
     cutoffs: AgentSessionStaleCutoffs,
     now: Date,
   ): Promise<number> {
-    const rows = await this.db
+    return withLiveSubject(this.db, subject, async (db) => {
+    const rows = await db
       .update(agentSessions)
       .set({ status: "stale", endedAt: sql`${agentSessions.lastEventAt}`, updatedAt: now })
       .where(and(
@@ -1397,6 +1467,7 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
       ))
       .returning({ id: agentSessions.id });
     return rows.length;
+    });
   }
 }
 
@@ -1421,7 +1492,8 @@ export class DrizzlePathMappingRepository implements PathMappingRepository {
   public constructor(private readonly db: DatabaseConnection["db"]) {}
 
   public async listForSubject(subject: AuthenticatedSubject): Promise<PathMappingRecord[]> {
-    const rows = await this.db
+    return withLiveSubject(this.db, subject, async (db) => {
+    const rows = await db
       .select()
       .from(projectPathMappings)
       .where(and(
@@ -1430,29 +1502,37 @@ export class DrizzlePathMappingRepository implements PathMappingRepository {
       ))
       .orderBy(asc(projectPathMappings.pathPrefix), asc(projectPathMappings.id));
     return rows.map(asPathMappingRecord);
+    });
   }
 
   public async findById(subject: AuthenticatedSubject, mappingId: string): Promise<PathMappingRecord | null> {
-    const rows = await this.db.select().from(projectPathMappings).where(and(
+    return withLiveSubject(this.db, subject, async (db) => {
+    const rows = await db.select().from(projectPathMappings).where(and(
       eq(projectPathMappings.id, mappingId),
       eq(projectPathMappings.organizationId, subject.organizationId),
       eq(projectPathMappings.userId, subject.userId),
     )).limit(1);
     return rows[0] === undefined ? null : asPathMappingRecord(rows[0]);
+    });
   }
 
   public async findByPathPrefix(subject: AuthenticatedSubject, pathPrefix: string): Promise<PathMappingRecord | null> {
-    const rows = await this.db.select().from(projectPathMappings).where(and(
+    return withLiveSubject(this.db, subject, async (db) => {
+    const rows = await db.select().from(projectPathMappings).where(and(
       eq(projectPathMappings.organizationId, subject.organizationId),
       eq(projectPathMappings.userId, subject.userId),
       eq(projectPathMappings.pathPrefix, pathPrefix),
     )).limit(1);
     return rows[0] === undefined ? null : asPathMappingRecord(rows[0]);
+    });
   }
 
   public async create(input: CreatePathMapping): Promise<PathMappingRecord> {
     try {
-      const rows = await this.db.insert(projectPathMappings).values(input).returning();
+      const rows = await withLiveSubject(this.db, {
+        organizationId: input.organizationId,
+        userId: input.userId,
+      }, async (db) => db.insert(projectPathMappings).values(input).returning());
       return asPathMappingRecord(rows[0]!);
     } catch (error) {
       if (uniqueConstraint(error) === "project_path_mappings_organization_user_prefix_unique") {
@@ -1464,7 +1544,7 @@ export class DrizzlePathMappingRepository implements PathMappingRepository {
 
   public async update(subject: AuthenticatedSubject, mappingId: string, input: UpdatePathMapping): Promise<PathMappingRecord | null> {
     try {
-      const rows = await this.db
+      const rows = await withLiveSubject(this.db, subject, async (db) => db
         .update(projectPathMappings)
         .set(input)
         .where(and(
@@ -1472,7 +1552,7 @@ export class DrizzlePathMappingRepository implements PathMappingRepository {
           eq(projectPathMappings.organizationId, subject.organizationId),
           eq(projectPathMappings.userId, subject.userId),
         ))
-        .returning();
+        .returning());
       return rows[0] === undefined ? null : asPathMappingRecord(rows[0]);
     } catch (error) {
       if (uniqueConstraint(error) === "project_path_mappings_organization_user_prefix_unique") {
@@ -1483,14 +1563,14 @@ export class DrizzlePathMappingRepository implements PathMappingRepository {
   }
 
   public async remove(subject: AuthenticatedSubject, mappingId: string): Promise<boolean> {
-    const rows = await this.db
+    const rows = await withLiveSubject(this.db, subject, async (db) => db
       .delete(projectPathMappings)
       .where(and(
         eq(projectPathMappings.id, mappingId),
         eq(projectPathMappings.organizationId, subject.organizationId),
         eq(projectPathMappings.userId, subject.userId),
       ))
-      .returning({ id: projectPathMappings.id });
+      .returning({ id: projectPathMappings.id }));
     return rows.length > 0;
   }
 }

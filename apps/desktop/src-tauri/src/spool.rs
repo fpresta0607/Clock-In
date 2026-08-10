@@ -84,6 +84,7 @@ pub fn active_identity() -> Option<EvidenceIdentity> {
 }
 
 pub fn activate_identity(identity: &EvidenceIdentity) -> SpoolResult<()> {
+    ensure_identity_namespace_capacity(identity)?;
     let paths = evidence_paths(identity);
     std::fs::create_dir_all(&paths.browser_dir)?;
     std::fs::write(paths.browser_dir.join(".last-active"), unix_seconds().to_string())?;
@@ -91,7 +92,15 @@ pub fn activate_identity(identity: &EvidenceIdentity) -> SpoolResult<()> {
         let body = serde_json::to_vec(identity).map_err(io::Error::other)?;
         rewrite(&active_identity_path(), &body)
     })?;
-    prune_stale_namespaces(identity)
+    Ok(())
+}
+
+pub fn ensure_identity_namespace_capacity(identity: &EvidenceIdentity) -> SpoolResult<()> {
+    reserve_namespace_slot(Some(identity))
+}
+
+pub fn ensure_new_identity_namespace_capacity() -> SpoolResult<()> {
+    reserve_namespace_slot(None)
 }
 
 pub fn clear_active_identity() -> SpoolResult<()> {
@@ -524,11 +533,16 @@ fn identity_component_is_valid(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
-fn prune_stale_namespaces(active: &EvidenceIdentity) -> SpoolResult<()> {
-    let root = evidence_root();
-    let active_dir = evidence_paths(active).browser_dir;
+fn reserve_namespace_slot(reserved: Option<&EvidenceIdentity>) -> SpoolResult<()> {
+    reserve_namespace_slot_at(&evidence_root(), reserved)
+}
+
+fn reserve_namespace_slot_at(root: &Path, reserved: Option<&EvidenceIdentity>) -> SpoolResult<()> {
+    let active_dir = active_identity().map(|identity| evidence_paths(&identity).browser_dir);
+    let reserved_dir = reserved.map(|identity| root.join(&identity.account_id).join(&identity.organization_id));
     let mut candidates = Vec::new();
-    match std::fs::read_dir(&root) {
+    let mut namespaces = 0usize;
+    match std::fs::read_dir(root) {
         Ok(accounts) => {
             for account in accounts {
                 let account = account?;
@@ -541,7 +555,10 @@ fn prune_stale_namespaces(active: &EvidenceIdentity) -> SpoolResult<()> {
                         continue;
                     }
                     let path = organization.path();
-                    if path == active_dir {
+                    namespaces += 1;
+                    if active_dir.as_ref().is_some_and(|active| path == *active)
+                        || reserved_dir.as_ref().is_some_and(|reserved| path == *reserved)
+                    {
                         continue;
                     }
                     let touched = std::fs::read_to_string(path.join(".last-active"))
@@ -562,12 +579,25 @@ fn prune_stale_namespaces(active: &EvidenceIdentity) -> SpoolResult<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     }
-    candidates.sort_by_key(|(touched, _)| std::cmp::Reverse(*touched));
-    for (_, path) in candidates.into_iter().skip(MAX_RETAINED_NAMESPACES.saturating_sub(1)) {
-        if namespace_has_pending_evidence(&path)? {
-            continue;
+    let reserve_count = match &reserved_dir {
+        Some(path) if path.is_dir() => 0,
+        Some(_) => 1,
+        None => 1,
+    };
+    candidates.sort_by_key(|(touched, _)| *touched);
+    for (_, path) in candidates {
+        if namespaces.saturating_add(reserve_count) <= MAX_RETAINED_NAMESPACES {
+            break;
         }
-        std::fs::remove_dir_all(path)?;
+        if !namespace_has_pending_evidence(&path)? {
+            std::fs::remove_dir_all(path)?;
+            namespaces = namespaces.saturating_sub(1);
+        }
+    }
+    if namespaces.saturating_add(reserve_count) > MAX_RETAINED_NAMESPACES {
+        return Err(io::Error::other(
+            "We saved unsynced work for another workspace. Sign back into that workspace and let Clock-In finish syncing before adding a new account.",
+        ));
     }
     Ok(())
 }
@@ -1366,6 +1396,26 @@ mod tests {
 
         assert!(namespace_has_pending_evidence(&pending).expect("pending namespace reads"));
         assert!(!namespace_has_pending_evidence(&drained).expect("drained namespace reads"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_identity_is_blocked_when_all_retained_namespaces_are_pending() {
+        let dir = temp_dir("namespace-capacity");
+        for index in 0..MAX_RETAINED_NAMESPACES {
+            let namespace = dir.join(format!("account-{index}")).join(format!("organization-{index}"));
+            std::fs::create_dir_all(&namespace).expect("namespace creates");
+            append(&namespace.join("agent-spool.jsonl"), &event(&format!("pending-{index}")))
+                .expect("pending evidence writes");
+        }
+        let next = EvidenceIdentity::new("new-account", "new-organization").expect("identity is valid");
+
+        let error = reserve_namespace_slot_at(&dir, Some(&next)).expect_err("new namespace is blocked");
+
+        assert!(error.to_string().contains("unsynced work"));
+        assert!(dir.join("account-0").join("organization-0").join("agent-spool.jsonl").exists());
+        assert!(!dir.join("new-account").join("new-organization").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

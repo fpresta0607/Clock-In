@@ -210,7 +210,7 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
   });
   app.get("/organization", async (context) => {
     const subject = getAuthenticatedSubject(context);
-    const organization = await dependencies.accounts.findOrganization(subject.organizationId);
+    const organization = await dependencies.accounts.findOrganization(subject.organizationId, subject);
     if (organization === null) throw new AppError("not_found", "Organization not found.");
     return context.json(organizationResponseSchema.parse({ organization }));
   });

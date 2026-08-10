@@ -21,6 +21,7 @@ import {
   Outbox,
   OUTBOX_NAMESPACES_STORAGE_KEY,
   OUTBOX_STORAGE_KEY,
+  canActivateOutboxNamespace,
   pruneOutboxNamespaces,
 } from "./outbox.js";
 import {
@@ -322,18 +323,40 @@ function collectionDetails(message: Record<string, unknown>): { enabled: boolean
   };
 }
 
-function activateOutbox(namespace: string): void {
+function migrateLegacyOutbox(namespace: string, id: string): void {
+  const legacyNamespace = `legacy:${id}`;
+  if (namespace === legacyNamespace) {
+    return;
+  }
+  const legacy = outboxes.get(legacyNamespace);
+  if (legacy === undefined) {
+    return;
+  }
+  const target = outboxes.get(namespace) ?? new Outbox<SpanEvent>();
+  for (const event of legacy.drain()) {
+    target.push(event);
+  }
+  outboxes.delete(legacyNamespace);
+  outboxes.set(namespace, target);
+}
+
+function activateOutbox(namespace: string, id: string): boolean {
+  if (!canActivateOutboxNamespace(outboxes, namespace, collectionNamespace)) {
+    return false;
+  }
+  migrateLegacyOutbox(namespace, id);
   collectionNamespace = namespace;
   outbox = outboxes.get(namespace) ?? new Outbox<SpanEvent>();
   outboxes.delete(namespace);
   outboxes.set(namespace, outbox);
+  return true;
 }
 
 function pruneOutboxes(): void {
   pruneOutboxNamespaces(outboxes, collectionNamespace);
 }
 
-function applyCollectionState(message: Record<string, unknown>): boolean {
+function applyCollectionState(message: Record<string, unknown>): "changed" | "unchanged" | "blocked" {
   const { enabled, id, namespace } = collectionDetails(message);
   if (!enabled || id === undefined || namespace === undefined) {
     const changed = collectionEnabled || collectionId !== undefined;
@@ -344,9 +367,20 @@ function applyCollectionState(message: Record<string, unknown>): boolean {
     resetLocalCollectionState();
     clearTally(tally);
     persistState();
-    return changed;
+    return changed ? "changed" : "unchanged";
   }
-  const changed = collectionId !== id || collectionNamespace !== namespace;
+  const legacyUpgrade = collectionId === id && collectionNamespace === `legacy:${id}`;
+  const changed = !legacyUpgrade && (collectionId !== id || collectionNamespace !== namespace);
+  if (changed && !canActivateOutboxNamespace(outboxes, namespace, collectionNamespace)) {
+    collectionEnabled = false;
+    collectionId = undefined;
+    collectionNamespace = undefined;
+    rules = [];
+    resetLocalCollectionState();
+    clearTally(tally);
+    persistState();
+    return "blocked";
+  }
   if (changed) {
     collectionEnabled = false;
     collectionId = undefined;
@@ -356,11 +390,13 @@ function applyCollectionState(message: Record<string, unknown>): boolean {
   }
   collectionEnabled = true;
   collectionId = id;
-  activateOutbox(namespace);
-  if (changed) {
+  if (!activateOutbox(namespace, id)) {
+    throw new Error("Outbox namespace capacity changed during activation.");
+  }
+  if (changed || legacyUpgrade) {
     persistState();
   }
-  return changed;
+  return changed ? "changed" : "unchanged";
 }
 
 function connect(): void {
@@ -403,19 +439,22 @@ function connect(): void {
       return;
     }
     if (payload["type"] === "collection-state") {
-      if (applyCollectionState(payload) && collectionEnabled) {
+      if (applyCollectionState(payload) === "changed" && collectionEnabled) {
         requestRules();
       }
       return;
     }
     if (payload["type"] === "rules") {
       const collectionChanged = applyCollectionState(payload);
+      if (collectionChanged === "blocked") {
+        return;
+      }
       const list = payload["rules"];
       // Fail closed: an unusable rule set matches nothing.
       rules = collectionEnabled && Array.isArray(list) ? list.filter(isRule) : [];
       reconnectAttempt = 0;
       // A new rule set changes the verdict of the tab already open.
-      if (collectionChanged) {
+      if (collectionChanged === "changed") {
         revalidateAttention();
       } else {
         reApplyActiveTab();
@@ -707,7 +746,7 @@ async function initialize(): Promise<void> {
     }
   }
   if (collectionId !== undefined) {
-    activateOutbox(`legacy:${collectionId}`);
+    activateOutbox(`legacy:${collectionId}`, collectionId);
   }
   for (const event of startup.queuedEvents) {
     outbox.push(event);

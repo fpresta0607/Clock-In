@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 
-import { createDatabase, runMigrations, type DatabaseConnection } from "@clock-in/database";
+import {
+  createDatabase,
+  createDisposableTestDatabase,
+  runMigrations,
+  type DatabaseConnection,
+  type DisposableTestDatabase,
+} from "@clock-in/database";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createApp } from "./app.js";
@@ -23,29 +29,28 @@ const integrationDescription = databaseUrl
   ? "manual timer smoke path"
   : "manual timer smoke path (skipped: TEST_DATABASE_URL is not set)";
 
-const config = parseEnv({
-  DATABASE_URL: databaseUrl ?? "postgres://unused:unused@localhost:5432/unused",
+let config = parseEnv({
+  DATABASE_URL: "postgres://unused:unused@localhost:5432/unused",
   AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
   NODE_ENV: "test",
 });
 
 integration(integrationDescription, () => {
-  const database = databaseUrl ? createDatabase(databaseUrl, { max: 1 }) : (undefined as unknown as DatabaseConnection);
+  let disposable: DisposableTestDatabase | undefined;
+  let database = undefined as unknown as DatabaseConnection;
   const authUserId = randomUUID();
   let app: ReturnType<typeof createApp>;
   let authorized: Record<string, string>;
 
   beforeAll(async () => {
     if (!databaseUrl) return;
-    // Migrations hard-reference the public schema (phase-2 enum types and
-    // foreign keys), so the disposable boundary is the database itself, not
-    // a schema. Refuse anything that is not obviously a scratch database.
-    const dbName = new URL(databaseUrl).pathname.replace("/", "");
-    if (!dbName.startsWith("clock_in_")) {
-      throw new Error(
-        `TEST_DATABASE_URL must point at a disposable database whose name starts with "clock_in_", got "${dbName}".`,
-      );
-    }
+    disposable = await createDisposableTestDatabase(databaseUrl, "api_smoke");
+    database = disposable.database;
+    config = parseEnv({
+      DATABASE_URL: disposable.databaseUrl,
+      AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
+      NODE_ENV: "test",
+    });
     await runMigrations(database);
 
     const auth = await createTestAuth(config, new Date());
@@ -67,15 +72,8 @@ integration(integrationDescription, () => {
   }, 60_000);
 
   afterAll(async () => {
-    if (!databaseUrl) return;
-    try {
-      // Reset the scratch database so reruns start empty.
-      await database.client.unsafe(`drop schema public cascade`);
-      await database.client.unsafe(`create schema public`);
-      await database.client.unsafe(`drop schema if exists drizzle cascade`);
-    } finally {
-      await database.client.end({ timeout: 5 });
-    }
+    if (disposable === undefined) return;
+    await disposable.cleanup();
   });
 
   it("provisions an account on first sign-in, tracks a session, and exports it in a report", async () => {
@@ -245,9 +243,9 @@ integration(integrationDescription, () => {
       error: { code: "forbidden", message: expect.stringContaining("claim the first admin role") },
     });
 
-    if (databaseUrl === undefined) throw new Error("The smoke database URL is required for this test.");
-    const firstClaimant = createDatabase(databaseUrl, { max: 1 });
-    const secondClaimant = createDatabase(databaseUrl, { max: 1 });
+    if (disposable === undefined) throw new Error("The disposable smoke database is required for this test.");
+    const firstClaimant = createDatabase(disposable.databaseUrl, { max: 1 });
+    const secondClaimant = createDatabase(disposable.databaseUrl, { max: 1 });
     let firstClaimWon = false;
     try {
       const firstClaimApp = createApp({ config, keys: firstAuth.keys, accounts: new DrizzleAccountStore(firstClaimant.db) });
@@ -309,8 +307,9 @@ integration(integrationDescription, () => {
     await expect(legacyAccounts.claimFirstAdmin({ organizationId: soloOrganizationId, userId: soloUserId }))
       .resolves.toMatchObject({ kind: "claimed" });
 
-    const mover = createDatabase(databaseUrl, { max: 1 });
-    const joiner = createDatabase(databaseUrl, { max: 1 });
+    if (disposable === undefined) throw new Error("The disposable smoke database is required for this test.");
+    const mover = createDatabase(disposable.databaseUrl, { max: 1 });
+    const joiner = createDatabase(disposable.databaseUrl, { max: 1 });
     try {
       const moverAuth = await createTestAuth(config, new Date());
       const joinerAuth = await createTestAuth(config, new Date());

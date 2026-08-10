@@ -200,6 +200,9 @@ impl AppState {
         if previous.as_ref() == Some(&identity) {
             return Ok(());
         }
+        spool::ensure_identity_namespace_capacity(&identity).map_err(|error| {
+            BridgeError::new(ErrorKind::Conflict, error.to_string())
+        })?;
         self.monitor.stop().await;
         let active = spool::active_identity();
         if previous.is_some() || active.as_ref() != Some(&identity) {
@@ -211,7 +214,7 @@ impl AppState {
             browser::deactivate_collection(&browser_dir)?;
         }
         spool::activate_identity(&identity)
-            .map_err(|_| BridgeError::unknown("Could not prepare offline evidence."))?;
+            .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
         let paths = spool::evidence_paths(&identity);
         *self.recovery.lock().await = load_recovery_from_disk(&paths.recovery_path);
         *self.recovery_path.lock().await = paths.recovery_path;
@@ -240,6 +243,11 @@ impl AppState {
             return Err(BridgeError::unknown("Could not revoke browser attribution."));
         }
         Ok(())
+    }
+
+    async fn deactivate_invalid_session(&self) -> ApiResult<()> {
+        self.clear_session_token();
+        self.deactivate_identity().await
     }
 
     async fn enable_active_collection(&self) -> ApiResult<()> {
@@ -276,13 +284,19 @@ async fn timer_bootstrap(state: State<'_, AppState>) -> ApiResult<Snapshot> {
         // No stored session, or the stored one no longer works: show sign-in
         // rather than an error the user cannot act on.
         Err(error) if error.kind == ErrorKind::Auth => {
-            state.deactivate_identity().await?;
-            state.clear_session_token();
+            state.deactivate_invalid_session().await?;
             return Ok(Snapshot::signed_out());
         }
         Err(error) => return Err(error),
     };
-    let snapshot = state.snapshot(&access_token).await?;
+    let snapshot = match state.snapshot(&access_token).await {
+        Ok(snapshot) => snapshot,
+        Err(error) if error.kind == ErrorKind::Auth => {
+            state.deactivate_invalid_session().await?;
+            return Ok(Snapshot::signed_out());
+        }
+        Err(error) => return Err(error),
+    };
     state.enable_active_collection().await?;
     // A signed-in session is what starts the monitor: recording while signed
     // out would attribute this machine's evidence to whoever signs in next.
@@ -292,8 +306,6 @@ async fn timer_bootstrap(state: State<'_, AppState>) -> ApiResult<Snapshot> {
 
 #[tauri::command]
 async fn auth_login(state: State<'_, AppState>, input: LoginInput) -> ApiResult<Snapshot> {
-    state.deactivate_identity().await?;
-    state.clear_session_token();
     let session = state.client.sign_in(&input.email, &input.password).await?;
     let access_token = state.client.fetch_access_token(&session).await?;
     let snapshot = state.snapshot(&access_token).await?;
@@ -322,8 +334,8 @@ pub struct SignupInput {
 
 #[tauri::command]
 async fn auth_signup(state: State<'_, AppState>, input: SignupInput) -> ApiResult<Snapshot> {
-    state.deactivate_identity().await?;
-    state.clear_session_token();
+    spool::ensure_new_identity_namespace_capacity()
+        .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
     let session = state
         .client
         .sign_up(&input.email, &input.password, &input.name)
@@ -356,6 +368,8 @@ struct OrganizationOverview {
 #[tauri::command]
 async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<OrganizationOverview> {
     let access_token = state.access_token().await?;
+    spool::ensure_new_identity_namespace_capacity()
+        .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
     let previous = state.active_identity.lock().await.clone();
     state.deactivate_identity().await?;
     if let Err(error) = state
@@ -515,6 +529,13 @@ async fn timer_retry_pending(state: State<'_, AppState>) -> ApiResult<PendingRet
 }
 
 #[tauri::command]
+async fn offline_sync_retry(state: State<'_, AppState>) -> ApiResult<()> {
+    let _ = state.access_token().await?;
+    state.monitor.request_upload();
+    Ok(())
+}
+
+#[tauri::command]
 async fn timer_use_server(state: State<'_, AppState>) -> ApiResult<Snapshot> {
     let access_token = state.access_token().await?;
 
@@ -545,8 +566,7 @@ async fn timer_retry_local_start(
 #[tauri::command]
 async fn monitor_status(state: State<'_, AppState>) -> ApiResult<MonitorStatus> {
     if state.monitor.identity_invalidated() {
-        state.clear_session_token();
-        if let Err(error) = state.deactivate_identity().await {
+        if let Err(error) = state.deactivate_invalid_session().await {
             eprintln!("clock-in: could not fully deactivate an invalid session: {}", error.message);
         }
         return Err(BridgeError::auth("Your session has expired. Sign in again."));
@@ -874,6 +894,7 @@ pub fn run() {
             timer_start,
             timer_stop,
             timer_retry_pending,
+            offline_sync_retry,
             timer_use_server,
             timer_retry_local_start,
             monitor_status,
