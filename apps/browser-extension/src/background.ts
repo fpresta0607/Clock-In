@@ -450,8 +450,10 @@ function reApplyActiveTab(): void {
   if (windowId === null) {
     return;
   }
-  const generation = tabReadGeneration + 1;
-  tabReadGeneration = generation;
+  const generation = beginTabRead();
+  if (generation === null) {
+    return;
+  }
   void chrome.tabs
     .get(tabId)
     .then((tab) => {
