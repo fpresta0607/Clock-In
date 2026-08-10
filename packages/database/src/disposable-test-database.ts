@@ -55,16 +55,42 @@ export async function createDisposableTestDatabase(
   const controlDatabaseUrl = controlUrl(configuredUrl);
   const disposableUrl = urlForDatabase(configuredUrl, name);
   const control = postgres(controlDatabaseUrl, { max: 1 });
+  let creationError: Error | undefined;
   try {
     await control.unsafe(`create database ${quotedIdentifier(name)}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : "unknown database error";
-    throw new Error(`Could not create the disposable integration database: ${message}`);
-  } finally {
+    creationError = new Error(`Could not create the disposable integration database: ${message}`);
+  }
+  let controlCloseError: unknown;
+  try {
     await control.end({ timeout: 5 });
+  } catch (error) {
+    controlCloseError = error;
+  }
+  if (creationError !== undefined) {
+    throw creationError;
+  }
+  if (controlCloseError !== undefined) {
+    try {
+      await dropDisposableDatabase(controlDatabaseUrl, name);
+    } catch (dropError) {
+      void dropError;
+    }
+    throw controlCloseError;
   }
 
-  const database = createDatabase(disposableUrl, { max: 1 });
+  let database: DatabaseConnection;
+  try {
+    database = createDatabase(disposableUrl, { max: 1 });
+  } catch (error) {
+    try {
+      await dropDisposableDatabase(controlDatabaseUrl, name);
+    } catch (dropError) {
+      void dropError;
+    }
+    throw error;
+  }
   try {
     const rows = await database.client<{ current_database: string }[]>`select current_database()`;
     if (rows[0]?.current_database !== name) {

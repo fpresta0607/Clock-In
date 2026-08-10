@@ -86,6 +86,11 @@ let collectionEnabled = false;
 let collectionId: string | undefined;
 let collectionNamespace: string | undefined;
 let capturePaused = false;
+let captureResumePending = false;
+let pauseAwaitingHostConfirmation = false;
+let storageWriteFailed = false;
+let pendingStorageWrites = 0;
+let storageWriteTail: Promise<void> = Promise.resolve();
 const capturePausedNamespaces = new Map<string, boolean>();
 
 // The active tab's local verdict. `unmatchedOrigin` exists only to feed the
@@ -102,10 +107,10 @@ const inFlightSpans = new Set<string>();
 let lastTickAt = Date.now();
 let lastTallyFlushAt = 0;
 
-function persistState(): void {
+function persistState(): Promise<boolean> {
   pruneOutboxes();
   const savedAt = Date.now();
-  void chrome.storage.local.set({
+  const state = {
     [TALLY_STORAGE_KEY]: tally,
     [OUTBOX_STORAGE_KEY]: outbox.snapshot(),
     [OUTBOX_NAMESPACES_STORAGE_KEY]: Object.fromEntries(
@@ -116,11 +121,27 @@ function persistState(): void {
     [COLLECTION_ID_STORAGE_KEY]: collectionId ?? null,
     [CAPTURE_PAUSED_STORAGE_KEY]: capturePaused,
     [CAPTURE_PAUSED_NAMESPACES_STORAGE_KEY]: Object.fromEntries(capturePausedNamespaces),
-  }).catch(() => {
-    // A later alarm or browser event retries. The in-memory state remains
-    // authoritative for this worker lifetime.
+  };
+  pendingStorageWrites += 1;
+  const write = storageWriteTail.then(() => chrome.storage.local.set(state));
+  storageWriteTail = write.then(
+    () => undefined,
+    () => undefined,
+  );
+  return write.then(() => {
+    pendingStorageWrites -= 1;
+    storageWriteFailed = false;
+    if (pendingStorageWrites === 0) {
+      sendNamespaceCapacity();
+      flushOutbox();
+    }
+    return true;
+  }, () => {
+    pendingStorageWrites -= 1;
+    storageWriteFailed = true;
+    pauseCapture();
+    return false;
   });
-  sendNamespaceCapacity();
 }
 
 function sendToHost(message: unknown): boolean {
@@ -149,7 +170,7 @@ function sendNamespaceCapacity(): void {
 }
 
 function emitSpanEvents(events: readonly SpanEvent[]): void {
-  if (collectionId === undefined || capturePaused) {
+  if (collectionId === undefined || capturePaused || captureResumePending || storageWriteFailed) {
     return;
   }
   if (events.length > outbox.remainingCapacity) {
@@ -163,8 +184,7 @@ function emitSpanEvents(events: readonly SpanEvent[]): void {
     }
   }
   if (events.length > 0) {
-    persistState();
-    flushOutbox();
+    void persistState();
   }
 }
 
@@ -173,6 +193,8 @@ function pauseCapture(): void {
     return;
   }
   capturePaused = true;
+  captureResumePending = false;
+  pauseAwaitingHostConfirmation = true;
   capturePausedNamespaces.set(collectionNamespace, true);
   rules = [];
   resetLocalCollectionState();
@@ -186,16 +208,30 @@ function applyCapturePause(message: Record<string, unknown>): void {
   }
   const paused = message["capturePaused"] === true;
   if (paused) {
-    if (!capturePaused) pauseCapture();
+    if (!capturePaused) {
+      pauseCapture();
+    } else {
+      pauseAwaitingHostConfirmation = false;
+      if (storageWriteFailed) void persistState();
+    }
     return;
   }
-  if (!capturePaused || outbox.remainingCapacity === 0) {
+  if (!capturePaused || outbox.remainingCapacity === 0 || pauseAwaitingHostConfirmation || captureResumePending) {
+    return;
+  }
+  if (storageWriteFailed) {
+    void persistState();
     return;
   }
   capturePaused = false;
   capturePausedNamespaces.delete(collectionNamespace);
-  persistState();
-  revalidateAttention();
+  captureResumePending = true;
+  void persistState().then((persisted) => {
+    if (!persisted || capturePaused) return;
+    captureResumePending = false;
+    requestRules();
+    revalidateAttention();
+  });
 }
 
 function scheduleMachineAdvance(): void {
@@ -325,7 +361,7 @@ function sendTally(): void {
 }
 
 function flushOutbox(): void {
-  if (!collectionEnabled || collectionId === undefined) {
+  if (!collectionEnabled || collectionId === undefined || pendingStorageWrites > 0 || storageWriteFailed) {
     return;
   }
   for (const event of outbox.snapshot()) {
@@ -340,7 +376,6 @@ function flushOutbox(): void {
       break;
     }
   }
-  persistState();
 }
 
 function spanKey(event: SpanEvent): string {
@@ -412,9 +447,14 @@ function activateOutbox(namespace: string, id: string): boolean {
   if (!migrateLegacyOutbox(namespace, id)) {
     return false;
   }
+  const changedNamespace = collectionNamespace !== namespace;
   collectionNamespace = namespace;
   outbox = outboxes.get(namespace) ?? new Outbox<SpanEvent>();
   capturePaused = capturePausedNamespaces.get(namespace) === true || outbox.remainingCapacity === 0;
+  if (changedNamespace) {
+    captureResumePending = false;
+    pauseAwaitingHostConfirmation = capturePaused;
+  }
   outboxes.delete(namespace);
   outboxes.set(namespace, outbox);
   return true;
@@ -437,6 +477,8 @@ function applyCollectionState(message: Record<string, unknown>): "changed" | "un
     collectionId = undefined;
     collectionNamespace = undefined;
     capturePaused = false;
+    captureResumePending = false;
+    pauseAwaitingHostConfirmation = false;
     rules = [];
     resetLocalCollectionState();
     clearTally(tally);
@@ -473,6 +515,12 @@ function applyCollectionState(message: Record<string, unknown>): "changed" | "un
     clearTally(tally);
     persistState();
     return "blocked";
+  }
+  if (storageWriteFailed) {
+    pauseCapture();
+  }
+  if (capturePaused && pauseAwaitingHostConfirmation) {
+    sendToHost({ type: "capture-paused", collectionId: id });
   }
   if (changed || legacyUpgrade) {
     persistState();
@@ -534,7 +582,7 @@ function connect(): void {
       applyCapturePause(payload);
       const list = payload["rules"];
       // Fail closed: an unusable rule set matches nothing.
-      rules = collectionEnabled && !capturePaused && Array.isArray(list) ? list.filter(isRule) : [];
+      rules = collectionEnabled && !capturePaused && !captureResumePending && Array.isArray(list) ? list.filter(isRule) : [];
       reconnectAttempt = 0;
       // A new rule set changes the verdict of the tab already open.
       if (collectionChanged === "changed") {
@@ -761,6 +809,10 @@ chrome.idle.onStateChanged.addListener((state) => {
 // worker eviction. The wall-clock delta is clamped and gaps trigger
 // re-validation, so laptop sleep cannot credit hours to a stale origin.
 function runTick(): void {
+  if (storageWriteFailed) {
+    if (pendingStorageWrites === 0) void persistState();
+    return;
+  }
   const now = Date.now();
   if (!advanceMachine(now)) {
     return;
@@ -821,9 +873,11 @@ async function initialize(): Promise<void> {
   tally = startup.tally;
   collectionId = startup.collectionId;
   const storedOutboxes = stored?.[OUTBOX_NAMESPACES_STORAGE_KEY];
+  let restoredOutboxState = false;
   if (typeof storedOutboxes === "object" && storedOutboxes !== null && !Array.isArray(storedOutboxes)) {
     for (const [namespace, queued] of Object.entries(storedOutboxes as Record<string, unknown>)) {
       if (isStoredOutboxNamespace(namespace) && Array.isArray(queued)) {
+        restoredOutboxState = true;
         const events = queued.filter(isSpanEvent);
         if (events.length > 0) {
           outboxes.set(namespace, new Outbox<SpanEvent>(undefined, events));
@@ -837,13 +891,13 @@ async function initialize(): Promise<void> {
       if (isStoredOutboxNamespace(namespace) && paused === true) capturePausedNamespaces.set(namespace, true);
     }
   }
-  if (collectionId !== undefined) {
+  if (!restoredOutboxState && collectionId !== undefined) {
     activateOutbox(`legacy:${collectionId}`, collectionId);
-  }
-  for (const event of startup.queuedEvents) {
-    if (!outbox.push(event)) {
-      capturePaused = true;
-      if (collectionNamespace !== undefined) capturePausedNamespaces.set(collectionNamespace, true);
+    for (const event of startup.queuedEvents) {
+      if (!outbox.push(event)) {
+        capturePaused = true;
+        if (collectionNamespace !== undefined) capturePausedNamespaces.set(collectionNamespace, true);
+      }
     }
   }
   capturePaused ||= stored?.[CAPTURE_PAUSED_STORAGE_KEY] === true;
