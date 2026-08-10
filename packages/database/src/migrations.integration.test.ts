@@ -66,7 +66,7 @@ integration(integrationDescription, () => {
     if (cleanupError !== undefined) throw cleanupError;
   });
 
-  it("backfills legacy defaults, memberships, and trusted timer devices without assigning an arbitrary administrator", async () => {
+  it("backfills legacy defaults and memberships without assigning administrators or timer devices", async () => {
     if (!database) return;
     const legacyOrganizationId = randomUUID();
     const legacyFirstUserId = randomUUID();
@@ -155,7 +155,7 @@ integration(integrationDescription, () => {
     const legacySession = await database.client`
       select device_id from time_sessions where id = ${legacySessionId}
     `;
-    expect(legacySession).toEqual([{ device_id: legacyDeviceId }]);
+    expect(legacySession).toEqual([{ device_id: null }]);
 
     await runMigrations(database);
     const rerunDefaults = await database.client`

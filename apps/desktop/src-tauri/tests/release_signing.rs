@@ -38,6 +38,18 @@ fn signer_environment(name: &str) -> Option<String> {
     }
 }
 
+fn macos_signing_environment(identity: &str, name: &str) -> Option<String> {
+    match name {
+        "APPLE_CERTIFICATE" => Some("certificate".to_string()),
+        "APPLE_CERTIFICATE_PASSWORD" => Some("password".to_string()),
+        "APPLE_SIGNING_IDENTITY" => Some(identity.to_string()),
+        "APPLE_ID" => Some("notarization@example.test".to_string()),
+        "APPLE_PASSWORD" => Some("app-specific-password".to_string()),
+        "APPLE_TEAM_ID" => Some("ABCDEFG123".to_string()),
+        _ => None,
+    }
+}
+
 #[test]
 fn helper_overrides_merge_with_the_base_release_configuration() {
     let base = serde_json::json!({
@@ -170,4 +182,28 @@ fn local_unsigned_builds_cannot_request_updater_artifacts() {
     assert!(error.contains("unsigned"));
     release_signing::validate_build_signing(false, "windows", &production_config(), |_| None)
         .expect("a local debug build remains available");
+}
+
+#[test]
+fn macos_release_rejects_adhoc_signing_identity() {
+    let error = release_signing::validate_macos_signing_with_verifier(
+        |name| macos_signing_environment("-", name),
+        |_| panic!("ad-hoc signing must not reach identity verification"),
+    )
+    .expect_err("an ad-hoc signing identity cannot authorize a macOS release");
+
+    assert!(error.contains("ad-hoc"));
+}
+
+#[test]
+fn macos_release_requires_a_verified_developer_id_identity() {
+    let identity = "Developer ID Application: Clock-In, Inc. (ABCDEFG123)";
+    release_signing::validate_macos_signing_with_verifier(
+        |name| macos_signing_environment(identity, name),
+        |verified_identity| {
+            assert_eq!(verified_identity, identity);
+            Ok(())
+        },
+    )
+    .expect("a verified Developer ID identity with notarization credentials is accepted");
 }

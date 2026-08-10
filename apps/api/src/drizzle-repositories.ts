@@ -5,7 +5,6 @@ import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lt, ne, or, sql,
 import {
   activitySegments,
   agentSessions,
-  backfillTrustedLegacySessionDevices,
   organizationAdminClaims,
   organizations,
   projectMemberships,
@@ -994,13 +993,12 @@ export class DrizzleReportRepository implements ReportRepository {
   }
 
   private async assertExactRangeSupport(
-    db: Pick<DatabaseConnection["db"], "select" | "execute">,
+    db: Pick<DatabaseConnection["db"], "select">,
     subject: AuthenticatedSubject,
     query: ReportQuery,
   ): Promise<void> {
     const range = clippedRange(query);
     if (range === null) return;
-    await backfillTrustedLegacySessionDevices(db, subject);
     const clippedAtBoundary = [
       range.from === undefined
         ? undefined
@@ -1379,16 +1377,12 @@ export class DrizzleActivitySegmentRepository implements ActivitySegmentReposito
       organizationId: first.organizationId,
       userId: first.userId,
     }, async (db) => {
-    await db
-      .insert(activitySegments)
-      .values(segments)
-      .onConflictDoNothing({
-        target: [activitySegments.organizationId, activitySegments.userId, activitySegments.clientId],
-      });
-    await backfillTrustedLegacySessionDevices(db, {
-      organizationId: first.organizationId,
-      userId: first.userId,
-    });
+      await db
+        .insert(activitySegments)
+        .values(segments)
+        .onConflictDoNothing({
+          target: [activitySegments.organizationId, activitySegments.userId, activitySegments.clientId],
+        });
     });
   }
 }

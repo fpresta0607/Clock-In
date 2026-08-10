@@ -986,7 +986,7 @@ integration(integrationDescription, () => {
     }));
   }, 60_000);
 
-  it("backfills legacy device evidence before clipping its idle range", async () => {
+  it("rejects clipped legacy idle time with unrelated overlapping device evidence", async () => {
     const me = await app.request("/me", { headers: authorized });
     expect(me.status).toBe(200);
     const { user } = await me.json();
@@ -1030,18 +1030,19 @@ integration(integrationDescription, () => {
     const stored = await database.client`
       select device_id from time_sessions where id = ${sessionId}
     `;
-    expect(stored).toEqual([{ device_id: deviceId }]);
+    expect(stored).toEqual([{ device_id: null }]);
 
     const response = await app.request(
       `/reports?projectId=${projectId}&fromAt=2026-08-02T10%3A00%3A00.000Z&toExclusiveAt=2026-08-02T11%3A00%3A00.000Z&page=1&pageSize=50`,
       { headers: authorized },
     );
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(400);
     const body = await response.json();
-    expect(body.totalDurationSeconds).toBe(0);
-    expect(body.rows).toEqual([expect.objectContaining({
-      id: sessionId,
-      durationSeconds: 0,
-    })]);
+    expect(body).toEqual({
+      error: {
+        code: "validation_error",
+        message: "This range includes legacy time without enough activity evidence to clip exactly.",
+      },
+    });
   }, 60_000);
 });
