@@ -493,11 +493,11 @@ fn extension_reservation_error() -> BridgeError {
 pub fn request_extension_namespace_reservation(
     dir: &Path,
     target: &spool::EvidenceIdentity,
-) -> ApiResult<Option<ExtensionNamespaceReservation>> {
+) -> ApiResult<ExtensionNamespaceReservation> {
     ensure_browser_dir(dir).map_err(|_| extension_reservation_error())?;
     spool::with_lock(&browser_spool_path(dir), || {
         if !extension_capacity_tracking_is_active(dir) {
-            return Ok(None);
+            return Err(io::Error::other("browser extension handshake is unavailable"));
         }
         let Some(collection) = read_collection(dir) else {
             return Err(io::Error::other("browser collection is unavailable"));
@@ -512,7 +512,7 @@ pub fn request_extension_namespace_reservation(
                 && existing.source_namespace == source_namespace
                 && existing.target_namespace == target_namespace
             {
-                return Ok(Some(existing));
+                return Ok(existing);
             }
             return Err(io::Error::other("browser namespace reservation is pending"));
         }
@@ -525,7 +525,7 @@ pub fn request_extension_namespace_reservation(
         };
         let bytes = serde_json::to_vec(&reservation).map_err(io::Error::other)?;
         write_if_changed_locked(&extension_namespace_reservation_path(dir), &bytes)?;
-        Ok(Some(reservation))
+        Ok(reservation)
     })
     .map_err(|_| extension_reservation_error())
 }

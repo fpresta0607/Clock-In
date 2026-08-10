@@ -34,6 +34,7 @@ pub const SPOOL_ENV_VAR: &str = "CLOCK_IN_SPOOL";
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
 const LOCK_WAIT_LIMIT: Duration = Duration::from_secs(5);
 const MAX_RETAINED_NAMESPACES: usize = 8;
+const NAMESPACE_RESERVATION_FILE: &str = ".namespace-reservation.json";
 
 pub type SpoolResult<T> = Result<T, io::Error>;
 
@@ -64,6 +65,11 @@ pub struct EvidencePaths {
     pub segments_path: PathBuf,
     pub browser_dir: PathBuf,
     pub recovery_path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamespaceReservation {
+    identity: EvidenceIdentity,
 }
 
 pub fn evidence_paths(identity: &EvidenceIdentity) -> EvidencePaths {
@@ -113,9 +119,78 @@ fn activate_identity_at(
         reserve_namespace_slot_at_locked(root, Some(identity), active_dir.as_deref())?;
         let paths = evidence_paths_at(root, identity);
         std::fs::create_dir_all(&paths.browser_dir)?;
+        let reservation_path = namespace_reservation_path(&paths.browser_dir);
+        recover_rewrite_files_locked(&reservation_path)?;
+        if let Some(reservation) = namespace_reservation_identity(&reservation_path)? {
+            if reservation != *identity {
+                return Err(io::Error::other("evidence namespace reservation does not match identity"));
+            }
+        }
         std::fs::write(paths.browser_dir.join(".last-active"), unix_seconds().to_string())?;
         let body = serde_json::to_vec(identity).map_err(io::Error::other)?;
-        rewrite(active_path, &body)
+        rewrite(active_path, &body)?;
+        remove_if_exists(&reservation_path)
+    })
+}
+
+pub fn reserve_identity_namespace(
+    identity: &EvidenceIdentity,
+) -> SpoolResult<NamespaceReservation> {
+    reserve_identity_namespace_at(&evidence_root(), &active_identity_path(), identity)
+}
+
+fn reserve_identity_namespace_at(
+    root: &Path,
+    active_path: &Path,
+    identity: &EvidenceIdentity,
+) -> SpoolResult<NamespaceReservation> {
+    with_lock(root, || {
+        recover_rewrite_files_locked(active_path)?;
+        let paths = evidence_paths_at(root, identity);
+        let reservation_path = namespace_reservation_path(&paths.browser_dir);
+        recover_rewrite_files_locked(&reservation_path)?;
+        if let Some(reservation) = namespace_reservation_identity(&reservation_path)? {
+            if reservation == *identity {
+                return Ok(NamespaceReservation {
+                    identity: identity.clone(),
+                });
+            }
+            return Err(io::Error::other("evidence namespace reservation does not match identity"));
+        }
+        let active_dir = active_identity_at(active_path)
+            .map(|identity| evidence_paths_at(root, &identity).browser_dir);
+        reserve_namespace_slot_at_locked(root, Some(identity), active_dir.as_deref())?;
+        std::fs::create_dir_all(&paths.browser_dir)?;
+        let body = serde_json::to_vec(identity).map_err(io::Error::other)?;
+        rewrite(&reservation_path, &body)?;
+        Ok(NamespaceReservation {
+            identity: identity.clone(),
+        })
+    })
+}
+
+pub fn release_identity_namespace_reservation(
+    reservation: &NamespaceReservation,
+) -> SpoolResult<()> {
+    let root = evidence_root();
+    release_identity_namespace_reservation_at(&root, reservation)
+}
+
+fn release_identity_namespace_reservation_at(
+    root: &Path,
+    reservation: &NamespaceReservation,
+) -> SpoolResult<()> {
+    with_lock(root, || {
+        let paths = evidence_paths_at(root, &reservation.identity);
+        let reservation_path = namespace_reservation_path(&paths.browser_dir);
+        recover_rewrite_files_locked(&reservation_path)?;
+        match namespace_reservation_identity(&reservation_path)? {
+            Some(identity) if identity == reservation.identity => remove_if_exists(&reservation_path),
+            Some(_) => Err(io::Error::other(
+                "evidence namespace reservation does not match identity",
+            )),
+            None => Ok(()),
+        }
     })
 }
 
@@ -722,6 +797,24 @@ fn namespace_capacity_error() -> io::Error {
     )
 }
 
+fn namespace_reservation_path(dir: &Path) -> PathBuf {
+    dir.join(NAMESPACE_RESERVATION_FILE)
+}
+
+fn namespace_reservation_identity(path: &Path) -> SpoolResult<Option<EvidenceIdentity>> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let identity = serde_json::from_slice::<EvidenceIdentity>(&bytes)
+                .map_err(|_| io::Error::other("evidence namespace reservation is invalid"))?;
+            EvidenceIdentity::new(&identity.account_id, &identity.organization_id)
+                .ok_or_else(|| io::Error::other("evidence namespace reservation is invalid"))
+                .map(Some)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn namespace_has_pending_evidence(dir: &Path) -> SpoolResult<bool> {
     with_namespace_writer_lease(dir, || namespace_has_pending_evidence_while_leased(dir))
 }
@@ -736,6 +829,11 @@ fn namespace_is_evictable_while_root_locked(dir: &Path) -> SpoolResult<bool> {
 }
 
 fn namespace_has_pending_evidence_while_leased(dir: &Path) -> SpoolResult<bool> {
+    let reservation_path = namespace_reservation_path(dir);
+    recover_rewrite_files_locked(&reservation_path)?;
+    if namespace_reservation_identity(&reservation_path)?.is_some() {
+        return Ok(true);
+    }
     for name in ["agent-spool.jsonl", "segments-spool.jsonl", "browser-spool.jsonl"] {
         if !pending_spool_paths_while_leased(&dir.join(name))?.is_empty() {
             return Ok(true);
@@ -1863,6 +1961,86 @@ mod tests {
                 .join("organization-next-b")
                 .is_dir()
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn namespace_reservation_blocks_cross_process_admission_until_rollback() {
+        let child_root = std::env::var_os("CLOCK_IN_SPOOL_RESERVATION_TEST_ROOT");
+        let child_result = std::env::var_os("CLOCK_IN_SPOOL_RESERVATION_TEST_RESULT");
+        if let (Some(root), Some(result_path)) = (child_root, child_result) {
+            let root = PathBuf::from(root);
+            let competing = EvidenceIdentity::new("account-competing", "organization-competing")
+                .expect("competing identity is valid");
+            let result = activate_identity_at(&root, &active_identity_path_for_root(&root), &competing);
+            std::fs::write(
+                result_path,
+                if result.is_err() { "blocked" } else { "admitted" },
+            )
+            .expect("child result writes");
+            assert!(result.is_err());
+            return;
+        }
+
+        let dir = temp_dir("namespace-reservation");
+        let root = dir.join("evidence");
+        let active_path = active_identity_path_for_root(&root);
+        for index in 0..MAX_RETAINED_NAMESPACES - 1 {
+            let pending = root
+                .join(format!("account-{index}"))
+                .join(format!("organization-{index}"))
+                .join("agent-spool.jsonl");
+            append(&pending, &event(&format!("pending-{index}")))
+                .expect("pending evidence writes");
+        }
+        let target = EvidenceIdentity::new("account-target", "organization-target")
+            .expect("target identity is valid");
+        let reservation = reserve_identity_namespace_at(&root, &active_path, &target)
+            .expect("target namespace reserves");
+        let competing = EvidenceIdentity::new("account-competing", "organization-competing")
+            .expect("competing identity is valid");
+        let result_path = dir.join("cross-process-result");
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .arg("namespace_reservation_blocks_cross_process_admission_until_rollback")
+            .arg("--nocapture")
+            .env("CLOCK_IN_SPOOL_RESERVATION_TEST_ROOT", &root)
+            .env("CLOCK_IN_SPOOL_RESERVATION_TEST_RESULT", &result_path)
+            .output()
+            .expect("child process starts");
+
+        assert!(output.status.success());
+        assert_eq!(
+            std::fs::read_to_string(&result_path).expect("child result reads"),
+            "blocked"
+        );
+        assert!(root
+            .join("account-target")
+            .join("organization-target")
+            .is_dir());
+        release_identity_namespace_reservation_at(&root, &reservation)
+            .expect("rollback releases the target capacity");
+        activate_identity_at(&root, &active_path, &competing)
+            .expect("released target capacity admits the competing workspace");
+        assert_eq!(active_identity_at(&active_path), Some(competing));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn identity_activation_completes_its_namespace_reservation() {
+        let dir = temp_dir("namespace-reservation-activation");
+        let root = dir.join("evidence");
+        let active_path = active_identity_path_for_root(&root);
+        let target = EvidenceIdentity::new("account-target", "organization-target")
+            .expect("target identity is valid");
+
+        let _reservation = reserve_identity_namespace_at(&root, &active_path, &target)
+            .expect("target namespace reserves");
+        activate_identity_at(&root, &active_path, &target).expect("target namespace activates");
+
+        assert_eq!(active_identity_at(&active_path), Some(target.clone()));
+        assert!(!namespace_reservation_path(&evidence_paths_at(&root, &target).browser_dir).exists());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
