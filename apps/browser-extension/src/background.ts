@@ -17,7 +17,7 @@
 
 import { shouldApplyTabActivation } from "./activation.js";
 import { match, type UrlRule } from "./matching.js";
-import { Outbox, OUTBOX_STORAGE_KEY } from "./outbox.js";
+import { Outbox, OUTBOX_NAMESPACES_STORAGE_KEY, OUTBOX_STORAGE_KEY } from "./outbox.js";
 import {
   MIN_ALARM_MINUTES,
   reconnectDelayMinutes,
@@ -70,10 +70,12 @@ let port: chrome.runtime.Port | null = null;
 let reconnectAttempt = 0;
 
 let machine: SpanMachine = createSpanMachine();
-const outbox = new Outbox<SpanEvent>();
+let outbox = new Outbox<SpanEvent>();
+const outboxes = new Map<string, Outbox<SpanEvent>>();
 let tally: Tally = emptyTally();
 let collectionEnabled = false;
 let collectionId: string | undefined;
+let collectionNamespace: string | undefined;
 
 // The active tab's local verdict. `unmatchedOrigin` exists only to feed the
 // local tally; it is never part of an emitted event.
@@ -94,6 +96,9 @@ function persistState(): void {
   void chrome.storage.local.set({
     [TALLY_STORAGE_KEY]: tally,
     [OUTBOX_STORAGE_KEY]: outbox.snapshot(),
+    [OUTBOX_NAMESPACES_STORAGE_KEY]: Object.fromEntries(
+      [...outboxes.entries()].map(([namespace, queued]) => [namespace, queued.snapshot()]),
+    ),
     [MACHINE_STORAGE_KEY]: snapshotMachine(machine, savedAt),
     [LAST_TICK_STORAGE_KEY]: lastTickAt,
     [COLLECTION_ID_STORAGE_KEY]: collectionId ?? null,
@@ -300,38 +305,47 @@ function isRule(value: unknown): value is UrlRule {
   return typeof candidate["id"] === "string" && typeof candidate["pattern"] === "string";
 }
 
-function collectionDetails(message: Record<string, unknown>): { enabled: boolean; id: string | undefined } {
+function collectionDetails(message: Record<string, unknown>): { enabled: boolean; id: string | undefined; namespace: string | undefined } {
   const id = message["collectionId"];
+  const namespace = message["collectionNamespace"];
+  const usableId = typeof id === "string" && id.length > 0 ? id : undefined;
   return {
-    enabled: message["collectionEnabled"] === true && typeof id === "string" && id.length > 0,
-    id: typeof id === "string" && id.length > 0 ? id : undefined,
+    enabled: message["collectionEnabled"] === true && usableId !== undefined,
+    id: usableId,
+    namespace: typeof namespace === "string" && namespace.length > 0 ? namespace : usableId,
   };
 }
 
+function activateOutbox(namespace: string): void {
+  collectionNamespace = namespace;
+  outbox = outboxes.get(namespace) ?? new Outbox<SpanEvent>();
+  outboxes.set(namespace, outbox);
+}
+
 function applyCollectionState(message: Record<string, unknown>): boolean {
-  const { enabled, id } = collectionDetails(message);
-  if (!enabled || id === undefined) {
+  const { enabled, id, namespace } = collectionDetails(message);
+  if (!enabled || id === undefined || namespace === undefined) {
     const changed = collectionEnabled || collectionId !== undefined;
     collectionEnabled = false;
     collectionId = undefined;
+    collectionNamespace = undefined;
     rules = [];
     resetLocalCollectionState();
-    outbox.clear();
     clearTally(tally);
     persistState();
     return changed;
   }
-  const changed = collectionId !== id;
+  const changed = collectionId !== id || collectionNamespace !== namespace;
   if (changed) {
     collectionEnabled = false;
     collectionId = undefined;
     rules = [];
     resetLocalCollectionState();
-    outbox.clear();
     clearTally(tally);
   }
   collectionEnabled = true;
   collectionId = id;
+  activateOutbox(namespace);
   if (changed) {
     persistState();
   }
@@ -667,12 +681,23 @@ ensurePeriodicAlarm(RULES_REFRESH_ALARM_NAME, RULES_REFRESH_PERIOD_MINUTES);
 
 async function initialize(): Promise<void> {
   const stored = await chrome.storage.local
-    .get([TALLY_STORAGE_KEY, OUTBOX_STORAGE_KEY, MACHINE_STORAGE_KEY, LAST_TICK_STORAGE_KEY, COLLECTION_ID_STORAGE_KEY])
+    .get([TALLY_STORAGE_KEY, OUTBOX_STORAGE_KEY, OUTBOX_NAMESPACES_STORAGE_KEY, MACHINE_STORAGE_KEY, LAST_TICK_STORAGE_KEY, COLLECTION_ID_STORAGE_KEY])
     .catch(() => undefined);
   const now = Date.now();
   const startup = parseStartupStorage(stored, now);
   tally = startup.tally;
   collectionId = startup.collectionId;
+  const storedOutboxes = stored?.[OUTBOX_NAMESPACES_STORAGE_KEY];
+  if (typeof storedOutboxes === "object" && storedOutboxes !== null && !Array.isArray(storedOutboxes)) {
+    for (const [namespace, queued] of Object.entries(storedOutboxes as Record<string, unknown>)) {
+      if (Array.isArray(queued)) {
+        outboxes.set(namespace, new Outbox<SpanEvent>(undefined, queued.filter(isSpanEvent)));
+      }
+    }
+  }
+  if (collectionId !== undefined) {
+    activateOutbox(`legacy:${collectionId}`);
+  }
   for (const event of startup.queuedEvents) {
     outbox.push(event);
   }

@@ -40,6 +40,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -1209,6 +1210,7 @@ pub struct Monitor {
     settings_path: PathBuf,
     paths: Mutex<MonitorPaths>,
     identity: Mutex<Option<spool::EvidenceIdentity>>,
+    recording: Arc<AtomicBool>,
     client: ApiClient,
     recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
     // Read only by the Windows-gated poll/auto-stop path today.
@@ -1241,6 +1243,7 @@ impl Monitor {
                 browser_dir: config.browser_dir,
             }),
             identity: Mutex::new(None),
+            recording: Arc::new(AtomicBool::new(false)),
             client: config.client,
             recovery: config.recovery,
             recovery_path: Mutex::new(config.recovery_path),
@@ -1281,6 +1284,7 @@ impl Monitor {
                 Arc::clone(&self.recovery),
                 lock(&self.recovery_path).clone(),
                 Arc::clone(&self.upload_now),
+                Arc::clone(&self.recording),
             )))
         };
         #[cfg(not(windows))]
@@ -1295,6 +1299,7 @@ impl Monitor {
             identity,
             Arc::clone(&self.recovery),
             Arc::clone(&self.upload_now),
+            Arc::clone(&self.recording),
         ));
         *guard = Some(MonitorTasks { poll, upload });
     }
@@ -1315,7 +1320,7 @@ impl Monitor {
             (shared.builder.flush(unix_now()), device_id)
         };
         if let Some(segment) = closed {
-            if lock(&self.identity).is_some() {
+            if self.recording.load(Ordering::SeqCst) && lock(&self.identity).is_some() {
                 append_segment_line(&lock(&self.paths).segments_path, &segment, &device_id);
             }
         }
@@ -1331,11 +1336,13 @@ impl Monitor {
         };
         *lock(&self.recovery_path) = evidence.recovery_path;
         *lock(&self.identity) = Some(identity);
+        self.recording.store(true, Ordering::SeqCst);
         self.clear_identity_state();
     }
 
     pub async fn deactivate_identity(&self) {
         self.stop().await;
+        self.recording.store(false, Ordering::SeqCst);
         *lock(&self.identity) = None;
         self.clear_identity_state();
     }
@@ -1554,6 +1561,7 @@ async fn poll_loop(
     recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
     recovery_path: PathBuf,
     upload_now: Arc<Notify>,
+    recording: Arc<AtomicBool>,
 ) {
     let source = platform::Poller::new();
     let mut previous: Option<TickReading> = None;
@@ -1562,6 +1570,9 @@ async fn poll_loop(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
+        if !recording.load(Ordering::SeqCst) {
+            return;
+        }
         let reading = TickReading {
             wall: unix_now(),
             // Unlike std::time::Instant/QueryPerformanceCounter on affected

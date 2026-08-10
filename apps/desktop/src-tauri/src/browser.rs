@@ -324,6 +324,20 @@ pub fn admitted_collection_id(dir: &Path) -> Option<String> {
     admitted_collection_id_at(dir, crate::monitor::unix_now())
 }
 
+pub fn admitted_collection_namespace(dir: &Path) -> Option<String> {
+    spool::with_lock(&browser_spool_path(dir), || {
+        let now = crate::monitor::unix_now();
+        if admitted_collection_id_at_locked(dir, now).is_none() {
+            return Ok(None);
+        }
+        Ok(read_collection(dir).map(|collection| {
+            format!("{}:{}", collection.account_id, collection.organization_id)
+        }))
+    })
+    .ok()
+    .flatten()
+}
+
 fn admitted_collection_id_at(dir: &Path, now: u64) -> Option<String> {
     spool::with_lock(&browser_spool_path(dir), || {
         Ok(admitted_collection_id_at_locked(dir, now))

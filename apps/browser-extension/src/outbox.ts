@@ -6,6 +6,7 @@
 
 export const OUTBOX_CAPACITY = 1000;
 export const OUTBOX_STORAGE_KEY = "spanOutbox";
+export const OUTBOX_NAMESPACES_STORAGE_KEY = "spanOutboxesByNamespace";
 
 /** A first-in-first-out bounded queue; pushing past capacity drops the oldest. */
 export class Outbox<T> {

@@ -418,6 +418,7 @@ pub(crate) fn discard_locked(path: &Path) -> SpoolResult<()> {
         remove_if_exists(&sibling(&candidate, ".partial"))?;
         remove_if_exists(&sibling(&candidate, ".corrupt"))?;
         remove_if_exists(&sibling(&candidate, ".tmp"))?;
+        remove_if_exists(&sibling(&candidate, ".bak"))?;
     }
     Ok(())
 }
@@ -561,9 +562,32 @@ fn prune_stale_namespaces(active: &EvidenceIdentity) -> SpoolResult<()> {
     }
     candidates.sort_by_key(|(touched, _)| std::cmp::Reverse(*touched));
     for (_, path) in candidates.into_iter().skip(MAX_RETAINED_NAMESPACES.saturating_sub(1)) {
+        if namespace_has_pending_evidence(&path)? {
+            continue;
+        }
         std::fs::remove_dir_all(path)?;
     }
     Ok(())
+}
+
+fn namespace_has_pending_evidence(dir: &Path) -> SpoolResult<bool> {
+    for name in ["agent-spool.jsonl", "segments-spool.jsonl", "browser-spool.jsonl"] {
+        if !pending_spool_paths(&dir.join(name))?.is_empty() {
+            return Ok(true);
+        }
+    }
+    match std::fs::read(dir.join("recovery.json")) {
+        Ok(bytes) => match serde_json::from_slice::<crate::recovery::RecoveryState>(&bytes) {
+            Ok(recovery) => Ok(
+                recovery.local_start.is_some()
+                    || recovery.running.is_some()
+                    || !recovery.pending_stops.is_empty(),
+            ),
+            Err(_) => Ok(true),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(windows)]
@@ -803,14 +827,20 @@ fn rewrite(path: &Path, content: &[u8]) -> SpoolResult<()> {
         };
     }
     let tmp = sibling(path, ".tmp");
-    std::fs::write(&tmp, content)?;
-    // Windows cannot rename over an existing file.
-    match std::fs::remove_file(path) {
+    let backup = sibling(path, ".bak");
+    remove_if_exists(&tmp)?;
+    remove_if_exists(&backup)?;
+    let mut file = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
+    file.write_all(content)?;
+    file.sync_all()?;
+    drop(file);
+    match std::fs::rename(path, &backup) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, path)?;
+    remove_if_exists(&backup)
 }
 
 fn sibling(path: &Path, suffix: &str) -> PathBuf {
@@ -827,7 +857,25 @@ pub fn with_lock<T>(path: &Path, action: impl FnOnce() -> SpoolResult<T>) -> Spo
         std::fs::create_dir_all(parent)?;
     }
     let _guard = acquire_lock(path)?;
+    recover_rewrite_files_locked(path)?;
     action()
+}
+
+fn recover_rewrite_files_locked(path: &Path) -> SpoolResult<()> {
+    let tmp = sibling(path, ".tmp");
+    let backup = sibling(path, ".bak");
+    let path_exists = path.exists();
+    if !path_exists && tmp.exists() {
+        std::fs::rename(&tmp, path)?;
+    } else if !path_exists && backup.exists() {
+        std::fs::rename(&backup, path)?;
+    } else {
+        remove_if_exists(&tmp)?;
+    }
+    if path.exists() {
+        remove_if_exists(&backup)?;
+    }
+    Ok(())
 }
 
 fn acquire_lock(path: &Path) -> SpoolResult<LockGuard> {
@@ -1269,6 +1317,38 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["first", "second", "third"]
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_completed_rewrite_temp_recovers_before_the_next_drain() {
+        let dir = temp_dir("rewrite-recovery");
+        let path = dir.join("agent-spool.jsonl");
+        let mut encoded = serde_json::to_vec(&event("recovered")).expect("event serializes");
+        encoded.push(b'\n');
+        std::fs::write(sibling(&path, ".tmp"), encoded).expect("temp writes");
+
+        let pending = read_pending(&path).expect("drain recovers temp");
+
+        assert_eq!(pending.events, vec![event("recovered")]);
+        assert!(!sibling(&path, ".tmp").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pending_namespace_evidence_is_not_evictable() {
+        let dir = temp_dir("namespace-retention");
+        let pending = dir.join("pending");
+        let drained = dir.join("drained");
+        std::fs::create_dir_all(&pending).expect("pending namespace creates");
+        std::fs::create_dir_all(&drained).expect("drained namespace creates");
+        append(&pending.join("agent-spool.jsonl"), &event("pending"))
+            .expect("pending evidence writes");
+
+        assert!(namespace_has_pending_evidence(&pending).expect("pending namespace reads"));
+        assert!(!namespace_has_pending_evidence(&drained).expect("drained namespace reads"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

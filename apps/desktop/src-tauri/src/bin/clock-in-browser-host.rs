@@ -187,11 +187,12 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
 }
 
 fn collection_state(paths: &HostPaths) -> serde_json::Value {
-    match admitted_collection_id(paths) {
-        Some(collection_id) => {
-            serde_json::json!({ "collectionEnabled": true, "collectionId": collection_id })
+    match (admitted_collection_id(paths), browser::admitted_collection_namespace(&paths.dir)) {
+        (Some(collection_id), Some(namespace)) => {
+            serde_json::json!({ "collectionEnabled": true, "collectionId": collection_id, "collectionNamespace": namespace })
         }
-        None => serde_json::json!({ "collectionEnabled": false }),
+        (None, _) => serde_json::json!({ "collectionEnabled": false }),
+        _ => serde_json::json!({ "collectionEnabled": false }),
     }
 }
 

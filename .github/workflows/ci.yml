@@ -52,10 +52,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      # The Tauri host links against the system webview and tray libraries.
       - run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+          deps="$RUNNER_TEMP/clock-in-tauri-deps"
+          mkdir -p "$deps/lists/partial" "$deps/cache/archives/partial" "$deps/root"
+          apt-get update \
+            -o "Dir::State::Lists=$deps/lists" \
+            -o "Dir::Cache=$deps/cache" \
+            -o "Dir::Cache::Archives=$deps/cache/archives"
+          apt-get --download-only --yes install \
+            -o "Dir::State::Lists=$deps/lists" \
+            -o "Dir::Cache=$deps/cache" \
+            -o "Dir::Cache::Archives=$deps/cache/archives" \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+          while IFS= read -r -d '' package; do
+            dpkg-deb -x "$package" "$deps/root"
+          done < <(find "$deps/cache/archives" -name '*.deb' -print0)
+          echo "PKG_CONFIG_PATH=$deps/root/usr/lib/x86_64-linux-gnu/pkgconfig:$deps/root/usr/share/pkgconfig" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$deps/root/usr/lib/x86_64-linux-gnu" >> "$GITHUB_ENV"
+          echo "PATH=$deps/root/usr/bin:$PATH" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop/src-tauri
