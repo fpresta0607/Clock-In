@@ -1205,7 +1205,7 @@ mod tests {
                 std::fs::remove_file(&writer_tally)?;
                 removed_tx.send(()).expect("writer signals removal");
                 resume_rx.recv().expect("writer resumes");
-                std::fs::rename(temp, writer_tally)
+                std::fs::rename(temp, &writer_tally)
             })
             .expect("replacement succeeds");
         });
@@ -1270,7 +1270,7 @@ mod tests {
                 std::fs::remove_file(&writer_never)?;
                 removed_tx.send(()).expect("writer signals removal");
                 resume_rx.recv().expect("writer resumes");
-                std::fs::rename(temp, writer_never)
+                std::fs::rename(temp, &writer_never)
             })
             .expect("replacement succeeds");
         });
@@ -1496,7 +1496,7 @@ mod tests {
                 std::fs::remove_file(&writer_marker)?;
                 removed_tx.send(()).expect("writer signals removal");
                 resume_rx.recv().expect("writer resumes");
-                std::fs::rename(temp, writer_marker)
+                std::fs::rename(temp, &writer_marker)
             })
             .expect("replacement succeeds");
         });
