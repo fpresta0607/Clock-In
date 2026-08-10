@@ -375,6 +375,78 @@ describe("background startup", () => {
     expect(spanMessages(harness.port)).toEqual([]);
   });
 
+  it("persists an extension namespace reservation before acknowledging it", async () => {
+    vi.useFakeTimers();
+    const harness = backgroundHarness([]);
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      collectionNamespace: "account-one:organization-one",
+      namespaceReservation: {
+        requestId: "reservation-one",
+        sourceNamespace: "account-one:organization-one",
+        targetNamespace: "account-one:organization-two",
+        action: "reserve",
+      },
+      rules: [],
+    } as never);
+    await settle();
+
+    expect(harness.set).toHaveBeenCalledWith(expect.objectContaining({
+      spanOutboxNamespaceReservations: ["account-one:organization-two"],
+      spanOutboxesByNamespace: expect.objectContaining({
+        "account-one:organization-two": [],
+      }),
+    }));
+    expect(lastHostMessage(harness.port, "namespace-reservation")).toEqual({
+      type: "namespace-reservation",
+      requestId: "reservation-one",
+      acknowledgement: "reserved",
+    });
+  });
+
+  it("rejects a namespace reservation when retained evidence fills capacity", async () => {
+    vi.useFakeTimers();
+    const namespaces = Object.fromEntries(Array.from(
+      { length: 8 },
+      (_, index) => [`account-${index}:organization-${index}`, [{
+        event: "started",
+        externalSessionId: `span-${index}`,
+        ruleId: "rule-1",
+        occurredAt: "2026-08-09T12:00:00.000Z",
+      }]],
+    ));
+    const harness = backgroundHarness([], undefined, undefined, undefined, undefined, {
+      spanOutboxesByNamespace: namespaces,
+    });
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "collection-state",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      collectionNamespace: "account-0:organization-0",
+      namespaceReservation: {
+        requestId: "reservation-full",
+        sourceNamespace: "account-0:organization-0",
+        targetNamespace: "account-next:organization-next",
+        action: "reserve",
+      },
+    } as never);
+    await settle();
+
+    expect(lastHostMessage(harness.port, "namespace-reservation")).toEqual({
+      type: "namespace-reservation",
+      requestId: "reservation-full",
+      acknowledgement: "rejected",
+    });
+  });
+
   it("discards malformed restored queues without blocking a valid workspace", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-09T12:00:00.000Z"));

@@ -19,6 +19,7 @@ import { shouldApplyTabActivation } from "./activation.js";
 import { match, type UrlRule } from "./matching.js";
 import {
   Outbox,
+  OUTBOX_NAMESPACE_RESERVATIONS_STORAGE_KEY,
   OUTBOX_NAMESPACES_STORAGE_KEY,
   OUTBOX_STORAGE_KEY,
   canActivateOutboxNamespace,
@@ -83,6 +84,8 @@ let reconnectAttempt = 0;
 let machine: SpanMachine = createSpanMachine();
 let outbox = new Outbox<SpanEvent>();
 const outboxes = new Map<string, Outbox<SpanEvent>>();
+const reservedOutboxNamespaces = new Set<string>();
+const reservationPersistencePending = new Set<string>();
 let tally: Tally = emptyTally();
 let collectionEnabled = false;
 let collectionId: string | undefined;
@@ -147,6 +150,7 @@ function persistState(staged: StagedSpanCommit | undefined = undefined): Promise
     [OUTBOX_NAMESPACES_STORAGE_KEY]: Object.fromEntries(
       [...outboxes.entries()].map(([namespace, queued]) => [namespace, queuedSnapshot(namespace, queued, staged)]),
     ),
+    [OUTBOX_NAMESPACE_RESERVATIONS_STORAGE_KEY]: [...reservedOutboxNamespaces],
     [MACHINE_STORAGE_KEY]: snapshotMachine(machine, savedAt),
     [LAST_TICK_STORAGE_KEY]: lastTickAt,
     [COLLECTION_ID_STORAGE_KEY]: collectionId ?? null,
@@ -414,6 +418,10 @@ function requestRules(): void {
   sendToHost({ type: "get-rules" });
 }
 
+function requestCollectionState(): void {
+  sendToHost({ type: "get-collection-state" });
+}
+
 function sendTally(): void {
   if (!collectionEnabled || collectionId === undefined) {
     return;
@@ -480,6 +488,84 @@ function collectionDetails(message: Record<string, unknown>): { enabled: boolean
   };
 }
 
+interface NamespaceReservation {
+  requestId: string;
+  sourceNamespace: string;
+  targetNamespace: string;
+  action: "reserve" | "release";
+}
+
+function namespaceReservationDetails(message: Record<string, unknown>): NamespaceReservation | undefined {
+  const value = message["namespaceReservation"];
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const reservation = value as Record<string, unknown>;
+  const requestId = reservation["requestId"];
+  const sourceNamespace = reservation["sourceNamespace"];
+  const targetNamespace = reservation["targetNamespace"];
+  const action = reservation["action"];
+  if (typeof requestId !== "string" || requestId.trim().length === 0 ||
+    !isIdentityNamespace(sourceNamespace) || !isIdentityNamespace(targetNamespace) ||
+    (action !== "reserve" && action !== "release")) {
+    return undefined;
+  }
+  return { requestId, sourceNamespace, targetNamespace, action };
+}
+
+function acknowledgeNamespaceReservation(
+  reservation: NamespaceReservation,
+  acknowledgement: "reserved" | "rejected" | "released",
+): void {
+  sendToHost({
+    type: "namespace-reservation",
+    requestId: reservation.requestId,
+    acknowledgement,
+  });
+}
+
+function applyNamespaceReservation(message: Record<string, unknown>): void {
+  const reservation = namespaceReservationDetails(message);
+  if (reservation === undefined || reservation.sourceNamespace !== collectionNamespace) {
+    return;
+  }
+  if (reservationPersistencePending.has(reservation.requestId)) {
+    return;
+  }
+  if (reservation.action === "release") {
+    if (!reservedOutboxNamespaces.delete(reservation.targetNamespace)) {
+      acknowledgeNamespaceReservation(reservation, "released");
+      return;
+    }
+    reservationPersistencePending.add(reservation.requestId);
+    void persistState().then((persisted) => {
+      reservationPersistencePending.delete(reservation.requestId);
+      if (persisted) acknowledgeNamespaceReservation(reservation, "released");
+    });
+    return;
+  }
+  if (reservedOutboxNamespaces.has(reservation.targetNamespace)) {
+    acknowledgeNamespaceReservation(reservation, "reserved");
+    return;
+  }
+  if (!canActivateOutboxNamespace(
+    outboxes,
+    reservation.targetNamespace,
+    collectionNamespace,
+    reservedOutboxNamespaces,
+  )) {
+    acknowledgeNamespaceReservation(reservation, "rejected");
+    return;
+  }
+  reservedOutboxNamespaces.add(reservation.targetNamespace);
+  outboxes.set(reservation.targetNamespace, outboxes.get(reservation.targetNamespace) ?? new Outbox<SpanEvent>());
+  reservationPersistencePending.add(reservation.requestId);
+  void persistState().then((persisted) => {
+    reservationPersistencePending.delete(reservation.requestId);
+    if (persisted) acknowledgeNamespaceReservation(reservation, "reserved");
+  });
+}
+
 function migrateLegacyOutbox(namespace: string, id: string): boolean {
   const legacyNamespace = `legacy:${id}`;
   if (namespace === legacyNamespace) {
@@ -512,7 +598,7 @@ function migrateLegacyOutbox(namespace: string, id: string): boolean {
 }
 
 function activateOutbox(namespace: string, id: string): boolean {
-  if (!canActivateOutboxNamespace(outboxes, namespace, collectionNamespace)) {
+  if (!canActivateOutboxNamespace(outboxes, namespace, collectionNamespace, reservedOutboxNamespaces)) {
     return false;
   }
   if (!migrateLegacyOutbox(namespace, id)) {
@@ -521,6 +607,7 @@ function activateOutbox(namespace: string, id: string): boolean {
   const changedNamespace = collectionNamespace !== namespace;
   collectionNamespace = namespace;
   outbox = outboxes.get(namespace) ?? new Outbox<SpanEvent>();
+  reservedOutboxNamespaces.delete(namespace);
   capturePaused = capturePausedNamespaces.get(namespace) === true || outbox.remainingCapacity === 0;
   if (changedNamespace) {
     captureResumePending = false;
@@ -532,7 +619,7 @@ function activateOutbox(namespace: string, id: string): boolean {
 }
 
 function pruneOutboxes(): void {
-  pruneOutboxNamespaces(outboxes, collectionNamespace);
+  pruneOutboxNamespaces(outboxes, collectionNamespace, undefined, reservedOutboxNamespaces);
   for (const namespace of capturePausedNamespaces.keys()) {
     if (!outboxes.has(namespace) && namespace !== collectionNamespace) {
       capturePausedNamespaces.delete(namespace);
@@ -558,7 +645,7 @@ function applyCollectionState(message: Record<string, unknown>): "changed" | "un
   }
   const legacyUpgrade = collectionId === id && collectionNamespace === `legacy:${id}`;
   const changed = !legacyUpgrade && (collectionId !== id || collectionNamespace !== namespace);
-  if (changed && !canActivateOutboxNamespace(outboxes, namespace, collectionNamespace)) {
+  if (changed && !canActivateOutboxNamespace(outboxes, namespace, collectionNamespace, reservedOutboxNamespaces)) {
     collectionEnabled = false;
     collectionId = undefined;
     collectionNamespace = undefined;
@@ -660,6 +747,7 @@ function handleHostMessage(payload: Record<string, unknown>): void {
       requestRules();
     }
     applyCapturePause(payload);
+    applyNamespaceReservation(payload);
     return;
   }
   if (payload["type"] === "rules") {
@@ -668,6 +756,7 @@ function handleHostMessage(payload: Record<string, unknown>): void {
       return;
     }
     applyCapturePause(payload);
+    applyNamespaceReservation(payload);
     const list = payload["rules"];
     rules = collectionEnabled && !capturePaused && !captureResumePending && Array.isArray(list) ? list.filter(isRule) : [];
     reconnectAttempt = 0;
@@ -903,6 +992,7 @@ function runTick(): void {
     return;
   }
   const now = Date.now();
+  requestCollectionState();
   if (!advanceMachine(now)) {
     return;
   }
@@ -955,7 +1045,7 @@ ensurePeriodicAlarm(RULES_REFRESH_ALARM_NAME, RULES_REFRESH_PERIOD_MINUTES);
 
 async function initialize(): Promise<void> {
   const stored = await chrome.storage.local
-    .get([TALLY_STORAGE_KEY, OUTBOX_STORAGE_KEY, OUTBOX_NAMESPACES_STORAGE_KEY, MACHINE_STORAGE_KEY, LAST_TICK_STORAGE_KEY, COLLECTION_ID_STORAGE_KEY, COLLECTION_NAMESPACE_STORAGE_KEY, CAPTURE_PAUSED_STORAGE_KEY, CAPTURE_PAUSED_NAMESPACES_STORAGE_KEY])
+    .get([TALLY_STORAGE_KEY, OUTBOX_STORAGE_KEY, OUTBOX_NAMESPACES_STORAGE_KEY, OUTBOX_NAMESPACE_RESERVATIONS_STORAGE_KEY, MACHINE_STORAGE_KEY, LAST_TICK_STORAGE_KEY, COLLECTION_ID_STORAGE_KEY, COLLECTION_NAMESPACE_STORAGE_KEY, CAPTURE_PAUSED_STORAGE_KEY, CAPTURE_PAUSED_NAMESPACES_STORAGE_KEY])
     .catch(() => undefined);
   const now = Date.now();
   const startup = parseStartupStorage(stored, now);
@@ -970,6 +1060,15 @@ async function initialize(): Promise<void> {
         if (events.length > 0) {
           outboxes.set(namespace, new Outbox<SpanEvent>(undefined, events));
         }
+      }
+    }
+  }
+  const storedReservations = stored?.[OUTBOX_NAMESPACE_RESERVATIONS_STORAGE_KEY];
+  if (Array.isArray(storedReservations)) {
+    for (const namespace of storedReservations) {
+      if (isIdentityNamespace(namespace)) {
+        reservedOutboxNamespaces.add(namespace);
+        outboxes.set(namespace, outboxes.get(namespace) ?? new Outbox<SpanEvent>());
       }
     }
   }
