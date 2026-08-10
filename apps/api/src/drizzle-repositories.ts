@@ -883,11 +883,19 @@ function sessionDurationSecondsSql(range: ClippedRange | null) {
     sql`${timeSessions.stoppedAt}`,
   );
   const clippedIdle = inactiveDurationSecondsSql(sessionStart, sessionEnd);
-  const legacyFallback = sql<number>`least(${timeSessions.durationSeconds}, ${elapsed})`;
+  const startsBeforeRange = range.from === undefined
+    ? sql<boolean>`false`
+    : sql<boolean>`${timeSessions.startedAt} < ${range.from.toISOString()}`;
+  const endsAfterRange = range.toExclusive === undefined
+    ? sql<boolean>`false`
+    : sql<boolean>`${timeSessions.stoppedAt} > ${range.toExclusive.toISOString()}`;
+  const boundaryClipped = sql<boolean>`(${startsBeforeRange} or ${endsAfterRange})`;
   return sql<number>`case
+    when not ${boundaryClipped}
+      then ${timeSessions.durationSeconds}
     when ${fullIdle} = ${timeSessions.idleSeconds}
       then greatest(0, ${elapsed} - ${clippedIdle})
-    else ${legacyFallback}
+    else 0
   end::integer`;
 }
 
@@ -1008,18 +1016,21 @@ export class DrizzleReportRepository implements ReportRepository {
         : and(lt(timeSessions.startedAt, range.toExclusive), gt(timeSessions.stoppedAt, range.toExclusive)),
     ].filter((condition): condition is SQL => condition !== undefined);
     if (clippedAtBoundary.length === 0) return;
+    const fullIdle = inactiveDurationSecondsSql(
+      sql`${timeSessions.startedAt}`,
+      sql`${timeSessions.stoppedAt}`,
+    );
     const unsupported = await db
       .select({ id: timeSessions.id })
       .from(timeSessions)
       .where(and(
         ...this.predicates(subject, query),
-        isNull(timeSessions.deviceId),
-        gt(timeSessions.idleSeconds, 0),
+        ne(fullIdle, timeSessions.idleSeconds),
         or(...clippedAtBoundary),
       ))
       .limit(1);
     if (unsupported.length > 0) {
-      throw new AppError("validation_error", "This range includes legacy time without enough activity evidence to clip exactly.");
+      throw new AppError("validation_error", "This range includes time without enough activity evidence to clip exactly.");
     }
   }
 

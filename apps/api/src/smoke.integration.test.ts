@@ -1041,7 +1041,52 @@ integration(integrationDescription, () => {
     expect(body).toEqual({
       error: {
         code: "validation_error",
-        message: "This range includes legacy time without enough activity evidence to clip exactly.",
+        message: "This range includes time without enough activity evidence to clip exactly.",
+      },
+    });
+  }, 60_000);
+
+  it("rejects a clipped device session when its idle intervals are missing", async () => {
+    const created = await app.request("/projects", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({ name: "Unreconciled Idle Range Project" }),
+    });
+    expect(created.status).toBe(201);
+    const projectId = (await created.json()).id;
+    const startedAt = new Date(Date.now() - 120_000);
+    const stoppedAt = new Date(Date.now() - 60_000);
+    const deviceId = randomUUID();
+
+    const started = await app.request("/sessions", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({
+        clientId: randomUUID(),
+        projectId,
+        deviceId,
+        startedAt: startedAt.toISOString(),
+      }),
+    });
+    expect(started.status).toBe(200);
+    const sessionId = (await started.json()).session.id;
+
+    const stopped = await app.request(`/sessions/${sessionId}/stop`, {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({ stoppedAt: stoppedAt.toISOString(), idleSeconds: 30 }),
+    });
+    expect(stopped.status).toBe(200);
+
+    const response = await app.request(
+      `/reports?projectId=${projectId}&fromAt=${encodeURIComponent(startedAt.toISOString())}&toExclusiveAt=${encodeURIComponent(new Date(startedAt.getTime() + 30_000).toISOString())}&page=1&pageSize=50`,
+      { headers: authorized },
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "validation_error",
+        message: "This range includes time without enough activity evidence to clip exactly.",
       },
     });
   }, 60_000);
