@@ -88,6 +88,7 @@ describe("Drizzle report repository", () => {
     const rows = {
       where: () => rows,
       groupBy: () => rows,
+      having: () => rows,
       orderBy: async () => [
         { processName: "Code.exe", durationSeconds: "4800" },
         { processName: "chrome.exe", durationSeconds: "1200" },

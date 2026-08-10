@@ -415,25 +415,50 @@ export class DrizzleAccountStore implements AccountStore {
  * evidence intervals are summed rather than unioned; the durationSeconds cap absorbs
  * the double-count, so corroborated time can never exceed the session it backs.
  */
-function corroboratedSecondsSql() {
+interface ExactStatsRange {
+  from: Date;
+  toExclusive: Date;
+}
+
+function exactStatsRange(query: ReportQuery): ExactStatsRange | null {
+  if (!query.clipToRange || query.from === undefined || query.toExclusive === undefined) return null;
+  return { from: query.from, toExclusive: query.toExclusive };
+}
+
+function sessionDurationSecondsSql(range: ExactStatsRange | null) {
+  if (range === null) return timeSessions.durationSeconds;
+  return sql<string | null>`least(${timeSessions.durationSeconds}, floor(greatest(0, extract(epoch from (
+    least(${timeSessions.stoppedAt}, ${range.toExclusive.toISOString()})
+    - greatest(${timeSessions.startedAt}, ${range.from.toISOString()})
+  )))))::bigint`;
+}
+
+function corroboratedSecondsSql(range: ExactStatsRange | null = null) {
+  const sessionStart = range === null
+    ? sql`${timeSessions.startedAt}`
+    : sql`greatest(${timeSessions.startedAt}, ${range.from.toISOString()})`;
+  const sessionEnd = range === null
+    ? sql`${timeSessions.stoppedAt}`
+    : sql`least(${timeSessions.stoppedAt}, ${range.toExclusive.toISOString()})`;
+  const sessionDuration = sessionDurationSecondsSql(range);
   return sql<string | null>`least(
-    ${timeSessions.durationSeconds},
+    ${sessionDuration},
     floor(
       coalesce((
         select sum(greatest(0, extract(epoch from
-          least(${activitySegments.endedAt}, ${timeSessions.stoppedAt})
-          - greatest(${activitySegments.startedAt}, ${timeSessions.startedAt}))))
+          least(${activitySegments.endedAt}, ${sessionEnd})
+          - greatest(${activitySegments.startedAt}, ${sessionStart}))))
         from ${activitySegments}
         where ${activitySegments.organizationId} = ${timeSessions.organizationId}
           and ${activitySegments.userId} = ${timeSessions.userId}
           and ${activitySegments.kind} = 'active'
-          and ${activitySegments.startedAt} < ${timeSessions.stoppedAt}
-          and ${activitySegments.endedAt} > ${timeSessions.startedAt}
+          and ${activitySegments.startedAt} < ${sessionEnd}
+          and ${activitySegments.endedAt} > ${sessionStart}
           and ${activitySegments.receivedAt} <= ${activitySegments.endedAt} + interval '7 days'
       ), 0) + coalesce((
         select sum(greatest(0, extract(epoch from
-          least(coalesce(${agentSessions.endedAt}, ${agentSessions.lastEventAt}), ${timeSessions.stoppedAt})
-          - greatest(${agentSessions.startedAt}, ${timeSessions.startedAt}))))
+          least(coalesce(${agentSessions.endedAt}, ${agentSessions.lastEventAt}), ${sessionEnd})
+          - greatest(${agentSessions.startedAt}, ${sessionStart}))))
         from ${agentSessions}
         where ${agentSessions.linkedSessionId} = ${timeSessions.id}
           and ${agentSessions.source} <> 'browser'
@@ -469,8 +494,14 @@ export class DrizzleReportRepository implements ReportRepository {
       eq(timeSessions.organizationId, subject.organizationId),
       or(eq(timeSessions.status, "stopped"), eq(timeSessions.status, "needs_review")),
     ];
-    if (query.from !== undefined) conditions.push(gte(timeSessions.startedAt, query.from));
-    if (query.toExclusive !== undefined) conditions.push(lt(timeSessions.startedAt, query.toExclusive));
+    const exactRange = exactStatsRange(query);
+    if (exactRange !== null) {
+      conditions.push(lt(timeSessions.startedAt, exactRange.toExclusive));
+      conditions.push(gt(timeSessions.stoppedAt, exactRange.from));
+    } else {
+      if (query.from !== undefined) conditions.push(gte(timeSessions.startedAt, query.from));
+      if (query.toExclusive !== undefined) conditions.push(lt(timeSessions.startedAt, query.toExclusive));
+    }
     if (query.projectId !== undefined) conditions.push(eq(timeSessions.projectId, query.projectId));
     if (query.userId !== undefined) conditions.push(eq(timeSessions.userId, query.userId));
     return conditions;
@@ -580,13 +611,15 @@ export class DrizzleReportRepository implements ReportRepository {
     subject: AuthenticatedSubject,
     query: ReportQuery,
   ): Promise<ProjectTotalRecord[]> {
-    const totalDuration = sum(timeSessions.durationSeconds);
+    const exactRange = exactStatsRange(query);
+    const sessionDuration = sessionDurationSecondsSql(exactRange);
+    const totalDuration = sum(sessionDuration);
     const rows = await this.db
       .select({
         projectId: projects.id,
         projectName: projects.name,
         durationSeconds: totalDuration,
-        corroboratedSeconds: sum(corroboratedSecondsSql()),
+        corroboratedSeconds: sum(corroboratedSecondsSql(exactRange)),
         sessionCount: count(timeSessions.id),
       })
       .from(timeSessions)
@@ -647,6 +680,7 @@ export class DrizzleReportRepository implements ReportRepository {
         sql`${activitySegments.receivedAt} <= ${activitySegments.endedAt} + interval '7 days'`,
       ))
       .groupBy(activitySegments.processName)
+      .having(gt(duration, 0))
       // processName breaks ties so equal totals do not reorder between requests.
       .orderBy(desc(duration), asc(activitySegments.processName));
 

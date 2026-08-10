@@ -78,6 +78,13 @@
       "when": 1786324015544,
       "tag": "0010_stormy_leo",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1786324015545,
+      "tag": "0011_agent_session_stale_check",
+      "breakpoints": true
     }
   ]
 }

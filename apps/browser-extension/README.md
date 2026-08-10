@@ -37,7 +37,7 @@ Framing (4-byte little-endian length-prefixed JSON) is handled by `chrome.runtim
 - `{"type":"span-event","collectionId","event":{"event","externalSessionId","ruleId","occurredAt"}}` - appended to the desktop's local browser spool. A `span-ack` returns the acknowledged event; `span-retry` keeps it queued, and `collection-state` means collection is unavailable.
 - `{"type":"tally","collectionId","weekStart","entries":[{"origin","seconds"}]}` - a snapshot of the local unmatched-origin tally; read-only passthrough, never uploaded. The host returns `collection-state` and may send `clear-tally` before it.
 
-When the host is unreachable, span events queue in a 1000-entry ring in extension storage and replay on reconnect (1 s backoff doubling to 60 s).
+When the host is unreachable, span events queue in a 1000-entry ring in extension storage and replay on reconnect (30 s backoff doubling to 60 s).
 
 ## Layout
 

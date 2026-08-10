@@ -107,12 +107,30 @@ class MemoryReports implements ReportRepository {
   public readonly agents: StoredAgent[] = [];
   public readonly mappings: StoredMapping[] = [];
 
-  private corroborated(session: StoredSession): number {
+  private exactRange(query: ReportQuery): { from: Date; toExclusive: Date } | null {
+    if (!query.clipToRange || query.from === undefined || query.toExclusive === undefined) return null;
+    return { from: query.from, toExclusive: query.toExclusive };
+  }
+
+  private sessionDuration(session: StoredSession, query: ReportQuery): number {
+    const range = this.exactRange(query);
+    if (range === null) return session.durationSeconds;
+    return Math.min(session.durationSeconds, Math.floor(overlapSeconds(session.startedAt, session.stoppedAt, range.from, range.toExclusive)));
+  }
+
+  private corroborated(session: StoredSession, query: ReportQuery): number {
+    const range = this.exactRange(query);
+    const sessionStart = range === null
+      ? session.startedAt
+      : new Date(Math.max(session.startedAt.getTime(), range.from.getTime()));
+    const sessionEnd = range === null
+      ? session.stoppedAt
+      : new Date(Math.min(session.stoppedAt.getTime(), range.toExclusive.getTime()));
     let total = 0;
     for (const segment of this.segments) {
       if (segment.organizationId !== session.organizationId || segment.userId !== session.userId || segment.kind !== "active") continue;
       if (segment.receivedAt.getTime() > segment.endedAt.getTime() + freshnessWindowMs) continue;
-      total += overlapSeconds(segment.startedAt, segment.endedAt, session.startedAt, session.stoppedAt);
+      total += overlapSeconds(segment.startedAt, segment.endedAt, sessionStart, sessionEnd);
     }
     for (const agent of this.agents) {
       // Browser spans attribute; they never corroborate.
@@ -120,15 +138,18 @@ class MemoryReports implements ReportRepository {
       if (agent.organizationId !== session.organizationId || agent.linkedSessionId !== session.id) continue;
       const occurredAt = agent.endedAt ?? agent.lastEventAt;
       if (agent.receivedAt.getTime() > occurredAt.getTime() + freshnessWindowMs) continue;
-      total += overlapSeconds(agent.startedAt, occurredAt, session.startedAt, session.stoppedAt);
+      total += overlapSeconds(agent.startedAt, occurredAt, sessionStart, sessionEnd);
     }
-    return Math.min(session.durationSeconds, total);
+    return Math.min(this.sessionDuration(session, query), Math.floor(total));
   }
 
   private filtered(subject: AuthenticatedSubject, query: ReportQuery): StoredSession[] {
+    const range = this.exactRange(query);
     return this.sessions.filter((session) => session.organizationId === subject.organizationId
-      && (query.from === undefined || session.startedAt >= query.from)
-      && (query.toExclusive === undefined || session.startedAt < query.toExclusive)
+      && (range === null
+        ? (query.from === undefined || session.startedAt >= query.from)
+          && (query.toExclusive === undefined || session.startedAt < query.toExclusive)
+        : session.startedAt < range.toExclusive && session.stoppedAt > range.from)
       && (query.userId === undefined || session.userId === query.userId)
       && (query.projectId === undefined || session.project.id === query.projectId));
   }
@@ -138,8 +159,8 @@ class MemoryReports implements ReportRepository {
     for (const session of this.filtered(subject, query)) {
       const existing = byProject.get(session.project.id)
         ?? { project: session.project, durationSeconds: 0, corroboratedSeconds: 0, sessionCount: 0 };
-      existing.durationSeconds = (existing.durationSeconds as number) + session.durationSeconds;
-      existing.corroboratedSeconds = (existing.corroboratedSeconds as number) + this.corroborated(session);
+      existing.durationSeconds = (existing.durationSeconds as number) + this.sessionDuration(session, query);
+      existing.corroboratedSeconds = (existing.corroboratedSeconds as number) + this.corroborated(session, query);
       existing.sessionCount = (existing.sessionCount as number) + 1;
       byProject.set(session.project.id, existing);
     }
@@ -164,7 +185,8 @@ class MemoryReports implements ReportRepository {
       byProcess.set(segment.processName, (byProcess.get(segment.processName) ?? 0) + seconds);
     }
     return [...byProcess.entries()]
-      .map(([processName, durationSeconds]) => ({ processName, durationSeconds }))
+      .map(([processName, durationSeconds]) => ({ processName, durationSeconds: Math.floor(durationSeconds) }))
+      .filter((entry) => entry.durationSeconds > 0)
       .sort((a, b) => b.durationSeconds - a.durationSeconds || a.processName.localeCompare(b.processName));
   }
 
@@ -340,7 +362,33 @@ describe("me/stats routes", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
       filters: { fromAt: "2026-08-06T05:00:00.000Z", toExclusiveAt: "2026-08-07T05:00:00.000Z" },
-      apps: [{ processName: "chrome.exe", durationSeconds: 1_800 }],
+      apps: [{ processName: "chrome.exe", durationSeconds: 3_600 }],
+    });
+  });
+
+  it("clips completed projects and corroboration at a local DST boundary", async () => {
+    const reports = new MemoryReports();
+    const crossing = session({
+      startedAt: new Date("2026-03-08T05:30:00.000Z"),
+      stoppedAt: new Date("2026-03-08T06:30:00.000Z"),
+      durationSeconds: 3_600,
+    });
+    reports.sessions.push(crossing);
+    reports.segments.push({
+      organizationId: ids.organization, userId: ids.user, kind: "active", processName: "clock-in.exe",
+      startedAt: crossing.startedAt, endedAt: crossing.stoppedAt, receivedAt: new Date("2026-03-08T06:31:00.000Z"),
+    });
+
+    const response = await createTestApp(reports).request(
+      "http://api.test/me/stats?fromAt=2026-03-08T06%3A00%3A00.000Z&toExclusiveAt=2026-03-09T05%3A00%3A00.000Z",
+      { headers: { authorization: bearerHeader } },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      totalDurationSeconds: 1_800,
+      corroboratedSeconds: 1_800,
+      projects: [{ project: { id: ids.project }, durationSeconds: 1_800, corroboratedSeconds: 1_800, sessionCount: 1 }],
     });
   });
 

@@ -574,4 +574,52 @@ integration(integrationDescription, () => {
       mapping: expect.objectContaining({ id: ruleId }),
     }));
   }, 60_000);
+
+  it("clips completed totals at a local DST calendar boundary in SQL", async () => {
+    const me = await app.request("/me", { headers: authorized });
+    expect(me.status).toBe(200);
+    const { user } = await me.json();
+
+    const created = await app.request("/projects", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({ name: "DST Boundary Project" }),
+    });
+    expect(created.status).toBe(201);
+    const projectId = (await created.json()).id;
+
+    const startedAt = new Date("2026-03-08T05:30:00.000Z");
+    const stoppedAt = new Date("2026-03-08T06:30:00.000Z");
+    await database.client`
+      insert into time_sessions (
+        id, organization_id, user_id, project_id, client_id, status,
+        started_at, stopped_at, idle_seconds, duration_seconds
+      ) values (
+        ${randomUUID()}, ${user.organizationId}, ${user.id}, ${projectId}, ${randomUUID()}, 'stopped',
+        ${startedAt}, ${stoppedAt}, 0, 3600
+      )
+    `;
+    await database.client`
+      insert into activity_segments (
+        organization_id, user_id, client_id, device_id, kind, process_name,
+        started_at, ended_at, received_at
+      ) values (
+        ${user.organizationId}, ${user.id}, ${randomUUID()}, ${randomUUID()}, 'active', 'clock-in.exe',
+        ${startedAt}, ${stoppedAt}, ${new Date("2026-03-08T06:31:00.000Z")}
+      )
+    `;
+
+    const response = await app.request(
+      "/me/stats?fromAt=2026-03-08T06%3A00%3A00.000Z&toExclusiveAt=2026-03-09T05%3A00%3A00.000Z",
+      { headers: authorized },
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.projects).toContainEqual({
+      project: { id: projectId, name: "DST Boundary Project" },
+      durationSeconds: 1_800,
+      corroboratedSeconds: 1_800,
+      sessionCount: 1,
+    });
+  }, 60_000);
 });
