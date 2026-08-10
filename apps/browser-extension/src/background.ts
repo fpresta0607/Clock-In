@@ -60,6 +60,8 @@ import {
 import { tickCredit } from "./tick.js";
 import {
   COLLECTION_ID_STORAGE_KEY,
+  CAPTURE_PAUSED_NAMESPACES_STORAGE_KEY,
+  CAPTURE_PAUSED_STORAGE_KEY,
   LAST_TICK_STORAGE_KEY,
   MACHINE_STORAGE_KEY,
   parseStartupStorage,
@@ -82,6 +84,8 @@ let tally: Tally = emptyTally();
 let collectionEnabled = false;
 let collectionId: string | undefined;
 let collectionNamespace: string | undefined;
+let capturePaused = false;
+const capturePausedNamespaces = new Map<string, boolean>();
 
 // The active tab's local verdict. `unmatchedOrigin` exists only to feed the
 // local tally; it is never part of an emitted event.
@@ -109,6 +113,8 @@ function persistState(): void {
     [MACHINE_STORAGE_KEY]: snapshotMachine(machine, savedAt),
     [LAST_TICK_STORAGE_KEY]: lastTickAt,
     [COLLECTION_ID_STORAGE_KEY]: collectionId ?? null,
+    [CAPTURE_PAUSED_STORAGE_KEY]: capturePaused,
+    [CAPTURE_PAUSED_NAMESPACES_STORAGE_KEY]: Object.fromEntries(capturePausedNamespaces),
   }).catch(() => {
     // A later alarm or browser event retries. The in-memory state remains
     // authoritative for this worker lifetime.
@@ -128,16 +134,53 @@ function sendToHost(message: unknown): boolean {
 }
 
 function emitSpanEvents(events: readonly SpanEvent[]): void {
-  if (collectionId === undefined) {
+  if (collectionId === undefined || capturePaused) {
+    return;
+  }
+  if (events.length > outbox.remainingCapacity) {
+    pauseCapture();
     return;
   }
   for (const event of events) {
-    outbox.push(event);
+    if (!outbox.push(event)) {
+      pauseCapture();
+      return;
+    }
   }
   if (events.length > 0) {
     persistState();
     flushOutbox();
   }
+}
+
+function pauseCapture(): void {
+  if (capturePaused || collectionId === undefined || collectionNamespace === undefined) {
+    return;
+  }
+  capturePaused = true;
+  capturePausedNamespaces.set(collectionNamespace, true);
+  rules = [];
+  resetLocalCollectionState();
+  persistState();
+  sendToHost({ type: "capture-paused", collectionId });
+}
+
+function applyCapturePause(message: Record<string, unknown>): void {
+  if (collectionNamespace === undefined) {
+    return;
+  }
+  const paused = message["capturePaused"] === true;
+  if (paused) {
+    if (!capturePaused) pauseCapture();
+    return;
+  }
+  if (!capturePaused || outbox.remainingCapacity === 0) {
+    return;
+  }
+  capturePaused = false;
+  capturePausedNamespaces.delete(collectionNamespace);
+  persistState();
+  revalidateAttention();
 }
 
 function scheduleMachineAdvance(): void {
@@ -316,37 +359,48 @@ function collectionDetails(message: Record<string, unknown>): { enabled: boolean
   const id = message["collectionId"];
   const namespace = message["collectionNamespace"];
   const usableId = typeof id === "string" && id.length > 0 ? id : undefined;
+  const usableNamespace = typeof namespace === "string" && /^[^:\s]+:[^:\s]+$/.test(namespace)
+    ? namespace
+    : undefined;
   return {
-    enabled: message["collectionEnabled"] === true && usableId !== undefined,
+    enabled: message["collectionEnabled"] === true && usableId !== undefined && usableNamespace !== undefined,
     id: usableId,
-    namespace: typeof namespace === "string" && namespace.length > 0 ? namespace : usableId,
+    namespace: usableNamespace,
   };
 }
 
-function migrateLegacyOutbox(namespace: string, id: string): void {
+function migrateLegacyOutbox(namespace: string, id: string): boolean {
   const legacyNamespace = `legacy:${id}`;
   if (namespace === legacyNamespace) {
-    return;
+    return true;
   }
   const legacy = outboxes.get(legacyNamespace);
   if (legacy === undefined) {
-    return;
+    return true;
   }
   const target = outboxes.get(namespace) ?? new Outbox<SpanEvent>();
-  for (const event of legacy.drain()) {
-    target.push(event);
+  if (target.remainingCapacity < legacy.size) {
+    return false;
   }
+  for (const event of legacy.snapshot()) {
+    if (!target.push(event)) return false;
+  }
+  legacy.clear();
   outboxes.delete(legacyNamespace);
   outboxes.set(namespace, target);
+  return true;
 }
 
 function activateOutbox(namespace: string, id: string): boolean {
   if (!canActivateOutboxNamespace(outboxes, namespace, collectionNamespace)) {
     return false;
   }
-  migrateLegacyOutbox(namespace, id);
+  if (!migrateLegacyOutbox(namespace, id)) {
+    return false;
+  }
   collectionNamespace = namespace;
   outbox = outboxes.get(namespace) ?? new Outbox<SpanEvent>();
+  capturePaused = capturePausedNamespaces.get(namespace) === true || outbox.remainingCapacity === 0;
   outboxes.delete(namespace);
   outboxes.set(namespace, outbox);
   return true;
@@ -354,6 +408,11 @@ function activateOutbox(namespace: string, id: string): boolean {
 
 function pruneOutboxes(): void {
   pruneOutboxNamespaces(outboxes, collectionNamespace);
+  for (const namespace of capturePausedNamespaces.keys()) {
+    if (!outboxes.has(namespace) && namespace !== collectionNamespace) {
+      capturePausedNamespaces.delete(namespace);
+    }
+  }
 }
 
 function applyCollectionState(message: Record<string, unknown>): "changed" | "unchanged" | "blocked" {
@@ -363,6 +422,7 @@ function applyCollectionState(message: Record<string, unknown>): "changed" | "un
     collectionEnabled = false;
     collectionId = undefined;
     collectionNamespace = undefined;
+    capturePaused = false;
     rules = [];
     resetLocalCollectionState();
     clearTally(tally);
@@ -391,7 +451,14 @@ function applyCollectionState(message: Record<string, unknown>): "changed" | "un
   collectionEnabled = true;
   collectionId = id;
   if (!activateOutbox(namespace, id)) {
-    throw new Error("Outbox namespace capacity changed during activation.");
+    collectionEnabled = false;
+    collectionId = undefined;
+    collectionNamespace = undefined;
+    rules = [];
+    resetLocalCollectionState();
+    clearTally(tally);
+    persistState();
+    return "blocked";
   }
   if (changed || legacyUpgrade) {
     persistState();
@@ -442,6 +509,7 @@ function connect(): void {
       if (applyCollectionState(payload) === "changed" && collectionEnabled) {
         requestRules();
       }
+      applyCapturePause(payload);
       return;
     }
     if (payload["type"] === "rules") {
@@ -449,9 +517,10 @@ function connect(): void {
       if (collectionChanged === "blocked") {
         return;
       }
+      applyCapturePause(payload);
       const list = payload["rules"];
       // Fail closed: an unusable rule set matches nothing.
-      rules = collectionEnabled && Array.isArray(list) ? list.filter(isRule) : [];
+      rules = collectionEnabled && !capturePaused && Array.isArray(list) ? list.filter(isRule) : [];
       reconnectAttempt = 0;
       // A new rule set changes the verdict of the tab already open.
       if (collectionChanged === "changed") {
@@ -731,7 +800,7 @@ ensurePeriodicAlarm(RULES_REFRESH_ALARM_NAME, RULES_REFRESH_PERIOD_MINUTES);
 
 async function initialize(): Promise<void> {
   const stored = await chrome.storage.local
-    .get([TALLY_STORAGE_KEY, OUTBOX_STORAGE_KEY, OUTBOX_NAMESPACES_STORAGE_KEY, MACHINE_STORAGE_KEY, LAST_TICK_STORAGE_KEY, COLLECTION_ID_STORAGE_KEY])
+    .get([TALLY_STORAGE_KEY, OUTBOX_STORAGE_KEY, OUTBOX_NAMESPACES_STORAGE_KEY, MACHINE_STORAGE_KEY, LAST_TICK_STORAGE_KEY, COLLECTION_ID_STORAGE_KEY, CAPTURE_PAUSED_STORAGE_KEY, CAPTURE_PAUSED_NAMESPACES_STORAGE_KEY])
     .catch(() => undefined);
   const now = Date.now();
   const startup = parseStartupStorage(stored, now);
@@ -745,12 +814,22 @@ async function initialize(): Promise<void> {
       }
     }
   }
+  const storedPaused = stored?.[CAPTURE_PAUSED_NAMESPACES_STORAGE_KEY];
+  if (typeof storedPaused === "object" && storedPaused !== null && !Array.isArray(storedPaused)) {
+    for (const [namespace, paused] of Object.entries(storedPaused as Record<string, unknown>)) {
+      if (paused === true) capturePausedNamespaces.set(namespace, true);
+    }
+  }
   if (collectionId !== undefined) {
     activateOutbox(`legacy:${collectionId}`, collectionId);
   }
   for (const event of startup.queuedEvents) {
-    outbox.push(event);
+    if (!outbox.push(event)) {
+      capturePaused = true;
+      if (collectionNamespace !== undefined) capturePausedNamespaces.set(collectionNamespace, true);
+    }
   }
+  capturePaused ||= stored?.[CAPTURE_PAUSED_STORAGE_KEY] === true;
   lastTickAt = Math.min(now, startup.lastTickAt ?? now);
   const restored = restoreMachine(startup.machineSnapshot, now);
   machine = restored.machine;

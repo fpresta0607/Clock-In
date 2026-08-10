@@ -562,13 +562,50 @@ impl ApiClient {
         })
     }
 
+    pub async fn preview_organization_join(
+        &self,
+        access_token: &str,
+        invite_code: &str,
+    ) -> ApiResult<Organization> {
+        let response = self
+            .http
+            .post(format!("{}/organization/join-preview", self.api_base_url))
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({ "inviteCode": invite_code }))
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+        if !response.status().is_success() {
+            return Err(match response.status().as_u16() {
+                404 => BridgeError::new(
+                    ErrorKind::Validation,
+                    "That invite code does not match a workspace.",
+                ),
+                status => classify(status),
+            });
+        }
+        let body: OrganizationResponse = response
+            .json()
+            .await
+            .map_err(|_| BridgeError::unknown("The workspace response could not be read."))?;
+        Ok(body.organization)
+    }
+
     /// Moves an existing account into a teammate's workspace.
-    pub async fn join_organization(&self, access_token: &str, invite_code: &str) -> ApiResult<()> {
+    pub async fn join_organization(
+        &self,
+        access_token: &str,
+        invite_code: &str,
+        expected_organization_id: &str,
+    ) -> ApiResult<()> {
         let response = self
             .http
             .post(format!("{}/organization/join", self.api_base_url))
             .bearer_auth(access_token)
-            .json(&serde_json::json!({ "inviteCode": invite_code }))
+            .json(&serde_json::json!({
+                "inviteCode": invite_code,
+                "expectedOrganizationId": expected_organization_id,
+            }))
             .send()
             .await
             .map_err(|error| classify_transport(&error))?;

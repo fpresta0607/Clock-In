@@ -104,6 +104,7 @@ export type MonitorStatus = {
   lastUploadAt: string | null;
   segmentBacklog: number;
   agentBacklog: number;
+  browserCapturePaused: boolean;
   hooks: readonly HookRegistration[];
   browsers: readonly BrowserHealth[];
   pendingSuggestion: PendingSuggestion | null;
@@ -192,6 +193,7 @@ export interface TimerBridge {
   stop(input: StopInput): Promise<void>;
   retryPending(): Promise<PendingRetryResult>;
   offlineSyncRetry?(): Promise<void>;
+  browserCaptureResume?(): Promise<void>;
   useServerTimer(): Promise<BootstrapSnapshot>;
   retryLocalStart(input: StartIntent): Promise<BootstrapSnapshot>;
   orgOverview(): Promise<OrganizationOverview>;
@@ -460,6 +462,7 @@ export const decodeMonitorStatus = (value: unknown): MonitorStatus => {
     lastUploadAt: timestampOrNull(candidate.lastUploadAt),
     segmentBacklog: nonnegativeInteger(candidate.segmentBacklog),
     agentBacklog: nonnegativeInteger(candidate.agentBacklog),
+    browserCapturePaused: candidate.browserCapturePaused === undefined ? false : boolean(candidate.browserCapturePaused),
     hooks: (hooks as unknown[]).map(decodeHookRegistration),
     browsers: (browsers as unknown[]).map(decodeBrowserHealth),
     pendingSuggestion: candidate.pendingSuggestion === null ? null : decodePendingSuggestion(candidate.pendingSuggestion),
@@ -581,6 +584,7 @@ export const defaultBridge: TimerBridge = {
   stop: (input) => invokeDecoded("timer_stop", decodeVoid, { input }),
   retryPending: () => invokeDecoded("timer_retry_pending", decodePendingRetryResult),
   offlineSyncRetry: () => invokeDecoded("offline_sync_retry", decodeVoid),
+  browserCaptureResume: () => invokeDecoded("browser_capture_resume", decodeVoid),
   useServerTimer: () => invokeDecoded("timer_use_server", decodeBootstrapSnapshot),
   retryLocalStart: (input) => invokeDecoded("timer_retry_local_start", decodeBootstrapSnapshot, { input }),
   orgOverview: () => invokeDecoded("org_overview", decodeOrganizationOverview),

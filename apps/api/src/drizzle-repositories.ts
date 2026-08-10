@@ -488,6 +488,7 @@ export class DrizzleAccountStore implements AccountStore {
   public async joinOrganization(
     subject: AuthenticatedSubject,
     inviteCode: string,
+    expectedOrganizationId?: string,
   ): Promise<AuthenticatedUser> {
     return withLiveSubject(this.db, subject, async (tx) => {
       const [target] = await tx
@@ -497,6 +498,9 @@ export class DrizzleAccountStore implements AccountStore {
         .limit(1);
       if (target === undefined) {
         throw new AppError("not_found", "That invite code does not match an organization.");
+      }
+      if (expectedOrganizationId !== undefined && target.id !== expectedOrganizationId) {
+        throw new AppError("conflict", "That workspace invitation changed. Review it and try again.");
       }
 
       const lockedUser = await tx.execute(sql`
@@ -527,17 +531,28 @@ export class DrizzleAccountStore implements AccountStore {
         }
       }
 
-      // A recorded session points at a project in the workspace being left, and
-      // that project does not exist in the new one. Rather than invent a mapping
-      // or silently drop the time, refuse and say why.
-      const [recorded] = await tx
-        .select({ total: count(timeSessions.id) })
-        .from(timeSessions)
-        .where(eq(timeSessions.userId, subject.userId));
-      if (Number(recorded?.total ?? 0) > 0) {
+      const [recorded, activity, agent, mappings] = await Promise.all([
+        tx
+          .select({ total: count(timeSessions.id) })
+          .from(timeSessions)
+          .where(and(eq(timeSessions.organizationId, current.organizationId), eq(timeSessions.userId, subject.userId))),
+        tx
+          .select({ total: count(activitySegments.id) })
+          .from(activitySegments)
+          .where(and(eq(activitySegments.organizationId, current.organizationId), eq(activitySegments.userId, subject.userId))),
+        tx
+          .select({ total: count(agentSessions.id) })
+          .from(agentSessions)
+          .where(and(eq(agentSessions.organizationId, current.organizationId), eq(agentSessions.userId, subject.userId))),
+        tx
+          .select({ total: count(projectPathMappings.id) })
+          .from(projectPathMappings)
+          .where(and(eq(projectPathMappings.organizationId, current.organizationId), eq(projectPathMappings.userId, subject.userId))),
+      ]);
+      if ([recorded, activity, agent, mappings].some((rows) => Number(rows[0]?.total ?? 0) > 0)) {
         throw new AppError(
           "conflict",
-          "This account has already recorded time in its current workspace, so it cannot be moved.",
+          "This account has recorded workspace evidence, so it cannot be moved.",
         );
       }
 
@@ -595,6 +610,23 @@ export class DrizzleAccountStore implements AccountStore {
       }
 
       return moved;
+    });
+  }
+
+  public async previewOrganizationJoin(
+    subject: AuthenticatedSubject,
+    inviteCode: string,
+  ): Promise<OrganizationRecord> {
+    return withLiveSubject(this.db, subject, async (tx) => {
+      const [organization] = await tx
+        .select({ id: organizations.id, name: organizations.name, inviteCode: organizations.inviteCode })
+        .from(organizations)
+        .where(eq(organizations.inviteCode, inviteCode))
+        .limit(1);
+      if (organization === undefined) {
+        throw new AppError("not_found", "That invite code does not match an organization.");
+      }
+      return organization;
     });
   }
 

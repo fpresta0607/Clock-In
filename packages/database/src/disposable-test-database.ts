@@ -71,8 +71,21 @@ export async function createDisposableTestDatabase(
       throw new Error("The integration connection did not reach its disposable database.");
     }
   } catch (error) {
-    await database.client.end({ timeout: 5 });
-    await dropDisposableDatabase(controlDatabaseUrl, name);
+    let closeError: unknown;
+    let dropError: unknown;
+    try {
+      await database.client.end({ timeout: 5 });
+    } catch (closeFailure) {
+      closeError = closeFailure;
+    } finally {
+      try {
+        await dropDisposableDatabase(controlDatabaseUrl, name);
+      } catch (dropFailure) {
+        dropError = dropFailure;
+      }
+    }
+    void closeError;
+    void dropError;
     throw error;
   }
 
@@ -81,8 +94,21 @@ export async function createDisposableTestDatabase(
     databaseName: name,
     databaseUrl: disposableUrl,
     cleanup: async () => {
-      await database.client.end({ timeout: 5 });
-      await dropDisposableDatabase(controlDatabaseUrl, name);
+      let closeError: unknown;
+      let dropError: unknown;
+      try {
+        await database.client.end({ timeout: 5 });
+      } catch (error) {
+        closeError = error;
+      } finally {
+        try {
+          await dropDisposableDatabase(controlDatabaseUrl, name);
+        } catch (error) {
+          dropError = error;
+        }
+      }
+      if (closeError !== undefined) throw closeError;
+      if (dropError !== undefined) throw dropError;
     },
   };
 }

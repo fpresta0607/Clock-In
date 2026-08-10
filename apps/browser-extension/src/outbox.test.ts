@@ -20,20 +20,21 @@ describe("Outbox", () => {
     expect(outbox.drain()).toEqual([]);
   });
 
-  it("drops the oldest events when the ring is full", () => {
+  it("refuses new events when the queue is full without discarding saved work", () => {
     const outbox = new Outbox<number>(3);
     for (let n = 1; n <= 5; n += 1) {
-      outbox.push(n);
+      if (n <= 3) expect(outbox.push(n)).toBe(true);
+      else expect(outbox.push(n)).toBe(false);
     }
     expect(outbox.size).toBe(3);
-    expect(outbox.drain()).toEqual([3, 4, 5]);
+    expect(outbox.drain()).toEqual([1, 2, 3]);
   });
 
-  it("restores from a storage snapshot, keeping the newest capacity events", () => {
+  it("restores every saved event before applying new backpressure", () => {
     const outbox = new Outbox<number>(2, [1, 2, 3]);
-    expect(outbox.snapshot()).toEqual([2, 3]);
-    outbox.push(4);
-    expect(outbox.snapshot()).toEqual([3, 4]);
+    expect(outbox.snapshot()).toEqual([1, 2, 3]);
+    expect(outbox.push(4)).toBe(false);
+    expect(outbox.snapshot()).toEqual([1, 2, 3]);
   });
 
   it("evicts only drained inactive namespaces beyond the retention cap", () => {

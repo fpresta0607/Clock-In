@@ -1,6 +1,6 @@
 //! Offline resilience for the native-messaging channel. When `connectNative`
 //! fails (desktop uninstalled, host missing), span events queue in a bounded
-//! ring — oldest dropped — and replay on reconnect, which is retried with
+//! FIFO and replay on reconnect, which is retried with
 //! exponential backoff. The ring persists to extension storage so a service
 //! worker restart does not lose queued verdicts.
 
@@ -9,7 +9,7 @@ export const MAX_RETAINED_OUTBOX_NAMESPACES = 8;
 export const OUTBOX_STORAGE_KEY = "spanOutbox";
 export const OUTBOX_NAMESPACES_STORAGE_KEY = "spanOutboxesByNamespace";
 
-/** A first-in-first-out bounded queue; pushing past capacity drops the oldest. */
+/** A first-in-first-out bounded queue that refuses an item when it is full. */
 export class Outbox<T> {
   private items: T[];
 
@@ -17,18 +17,23 @@ export class Outbox<T> {
     readonly capacity: number = OUTBOX_CAPACITY,
     restore: readonly T[] = [],
   ) {
-    this.items = restore.slice(-capacity);
+    this.items = [...restore];
   }
 
   get size(): number {
     return this.items.length;
   }
 
-  push(item: T): void {
-    this.items.push(item);
-    if (this.items.length > this.capacity) {
-      this.items.splice(0, this.items.length - this.capacity);
+  push(item: T): boolean {
+    if (this.items.length >= this.capacity) {
+      return false;
     }
+    this.items.push(item);
+    return true;
+  }
+
+  get remainingCapacity(): number {
+    return Math.max(0, this.capacity - this.items.length);
   }
 
   /** Returns every queued item in order and empties the ring. */

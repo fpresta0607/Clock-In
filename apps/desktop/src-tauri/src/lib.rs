@@ -368,13 +368,20 @@ struct OrganizationOverview {
 #[tauri::command]
 async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<OrganizationOverview> {
     let access_token = state.access_token().await?;
-    spool::ensure_new_identity_namespace_capacity()
+    let current_identity = state.client.identity(&access_token).await?;
+    let target = state
+        .client
+        .preview_organization_join(&access_token, input.invite_code.trim())
+        .await?;
+    let target_identity = spool::EvidenceIdentity::new(&current_identity.account_id, &target.id)
+        .ok_or_else(|| BridgeError::unknown("Could not identify the destination workspace."))?;
+    spool::ensure_identity_namespace_capacity(&target_identity)
         .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
     let previous = state.active_identity.lock().await.clone();
     state.deactivate_identity().await?;
     if let Err(error) = state
         .client
-        .join_organization(&access_token, input.invite_code.trim())
+        .join_organization(&access_token, input.invite_code.trim(), &target.id)
         .await
     {
         if let Some(identity) = previous {
@@ -531,6 +538,13 @@ async fn timer_retry_pending(state: State<'_, AppState>) -> ApiResult<PendingRet
 #[tauri::command]
 async fn offline_sync_retry(state: State<'_, AppState>) -> ApiResult<()> {
     let _ = state.access_token().await?;
+    state.monitor.request_upload();
+    Ok(())
+}
+
+#[tauri::command]
+async fn browser_capture_resume(state: State<'_, AppState>) -> ApiResult<()> {
+    browser::request_capture_resume(&state.monitor.browser_dir())?;
     state.monitor.request_upload();
     Ok(())
 }
@@ -860,6 +874,16 @@ pub fn run() {
                 monitor,
                 pending_update: std::sync::Mutex::new(None),
             });
+            let invalid_session_app = app.handle().clone();
+            app.state::<AppState>().monitor.set_invalid_session_handler(Arc::new(move || {
+                let app = invalid_session_app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app.state::<AppState>();
+                    if let Err(error) = state.deactivate_invalid_session().await {
+                        eprintln!("clock-in: could not fully deactivate an invalid session: {}", error.message);
+                    }
+                });
+            }));
             build_tray(app.handle())?;
 
             // Auto-update: check and download in the background now, install
@@ -895,6 +919,7 @@ pub fn run() {
             timer_stop,
             timer_retry_pending,
             offline_sync_retry,
+            browser_capture_resume,
             timer_use_server,
             timer_retry_local_start,
             monitor_status,

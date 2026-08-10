@@ -58,9 +58,9 @@ describe("Drizzle account store", () => {
             role: "admin",
           }]);
         }
-        if (selectStep === 3) return { from: () => ({ where: async () => [{ total: 0 }] }) };
-        if (selectStep === 4) return limited([{ organizationId: currentOrganizationId }]);
-        if (selectStep === 5) return { from: () => ({ where: async () => [{ total: 1 }] }) };
+        if (selectStep >= 3 && selectStep <= 6) return { from: () => ({ where: async () => [{ total: 0 }] }) };
+        if (selectStep === 7) return limited([{ organizationId: currentOrganizationId }]);
+        if (selectStep === 8) return { from: () => ({ where: async () => [{ total: 1 }] }) };
         throw new Error(`unexpected select ${selectStep}`);
       },
       delete: (table: unknown) => {
@@ -79,6 +79,49 @@ describe("Drizzle account store", () => {
         message: "The first administrator cannot leave a legacy workspace while it still has members.",
       });
     expect(deleted).toEqual([]);
+  });
+
+  it("rejects a workspace move before activity evidence can violate its tenant key", async () => {
+    const targetOrganizationId = "a1c7e513-b094-4d4c-ae55-21790ae019a4";
+    const currentOrganizationId = "b1c7e513-b094-4d4c-ae55-21790ae019a4";
+    let selectStep = 0;
+    const limited = (rows: unknown[]) => ({
+      from: () => ({ where: () => ({ limit: async () => rows }) }),
+    });
+    const transaction = {
+      execute: async () => selectStep === 0
+        ? [{ organization_id: currentOrganizationId, role: "member" }]
+        : [{ id: input.userId }],
+      select: () => {
+        selectStep += 1;
+        if (selectStep === 1) return limited([{ id: targetOrganizationId }]);
+        if (selectStep === 2) return limited([{
+          id: input.userId,
+          email: "member@example.com",
+          name: "Member",
+          organizationId: currentOrganizationId,
+          role: "member",
+        }]);
+        if (selectStep === 3 || selectStep === 5 || selectStep === 6) {
+          return { from: () => ({ where: async () => [{ total: 0 }] }) };
+        }
+        if (selectStep === 4) return { from: () => ({ where: async () => [{ total: 1 }] }) };
+        throw new Error(`unexpected select ${selectStep}`);
+      },
+      delete: () => ({ where: async () => undefined }),
+      update: () => ({ set: () => ({ where: () => ({ returning: async () => [] }) }) }),
+    };
+    const db = {
+      transaction: async (callback: (handle: typeof transaction) => Promise<unknown>) => callback(transaction),
+    } as unknown as DatabaseConnection["db"];
+
+    await expect(new DrizzleAccountStore(db).joinOrganization(
+      { organizationId: currentOrganizationId, userId: input.userId },
+      "ACDEF-GHJKM",
+    )).rejects.toMatchObject({
+      code: "conflict",
+      message: "This account has recorded workspace evidence, so it cannot be moved.",
+    });
   });
 });
 

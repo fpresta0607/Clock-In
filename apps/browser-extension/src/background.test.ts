@@ -29,7 +29,19 @@ function backgroundHarness(
   const updated = listeners();
   const focusChanged = listeners();
   const idleChanged = listeners();
-  const portMessages = listeners();
+  const rawPortMessages = listeners();
+  const portMessages = {
+    addListener: rawPortMessages.addListener,
+    emit: (message: Record<string, unknown>) => {
+      if ((message.type === "rules" || message.type === "collection-state") &&
+        message.collectionEnabled === true && message.collectionNamespace === undefined) {
+        rawPortMessages.emit({ ...message, collectionNamespace: "account-one:organization-one" } as never);
+        return;
+      }
+      rawPortMessages.emit(message as never);
+    },
+    emitRaw: rawPortMessages.emit,
+  };
   const portDisconnect = listeners();
   const tabsById = new Map(tabs.map((tab) => [tab.id, { ...tab, windowId: tab.windowId ?? 1 }]));
   let activeTabId = tabs[0]?.id;
@@ -118,6 +130,25 @@ describe("background startup", () => {
       collectionId: "collection-one",
       event,
     }));
+  });
+
+  it("fails closed when the native host omits the identity namespace", async () => {
+    vi.useFakeTimers();
+    const harness = backgroundHarness([{ id: 1, url: "https://github.com/acme/project", incognito: false }]);
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emitRaw({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      rules: [{ id: "rule-1", pattern: "github.com/acme/*" }],
+    } as never);
+    await settle();
+    vi.advanceTimersByTime(120_000);
+    await settle();
+
+    expect(spanMessages(harness.port)).toEqual([]);
   });
 
   it("does not let an alarm overwrite restored state before initialization completes", async () => {

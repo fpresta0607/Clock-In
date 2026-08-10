@@ -246,6 +246,8 @@ const COLLECTION_FILE: &str = "browser-collection.json";
 const COLLECTION_REVOCATION_FILE: &str = "browser-collection-revoked";
 const COLLECTION_AUTHORIZATION_FILE: &str = "browser-collection-authorization.json";
 const TALLY_CLEAR_FILE: &str = "browser-tally-clear.json";
+const CAPTURE_PAUSED_FILE: &str = "browser-capture-paused.json";
+const CAPTURE_RESUME_FILE: &str = "browser-capture-resume";
 const COLLECTION_AUTHORIZATION_SECONDS: u64 = 10 * 60;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -279,6 +281,14 @@ fn collection_authorization_path(dir: &Path) -> PathBuf {
 
 fn tally_clear_path(dir: &Path) -> PathBuf {
     dir.join(TALLY_CLEAR_FILE)
+}
+
+fn capture_paused_path(dir: &Path) -> PathBuf {
+    dir.join(CAPTURE_PAUSED_FILE)
+}
+
+fn capture_resume_path(dir: &Path) -> PathBuf {
+    dir.join(CAPTURE_RESUME_FILE)
 }
 
 fn browser_spool_path(dir: &Path) -> PathBuf {
@@ -460,6 +470,8 @@ pub fn deactivate_collection(dir: &Path) -> ApiResult<()> {
         remove_if_exists(&dir.join("unmatched-tally.json"))?;
         remove_if_exists(&dir.join("never-suggest.json"))?;
         remove_if_exists(&tally_clear_path(dir))?;
+        remove_if_exists(&capture_paused_path(dir))?;
+        remove_if_exists(&capture_resume_path(dir))?;
         Ok(())
     })
     .map_err(|_| BridgeError::unknown("Could not disable browser attribution."))
@@ -481,9 +493,59 @@ pub fn discard_collection(dir: &Path) -> ApiResult<()> {
     spool::with_lock(&spool, || {
         remove_if_exists(&collection_path(dir))?;
         remove_if_exists(&collection_authorization_path(dir))?;
+        remove_if_exists(&capture_paused_path(dir))?;
+        remove_if_exists(&capture_resume_path(dir))?;
         discard_browser_evidence(dir)
     })
     .map_err(|_| BridgeError::unknown("Could not disable browser attribution."))
+}
+
+pub fn record_capture_paused(dir: &Path, collection_id: &str) -> io::Result<()> {
+    let spool = browser_spool_path(dir);
+    spool::with_lock(&spool, || {
+        if admitted_collection_id_locked(dir).as_deref() != Some(collection_id) {
+            return Ok(());
+        }
+        let body = serde_json::to_vec(&serde_json::json!({ "collectionId": collection_id }))
+            .map_err(io::Error::other)?;
+        write_if_changed_locked(&capture_paused_path(dir), &body)
+    })
+}
+
+pub fn capture_is_paused(dir: &Path) -> bool {
+    let spool = browser_spool_path(dir);
+    spool::with_lock(&spool, || {
+        let Some(collection_id) = admitted_collection_id_locked(dir) else {
+            return Ok(false);
+        };
+        let paused = serde_json::from_slice::<serde_json::Value>(&std::fs::read(capture_paused_path(dir))?)
+            .ok()
+            .and_then(|value| value.get("collectionId").and_then(serde_json::Value::as_str).map(str::to_string))
+            .as_deref() == Some(collection_id.as_str());
+        Ok(paused)
+    })
+    .unwrap_or(false)
+}
+
+pub fn request_capture_resume(dir: &Path) -> ApiResult<()> {
+    ensure_browser_dir(dir)
+        .map_err(|_| BridgeError::unknown("Could not resume browser attribution."))?;
+    let spool = browser_spool_path(dir);
+    spool::with_lock(&spool, || write_if_changed_locked(&capture_resume_path(dir), b"{}"))
+        .map_err(|_| BridgeError::unknown("Could not resume browser attribution."))
+}
+
+pub fn consume_capture_resume(dir: &Path) -> bool {
+    let spool = browser_spool_path(dir);
+    spool::with_lock(&spool, || {
+        let requested = capture_resume_path(dir).exists();
+        if requested {
+            remove_if_exists(&capture_resume_path(dir))?;
+            remove_if_exists(&capture_paused_path(dir))?;
+        }
+        Ok(requested)
+    })
+    .unwrap_or(false)
 }
 
 pub fn disable_collection(dir: &Path) -> ApiResult<()> {

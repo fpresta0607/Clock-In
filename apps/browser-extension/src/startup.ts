@@ -8,6 +8,8 @@ import { restoreTally, TALLY_STORAGE_KEY, type Tally } from "./tally.js";
 export const MACHINE_STORAGE_KEY = "spanMachine";
 export const LAST_TICK_STORAGE_KEY = "lastTickAt";
 export const COLLECTION_ID_STORAGE_KEY = "browserCollectionId";
+export const CAPTURE_PAUSED_STORAGE_KEY = "spanCapturePaused";
+export const CAPTURE_PAUSED_NAMESPACES_STORAGE_KEY = "spanCapturePausedByNamespace";
 
 export interface StartupStorage {
   tally: Tally;
