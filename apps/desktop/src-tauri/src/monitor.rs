@@ -483,6 +483,10 @@ pub struct SessionTracker {
     /// exclude agent-covered idle from trimmed-idle accounting so overnight
     /// agent runs survive into the session duration instead of being subtracted.
     agent_seen_at: u64,
+    /// When the agent first became active during the current idle period.
+    /// Reset to 0 when the session enters an active span, so only idle-
+    /// internal agent starts count for the resumed-idle coverage calculation.
+    agent_first_in_idle: u64,
 }
 
 /// What the tracker needs to know about the world on each tick.
@@ -537,10 +541,14 @@ impl SessionTracker {
             } else if let Some(open) = self.open.as_mut() {
                 // Exclude any portion of the idle gap that was covered by an
                 // active agent: that time counts as work, not trimmed idle.
-                let agent_covered = if self.agent_seen_at >= idle_started_at {
-                    self.agent_seen_at
-                        .min(span_started_at)
-                        .saturating_sub(idle_started_at)
+                let agent_covered = if self.agent_first_in_idle >= idle_started_at
+                    && self.agent_first_in_idle > 0
+                {
+                    // Agent became active mid-idle; cover from that point forward.
+                    span_started_at.saturating_sub(self.agent_first_in_idle)
+                } else if self.agent_first_in_idle > 0 {
+                    // Agent was already active before idle began: full coverage.
+                    idle_seconds
                 } else {
                     0
                 };
@@ -575,6 +583,7 @@ impl SessionTracker {
                     // idle gap as active work. It begins when activity resumed.
                     opens_at = resumed_idle.map_or(boundary, |_| span_started_at);
                 }
+                self.agent_first_in_idle = 0;
                 match self.open.as_mut() {
                     Some(open) => open.last_active_at = input.now,
                     None => {
@@ -601,6 +610,9 @@ impl SessionTracker {
                     if let Some(open) = self.open.as_mut() {
                         open.last_active_at = input.now;
                     }
+                    if self.agent_seen_at == 0 {
+                        self.agent_first_in_idle = input.now;
+                    }
                     self.agent_seen_at = input.now;
                 }
             }
@@ -615,6 +627,9 @@ impl SessionTracker {
                     closed.extend(self.close_at(boundary));
                 } else if let Some(open) = self.open.as_mut() {
                     open.last_active_at = input.now;
+                    if self.agent_seen_at == 0 {
+                        self.agent_first_in_idle = input.now;
+                    }
                     self.agent_seen_at = input.now;
                 }
             }
@@ -640,6 +655,7 @@ impl SessionTracker {
     fn close_at(&mut self, stopped_at: u64) -> Option<ObservedSession> {
         let open = self.open.take()?;
         self.agent_seen_at = 0;
+        self.agent_first_in_idle = 0;
         let stopped_at = stopped_at.max(open.started_at);
         // A session with no elapsed time is not evidence of anything.
         if stopped_at <= open.started_at {
