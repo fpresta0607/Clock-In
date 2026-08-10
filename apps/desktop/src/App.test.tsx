@@ -913,6 +913,23 @@ describe("App", () => {
     expect(within(dialog).getByRole("button", { name: "Join" })).toBeEnabled();
   });
 
+  it("clears the previous workspace when post-move refresh fails", async () => {
+    const bootstrap = vi.fn()
+      .mockResolvedValueOnce({ kind: "idle", user, projects: [project] })
+      .mockRejectedValueOnce({ kind: "transient", message: "Workspace refresh unavailable" });
+    const bridge = bridgeFor({ bootstrap });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const dialog = await openSettings(person);
+    await person.type(within(dialog).getByLabelText("Invite code to join a teammate"), "acdef-ghjkm");
+    await person.click(within(dialog).getByRole("button", { name: "Join" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Workspace refresh unavailable");
+    expect(screen.queryByRole("heading", { name: "Working on: Field work" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry connection" })).toBeEnabled();
+  });
+
   it("keeps the current workspace available when retained offline work blocks a switch", async () => {
     const offlineSyncRetry = vi.fn().mockResolvedValue(undefined);
     const bridge = bridgeFor({

@@ -82,6 +82,7 @@ export type TimerState =
 
 export type TimerEvent =
   | { type: "bootstrapped"; snapshot: BootstrapSnapshot }
+  | { type: "workspace-reset" }
   | { type: "bootstrap-failed"; message: string }
   | { type: "start-requested"; start: StartIntent }
   | { type: "start-confirmed"; running: RunningTimer }
@@ -142,6 +143,7 @@ const fromSnapshot = (snapshot: BootstrapSnapshot): TimerState => {
 };
 
 export const timerReducer = (state: TimerState, event: TimerEvent): TimerState => {
+  if (event.type === "workspace-reset") return initialTimerState;
   if (event.type === "bootstrapped") return fromSnapshot(event.snapshot);
   if (event.type === "auth-failed") return { kind: "sign-in", error: event.message };
   if (state.kind === "booting" && event.type === "bootstrap-failed") {

@@ -392,17 +392,9 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
         }
         return Err(error);
     }
-    state.bind_identity(state.client.identity(&access_token).await?).await?;
-    state.enable_active_collection().await?;
-    state.monitor.ensure_running().await;
-    // Return the new workspace so the window updates without a reload.
-    let (organization, entries) = tokio::try_join!(
-        state.client.organization(&access_token),
-        state.client.leaderboard(&access_token)
-    )?;
     Ok(OrganizationOverview {
-        organization,
-        entries,
+        organization: target,
+        entries: Vec::new(),
     })
 }
 

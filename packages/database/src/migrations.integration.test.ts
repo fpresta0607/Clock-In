@@ -210,6 +210,14 @@ integration(integrationDescription, () => {
       insert into agent_sessions (organization_id, user_id, source, external_session_id, cwd, started_at, last_event_at)
       values (${organizationId}, ${userId}, 'browser', 'span-1', 'rule:placeholder', now(), now())
     `).resolves.toBeDefined();
+    await expect(database.client`
+      insert into agent_sessions (organization_id, user_id, source, external_session_id, started_at, last_event_at)
+      values (${organizationId}, ${userId}, 'browser', '', now(), now())
+    `).rejects.toThrow();
+    await expect(database.client`
+      insert into agent_sessions (organization_id, user_id, source, external_session_id, started_at, last_event_at)
+      values (${organizationId}, ${userId}, 'browser', ${"x".repeat(201)}, now(), now())
+    `).rejects.toThrow();
 
     // Browser spans carry no cwd; the matched url-rule id is stored instead.
     const [span] = await database.client`
@@ -249,6 +257,14 @@ integration(integrationDescription, () => {
     await expect(database.client`
       insert into project_path_mappings (organization_id, user_id, kind, path_prefix, project_id)
       values (${organizationId}, ${userId}, 'glob', 'example.com', ${projectId})
+    `).rejects.toThrow();
+    await expect(database.client`
+      insert into project_path_mappings (organization_id, user_id, kind, path_prefix, project_id)
+      values (${organizationId}, ${userId}, 'url_rule', '', ${projectId})
+    `).rejects.toThrow();
+    await expect(database.client`
+      insert into project_path_mappings (organization_id, user_id, kind, path_prefix, project_id)
+      values (${organizationId}, ${userId}, 'url_rule', ${"x".repeat(501)}, ${projectId})
     `).rejects.toThrow();
   });
 });

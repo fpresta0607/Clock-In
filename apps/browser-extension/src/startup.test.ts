@@ -50,7 +50,14 @@ describe("parseStartupStorage", () => {
 
   it("keeps valid queued events and drops malformed ones", () => {
     const parsed = parseStartupStorage({
-      spanOutbox: [VALID_EVENT, { event: "exploded" }, "junk", null],
+      spanOutbox: [
+        VALID_EVENT,
+        { ...VALID_EVENT, occurredAt: "2026-08-09T12:00:00Z" },
+        { ...VALID_EVENT, unexpected: true },
+        { event: "exploded" },
+        "junk",
+        null,
+      ],
     }, NOW);
     expect(parsed.queuedEvents).toEqual([VALID_EVENT]);
   });

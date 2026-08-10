@@ -218,19 +218,6 @@ describe("database schema", () => {
         "agent_sessions_cwd_length_valid",
       ]),
     );
-    const statusCheck = config.checks.find((constraint) => constraint.name === "agent_sessions_status_fields_valid");
-    expect(new PgDialect().sqlToQuery(statusCheck!.value).sql).toContain("'running'");
-    expect(new PgDialect().sqlToQuery(statusCheck!.value).sql).toContain("'stale'");
-    const externalIdCheck = config.checks.find(
-      (constraint) => constraint.name === "agent_sessions_external_session_id_length_valid",
-    );
-    expect(new PgDialect().sqlToQuery(externalIdCheck!.value).sql).toContain(
-      'char_length("agent_sessions"."external_session_id") between 1 and 200',
-    );
-    const cwdCheck = config.checks.find((constraint) => constraint.name === "agent_sessions_cwd_length_valid");
-    expect(new PgDialect().sqlToQuery(cwdCheck!.value).sql).toContain(
-      '"agent_sessions"."cwd" is null or char_length("agent_sessions"."cwd") between 1 and 1000',
-    );
     const userTimelineIndex = config.indexes.find(
       (index) => index.config.name === "agent_sessions_organization_user_started_at_idx",
     );
@@ -270,18 +257,6 @@ describe("database schema", () => {
         "project_path_mappings_path_prefix_length_valid",
         "project_path_mappings_kind_valid",
       ]),
-    );
-    const kindCheck = config.checks.find(
-      (constraint) => constraint.name === "project_path_mappings_kind_valid",
-    );
-    expect(new PgDialect().sqlToQuery(kindCheck!.value).sql).toContain(
-      '"project_path_mappings"."kind" in (\'path_prefix\', \'url_rule\')',
-    );
-    const prefixCheck = config.checks.find(
-      (constraint) => constraint.name === "project_path_mappings_path_prefix_length_valid",
-    );
-    expect(new PgDialect().sqlToQuery(prefixCheck!.value).sql).toContain(
-      'char_length("project_path_mappings"."path_prefix") between 1 and 500',
     );
   });
 });

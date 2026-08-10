@@ -25,13 +25,16 @@ function record(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function isSpanEvent(value: unknown): value is SpanEvent {
+export function isSpanEvent(value: unknown): value is SpanEvent {
   const candidate = record(value);
   return candidate !== null &&
+    Object.keys(candidate).length === 4 &&
     (candidate["event"] === "started" || candidate["event"] === "heartbeat" || candidate["event"] === "ended") &&
-    typeof candidate["externalSessionId"] === "string" && candidate["externalSessionId"].length > 0 &&
-    typeof candidate["ruleId"] === "string" && candidate["ruleId"].length > 0 &&
-    typeof candidate["occurredAt"] === "string" && Number.isFinite(Date.parse(candidate["occurredAt"]));
+    typeof candidate["externalSessionId"] === "string" && candidate["externalSessionId"].trim().length > 0 &&
+    typeof candidate["ruleId"] === "string" && candidate["ruleId"].trim().length > 0 &&
+    typeof candidate["occurredAt"] === "string" &&
+    Number.isFinite(Date.parse(candidate["occurredAt"])) &&
+    new Date(candidate["occurredAt"]).toISOString() === candidate["occurredAt"];
 }
 
 export function parseStartupStorage(value: unknown, now: number = Date.now()): StartupStorage {

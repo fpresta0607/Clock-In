@@ -94,6 +94,7 @@ async fn upload_once(
                 error.message
             );
         }
+        deactivate_invalid_identity(shared, recording, identity_invalidated, invalid_session_handler);
         return;
     };
     let token = match client.fetch_access_token(&session).await {
