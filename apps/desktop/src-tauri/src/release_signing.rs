@@ -135,6 +135,16 @@ fn validate_windows_signing(configured_thumbprint: Option<String>) -> Result<(),
 }
 
 fn validate_macos_signing(get: impl Fn(&str) -> Option<String>) -> Result<(), String> {
+    validate_macos_signing_with_verifier(get, |identity| {
+        validate_macos_signing_identity(identity)?;
+        validate_macos_notarization_tool()
+    })
+}
+
+pub(crate) fn validate_macos_signing_with_verifier(
+    get: impl Fn(&str) -> Option<String>,
+    verify_identity: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
     let required_names = [
         "APPLE_CERTIFICATE",
         "APPLE_CERTIFICATE_PASSWORD",
@@ -147,14 +157,55 @@ fn validate_macos_signing(get: impl Fn(&str) -> Option<String>) -> Result<(), St
         .into_iter()
         .filter(|name| required(get(name)).is_none())
         .collect::<Vec<_>>();
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
+    if !missing.is_empty() {
+        return Err(format!(
             "macOS release builds require {}.",
             missing.join(", ")
-        ))
+        ));
     }
+    let identity = required(get("APPLE_SIGNING_IDENTITY"))
+        .expect("APPLE_SIGNING_IDENTITY was checked above");
+    if identity.trim() == "-" {
+        return Err(
+            "macOS release builds require a Developer ID Application signing identity, not ad-hoc signing."
+                .to_string(),
+        );
+    }
+    if !identity.trim().starts_with("Developer ID Application:") {
+        return Err("macOS release builds require a Developer ID Application signing identity.".to_string());
+    }
+    verify_identity(identity.trim())
+}
+
+fn validate_macos_signing_identity(identity: &str) -> Result<(), String> {
+    if std::env::consts::OS != "macos" {
+        return Err("macOS signing credentials can only be validated on macOS.".to_string());
+    }
+    let output = std::process::Command::new("security")
+        .args(["find-identity", "-v", "-p", "codesigning"])
+        .output()
+        .map_err(|_| "The configured macOS signing identity is unavailable.".to_string())?;
+    let quoted_identity = format!("\"{identity}\"");
+    (output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.contains(&quoted_identity)))
+    .then_some(())
+    .ok_or_else(|| {
+        "The configured macOS Developer ID signing identity is unavailable or lacks a private key."
+            .to_string()
+    })
+}
+
+fn validate_macos_notarization_tool() -> Result<(), String> {
+    let status = std::process::Command::new("xcrun")
+        .args(["notarytool", "--help"])
+        .status()
+        .map_err(|_| "macOS release builds require the Xcode notarytool.".to_string())?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| "macOS release builds require the Xcode notarytool.".to_string())
 }
 
 fn required(value: Option<String>) -> Option<String> {
