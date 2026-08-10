@@ -96,6 +96,22 @@ function overlapSeconds(aStart: Date, aEnd: Date, bStart: Date, bEnd: Date): num
   return Math.max(0, Math.min(aEnd.getTime(), bEnd.getTime()) - Math.max(aStart.getTime(), bStart.getTime())) / 1_000;
 }
 
+function mergeIntervals(intervals: { start: number; end: number }[]): { start: number; end: number }[] {
+  const sorted = intervals
+    .filter((interval) => interval.end > interval.start)
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged: { start: number; end: number }[] = [];
+  for (const interval of sorted) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && interval.start <= last.end) {
+      last.end = Math.max(last.end, interval.end);
+    } else {
+      merged.push({ ...interval });
+    }
+  }
+  return merged;
+}
+
 /**
  * Mirrors the repository's corroboration semantics — the same completed-session
  * filters, freshness window, and duration cap as the SQL — so the route tests
@@ -126,12 +142,16 @@ class MemoryReports implements ReportRepository {
     const sessionEnd = range === null
       ? session.stoppedAt
       : new Date(Math.min(session.stoppedAt.getTime(), range.toExclusive.getTime()));
-    let total = 0;
-    for (const segment of this.segments) {
-      if (segment.organizationId !== session.organizationId || segment.userId !== session.userId || segment.kind !== "active") continue;
-      if (segment.receivedAt.getTime() > segment.endedAt.getTime() + freshnessWindowMs) continue;
-      total += overlapSeconds(segment.startedAt, segment.endedAt, sessionStart, sessionEnd);
-    }
+    let total = mergeIntervals(this.segments
+      .filter((segment) => segment.organizationId === session.organizationId
+        && segment.userId === session.userId
+        && segment.kind === "active"
+        && segment.receivedAt.getTime() <= segment.endedAt.getTime() + freshnessWindowMs)
+      .map((segment) => ({
+        start: Math.max(segment.startedAt.getTime(), sessionStart.getTime()),
+        end: Math.min(segment.endedAt.getTime(), sessionEnd.getTime()),
+      })))
+      .reduce((seconds, interval) => seconds + (interval.end - interval.start) / 1_000, 0);
     for (const agent of this.agents) {
       // Browser spans attribute; they never corroborate.
       if (agent.source === "browser") continue;
@@ -200,20 +220,6 @@ class MemoryReports implements ReportRepository {
    * exceeds actual focused wall-clock time. Empty totals return no row.
    */
   public async readSiteTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<SiteTotalRecord[]> {
-    const mergeIntervals = (intervals: { start: number; end: number }[]): { start: number; end: number }[] => {
-      const sorted = [...intervals].sort((a, b) => a.start - b.start || a.end - b.end);
-      const merged: { start: number; end: number }[] = [];
-      for (const interval of sorted) {
-        const last = merged[merged.length - 1];
-        if (last !== undefined && interval.start <= last.end) {
-          last.end = Math.max(last.end, interval.end);
-        } else {
-          merged.push({ ...interval });
-        }
-      }
-      return merged;
-    };
-
     const spansByRule = new Map<string, { mapping: StoredMapping; intervals: { start: number; end: number }[] }>();
     for (const span of this.agents) {
       if (span.organizationId !== subject.organizationId || span.userId !== subject.userId) continue;
@@ -450,6 +456,41 @@ describe("me/stats routes", () => {
       // browser span's rule is not one of the caller's mappings.
       apps: [],
       sites: [],
+    });
+  });
+
+  it("unions overlapping active evidence when corroborating a timer", async () => {
+    const reports = new MemoryReports();
+    const timer = session({
+      startedAt: new Date("2026-08-05T14:00:00.000Z"),
+      stoppedAt: new Date("2026-08-05T14:10:00.000Z"),
+      durationSeconds: 600,
+    });
+    reports.sessions.push(timer);
+    const receivedAt = new Date("2026-08-05T14:10:01.000Z");
+    reports.segments.push(
+      {
+        organizationId: ids.organization, userId: ids.user, kind: "active",
+        startedAt: new Date("2026-08-05T14:00:00.000Z"), endedAt: new Date("2026-08-05T14:03:30.000Z"), receivedAt,
+      },
+      {
+        organizationId: ids.organization, userId: ids.user, kind: "active",
+        startedAt: new Date("2026-08-05T14:02:00.000Z"), endedAt: new Date("2026-08-05T14:05:00.000Z"), receivedAt,
+      },
+    );
+    // Browser sessions attribute time but must not corroborate this timer.
+    reports.agents.push({
+      organizationId: ids.organization, userId: ids.user, source: "browser", ruleId: null, linkedSessionId: timer.id,
+      startedAt: timer.startedAt, endedAt: timer.stoppedAt, lastEventAt: timer.stoppedAt, receivedAt,
+    });
+
+    const response = await createTestApp(reports).request("http://api.test/me/stats", { headers: { authorization: bearerHeader } });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      totalDurationSeconds: 600,
+      corroboratedSeconds: 300,
+      projects: [{ project: { id: ids.project }, durationSeconds: 600, corroboratedSeconds: 300, sessionCount: 1 }],
     });
   });
 

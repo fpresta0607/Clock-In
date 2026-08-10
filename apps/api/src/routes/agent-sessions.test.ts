@@ -391,7 +391,7 @@ describe("agent-session routes", () => {
 
     expect(agentSessions.records[0]).toMatchObject({
       externalSessionId: "span-1",
-      status: "ended",
+      status: "stale",
       endedAt: new Date("2026-08-06T13:40:00.000Z"),
     });
     expect(agentSessions.records[1]).toMatchObject({ externalSessionId: "session-1", status: "running" });

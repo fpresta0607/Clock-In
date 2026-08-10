@@ -646,8 +646,8 @@ export class DrizzleAccountStore implements AccountStore {
  * to the session, floored and capped at durationSeconds. Browser spans are excluded:
  * they attribute active time to a project but never corroborate it. Evidence received
  * more than seven days after it occurred is stored but never corroborates. Overlapping
- * evidence intervals are summed rather than unioned; the durationSeconds cap absorbs
- * the double-count, so corroborated time can never exceed the session it backs.
+ * active intervals are unioned, so simultaneous devices never inflate corroborated
+ * wall-clock time.
  */
 interface ExactStatsRange {
   from: Date;
@@ -679,16 +679,35 @@ function corroboratedSecondsSql(range: ExactStatsRange | null = null) {
     ${sessionDuration},
     floor(
       coalesce((
-        select sum(greatest(0, extract(epoch from
-          least(${activitySegments.endedAt}, ${sessionEnd})
-          - greatest(${activitySegments.startedAt}, ${sessionStart}))))
-        from ${activitySegments}
-        where ${activitySegments.organizationId} = ${timeSessions.organizationId}
-          and ${activitySegments.userId} = ${timeSessions.userId}
-          and ${activitySegments.kind} = 'active'
-          and ${activitySegments.startedAt} < ${sessionEnd}
-          and ${activitySegments.endedAt} > ${sessionStart}
-          and ${activitySegments.receivedAt} <= ${activitySegments.endedAt} + interval '7 days'
+        select sum(extract(epoch from (merged_end - merged_start)))
+        from (
+          select min(segment_start) as merged_start, max(segment_end) as merged_end
+          from (
+            select segment_start, segment_end,
+              sum(case when previous_end is null or segment_start > previous_end then 1 else 0 end)
+                over (order by segment_start, segment_end rows unbounded preceding) as interval_group
+            from (
+              select segment_start, segment_end,
+                max(segment_end) over (
+                  order by segment_start, segment_end
+                  rows between unbounded preceding and 1 preceding
+                ) as previous_end
+              from (
+                select
+                  greatest(${activitySegments.startedAt}, ${sessionStart}) as segment_start,
+                  least(${activitySegments.endedAt}, ${sessionEnd}) as segment_end
+                from ${activitySegments}
+                where ${activitySegments.organizationId} = ${timeSessions.organizationId}
+                  and ${activitySegments.userId} = ${timeSessions.userId}
+                  and ${activitySegments.kind} = 'active'
+                  and ${activitySegments.startedAt} < ${sessionEnd}
+                  and ${activitySegments.endedAt} > ${sessionStart}
+                  and ${activitySegments.receivedAt} <= ${activitySegments.endedAt} + interval '7 days'
+              ) as clipped_segments
+            ) as ordered_segments
+          ) as grouped_segments
+          group by interval_group
+        ) as merged_segments
       ), 0) + coalesce((
         select sum(greatest(0, extract(epoch from
           least(coalesce(${agentSessions.endedAt}, ${agentSessions.lastEventAt}), ${sessionEnd})
