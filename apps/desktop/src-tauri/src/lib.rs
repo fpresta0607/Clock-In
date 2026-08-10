@@ -9,6 +9,9 @@ pub mod browser;
 mod monitor;
 mod recovery;
 mod uploader;
+// Public because its `QuotaSource` trait is the extension point for native
+// per-CLI quota discovery beyond the `quota-axi` adapter that ships here.
+pub mod quota;
 // Shared with the `clock-in-hook` binary; the uploader drains it from here.
 pub mod spool;
 // Shared with the `clock-in-browser-host` binary: the stdio framing it serves.
@@ -32,6 +35,7 @@ use api::{
     PathMapping, PathMappingCreateInput, PathMappingUpdateInput, TimerProject, TimerUser,
 };
 use monitor::{MonitorSettings, MonitorStatus, SettingsPatch};
+use quota::{QuotaMonitor, QuotaSnapshot};
 use recovery::{reconcile, PendingStop, Reconciliation, RecoveryState, RunningTimer, StartIntent};
 
 const KEYRING_SERVICE: &str = "clock-in";
@@ -140,6 +144,7 @@ pub struct AppState {
     /// Auto-update is silent end to end: a failed check or download leaves
     /// this empty and the user on the status quo.
     pending_update: std::sync::Mutex<Option<(tauri_plugin_updater::Update, Vec<u8>)>>,
+    quota: QuotaMonitor,
 }
 
 async fn teardown_after_auth_failure<T, F, Fut>(result: ApiResult<T>, teardown: F) -> ApiResult<T>
@@ -894,6 +899,15 @@ async fn monitor_status(state: State<'_, AppState>) -> ApiResult<MonitorStatus> 
     Ok(state.monitor.status().await)
 }
 
+/// How much of each coding agent's plan is left, for the dials beside
+/// agent-attributed activity. Answers from cache and refreshes behind the UI,
+/// so this never waits on a provider read; a machine with no quota tooling gets
+/// a snapshot of unknowns rather than an error.
+#[tauri::command]
+async fn quota_status(state: State<'_, AppState>) -> ApiResult<QuotaSnapshot> {
+    Ok(state.quota.snapshot())
+}
+
 /// Opt-in hook registration for one agent CLI, triggered from the settings
 /// UI. Never silent: the user clicks, and the result says whether the CLI's
 /// config was merged or a paste-it-yourself snippet came back.
@@ -1212,6 +1226,7 @@ pub fn run() {
                 active_identity: Mutex::new(None),
                 monitor,
                 pending_update: std::sync::Mutex::new(None),
+                quota: QuotaMonitor::new(),
             });
             let invalid_session_app = app.handle().clone();
             app.state::<AppState>()
@@ -1267,6 +1282,7 @@ pub fn run() {
             timer_use_server,
             timer_retry_local_start,
             monitor_status,
+            quota_status,
             hook_register,
             monitor_set_enabled,
             monitor_dismiss_suggestion,

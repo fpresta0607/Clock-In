@@ -87,6 +87,95 @@ describe("defaultBridge", () => {
     await expect(defaultBridge.monitorStatus()).resolves.toMatchObject({ pendingSuggestion: null, agentActive: null, sessionIdleSeconds: null, away: null });
   });
 
+  /// The shape `quota_status` serializes, as the host writes it for a machine
+  /// with one readable provider and one that cannot be read.
+  const quotaPayload = {
+    status: "ready",
+    checkedAt: "2026-08-10T15:28:29.562Z",
+    detail: null,
+    providers: [
+      {
+        provider: "claude",
+        label: "Claude",
+        sources: ["claude_code"],
+        status: "known",
+        account: { email: "dev@example.com", organization: "Example Org" },
+        plan: "max",
+        percentRemaining: 72,
+        bindingWindowId: "seven_day",
+        windows: [
+          { id: "five_hour", label: "session", kind: "session", percentRemaining: 79, resetsAt: "2026-08-10T19:30:00.443029+00:00" },
+          { id: "seven_day", label: "week", kind: "weekly", percentRemaining: 72, resetsAt: "2026-08-13T21:00:00.000Z" },
+        ],
+        detail: null,
+        reason: null,
+        stale: false,
+      },
+      {
+        provider: "cursor",
+        label: "Cursor",
+        sources: ["cursor"],
+        status: "unknown",
+        account: null,
+        plan: null,
+        percentRemaining: null,
+        bindingWindowId: null,
+        windows: [],
+        detail: "This tool's quota could not be read on this machine.",
+        reason: "sqlite3_unavailable",
+        stale: false,
+      },
+    ],
+  };
+
+  it("decodes the quota snapshot and rejects readings the dial could not draw", async () => {
+    invoke.mockResolvedValueOnce(quotaPayload);
+    await expect(defaultBridge.quotaStatus()).resolves.toEqual(quotaPayload);
+    expect(invoke).toHaveBeenCalledWith("quota_status", undefined);
+
+    // Before the host's first reading lands, and when no source answered at all.
+    invoke.mockResolvedValueOnce({ status: "pending", checkedAt: null, detail: null, providers: [] });
+    await expect(defaultBridge.quotaStatus()).resolves.toMatchObject({ status: "pending", providers: [] });
+
+    invoke.mockResolvedValueOnce({ status: "unavailable", checkedAt: null, detail: "quota-axi: not installed", providers: [] });
+    await expect(defaultBridge.quotaStatus()).resolves.toMatchObject({ status: "unavailable", detail: "quota-axi: not installed" });
+
+    invoke.mockResolvedValueOnce({ ...quotaPayload, status: "surprise" });
+    await expect(defaultBridge.quotaStatus()).rejects.toMatchObject({ kind: "unknown" });
+
+    invoke.mockResolvedValueOnce({ ...quotaPayload, providers: "claude" });
+    await expect(defaultBridge.quotaStatus()).rejects.toMatchObject({ kind: "unknown" });
+
+    // A known reading has to carry the number the arc is drawn from.
+    invoke.mockResolvedValueOnce({
+      ...quotaPayload,
+      providers: [{ ...quotaPayload.providers[0], percentRemaining: null }],
+    });
+    await expect(defaultBridge.quotaStatus()).rejects.toMatchObject({ kind: "unknown" });
+
+    invoke.mockResolvedValueOnce({
+      ...quotaPayload,
+      providers: [{ ...quotaPayload.providers[0], percentRemaining: 140 }],
+    });
+    await expect(defaultBridge.quotaStatus()).rejects.toMatchObject({ kind: "unknown" });
+
+    invoke.mockResolvedValueOnce({
+      ...quotaPayload,
+      providers: [{ ...quotaPayload.providers[0], windows: [{ id: "seven_day", label: "week", kind: "weekly", percentRemaining: "most", resetsAt: null }] }],
+    });
+    await expect(defaultBridge.quotaStatus()).rejects.toMatchObject({ kind: "unknown" });
+
+    // A provider that names only part of the login still decodes: the dial
+    // reports whichever half it was given rather than dropping the reading.
+    invoke.mockResolvedValueOnce({
+      ...quotaPayload,
+      providers: [{ ...quotaPayload.providers[0], account: { email: "dev@example.com" } }],
+    });
+    await expect(defaultBridge.quotaStatus()).resolves.toMatchObject({
+      providers: [{ account: { email: "dev@example.com", organization: null } }],
+    });
+  });
+
   it("decodes the hook registration outcomes and rejects unknown statuses", async () => {
     const manual = {
       status: "manual",
