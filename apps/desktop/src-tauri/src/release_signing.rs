@@ -81,17 +81,23 @@ fn validate_updater_key(
     password: Option<String>,
     updater_public_key: Option<String>,
 ) -> Result<(), String> {
-    let value = required(value)
-        .ok_or_else(|| "TAURI_SIGNING_PRIVATE_KEY must contain a Minisign private key.".to_string())?;
+    let value = required(value).ok_or_else(|| {
+        "TAURI_SIGNING_PRIVATE_KEY must contain a Minisign private key.".to_string()
+    })?;
     let value = match Path::new(&value).is_file() {
         true => std::fs::read_to_string(&value)
             .map_err(|_| "TAURI_SIGNING_PRIVATE_KEY could not be read.".to_string())?,
         false => value,
     };
-    let secret = minisign::SecretKeyBox::from_string(&minisign_key_text(&value, "TAURI_SIGNING_PRIVATE_KEY")?)
-        .map_err(|_| "TAURI_SIGNING_PRIVATE_KEY must contain a Minisign private key.".to_string())?
-        .into_secret_key(password)
-        .map_err(|_| "TAURI_SIGNING_PRIVATE_KEY must contain a usable Minisign private key.".to_string())?;
+    let secret = minisign::SecretKeyBox::from_string(&minisign_key_text(
+        &value,
+        "TAURI_SIGNING_PRIVATE_KEY",
+    )?)
+    .map_err(|_| "TAURI_SIGNING_PRIVATE_KEY must contain a Minisign private key.".to_string())?
+    .into_secret_key(password)
+    .map_err(|_| {
+        "TAURI_SIGNING_PRIVATE_KEY must contain a usable Minisign private key.".to_string()
+    })?;
     let updater_public_key = required(updater_public_key).ok_or_else(|| {
         "The configured updater public key is required for release signing.".to_string()
     })?;
@@ -109,7 +115,9 @@ fn validate_updater_key(
         None,
         None,
     )
-    .map_err(|_| "TAURI_SIGNING_PRIVATE_KEY must contain a usable Minisign private key.".to_string())?;
+    .map_err(|_| {
+        "TAURI_SIGNING_PRIVATE_KEY must contain a usable Minisign private key.".to_string()
+    })?;
     Ok(())
 }
 
@@ -163,8 +171,8 @@ pub(crate) fn validate_macos_signing_with_verifier(
             missing.join(", ")
         ));
     }
-    let identity = required(get("APPLE_SIGNING_IDENTITY"))
-        .expect("APPLE_SIGNING_IDENTITY was checked above");
+    let identity =
+        required(get("APPLE_SIGNING_IDENTITY")).expect("APPLE_SIGNING_IDENTITY was checked above");
     if identity.trim() == "-" {
         return Err(
             "macOS release builds require a Developer ID Application signing identity, not ad-hoc signing."
@@ -172,7 +180,9 @@ pub(crate) fn validate_macos_signing_with_verifier(
         );
     }
     if !identity.trim().starts_with("Developer ID Application:") {
-        return Err("macOS release builds require a Developer ID Application signing identity.".to_string());
+        return Err(
+            "macOS release builds require a Developer ID Application signing identity.".to_string(),
+        );
     }
     verify_identity(identity.trim())
 }

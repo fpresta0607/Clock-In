@@ -39,8 +39,8 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -1458,7 +1458,9 @@ impl Monitor {
         let device_id = lock(&self.shared).settings.device_id.clone();
         uuid::Uuid::parse_str(&device_id)
             .map(|_| device_id)
-            .map_err(|_| BridgeError::unknown("A valid recording device is required to start a timer."))
+            .map_err(|_| {
+                BridgeError::unknown("A valid recording device is required to start a timer.")
+            })
     }
 
     /// Asks the upload task to run now instead of at the next 5-minute tick
@@ -1542,9 +1544,14 @@ impl Monitor {
             enabled: shared.settings.enabled,
             running,
             last_upload_at: shared.last_upload_at.clone(),
-            segment_backlog: active_identity.then(|| count_lines(&paths.segments_path)).unwrap_or(0),
-            agent_backlog: active_identity.then(|| count_lines(&paths.agent_path)).unwrap_or(0),
-            browser_capture_paused: active_identity && crate::browser::capture_is_paused(&paths.browser_dir),
+            segment_backlog: active_identity
+                .then(|| count_lines(&paths.segments_path))
+                .unwrap_or(0),
+            agent_backlog: active_identity
+                .then(|| count_lines(&paths.agent_path))
+                .unwrap_or(0),
+            browser_capture_paused: active_identity
+                && crate::browser::capture_is_paused(&paths.browser_dir),
             hooks: detect_hooks(&default_hook_probes()),
             browsers: crate::browser::health_all(&paths.browser_dir),
             pending_suggestion: shared.agent.suggestion.clone(),
@@ -2634,10 +2641,18 @@ mod tests {
         ));
         let path = dir.join("segments.jsonl");
         let mut builder = SegmentBuilder::new();
-        builder.apply(1_000, &ActivitySignal::Active { process_name: Some("Code.exe".to_string()) });
+        builder.apply(
+            1_000,
+            &ActivitySignal::Active {
+                process_name: Some("Code.exe".to_string()),
+            },
+        );
         let shared = Arc::new(Mutex::new(MonitorShared {
             builder,
-            settings: MonitorSettings { device_id: "device-one".to_string(), ..MonitorSettings::default() },
+            settings: MonitorSettings {
+                device_id: "device-one".to_string(),
+                ..MonitorSettings::default()
+            },
             mappings: Vec::new(),
             agent: AgentTracking::default(),
             browser: BrowserTracking::default(),
@@ -2646,7 +2661,8 @@ mod tests {
         }));
 
         assert!(flush_open_segment_to_spool(&shared, &path, 1_030));
-        let (records, _) = spool::read_pending_lines::<SegmentRecord>(&path).expect("durable segment reads");
+        let (records, _) =
+            spool::read_pending_lines::<SegmentRecord>(&path).expect("durable segment reads");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, SegmentKind::Active);
         assert_eq!(records[0].started_at, iso8601(1_000));

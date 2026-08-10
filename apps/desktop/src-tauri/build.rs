@@ -30,22 +30,18 @@ fn main() {
         .ok()
         .and_then(|config| serde_json::from_str::<serde_json::Value>(&config).ok())
         .expect("tauri.conf.json must contain a Tauri configuration");
-    let override_config = std::env::var("TAURI_CONFIG")
-        .ok()
-        .map(|config| {
-            serde_json::from_str::<serde_json::Value>(&config)
-                .expect("TAURI_CONFIG must contain a JSON configuration override")
-        });
-    let tauri_config = release_signing::effective_tauri_config(base_config, override_config.as_ref());
+    let override_config = std::env::var("TAURI_CONFIG").ok().map(|config| {
+        serde_json::from_str::<serde_json::Value>(&config)
+            .expect("TAURI_CONFIG must contain a JSON configuration override")
+    });
+    let tauri_config =
+        release_signing::effective_tauri_config(base_config, override_config.as_ref());
     let signing_config = release_signing::signing_configuration(&tauri_config);
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS")
-        .unwrap_or_else(|_| std::env::consts::OS.to_string());
-    release_signing::validate_build_signing(
-        release,
-        &target_os,
-        &signing_config,
-        |name| std::env::var(name).ok(),
-    )
+    let target_os =
+        std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| std::env::consts::OS.to_string());
+    release_signing::validate_build_signing(release, &target_os, &signing_config, |name| {
+        std::env::var(name).ok()
+    })
     .unwrap_or_else(|error| panic!("{error}"));
 
     // These are baked in at compile time, so a release built without them would

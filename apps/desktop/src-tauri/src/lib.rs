@@ -244,9 +244,8 @@ impl AppState {
             }
             return Ok(());
         }
-        spool::ensure_identity_namespace_capacity(&identity).map_err(|error| {
-            BridgeError::new(ErrorKind::Conflict, error.to_string())
-        })?;
+        spool::ensure_identity_namespace_capacity(&identity)
+            .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
         self.monitor.stop().await;
         let active = spool::active_identity();
         if previous.is_some() || active.as_ref() != Some(&identity) {
@@ -277,18 +276,22 @@ impl AppState {
         self.monitor.stop().await;
         let active = spool::active_identity();
         let browser_dir = (self.active_identity.lock().await.take().is_some() || active.is_some())
-            .then(|| active
-                .as_ref()
-                .map(spool::evidence_paths)
-                .map(|paths| paths.browser_dir)
-                .unwrap_or_else(|| self.monitor.browser_dir()));
+            .then(|| {
+                active
+                    .as_ref()
+                    .map(spool::evidence_paths)
+                    .map(|paths| paths.browser_dir)
+                    .unwrap_or_else(|| self.monitor.browser_dir())
+            });
         complete_identity_deactivation(
             move || match browser_dir {
                 Some(browser_dir) => browser::deactivate_collection(&browser_dir),
                 None => Ok(()),
             },
-            || spool::clear_active_identity()
-                .map_err(|_| BridgeError::unknown("Could not secure offline evidence.")),
+            || {
+                spool::clear_active_identity()
+                    .map_err(|_| BridgeError::unknown("Could not secure offline evidence."))
+            },
             || async {
                 self.monitor.deactivate_identity().await;
                 *self.recovery.lock().await = RecoveryState::default();
@@ -307,9 +310,12 @@ impl AppState {
     }
 
     async fn enable_active_collection(&self) -> ApiResult<()> {
-        let identity = self.active_identity.lock().await.clone().ok_or_else(|| {
-            BridgeError::unknown("Could not identify the signed-in account.")
-        })?;
+        let identity = self
+            .active_identity
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| BridgeError::unknown("Could not identify the signed-in account."))?;
         browser::enable_collection_for_identity(&self.monitor.browser_dir(), &identity)
     }
 
@@ -568,25 +574,28 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
     let current_identity = state
         .authenticated_result(state.client.identity(&access_token).await)
         .await?;
-    let target = state.authenticated_result(
-        state
-            .client
-            .preview_organization_join(&access_token, input.invite_code.trim())
-            .await,
-    )
-    .await?;
+    let target = state
+        .authenticated_result(
+            state
+                .client
+                .preview_organization_join(&access_token, input.invite_code.trim())
+                .await,
+        )
+        .await?;
     let target_identity = spool::EvidenceIdentity::new(&current_identity.account_id, &target.id)
         .ok_or_else(|| BridgeError::unknown("Could not identify the destination workspace."))?;
-    let desktop_reservation = spool::reserve_identity_namespace(&current_identity, &target_identity)
-        .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
+    let desktop_reservation =
+        spool::reserve_identity_namespace(&current_identity, &target_identity)
+            .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
     let browser_dir = state.monitor.browser_dir();
-    let extension_reservation = match reserve_extension_namespace_capacity(&browser_dir, &target_identity).await {
-        Ok(reservation) => reservation,
-        Err(error) => {
-            rollback_workspace_move(&browser_dir, &desktop_reservation);
-            return Err(error);
-        }
-    };
+    let extension_reservation =
+        match reserve_extension_namespace_capacity(&browser_dir, &target_identity).await {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                rollback_workspace_move(&browser_dir, &desktop_reservation);
+                return Err(error);
+            }
+        };
     if let Err(error) = spool::record_workspace_move_extension_reservation(
         &desktop_reservation,
         &extension_reservation.request_id,
@@ -598,13 +607,14 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
         rollback_workspace_move(&browser_dir, &desktop_reservation);
         return Err(error);
     }
-    if let Err(error) = state.authenticated_result(
-        state
-            .client
-            .join_organization(&access_token, input.invite_code.trim(), &target.id)
-            .await,
-    )
-    .await
+    if let Err(error) = state
+        .authenticated_result(
+            state
+                .client
+                .join_organization(&access_token, input.invite_code.trim(), &target.id)
+                .await,
+        )
+        .await
     {
         if error.kind == ErrorKind::Auth {
             return Err(error);
@@ -614,7 +624,9 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
             .await
         {
             Ok(identity) => identity,
-            Err(revalidation_error) if revalidation_error.kind == ErrorKind::Auth => return Err(revalidation_error),
+            Err(revalidation_error) if revalidation_error.kind == ErrorKind::Auth => {
+                return Err(revalidation_error)
+            }
             Err(_) => {
                 return Err(BridgeError::new(
                     ErrorKind::Conflict,
@@ -631,10 +643,11 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
                 return Err(error);
             }
             WorkspaceMoveRevalidation::Target => {
-                spool::mark_workspace_move_committed(&desktop_reservation)
-                    .map_err(|storage_error| {
+                spool::mark_workspace_move_committed(&desktop_reservation).map_err(
+                    |storage_error| {
                         BridgeError::new(ErrorKind::Conflict, storage_error.to_string())
-                    })?;
+                    },
+                )?;
                 state.snapshot(&access_token).await?;
                 state.enable_active_collection().await?;
                 state.monitor.ensure_running().await;
@@ -689,7 +702,10 @@ async fn auth_logout(state: State<'_, AppState>) -> ApiResult<()> {
 }
 
 #[tauri::command]
-async fn timer_start(state: State<'_, AppState>, mut input: StartIntent) -> ApiResult<RunningTimer> {
+async fn timer_start(
+    state: State<'_, AppState>,
+    mut input: StartIntent,
+) -> ApiResult<RunningTimer> {
     let access_token = state.access_token().await?;
     input.device_id = Some(state.monitor.trusted_device_id()?);
 
@@ -847,9 +863,14 @@ async fn timer_retry_local_start(
 async fn monitor_status(state: State<'_, AppState>) -> ApiResult<MonitorStatus> {
     if state.monitor.identity_invalidated() {
         if let Err(error) = state.deactivate_invalid_session().await {
-            eprintln!("clock-in: could not fully deactivate an invalid session: {}", error.message);
+            eprintln!(
+                "clock-in: could not fully deactivate an invalid session: {}",
+                error.message
+            );
         }
-        return Err(BridgeError::auth("Your session has expired. Sign in again."));
+        return Err(BridgeError::auth(
+            "Your session has expired. Sign in again.",
+        ));
     }
     Ok(state.monitor.status().await)
 }
@@ -942,15 +963,18 @@ async fn me_stats(
     to_exclusive_at: Option<String>,
 ) -> ApiResult<MeStats> {
     let access_token = state.access_token().await?;
-    state.authenticated_result(
-        state.client.me_stats(
-            &access_token,
-            from_at.as_deref(),
-            to_exclusive_at.as_deref(),
+    state
+        .authenticated_result(
+            state
+                .client
+                .me_stats(
+                    &access_token,
+                    from_at.as_deref(),
+                    to_exclusive_at.as_deref(),
+                )
+                .await,
         )
-        .await,
-    )
-    .await
+        .await
 }
 
 #[derive(serde::Deserialize)]
@@ -1016,13 +1040,14 @@ async fn path_mappings_create(
     input: PathMappingCreateInput,
 ) -> ApiResult<PathMapping> {
     let access_token = state.access_token().await?;
-    let mapping = state.authenticated_result(
-        state
-            .client
-            .create_path_mapping(&access_token, &input)
-            .await,
-    )
-    .await?;
+    let mapping = state
+        .authenticated_result(
+            state
+                .client
+                .create_path_mapping(&access_token, &input)
+                .await,
+        )
+        .await?;
     refresh_mapping_cache(&state, &access_token).await?;
     Ok(mapping)
 }
@@ -1034,13 +1059,14 @@ async fn path_mappings_update(
     input: PathMappingUpdateInput,
 ) -> ApiResult<PathMapping> {
     let access_token = state.access_token().await?;
-    let mapping = state.authenticated_result(
-        state
-            .client
-            .update_path_mapping(&access_token, &id, &input)
-            .await,
-    )
-    .await?;
+    let mapping = state
+        .authenticated_result(
+            state
+                .client
+                .update_path_mapping(&access_token, &id, &input)
+                .await,
+        )
+        .await?;
     refresh_mapping_cache(&state, &access_token).await?;
     Ok(mapping)
 }
@@ -1169,15 +1195,20 @@ pub fn run() {
                 pending_update: std::sync::Mutex::new(None),
             });
             let invalid_session_app = app.handle().clone();
-            app.state::<AppState>().monitor.set_invalid_session_handler(Arc::new(move || {
-                let app = invalid_session_app.clone();
-                tauri::async_runtime::spawn(async move {
-                    let state = app.state::<AppState>();
-                    if let Err(error) = state.deactivate_invalid_session().await {
-                        eprintln!("clock-in: could not fully deactivate an invalid session: {}", error.message);
-                    }
-                });
-            }));
+            app.state::<AppState>()
+                .monitor
+                .set_invalid_session_handler(Arc::new(move || {
+                    let app = invalid_session_app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = app.state::<AppState>();
+                        if let Err(error) = state.deactivate_invalid_session().await {
+                            eprintln!(
+                                "clock-in: could not fully deactivate an invalid session: {}",
+                                error.message
+                            );
+                        }
+                    });
+                }));
             build_tray(app.handle())?;
 
             // Auto-update: check and download in the background now, install
@@ -1462,7 +1493,9 @@ mod tests {
             Err(BridgeError::auth("session expired")),
             move || async move {
                 observed.store(true, Ordering::SeqCst);
-                Err(BridgeError::unknown("active identity file could not be cleared"))
+                Err(BridgeError::unknown(
+                    "active identity file could not be cleared",
+                ))
             },
         )
         .await
@@ -1479,7 +1512,9 @@ mod tests {
         let error = complete_identity_deactivation(
             || {
                 effects.borrow_mut().push("revoke");
-                Err(BridgeError::unknown("browser revocation file could not be cleared"))
+                Err(BridgeError::unknown(
+                    "browser revocation file could not be cleared",
+                ))
             },
             || {
                 effects.borrow_mut().push("clear-active-identity");
@@ -1493,24 +1528,26 @@ mod tests {
         .expect_err("cleanup failures remain observable after every deactivation step runs");
 
         assert_eq!(error.kind, ErrorKind::Unknown);
-        assert_eq!(effects.into_inner(), vec!["revoke", "clear-active-identity", "deactivate-monitor"]);
+        assert_eq!(
+            effects.into_inner(),
+            vec!["revoke", "clear-active-identity", "deactivate-monitor"]
+        );
     }
 
     #[test]
     fn mapping_cache_refresh_propagates_auth_and_keeps_other_failures_best_effort() {
         let cached = std::cell::Cell::new(false);
-        let auth_error = apply_mapping_cache_refresh(
-            Err(BridgeError::auth("session expired")),
-            |_| cached.set(true),
-        )
-        .expect_err("an authentication failure must reach the renderer");
+        let auth_error =
+            apply_mapping_cache_refresh(Err(BridgeError::auth("session expired")), |_| {
+                cached.set(true)
+            })
+            .expect_err("an authentication failure must reach the renderer");
         assert_eq!(auth_error.kind, ErrorKind::Auth);
         assert!(!cached.get());
 
-        apply_mapping_cache_refresh(
-            Err(BridgeError::transient("retry later")),
-            |_| cached.set(true),
-        )
+        apply_mapping_cache_refresh(Err(BridgeError::transient("retry later")), |_| {
+            cached.set(true)
+        })
         .expect("non-auth refresh failures remain best effort");
         assert!(!cached.get());
     }
