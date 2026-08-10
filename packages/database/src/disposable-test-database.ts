@@ -11,6 +11,24 @@ export interface DisposableTestDatabase {
   cleanup(): Promise<void>;
 }
 
+const disposableCapabilityParameter = "clock_in_disposable_test_capability";
+
+export function verifyDisposableTestDatabaseUrl(
+  configuredUrl: string,
+  capability = process.env.CLOCK_IN_DISPOSABLE_TEST_CAPABILITY,
+): string {
+  const url = new URL(configuredUrl);
+  if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
+    throw new Error("TEST_DATABASE_URL must use a PostgreSQL URL.");
+  }
+  const marker = url.searchParams.get(disposableCapabilityParameter);
+  if (capability === undefined || capability.length < 16 || marker !== capability) {
+    throw new Error("TEST_DATABASE_URL requires an explicit disposable-test capability.");
+  }
+  url.searchParams.delete(disposableCapabilityParameter);
+  return url.toString();
+}
+
 function databaseName(label: string): string {
   const safeLabel = label.replace(/[^a-z0-9]/gi, "_").toLowerCase().slice(0, 12) || "run";
   return `clock_in_test_${safeLabel}_${randomUUID().replaceAll("-", "")}`;
@@ -50,10 +68,12 @@ async function dropDisposableDatabase(controlDatabaseUrl: string, name: string):
 export async function createDisposableTestDatabase(
   configuredUrl: string,
   label: string,
+  capability?: string,
 ): Promise<DisposableTestDatabase> {
+  const verifiedUrl = verifyDisposableTestDatabaseUrl(configuredUrl, capability);
   const name = databaseName(label);
-  const controlDatabaseUrl = controlUrl(configuredUrl);
-  const disposableUrl = urlForDatabase(configuredUrl, name);
+  const controlDatabaseUrl = controlUrl(verifiedUrl);
+  const disposableUrl = urlForDatabase(verifiedUrl, name);
   const control = postgres(controlDatabaseUrl, { max: 1 });
   let creationError: Error | undefined;
   try {

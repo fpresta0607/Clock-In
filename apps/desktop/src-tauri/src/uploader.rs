@@ -97,6 +97,7 @@ async fn upload_once(
     let Some(session) = crate::read_session_token() else {
         invalidate_auth_loss(
             shared,
+            segments_path,
             browser_dir,
             recording,
             identity_invalidated,
@@ -110,6 +111,7 @@ async fn upload_once(
             if error.kind == ErrorKind::Auth {
                 invalidate_auth_loss(
                     shared,
+                    segments_path,
                     browser_dir,
                     recording,
                     identity_invalidated,
@@ -124,6 +126,7 @@ async fn upload_once(
         Ok(_) => {
             invalidate_auth_loss(
                 shared,
+                segments_path,
                 browser_dir,
                 recording,
                 identity_invalidated,
@@ -135,6 +138,7 @@ async fn upload_once(
             if error.kind == ErrorKind::Auth {
                 invalidate_auth_loss(
                     shared,
+                    segments_path,
                     browser_dir,
                     recording,
                     identity_invalidated,
@@ -157,6 +161,7 @@ async fn upload_once(
         UploadDrainResult::AuthLost => {
             invalidate_auth_loss(
                 shared,
+                segments_path,
                 browser_dir,
                 recording,
                 identity_invalidated,
@@ -188,6 +193,7 @@ async fn upload_once(
         Err(error) if error.kind == ErrorKind::Auth => {
             invalidate_auth_loss(
                 shared,
+                segments_path,
                 browser_dir,
                 recording,
                 identity_invalidated,
@@ -205,6 +211,7 @@ async fn upload_once(
         UploadDrainResult::AuthLost => {
             invalidate_auth_loss(
                 shared,
+                segments_path,
                 browser_dir,
                 recording,
                 identity_invalidated,
@@ -219,6 +226,7 @@ async fn upload_once(
         UploadDrainResult::AuthLost => {
             invalidate_auth_loss(
                 shared,
+                segments_path,
                 browser_dir,
                 recording,
                 identity_invalidated,
@@ -235,11 +243,15 @@ async fn upload_once(
 
 fn invalidate_auth_loss(
     shared: &Arc<Mutex<MonitorShared>>,
+    segments_path: &Path,
     browser_dir: &Path,
     recording: &Arc<AtomicBool>,
     identity_invalidated: &Arc<AtomicBool>,
     invalid_session_handler: &Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 ) {
+    if !crate::monitor::flush_open_segment_to_spool(shared, segments_path, unix_now()) {
+        return;
+    }
     let _ = crate::browser::deactivate_collection(browser_dir);
     crate::clear_session_token();
     deactivate_invalid_identity(shared, recording, identity_invalidated, invalid_session_handler);

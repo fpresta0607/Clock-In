@@ -17,11 +17,11 @@ const rangeLabels: Record<Range, string> = {
   "365": "Last year",
 };
 
-/** Inclusive UTC calendar bounds, matching how the API reads from/to. */
-function rangeQuery(range: Range, today = new Date()): string {
-  const to = today.toISOString().slice(0, 10);
-  const fromDate = new Date(today.getTime() - (Number(range) - 1) * 24 * 60 * 60 * 1_000);
-  return `?from=${fromDate.toISOString().slice(0, 10)}&to=${to}`;
+export function rangeQuery(range: Range, now = new Date()): string {
+  const toExclusive = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  const from = new Date(toExclusive);
+  from.setDate(from.getDate() - Number(range));
+  return `?fromAt=${encodeURIComponent(from.toISOString())}&toExclusiveAt=${encodeURIComponent(toExclusive.toISOString())}`;
 }
 
 const messageFor = (error: unknown): string =>

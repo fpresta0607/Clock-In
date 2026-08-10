@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import { generateInviteCode, type AgentSource } from "@clock-in/shared";
-import { and, asc, count, desc, eq, gt, gte, isNotNull, lt, ne, or, sql, sum } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, isNotNull, lt, ne, or, sql, sum, type SQL } from "drizzle-orm";
 import {
   activitySegments,
   agentSessions,
@@ -831,6 +831,39 @@ function clippedRange(query: ReportQuery): ClippedRange | null {
   return { from: query.from, toExclusive: query.toExclusive };
 }
 
+function inactiveDurationSecondsSql(sessionStart: SQL, sessionEnd: SQL) {
+  return sql<number>`floor(coalesce((
+    select sum(extract(epoch from (merged_end - merged_start)))
+    from (
+      select min(segment_start) as merged_start, max(segment_end) as merged_end
+      from (
+        select segment_start, segment_end,
+          sum(case when previous_end is null or segment_start > previous_end then 1 else 0 end)
+            over (order by segment_start, segment_end rows unbounded preceding) as interval_group
+        from (
+          select segment_start, segment_end,
+            max(segment_end) over (
+              order by segment_start, segment_end
+              rows between unbounded preceding and 1 preceding
+            ) as previous_end
+          from (
+            select
+              greatest(${activitySegments.startedAt}, ${sessionStart}) as segment_start,
+              least(${activitySegments.endedAt}, ${sessionEnd}) as segment_end
+            from ${activitySegments}
+            where ${activitySegments.organizationId} = ${timeSessions.organizationId}
+              and ${activitySegments.userId} = ${timeSessions.userId}
+              and ${activitySegments.kind} <> 'active'
+              and ${activitySegments.startedAt} < ${sessionEnd}
+              and ${activitySegments.endedAt} > ${sessionStart}
+          ) as clipped_segments
+        ) as ordered_segments
+      ) as grouped_segments
+      group by interval_group
+    ) as merged_segments
+  ), 0))::integer`;
+}
+
 function sessionDurationSecondsSql(range: ClippedRange | null) {
   if (range === null) return sql<number>`${timeSessions.durationSeconds}`;
   const sessionStart = range.from === undefined
@@ -839,9 +872,20 @@ function sessionDurationSecondsSql(range: ClippedRange | null) {
   const sessionEnd = range.toExclusive === undefined
     ? sql`${timeSessions.stoppedAt}`
     : sql`least(${timeSessions.stoppedAt}, ${range.toExclusive.toISOString()})`;
-  return sql<number>`least(${timeSessions.durationSeconds}, floor(greatest(0, extract(epoch from (
+  const elapsed = sql<number>`floor(greatest(0, extract(epoch from (
     ${sessionEnd} - ${sessionStart}
-  )))))::integer`;
+  ))))::integer`;
+  const fullIdle = inactiveDurationSecondsSql(
+    sql`${timeSessions.startedAt}`,
+    sql`${timeSessions.stoppedAt}`,
+  );
+  const clippedIdle = inactiveDurationSecondsSql(sessionStart, sessionEnd);
+  const legacyFallback = sql<number>`least(${timeSessions.durationSeconds}, ${elapsed})`;
+  return sql<number>`case
+    when ${fullIdle} = ${timeSessions.idleSeconds}
+      then greatest(0, ${elapsed} - ${clippedIdle})
+    else ${legacyFallback}
+  end::integer`;
 }
 
 function corroboratedSecondsSql(range: ClippedRange | null = null) {

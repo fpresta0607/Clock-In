@@ -621,10 +621,14 @@ fn release_extension_namespace_reservation_matching(
         {
             return Ok(());
         }
+        if current.action == ExtensionNamespaceReservationAction::Release {
+            return Err(io::Error::other("browser extension release acknowledgement is pending"));
+        }
         current.action = ExtensionNamespaceReservationAction::Release;
         current.acknowledgement = None;
         let bytes = serde_json::to_vec(&current).map_err(io::Error::other)?;
-        write_if_changed_locked(&extension_namespace_reservation_path(dir), &bytes)
+        write_if_changed_locked(&extension_namespace_reservation_path(dir), &bytes)?;
+        Err(io::Error::other("browser extension release acknowledgement is pending"))
     })
     .map_err(|_| extension_reservation_error())
 }
@@ -2093,13 +2097,28 @@ mod tests {
             &target,
             Some(&reservation.request_id),
         )
-        .expect("matching recovery releases");
+        .expect_err("matching recovery waits for the extension acknowledgement");
         assert_eq!(
             pending_extension_namespace_reservation(&dir)
                 .expect("release remains pending for the extension")
                 .action,
             ExtensionNamespaceReservationAction::Release,
         );
+
+        acknowledge_extension_namespace_reservation(
+            &dir,
+            &reservation.request_id,
+            ExtensionNamespaceReservationAcknowledgement::Released,
+        )
+        .expect("release acknowledgement records");
+        release_extension_namespace_reservation_for_workspace_move(
+            &dir,
+            &source,
+            &target,
+            Some(&reservation.request_id),
+        )
+        .expect("acknowledged release completes");
+        assert!(pending_extension_namespace_reservation(&dir).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
