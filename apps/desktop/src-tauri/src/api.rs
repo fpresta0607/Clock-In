@@ -724,15 +724,17 @@ impl ApiClient {
         access_token: &str,
         intent: &StartIntent,
     ) -> ApiResult<RunningTimer> {
-        let mut request = serde_json::json!({
+        let device_id = intent
+            .device_id
+            .as_ref()
+            .ok_or_else(|| BridgeError::unknown("A recording device is required to start a timer."))?;
+        let request = serde_json::json!({
             "clientId": intent.client_id,
             "projectId": intent.project_id,
+            "deviceId": device_id,
             "description": intent.description,
             "startedAt": intent.started_at,
         });
-        if let Some(device_id) = &intent.device_id {
-            request["deviceId"] = serde_json::Value::String(device_id.clone());
-        }
         let response = self
             .http
             .post(format!("{}/sessions", self.api_base_url))

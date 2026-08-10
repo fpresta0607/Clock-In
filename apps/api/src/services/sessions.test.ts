@@ -136,7 +136,7 @@ describe("session service", () => {
   it("uses the member-visible default when a start omits a project", async () => {
     const { service, sessions, projects } = createService();
 
-    await service.start(subject, { clientId: ids.client, description: "General work" });
+    await service.start(subject, { clientId: ids.client, deviceId: ids.device, description: "General work" });
 
     expect(sessions.records[0]).toMatchObject({ projectId: ids.project, organizationId: ids.organization, userId: ids.user });
     expect(projects.selectedFor(ids.user)).toBe(ids.project);
@@ -155,7 +155,7 @@ describe("session service", () => {
     const { service } = createService([persisted], []);
 
     await expect(service.start(subject, {
-      clientId: ids.client, projectId: ids.project, description: "Investigate timer", startedAt: persisted.startedAt,
+      clientId: ids.client, projectId: ids.project, deviceId: ids.device, description: "Investigate timer", startedAt: persisted.startedAt,
     })).resolves.toEqual(persisted);
   });
 
@@ -164,7 +164,7 @@ describe("session service", () => {
     const { service } = createService([persisted], []);
 
     await expect(service.start(subject, {
-      clientId: ids.client, projectId: ids.project, description: "Investigate timer",
+      clientId: ids.client, projectId: ids.project, deviceId: ids.device, description: "Investigate timer",
     })).resolves.toEqual(persisted);
   });
 
@@ -175,6 +175,7 @@ describe("session service", () => {
     await expect(service.start(subject, {
       clientId: ids.client,
       projectId: ids.project,
+      deviceId: ids.device,
       description: "Investigate timer",
       startedAt: persisted.startedAt,
     })).resolves.toEqual(persisted);
@@ -184,13 +185,13 @@ describe("session service", () => {
     const { service } = createService([running()]);
 
     await expect(service.start(subject, {
-      clientId: ids.client, projectId: ids.otherProject, description: "Investigate timer", startedAt: new Date("2026-08-06T13:00:00.000Z"),
+      clientId: ids.client, projectId: ids.otherProject, deviceId: ids.device, description: "Investigate timer", startedAt: new Date("2026-08-06T13:00:00.000Z"),
     })).rejects.toMatchObject({ code: "conflict", status: 409 });
   });
 
   it("validates explicit start times against the injected clock", async () => {
     const { service } = createService();
-    const input = { clientId: ids.client, projectId: ids.project };
+    const input = { clientId: ids.client, projectId: ids.project, deviceId: ids.device };
 
     await expect(service.start(subject, { ...input, startedAt: new Date("not-a-date") })).rejects.toMatchObject({ code: "validation_error", status: 400 });
     await expect(service.start(subject, { ...input, startedAt: new Date("2026-08-06T14:00:30.001Z") })).rejects.toMatchObject({ code: "validation_error", status: 400 });
@@ -201,7 +202,7 @@ describe("session service", () => {
   it("does not leak inaccessible projects and rejects archived projects", async () => {
     const inaccessible = createService([], []);
     const archived = createService([], [{ id: ids.project, organizationId: ids.organization, name: "Old", archived: true }]);
-    const input = { clientId: ids.client, projectId: ids.project };
+    const input = { clientId: ids.client, projectId: ids.project, deviceId: ids.device };
 
     await expect(inaccessible.service.start(subject, input)).rejects.toMatchObject({ code: "not_found", status: 404 });
     await expect(archived.service.start(subject, input)).rejects.toMatchObject({ code: "project_archived", status: 409 });
@@ -209,20 +210,20 @@ describe("session service", () => {
 
   it("rejects another running session and resolves a client-id unique race by re-reading", async () => {
     const active = createService([running({ clientId: ids.otherProject })]);
-    await expect(active.service.start(subject, { clientId: ids.client, projectId: ids.project })).rejects.toMatchObject({ code: "session_already_running" });
+    await expect(active.service.start(subject, { clientId: ids.client, projectId: ids.project, deviceId: ids.device })).rejects.toMatchObject({ code: "session_already_running" });
 
     const raced = createService();
     raced.sessions.nextCreateError = new SessionRepositoryError("client_id");
     raced.sessions.raceRecord = running();
     await expect(raced.service.start(subject, {
-      clientId: ids.client, projectId: ids.project, description: "Investigate timer", startedAt: new Date("2026-08-06T13:00:00.000Z"),
+      clientId: ids.client, projectId: ids.project, deviceId: ids.device, description: "Investigate timer", startedAt: new Date("2026-08-06T13:00:00.000Z"),
     })).resolves.toEqual(running());
 
     const oneRunningRace = createService();
     oneRunningRace.sessions.nextCreateError = new SessionRepositoryError("session_already_running");
     oneRunningRace.sessions.raceRecord = running();
     await expect(oneRunningRace.service.start(subject, {
-      clientId: ids.client, projectId: ids.project, description: "Investigate timer", startedAt: new Date("2026-08-06T13:00:00.000Z"),
+      clientId: ids.client, projectId: ids.project, deviceId: ids.device, description: "Investigate timer", startedAt: new Date("2026-08-06T13:00:00.000Z"),
     })).resolves.toEqual(running());
   });
 
@@ -246,6 +247,7 @@ describe("session service", () => {
     await expect(service.start(subject, {
       clientId: ids.client,
       projectId: ids.project,
+      deviceId: ids.device,
       description: "Investigate timer",
       startedAt: new Date("2026-08-06T13:00:00.000Z"),
     })).resolves.toEqual(completed);

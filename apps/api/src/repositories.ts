@@ -47,7 +47,7 @@ export interface CreateRunningSession {
   userId: string;
   clientId: string;
   projectId: string;
-  deviceId?: string;
+  deviceId: string;
   description: string | null;
   startedAt: Date;
 }

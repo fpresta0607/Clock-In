@@ -116,7 +116,7 @@ integration(integrationDescription, () => {
     const start = await app.request("/sessions", {
       method: "POST",
       headers: authorized,
-      body: JSON.stringify({ clientId: randomUUID(), projectId, description: "Smoke work", startedAt }),
+      body: JSON.stringify({ clientId: randomUUID(), projectId, deviceId: randomUUID(), description: "Smoke work", startedAt }),
     });
     expect(start.status).toBe(200);
     const { session } = await start.json();
@@ -361,7 +361,7 @@ integration(integrationDescription, () => {
     const defaultStart = await administratorApp.request("/sessions", {
       method: "POST",
       headers: administratorHeaders,
-      body: JSON.stringify({ clientId: randomUUID(), description: "Legacy default" }),
+      body: JSON.stringify({ clientId: randomUUID(), deviceId: randomUUID(), description: "Legacy default" }),
     });
     expect(defaultStart.status).toBe(200);
     expect((await defaultStart.json()).session.projectId).toBe(defaultProjectId);
@@ -481,7 +481,7 @@ integration(integrationDescription, () => {
     const started = await teammateApp.request("/sessions", {
       method: "POST",
       headers: teammateAuth,
-      body: JSON.stringify({ clientId: randomUUID(), projectId: sharedProject.id, description: "Teammate work", startedAt: teammateStart }),
+      body: JSON.stringify({ clientId: randomUUID(), projectId: sharedProject.id, deviceId: randomUUID(), description: "Teammate work", startedAt: teammateStart }),
     });
     expect(started.status).toBe(200);
     await teammateApp.request(`/sessions/${(await started.json()).session.id}/stop`, {
@@ -606,7 +606,7 @@ integration(integrationDescription, () => {
     const started = await trackedApp.request("/sessions", {
       method: "POST",
       headers,
-      body: JSON.stringify({ clientId: randomUUID(), projectId: own.id, startedAt: new Date(Date.now() - 60_000).toISOString() }),
+      body: JSON.stringify({ clientId: randomUUID(), projectId: own.id, deviceId: randomUUID(), startedAt: new Date(Date.now() - 60_000).toISOString() }),
     });
     await trackedApp.request(`/sessions/${(await started.json()).session.id}/stop`, {
       method: "POST",
@@ -625,7 +625,7 @@ integration(integrationDescription, () => {
     expect((await (await trackedApp.request("/me", { headers })).json()).user.organizationId).not.toBe(organization.id);
   }, 90_000);
 
-  it("attributes a browser span through its url rule, links the running timer, and feeds sites without corroborating", async () => {
+  it("attributes browser spans, links running timer evidence, and keeps corroboration to wall-clock time", async () => {
     // A fixed ten-minute window ending now keeps every overlap below exact.
     const t0 = Date.now() - 600_000;
     const at = (offsetMs: number) => new Date(t0 + offsetMs).toISOString();
@@ -720,6 +720,24 @@ integration(integrationDescription, () => {
     });
     expect(activity.status).toBe(200);
 
+    const agentMapping = await app.request("/path-mappings", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({ kind: "path_prefix", pathPrefix: "C:/smoke-overlap", projectId }),
+    });
+    expect(agentMapping.status).toBe(200);
+    const agentEvidence = await app.request("/agent-sessions", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({
+        events: [
+          { source: "codex", externalSessionId: "smoke-agent-overlap", event: "started", occurredAt: at(90_000), cwd: "C:/smoke-overlap" },
+          { source: "codex", externalSessionId: "smoke-agent-overlap", event: "ended", occurredAt: at(330_000), cwd: "C:/smoke-overlap" },
+        ],
+      }),
+    });
+    expect(agentEvidence.status).toBe(200);
+
     const stop = await app.request(`/sessions/${timerId}/stop`, {
       method: "POST",
       headers: authorized,
@@ -748,9 +766,8 @@ integration(integrationDescription, () => {
       { mapping: { id: ruleId, pattern: "github.com/acme/*", projectId }, durationSeconds: 60 },
     ]);
 
-    // Corroboration is the active-segment overlap only; the linked browser span adds nothing.
     const project = body.projects.find((entry: { project: { id: string } }) => entry.project.id === projectId);
-    expect(project).toMatchObject({ durationSeconds: 600, corroboratedSeconds: 210, sessionCount: 1 });
+    expect(project).toMatchObject({ durationSeconds: 600, corroboratedSeconds: 330, sessionCount: 1 });
 
     const idleTimerDeviceId = randomUUID();
     const idleTimer = await app.request("/sessions", {
