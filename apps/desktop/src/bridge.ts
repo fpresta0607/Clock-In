@@ -126,7 +126,12 @@ export type MonitorSettings = {
 export type SettingsPatch = Partial<Omit<MonitorSettings, "deviceId">>;
 
 export type MeStats = {
-  filters: { from?: string | undefined; to?: string | undefined };
+  filters: {
+    from?: string | undefined;
+    to?: string | undefined;
+    fromAt?: string | undefined;
+    toExclusiveAt?: string | undefined;
+  };
   totalDurationSeconds: number;
   corroboratedSeconds: number;
   projects: readonly MeStatsProject[];
@@ -201,7 +206,7 @@ export interface TimerBridge {
   monitorDismissSuggestion(): Promise<void>;
   settingsGet(): Promise<MonitorSettings>;
   settingsUpdate(input: SettingsPatch): Promise<MonitorSettings>;
-  meStats(from?: string, to?: string): Promise<MeStats>;
+  meStats(fromAt?: string, toExclusiveAt?: string): Promise<MeStats>;
   projectCreate(input: ProjectCreateInput): Promise<TimerProject>;
   pathMappingsList(): Promise<readonly PathMapping[]>;
   pathMappingsCreate(input: PathMappingCreateInput): Promise<PathMapping>;
@@ -509,7 +514,12 @@ export const decodeMeStats = (value: unknown): MeStats => {
   const corroboratedSeconds = nonnegativeInteger(candidate.corroboratedSeconds);
   if (corroboratedSeconds > totalDurationSeconds) invalidResponse();
   return {
-    filters: { from: optionalString(filters.from), to: optionalString(filters.to) },
+    filters: {
+      from: optionalString(filters.from),
+      to: optionalString(filters.to),
+      fromAt: optionalString(filters.fromAt),
+      toExclusiveAt: optionalString(filters.toExclusiveAt),
+    },
     totalDurationSeconds,
     corroboratedSeconds,
     projects: (projects as unknown[]).map(decodeMeStatsProject),
@@ -574,10 +584,10 @@ export const defaultBridge: TimerBridge = {
   monitorDismissSuggestion: () => invokeDecoded("monitor_dismiss_suggestion", decodeVoid),
   settingsGet: () => invokeDecoded("settings_get", decodeMonitorSettings),
   settingsUpdate: (input) => invokeDecoded("settings_update", decodeMonitorSettings, { input }),
-  meStats: (from, to) =>
+  meStats: (fromAt, toExclusiveAt) =>
     invokeDecoded("me_stats", decodeMeStats, {
-      ...(from === undefined ? {} : { from }),
-      ...(to === undefined ? {} : { to }),
+      ...(fromAt === undefined ? {} : { fromAt }),
+      ...(toExclusiveAt === undefined ? {} : { toExclusiveAt }),
     }),
   projectCreate: (input) => invokeDecoded("project_create", decodeProject, { input }),
   pathMappingsList: () => invokeDecoded("path_mappings_list", decodePathMappings),

@@ -137,9 +137,9 @@ describe("defaultBridge", () => {
     await expect(defaultBridge.settingsGet()).rejects.toMatchObject({ kind: "unknown" });
   });
 
-  it("sends only the provided stats filters and validates the split", async () => {
+  it("sends canonical stats bounds and validates the split", async () => {
     const stats = {
-      filters: { from: "2026-08-06T00:00:00.000Z" },
+      filters: { fromAt: "2026-08-06T05:00:00.000Z", toExclusiveAt: "2026-08-07T05:00:00.000Z" },
       totalDurationSeconds: 7_200,
       corroboratedSeconds: 5_400,
       projects: [
@@ -159,11 +159,14 @@ describe("defaultBridge", () => {
       ],
     };
     invoke.mockResolvedValueOnce(stats);
-    await expect(defaultBridge.meStats("2026-08-06T00:00:00.000Z")).resolves.toEqual(stats);
-    expect(invoke).toHaveBeenCalledWith("me_stats", { from: "2026-08-06T00:00:00.000Z" });
+    await expect(defaultBridge.meStats("2026-08-06T05:00:00.000Z", "2026-08-07T05:00:00.000Z")).resolves.toEqual(stats);
+    expect(invoke).toHaveBeenCalledWith("me_stats", {
+      fromAt: "2026-08-06T05:00:00.000Z",
+      toExclusiveAt: "2026-08-07T05:00:00.000Z",
+    });
 
     invoke.mockResolvedValueOnce({ ...stats, filters: {} });
-    await expect(defaultBridge.meStats()).resolves.toMatchObject({ filters: { from: undefined, to: undefined } });
+    await expect(defaultBridge.meStats()).resolves.toMatchObject({ filters: { from: undefined, to: undefined, fromAt: undefined, toExclusiveAt: undefined } });
     expect(invoke).toHaveBeenCalledWith("me_stats", {});
 
     invoke.mockResolvedValueOnce({ ...stats, corroboratedSeconds: 9_999 });

@@ -363,6 +363,10 @@ pub struct MeStatsFilters {
     pub from: Option<String>,
     #[serde(default)]
     pub to: Option<String>,
+    #[serde(default)]
+    pub from_at: Option<String>,
+    #[serde(default)]
+    pub to_exclusive_at: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -742,19 +746,18 @@ impl ApiClient {
         Ok(body.results)
     }
 
-    /// The caller's own stats for a date range (`YYYY-MM-DD`, either optional).
     pub async fn me_stats(
         &self,
         access_token: &str,
-        from: Option<&str>,
-        to: Option<&str>,
+        from_at: Option<&str>,
+        to_exclusive_at: Option<&str>,
     ) -> ApiResult<MeStats> {
         let mut query: Vec<(&str, &str)> = Vec::new();
-        if let Some(from) = from {
-            query.push(("from", from));
+        if let Some(from_at) = from_at {
+            query.push(("fromAt", from_at));
         }
-        if let Some(to) = to {
-            query.push(("to", to));
+        if let Some(to_exclusive_at) = to_exclusive_at {
+            query.push(("toExclusiveAt", to_exclusive_at));
         }
         let response = self
             .http
@@ -1081,7 +1084,7 @@ mod tests {
     fn reads_the_me_stats_response_shape() {
         let stats: MeStats = serde_json::from_str(
             r#"{
-                "filters": {"from": "2026-08-01"},
+                "filters": {"fromAt": "2026-08-01T05:00:00.000Z", "toExclusiveAt": "2026-08-02T05:00:00.000Z"},
                 "totalDurationSeconds": 7200,
                 "corroboratedSeconds": 5400,
                 "projects": [{
@@ -1098,8 +1101,8 @@ mod tests {
         )
         .expect("stats parse");
 
-        assert_eq!(stats.filters.from.as_deref(), Some("2026-08-01"));
-        assert_eq!(stats.filters.to, None);
+        assert_eq!(stats.filters.from_at.as_deref(), Some("2026-08-01T05:00:00.000Z"));
+        assert_eq!(stats.filters.to_exclusive_at.as_deref(), Some("2026-08-02T05:00:00.000Z"));
         assert_eq!(stats.projects[0].project.name, "Clock-In");
         assert_eq!(stats.projects[0].corroborated_seconds, 5400);
         assert_eq!(stats.apps[0].process_name, "Code.exe");

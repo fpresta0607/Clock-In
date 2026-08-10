@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import { generateInviteCode, type AgentSource } from "@clock-in/shared";
-import { and, asc, count, desc, eq, gt, gte, isNotNull, lt, ne, not, or, sql, sum } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, isNotNull, lt, ne, or, sql, sum } from "drizzle-orm";
 import {
   activitySegments,
   agentSessions,
@@ -29,7 +29,6 @@ import {
   type ActivitySegmentRepository,
   type AgentSessionRecord,
   type AgentSessionRepository,
-  type AgentSessionStaleExclusion,
   type AgentSessionStaleCutoffs,
   type AppTotalRecord,
   type CreatePathMapping,
@@ -870,6 +869,20 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         // Drizzle does not run onConflictDoUpdate set values through the column
         // serializer, so bind an ISO string - a raw Date crashes postgres-js.
         set: {
+          status: sql`case
+            when ${agentSessions.source} = 'browser'
+              and ${agentSessions.status} = 'stale'
+              and ${agentSessions.lastEventAt} < ${input.occurredAt.toISOString()}
+            then 'running'::agent_session_status
+            else ${agentSessions.status}
+          end`,
+          endedAt: sql`case
+            when ${agentSessions.source} = 'browser'
+              and ${agentSessions.status} = 'stale'
+              and ${agentSessions.lastEventAt} < ${input.occurredAt.toISOString()}
+            then null
+            else ${agentSessions.endedAt}
+          end`,
           lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${input.occurredAt.toISOString()})`,
           updatedAt: sql`${input.receivedAt.toISOString()}`,
         },
@@ -883,7 +896,7 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
       .update(agentSessions)
       .set({
         status: "ended",
-        endedAt,
+        endedAt: sql`greatest(${agentSessions.lastEventAt}, ${endedAt.toISOString()})`,
         lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${endedAt.toISOString()})`,
         updatedAt: now,
       })
@@ -892,7 +905,14 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         eq(agentSessions.userId, subject.userId),
         eq(agentSessions.source, source),
         eq(agentSessions.externalSessionId, externalSessionId),
-        eq(agentSessions.status, "running"),
+        or(
+          eq(agentSessions.status, "running"),
+          and(
+            eq(agentSessions.source, "browser"),
+            eq(agentSessions.status, "stale"),
+            sql`${agentSessions.lastEventAt} <= ${endedAt.toISOString()}`,
+          ),
+        ),
       ))
       .returning();
     return rows[0] === undefined ? null : asAgentSessionRecord(rows[0]);
@@ -922,6 +942,20 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
     const rows = await this.db
       .update(agentSessions)
       .set({
+        status: sql`case
+          when ${agentSessions.source} = 'browser'
+            and ${agentSessions.status} = 'stale'
+            and ${agentSessions.lastEventAt} < ${occurredAt.toISOString()}
+          then 'running'::agent_session_status
+          else ${agentSessions.status}
+        end`,
+        endedAt: sql`case
+          when ${agentSessions.source} = 'browser'
+            and ${agentSessions.status} = 'stale'
+            and ${agentSessions.lastEventAt} < ${occurredAt.toISOString()}
+          then null
+          else ${agentSessions.endedAt}
+        end`,
         lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${occurredAt.toISOString()})`,
         updatedAt: now,
       })
@@ -930,7 +964,14 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         eq(agentSessions.userId, subject.userId),
         eq(agentSessions.source, source),
         eq(agentSessions.externalSessionId, externalSessionId),
-        eq(agentSessions.status, "running"),
+        or(
+          eq(agentSessions.status, "running"),
+          and(
+            eq(agentSessions.source, "browser"),
+            eq(agentSessions.status, "stale"),
+            sql`${agentSessions.lastEventAt} < ${occurredAt.toISOString()}`,
+          ),
+        ),
       ))
       .returning({ id: agentSessions.id });
     return rows.length > 0;
@@ -940,17 +981,10 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
     subject: AuthenticatedSubject,
     cutoffs: AgentSessionStaleCutoffs,
     now: Date,
-    excluded: readonly AgentSessionStaleExclusion[] = [],
   ): Promise<number> {
-    const excludedKeys = excluded.length === 0
-      ? undefined
-      : not(or(...excluded.map((key) => and(
-        eq(agentSessions.source, key.source),
-        eq(agentSessions.externalSessionId, key.externalSessionId),
-      ))));
     const rows = await this.db
       .update(agentSessions)
-      .set({ status: "ended", endedAt: sql`${agentSessions.lastEventAt}`, updatedAt: now })
+      .set({ status: "stale", endedAt: sql`${agentSessions.lastEventAt}`, updatedAt: now })
       .where(and(
         eq(agentSessions.organizationId, subject.organizationId),
         eq(agentSessions.userId, subject.userId),
@@ -959,7 +993,6 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
           and(eq(agentSessions.source, "browser"), lt(agentSessions.lastEventAt, cutoffs.browser)),
           and(ne(agentSessions.source, "browser"), lt(agentSessions.lastEventAt, cutoffs.default)),
         ),
-        excludedKeys,
       ))
       .returning({ id: agentSessions.id });
     return rows.length;

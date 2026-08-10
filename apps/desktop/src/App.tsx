@@ -60,6 +60,9 @@ const AGENT_PROCESS_SOURCES: Record<string, string> = {
 };
 
 const FRIENDLY_APP_NAMES: Record<string, string> = {
+  claude: "Claude",
+  chatgpt: "ChatGPT",
+  gmail: "Gmail",
   chrome: "Google Chrome",
   msedge: "Microsoft Edge",
   firefox: "Firefox",
@@ -82,6 +85,35 @@ const FRIENDLY_APP_NAMES: Record<string, string> = {
   spotify: "Spotify",
 };
 
+type ActivityAppIconName = "agent" | "claude" | "chatgpt" | "gmail" | "browser" | "code" | "cursor" | "terminal" | "slack" | "design" | "notes" | "generic-web" | "generic-app";
+
+const ACTIVITY_APP_ICONS: Record<string, ActivityAppIconName> = {
+  claude: "claude",
+  chatgpt: "chatgpt",
+  gmail: "gmail",
+  chrome: "browser",
+  msedge: "browser",
+  firefox: "browser",
+  brave: "browser",
+  arc: "browser",
+  code: "code",
+  cursor: "cursor",
+  windowsterminal: "terminal",
+  pwsh: "terminal",
+  powershell: "terminal",
+  cmd: "terminal",
+  slack: "slack",
+  figma: "design",
+  notion: "notes",
+  obsidian: "notes",
+  webview2: "generic-web",
+};
+
+const AGENT_SOURCE_ICONS: Record<string, ActivityAppIconName> = {
+  claude_code: "claude",
+  cursor: "cursor",
+};
+
 /// "chrome.exe" -> "Google Chrome"; unknown processes lose the extension and
 /// get title-cased ("app-09.exe" -> "App 09").
 const friendlyAppName = (processName: string): string => {
@@ -93,6 +125,43 @@ const friendlyAppName = (processName: string): string => {
     .filter((part) => part.length > 0)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
+};
+
+const activityAppIcon = (processName: string): ActivityAppIconName =>
+  ACTIVITY_APP_ICONS[processName.replace(/\.exe$/i, "").toLowerCase()] ?? "generic-app";
+
+const ActivityAppIcon = ({ icon, label }: { icon: ActivityAppIconName; label: string }) => {
+  const mark = (() => {
+    switch (icon) {
+      case "agent":
+        return <><rect x="3" y="4" width="18" height="16" rx="3" fill="#4f46e5" /><path d="m8 9 3 3-3 3M13 15h3" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></>;
+      case "claude":
+        return <><rect x="3" y="3" width="18" height="18" rx="5" fill="#d97706" /><path d="M15.5 8.5a4.5 4.5 0 1 0 0 7" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" /></>;
+      case "chatgpt":
+        return <><circle cx="12" cy="12" r="9" fill="#10a37f" /><path d="M12 6.5 15.8 8.7v4.5L12 15.5l-3.8-2.3V8.7L12 6.5Zm0 9V20M8.2 8.7 4.5 10.8m11.3-2.1 3.7 2.1" fill="none" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></>;
+      case "gmail":
+        return <><rect x="3" y="5" width="18" height="14" rx="2" fill="white" /><path d="m4 7 8 6 8-6M4 18V7l4.5 4M20 18V7l-4.5 4" fill="none" stroke="#ea4335" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></>;
+      case "browser":
+        return <><circle cx="12" cy="12" r="9" fill="#fbbc05" /><path d="M12 3a9 9 0 0 1 7.8 4.5H12Z" fill="#ea4335" /><path d="M4.2 7.5 8.5 15l-2.2 3.8A9 9 0 0 1 4.2 7.5Z" fill="#34a853" /><circle cx="12" cy="12" r="4" fill="#4285f4" stroke="white" strokeWidth="1.4" /></>;
+      case "code":
+        return <><rect x="3" y="3" width="18" height="18" rx="4" fill="#2563eb" /><path d="m10 8-3 4 3 4M14 16l3-4-3-4M13 7l-2 10" fill="none" stroke="white" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></>;
+      case "cursor":
+        return <><rect x="3" y="3" width="18" height="18" rx="4" fill="#171717" /><path d="m8 6 8 6-4.2.8L10 17Z" fill="#f8fafc" stroke="#a3e635" strokeWidth="1.3" strokeLinejoin="round" /></>;
+      case "terminal":
+        return <><rect x="3" y="4" width="18" height="16" rx="3" fill="#334155" /><path d="m8 9 3 3-3 3M13 15h3" stroke="#a3e635" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></>;
+      case "slack":
+        return <><circle cx="9" cy="6.5" r="2" fill="#36c5f0" /><circle cx="17.5" cy="9" r="2" fill="#2eb67d" /><circle cx="15" cy="17.5" r="2" fill="#ecb22e" /><circle cx="6.5" cy="15" r="2" fill="#e01e5a" /><path d="M9 8.5v4M11.5 9h4M15 11.5v4M12.5 15H9" stroke="white" strokeWidth="1.5" strokeLinecap="round" /></>;
+      case "design":
+        return <><path d="M12 3v9H3a4.5 4.5 0 0 1 9-4.5V3Z" fill="#a259ff" /><path d="M12 3h4.5a4.5 4.5 0 0 1 0 9H12Z" fill="#f24e1e" /><path d="M3 12h9v9a4.5 4.5 0 0 1-9-4.5Z" fill="#0acf83" /><path d="M12 12h9v4.5a4.5 4.5 0 0 1-9 0Z" fill="#ff7262" /></>;
+      case "notes":
+        return <><rect x="4" y="3" width="16" height="18" rx="3" fill="#f8fafc" /><path d="M8 8h8M8 12h8M8 16h5" stroke="#64748b" strokeWidth="1.6" strokeLinecap="round" /></>;
+      case "generic-web":
+        return <><circle cx="12" cy="12" r="9" fill="#0ea5e9" /><path d="M3.5 12h17M12 3c2.4 2.5 3.6 5.5 3.6 9S14.4 18.5 12 21M12 3C9.6 5.5 8.4 8.5 8.4 12s1.2 6.5 3.6 9" fill="none" stroke="white" strokeWidth="1.4" strokeLinecap="round" /></>;
+      case "generic-app":
+        return <><rect x="3" y="3" width="18" height="18" rx="5" fill="#64748b" /><circle cx="8.5" cy="8.5" r="1.4" fill="white" /><circle cx="15.5" cy="8.5" r="1.4" fill="white" /><circle cx="8.5" cy="15.5" r="1.4" fill="white" /><circle cx="15.5" cy="15.5" r="1.4" fill="white" /></>;
+    }
+  })();
+  return <span className="app-icon" role="img" aria-label={`${label} icon`} data-icon={icon}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">{mark}</svg></span>;
 };
 
 /// Compact durations for the Today card: "2h 12m", "45m", "30s".
@@ -119,6 +188,7 @@ const siteTimeLabel = (seconds: number): string => {
 type AppRow = {
   key: string;
   label: string;
+  icon: ActivityAppIconName;
   durationSeconds: number;
   agent: boolean;
 };
@@ -139,13 +209,14 @@ const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
       agentSources.add(agentSource);
       continue;
     }
-    rows.push({ key: app.processName, label: friendlyAppName(app.processName), durationSeconds: app.durationSeconds, agent: false });
+    rows.push({ key: app.processName, label: friendlyAppName(app.processName), icon: activityAppIcon(app.processName), durationSeconds: app.durationSeconds, agent: false });
   }
   if (agentSeconds > 0) {
     const sources = [...agentSources];
     rows.push({
       key: "agent-clis",
       label: sources.length === 1 ? sourceLabel(sources[0] ?? "") : "Agent CLIs",
+      icon: sources.length === 1 ? AGENT_SOURCE_ICONS[sources[0] ?? ""] ?? "agent" : "agent",
       durationSeconds: agentSeconds,
       agent: true,
     });
@@ -153,18 +224,19 @@ const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
   rows.sort((a, b) => b.durationSeconds - a.durationSeconds || a.label.localeCompare(b.label));
   if (rows.length <= TOP_APP_ROWS) return rows;
   const rest = rows.slice(TOP_APP_ROWS).reduce((sum, row) => sum + row.durationSeconds, 0);
-  return [...rows.slice(0, TOP_APP_ROWS), { key: "everything-else", label: "Everything else", durationSeconds: rest, agent: false }];
+  return [...rows.slice(0, TOP_APP_ROWS), { key: "everything-else", label: "Everything else", icon: "generic-app", durationSeconds: rest, agent: false }];
 };
 
 type StatsRange = "today" | "week";
 
-/// Local midnight today, or local midnight on Monday for "this week".
-const rangeStart = (range: StatsRange): string => {
-  const start = new Date();
+const statsRangeBounds = (range: StatsRange, now = new Date()): { fromAt: string; toExclusiveAt: string } => {
+  const start = new Date(now);
   if (range === "week") start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
   start.setHours(0, 0, 0, 0);
-  // The API reads calendar days, not timestamps: a full ISO datetime is a 400.
-  return start.toISOString().slice(0, 10);
+  const toExclusive = new Date(now);
+  toExclusive.setHours(0, 0, 0, 0);
+  toExclusive.setDate(toExclusive.getDate() + 1);
+  return { fromAt: start.toISOString(), toExclusiveAt: toExclusive.toISOString() };
 };
 
 type BrowserCardProps = {
@@ -530,7 +602,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     const service = bridge;
     const generation = bridgeGeneration.current;
     const epoch = accountEpoch.current;
-    void service.meStats(rangeStart(statsRange)).then(
+    const bounds = statsRangeBounds(statsRange);
+    void service.meStats(bounds.fromAt, bounds.toExclusiveAt).then(
       (result) => {
         if (active && isCurrent(service, generation, epoch)) {
           setStats(result);
@@ -1584,8 +1657,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                   {appRows.map((row) => (
                     <li key={row.key} className="app-row">
                       <span className="app-name">
-                        {row.label}
-                        {row.agent && monitorStatus?.agentActive && <span className="app-active"> · active now</span>}
+                        <ActivityAppIcon icon={row.icon} label={row.label} />
+                        <span className="app-label">
+                          {row.label}
+                          {row.agent && monitorStatus?.agentActive && <span className="app-active"> · active now</span>}
+                        </span>
                       </span>
                       <span className="app-duration">{formatCompact(row.durationSeconds)}</span>
                     </li>

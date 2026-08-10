@@ -71,6 +71,13 @@
       "when": 1786287719356,
       "tag": "0009_mapping_kind_check",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786324015544,
+      "tag": "0010_stormy_leo",
+      "breakpoints": true
     }
   ]
 }

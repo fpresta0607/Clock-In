@@ -62,6 +62,10 @@ class MemoryAgentSessions implements AgentSessionRepository {
   public async upsertStarted(input: UpsertStartedAgentSession) {
     const existing = this.find(input.organizationId, input.userId, input.source, input.externalSessionId);
     if (existing !== undefined) {
+      if (existing.status === "stale" && input.source === "browser" && input.occurredAt > existing.lastEventAt) {
+        existing.status = "running";
+        existing.endedAt = null;
+      }
       if (input.occurredAt > existing.lastEventAt) existing.lastEventAt = input.occurredAt;
       return existing;
     }
@@ -86,10 +90,12 @@ class MemoryAgentSessions implements AgentSessionRepository {
 
   public async closeRunning(subject: { organizationId: string; userId: string }, source: AgentSessionRecord["source"], externalSessionId: string, endedAt: Date) {
     const existing = this.find(subject.organizationId, subject.userId, source, externalSessionId);
-    if (existing === undefined || existing.status !== "running") return null;
+    if (existing === undefined || existing.status === "ended") return null;
+    if (existing.status === "stale" && (source !== "browser" || endedAt < existing.lastEventAt)) return null;
     existing.status = "ended";
-    existing.endedAt = endedAt;
-    if (endedAt > existing.lastEventAt) existing.lastEventAt = endedAt;
+    const terminalAt = endedAt > existing.lastEventAt ? endedAt : existing.lastEventAt;
+    existing.endedAt = terminalAt;
+    existing.lastEventAt = terminalAt;
     return existing;
   }
 
@@ -114,7 +120,12 @@ class MemoryAgentSessions implements AgentSessionRepository {
 
   public async advanceLastEvent(subject: { organizationId: string; userId: string }, source: AgentSessionRecord["source"], externalSessionId: string, occurredAt: Date) {
     const existing = this.find(subject.organizationId, subject.userId, source, externalSessionId);
-    if (existing === undefined || existing.status !== "running") return false;
+    if (existing === undefined || existing.status === "ended") return false;
+    if (existing.status === "stale") {
+      if (source !== "browser" || occurredAt <= existing.lastEventAt) return false;
+      existing.status = "running";
+      existing.endedAt = null;
+    }
     if (occurredAt > existing.lastEventAt) existing.lastEventAt = occurredAt;
     return true;
   }
@@ -125,7 +136,7 @@ class MemoryAgentSessions implements AgentSessionRepository {
       if (record.organizationId !== subject.organizationId || record.userId !== subject.userId) continue;
       const cutoff = record.source === "browser" ? cutoffs.browser : cutoffs.default;
       if (record.status === "running" && record.lastEventAt < cutoff) {
-        record.status = "ended";
+        record.status = "stale";
         record.endedAt = record.lastEventAt;
         reaped += 1;
       }
@@ -305,7 +316,7 @@ describe("agent-session routes", () => {
       method: "POST", headers, body: JSON.stringify({ events: [event({ externalSessionId: "fresh" })] }),
     });
 
-    expect(agentSessions.records[0]).toMatchObject({ status: "ended", endedAt: new Date("2026-08-06T07:00:00.000Z") });
+    expect(agentSessions.records[0]).toMatchObject({ status: "stale", endedAt: new Date("2026-08-06T07:00:00.000Z") });
     expect(agentSessions.records[1]).toMatchObject({ externalSessionId: "fresh", status: "running" });
   });
 

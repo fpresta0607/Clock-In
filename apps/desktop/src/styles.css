@@ -152,9 +152,12 @@ select:disabled { opacity: .55; }
 /* Long activity lists scroll inside the card instead of pushing the
    leaderboard and everything below it off the window. */
 .app-list { display: grid; gap: 2px; max-height: 15rem; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
-.app-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 5px 2px; border-bottom: 1px solid rgba(163, 179, 194, 0.08); font-size: .84rem; }
+.app-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 5px 2px; border-bottom: 1px solid rgba(163, 179, 194, 0.08); font-size: .84rem; }
 .app-row:last-child { border-bottom: 0; }
-.app-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app-name { display: flex; min-width: 0; flex: 1 1 auto; align-items: center; gap: 8px; }
+.app-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app-icon { display: grid; width: 1.25rem; height: 1.25rem; flex: none; place-items: center; border-radius: .35rem; overflow: hidden; }
+.app-icon svg { display: block; width: 100%; height: 100%; }
 .app-active { color: var(--mint); font-size: .74rem; }
 .app-duration { flex: none; color: var(--mint); font-variant-numeric: tabular-nums; }
 

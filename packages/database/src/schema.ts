@@ -17,7 +17,7 @@ import {
 export const sessionStatus = pgEnum("session_status", ["running", "stopped", "needs_review"]);
 export const activitySegmentKind = pgEnum("activity_segment_kind", ["active", "idle", "locked", "suspended"]);
 export const agentSource = pgEnum("agent_source", ["claude_code", "codex", "kimi_code", "cursor", "browser", "other"]);
-export const agentSessionStatus = pgEnum("agent_session_status", ["running", "ended"]);
+export const agentSessionStatus = pgEnum("agent_session_status", ["running", "ended", "stale"]);
 
 const auditColumns = {
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),
@@ -231,7 +231,7 @@ export const agentSessions = pgTable(
       sql`(
         (${table.status} = 'running' and ${table.endedAt} is null)
         or
-        (${table.status} = 'ended' and ${table.endedAt} is not null)
+        (${table.status} in ('ended', 'stale') and ${table.endedAt} is not null)
       )`,
     ),
     check(

@@ -567,6 +567,10 @@ describe("personal stats contracts", () => {
   it("accepts a per-project corroborated/uncorroborated split with per-app and per-site breakdowns", () => {
     expect(meStatsResponseSchema.parse(stats)).toEqual(stats);
     expect(meStatsResponseSchema.parse({ ...stats, filters: {}, projects: [], apps: [], sites: [] })).toEqual({ ...stats, filters: {}, projects: [], apps: [], sites: [] });
+    expect(meStatsResponseSchema.parse({
+      ...stats,
+      filters: { fromAt: "2026-08-06T05:00:00.000Z", toExclusiveAt: "2026-08-07T05:00:00.000Z" },
+    })).toMatchObject({ filters: { fromAt: "2026-08-06T05:00:00.000Z", toExclusiveAt: "2026-08-07T05:00:00.000Z" } });
   });
 
   it("rejects unsafe or negative counters and unknown fields", () => {
@@ -574,6 +578,11 @@ describe("personal stats contracts", () => {
     expect(() => meStatsResponseSchema.parse({ ...stats, totalDurationSeconds: 1.5 })).toThrow();
     expect(() => meStatsResponseSchema.parse({ ...stats, totalDurationSeconds: Number.MAX_SAFE_INTEGER + 1 })).toThrow();
     expect(() => meStatsResponseSchema.parse({ ...stats, filters: { from: "2026-99-99" } })).toThrow();
+    expect(() => meStatsResponseSchema.parse({ ...stats, filters: { fromAt: "2026-08-06T05:00:00.000Z" } })).toThrow();
+    expect(() => meStatsResponseSchema.parse({
+      ...stats,
+      filters: { from: "2026-08-06", fromAt: "2026-08-06T05:00:00.000Z", toExclusiveAt: "2026-08-07T05:00:00.000Z" },
+    })).toThrow();
     expect(() => meStatsResponseSchema.parse({
       ...stats,
       projects: [{ ...stats.projects[0], corroboratedSeconds: undefined }],

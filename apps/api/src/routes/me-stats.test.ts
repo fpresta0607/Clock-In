@@ -318,6 +318,30 @@ describe("me/stats routes", () => {
     await expect(reversed.json()).resolves.toEqual({
       error: { code: "validation_error", message: "The report date range must be between zero and 366 days." },
     });
+
+    const incompleteInstantRange = await app.request("http://api.test/me/stats?fromAt=2026-08-06T05%3A00%3A00.000Z", { headers });
+    expect(incompleteInstantRange.status).toBe(400);
+  });
+
+  it("uses canonical instant bounds for a local-calendar day", async () => {
+    const reports = new MemoryReports();
+    reports.segments.push(
+      { organizationId: ids.organization, userId: ids.user, kind: "active", processName: "chrome.exe",
+        startedAt: new Date("2026-08-06T04:30:00.000Z"), endedAt: new Date("2026-08-06T05:30:00.000Z"), receivedAt: new Date("2026-08-06T05:31:00.000Z") },
+      { organizationId: ids.organization, userId: ids.user, kind: "active", processName: "chrome.exe",
+        startedAt: new Date("2026-08-07T04:30:00.000Z"), endedAt: new Date("2026-08-07T05:30:00.000Z"), receivedAt: new Date("2026-08-07T05:31:00.000Z") },
+    );
+
+    const response = await createTestApp(reports).request(
+      "http://api.test/me/stats?fromAt=2026-08-06T05%3A00%3A00.000Z&toExclusiveAt=2026-08-07T05%3A00%3A00.000Z",
+      { headers: { authorization: bearerHeader } },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      filters: { fromAt: "2026-08-06T05:00:00.000Z", toExclusiveAt: "2026-08-07T05:00:00.000Z" },
+      apps: [{ processName: "chrome.exe", durationSeconds: 1_800 }],
+    });
   });
 
   it("splits corroborated from uncorroborated time per project for the caller only", async () => {

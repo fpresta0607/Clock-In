@@ -1146,15 +1146,42 @@ describe("App", () => {
     render(<App bridge={bridge} />);
 
     await waitFor(() => expect(bridge.meStats).toHaveBeenCalledTimes(1));
-    expect(bridge.meStats).toHaveBeenCalledWith(expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    expect(bridge.meStats).toHaveBeenCalledWith(today.toISOString(), tomorrow.toISOString());
     const panel = await screen.findByRole("region", { name: "Today so far" });
     expect(await within(panel).findByText("2h", { selector: "strong" })).toBeInTheDocument();
     const codeRow = within(panel).getByText("VS Code").closest("li");
     expect(codeRow).toHaveTextContent("1h 20m");
     const chromeRow = within(panel).getByText("Google Chrome").closest("li");
     expect(chromeRow).toHaveTextContent("20m");
+    expect(within(chromeRow!).getByRole("img", { name: "Google Chrome icon" })).toHaveAttribute("data-icon", "browser");
     expect(within(panel).queryByText(/Code\.exe/)).not.toBeInTheDocument();
     expect(within(panel).queryByText(/corroborated/i)).not.toBeInTheDocument();
+  });
+
+  it("uses bundled known-app icons and a generic fallback for unknown activity", async () => {
+    const bridge = bridgeFor({
+      meStats: vi.fn().mockResolvedValue({
+        ...meStats,
+        apps: [
+          { processName: "chatgpt.exe", durationSeconds: 1_800 },
+          { processName: "gmail.exe", durationSeconds: 1_200 },
+          { processName: "mystery-client.exe", durationSeconds: 600 },
+        ],
+      }),
+    });
+    render(<App bridge={bridge} />);
+
+    const panel = await screen.findByRole("region", { name: "Today so far" });
+    const chatGptRow = within(panel).getByText("ChatGPT").closest("li");
+    expect(within(chatGptRow!).getByRole("img", { name: "ChatGPT icon" })).toHaveAttribute("data-icon", "chatgpt");
+    const gmailRow = within(panel).getByText("Gmail").closest("li");
+    expect(within(gmailRow!).getByRole("img", { name: "Gmail icon" })).toHaveAttribute("data-icon", "gmail");
+    const unknownRow = within(panel).getByText("Mystery Client").closest("li");
+    expect(within(unknownRow!).getByRole("img", { name: "Mystery Client icon" })).toHaveAttribute("data-icon", "generic-app");
   });
 
   it("shows the apps empty state when no monitoring activity was recorded", async () => {
@@ -1191,7 +1218,10 @@ describe("App", () => {
     const monday = new Date();
     monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
     monday.setHours(0, 0, 0, 0);
-    expect(bridge.meStats).toHaveBeenLastCalledWith(monday.toISOString().slice(0, 10));
+    const tomorrow = new Date();
+    tomorrow.setHours(0, 0, 0, 0);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    expect(bridge.meStats).toHaveBeenLastCalledWith(monday.toISOString(), tomorrow.toISOString());
     expect(screen.getByRole("region", { name: "This week" })).toBeInTheDocument();
   });
 
@@ -1283,6 +1313,7 @@ describe("App", () => {
     const panel = await screen.findByRole("region", { name: "Today so far" });
     const row = (await within(panel).findByText("Claude Code")).closest("li");
     expect(row).toHaveTextContent("1h");
+    expect(within(row!).getByRole("img", { name: "Claude Code icon" })).toHaveAttribute("data-icon", "claude");
     expect(row).not.toHaveTextContent("active now");
   });
 
