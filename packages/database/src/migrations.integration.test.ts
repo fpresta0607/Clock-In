@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -10,9 +14,28 @@ const integration = databaseUrl ? describe : describe.skip;
 const integrationDescription = databaseUrl
   ? "initial PostgreSQL migration"
   : "initial PostgreSQL migration (skipped: TEST_DATABASE_URL is not set)";
+const migrationsFolder = fileURLToPath(new URL("../migrations", import.meta.url));
+
+async function migrationsThrough(index: number): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "clock-in-migrations-"));
+  const metadata = JSON.parse(await readFile(join(migrationsFolder, "meta", "_journal.json"), "utf8")) as {
+    entries: Array<{ idx: number; tag: string }>;
+  };
+  const entries = metadata.entries.filter((entry) => entry.idx <= index);
+  await mkdir(join(directory, "meta"));
+  await writeFile(join(directory, "meta", "_journal.json"), JSON.stringify({ ...metadata, entries }));
+  await Promise.all(entries.map(async (entry) => {
+    await writeFile(
+      join(directory, `${entry.tag}.sql`),
+      await readFile(join(migrationsFolder, `${entry.tag}.sql`)),
+    );
+  }));
+  return directory;
+}
 
 integration(integrationDescription, () => {
   const database = databaseUrl ? createDatabase(databaseUrl, { max: 1 }) : undefined;
+  let preBackfillMigrations: string | undefined;
 
   beforeAll(async () => {
     if (!database || !databaseUrl) return;
@@ -25,8 +48,8 @@ integration(integrationDescription, () => {
         `TEST_DATABASE_URL must point at a disposable database whose name starts with "clock_in_", got "${dbName}".`,
       );
     }
-    await runMigrations(database);
-    await runMigrations(database);
+    preBackfillMigrations = await migrationsThrough(12);
+    await runMigrations(database, { migrationsFolder: preBackfillMigrations });
   });
 
   afterAll(async () => {
@@ -37,8 +60,71 @@ integration(integrationDescription, () => {
       await database.client.unsafe(`create schema public`);
       await database.client.unsafe(`drop schema if exists drizzle cascade`);
     } finally {
+      if (preBackfillMigrations !== undefined) await rm(preBackfillMigrations, { recursive: true, force: true });
       await database.client.end({ timeout: 5 });
     }
+  });
+
+  it("backfills legacy defaults, memberships, and an administrator exactly once", async () => {
+    if (!database) return;
+    const legacyOrganizationId = randomUUID();
+    const legacyFirstUserId = randomUUID();
+    const legacySecondUserId = randomUUID();
+    const existingOrganizationId = randomUUID();
+    const existingUserId = randomUUID();
+    const existingProjectId = randomUUID();
+
+    await database.client`
+      insert into organizations (id, name, invite_code)
+      values
+        (${legacyOrganizationId}, 'Legacy workspace', ${randomUUID().replaceAll("-", "")}),
+        (${existingOrganizationId}, 'Existing default workspace', ${randomUUID().replaceAll("-", "")})
+    `;
+    await database.client`
+      insert into users (id, organization_id, email, name)
+      values
+        (${legacyFirstUserId}, ${legacyOrganizationId}, 'legacy-first@example.test', 'Legacy First'),
+        (${legacySecondUserId}, ${legacyOrganizationId}, 'legacy-second@example.test', 'Legacy Second'),
+        (${existingUserId}, ${existingOrganizationId}, 'existing@example.test', 'Existing User')
+    `;
+    await database.client`
+      insert into projects (id, organization_id, name, is_default)
+      values (${existingProjectId}, ${existingOrganizationId}, 'Existing Default', true)
+    `;
+
+    await runMigrations(database);
+
+    const legacyDefaults = await database.client`
+      select id, name from projects
+      where organization_id = ${legacyOrganizationId} and is_default and not archived
+    `;
+    expect(legacyDefaults).toEqual([expect.objectContaining({ name: "General Work" })]);
+    const legacyRoles = await database.client`
+      select role from users where organization_id = ${legacyOrganizationId} order by role
+    `;
+    expect(legacyRoles.map((user) => user.role)).toEqual(["admin", "member"]);
+    const legacyMemberships = await database.client`
+      select user_id from project_memberships
+      where organization_id = ${legacyOrganizationId} and project_id = ${legacyDefaults[0]!.id}
+    `;
+    expect(legacyMemberships).toHaveLength(2);
+    const existingDefaults = await database.client`
+      select id, name from projects
+      where organization_id = ${existingOrganizationId} and is_default and not archived
+    `;
+    expect(existingDefaults).toEqual([{ id: existingProjectId, name: "Existing Default" }]);
+    const existingMemberships = await database.client`
+      select user_id from project_memberships
+      where organization_id = ${existingOrganizationId} and project_id = ${existingProjectId}
+    `;
+    expect(existingMemberships).toEqual([{ user_id: existingUserId }]);
+
+    await runMigrations(database);
+    const rerunDefaults = await database.client`
+      select id from projects
+      where organization_id = ${legacyOrganizationId} and is_default and not archived
+    `;
+    expect(rerunDefaults).toHaveLength(1);
   });
 
   it("enforces tenant foreign keys and a single running session per user", async () => {

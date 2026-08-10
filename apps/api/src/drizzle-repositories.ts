@@ -112,10 +112,20 @@ export class DrizzleProjectRepository implements ProjectRepository {
         .limit(1);
       const project = rows[0];
       if (project === undefined) throw new Error("The organization has no usable default project.");
-      await tx
-        .insert(projectMemberships)
-        .values({ organizationId: subject.organizationId, projectId: project.id, userId: subject.userId })
-        .onConflictDoNothing();
+      const members = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.organizationId, subject.organizationId));
+      if (members.length > 0) {
+        await tx
+          .insert(projectMemberships)
+          .values(members.map((member) => ({
+            organizationId: subject.organizationId,
+            projectId: project.id,
+            userId: member.id,
+          })))
+          .onConflictDoNothing();
+      }
       return project;
     });
   }
@@ -260,10 +270,15 @@ export class DrizzleProjectRepository implements ProjectRepository {
         const replacementRows = await tx
           .select({ id: projects.id, archived: projects.archived })
           .from(projects)
+          .innerJoin(projectMemberships, and(
+            eq(projectMemberships.organizationId, projects.organizationId),
+            eq(projectMemberships.projectId, projects.id),
+          ))
           .where(and(
             eq(projects.id, input.replacementProjectId!),
             eq(projects.organizationId, subject.organizationId),
             eq(projects.archived, false),
+            eq(projectMemberships.userId, subject.userId),
           ))
           .limit(1);
         const replacement = replacementRows[0];

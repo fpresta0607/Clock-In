@@ -357,6 +357,10 @@ fn authorize_collection_locked(dir: &Path, collection: &BrowserCollection) -> io
     write_if_changed_locked(&collection_authorization_path(dir), &body)
 }
 
+fn revoke_collection_authorization_locked(dir: &Path) -> io::Result<()> {
+    write_if_changed_locked(&collection_authorization_path(dir), b"{}")
+}
+
 pub fn enable_collection(dir: &Path, account_id: &str) -> ApiResult<()> {
     let account_id = account_id.trim();
     if account_id.is_empty() {
@@ -391,7 +395,10 @@ pub fn revoke_collection(dir: &Path) -> ApiResult<()> {
     ensure_browser_dir(dir)
         .map_err(|_| BridgeError::unknown("Could not disable browser attribution."))?;
     let spool = browser_spool_path(dir);
-    spool::with_lock(&spool, || write_if_changed_locked(&collection_revocation_path(dir), b"{}"))
+    spool::with_lock(&spool, || {
+        revoke_collection_authorization_locked(dir)?;
+        write_if_changed_locked(&collection_revocation_path(dir), b"{}")
+    })
         .map_err(|_| BridgeError::unknown("Could not disable browser attribution."))
 }
 
@@ -1430,6 +1437,22 @@ mod tests {
         assert_eq!(admitted_collection_id_at(&dir, expires_at.saturating_sub(1)), Some(collection_id));
         assert_eq!(admitted_collection_id_at(&dir, expires_at), None);
         revoke_collection(&dir).expect("collection revokes");
+        assert!(read_collection_authorization(&dir).is_none());
+        assert_eq!(admitted_collection_id_at(&dir, expires_at.saturating_sub(1)), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_collection_revocation_leaves_admission_denied() {
+        let dir = temp_dir("failed-collection-revocation");
+        enable_collection(&dir, "user-one").expect("collection enables");
+        std::fs::create_dir_all(collection_revocation_path(&dir)).expect("revocation path blocks replacement");
+
+        assert!(revoke_collection(&dir).is_err());
+        std::fs::remove_dir_all(collection_revocation_path(&dir)).expect("revocation path clears");
+
+        assert!(read_collection_authorization(&dir).is_none());
         assert_eq!(admitted_collection_id(&dir), None);
 
         let _ = std::fs::remove_dir_all(&dir);
