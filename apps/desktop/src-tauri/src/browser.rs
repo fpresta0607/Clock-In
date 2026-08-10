@@ -496,7 +496,13 @@ const HANDSHAKE_STALE_SECONDS: u64 = 24 * 3_600;
 /// handshake), naming the parent process it could see. `now` is injected so
 /// staleness is testable.
 fn handshake_is_fresh(dir: &Path, browser: Browser, now: u64) -> bool {
-    let bytes = match std::fs::read(handshake_path(dir, browser)) {
+    let marker = handshake_path(dir, browser);
+    spool::with_lock(&marker, || Ok(handshake_is_fresh_locked(&marker, browser, now)))
+        .unwrap_or(false)
+}
+
+fn handshake_is_fresh_locked(marker: &Path, browser: Browser, now: u64) -> bool {
+    let bytes = match std::fs::read(marker) {
         Ok(bytes) => bytes,
         Err(_) => return false,
     };
@@ -1444,6 +1450,59 @@ mod tests {
         std::fs::write(handshake_path(&dir, Browser::Chrome), "junk").expect("marker writes");
         assert!(!handshake_is_fresh(&dir, Browser::Chrome, marked_at));
         assert!(handshake_is_fresh(&dir, Browser::Edge, crate::monitor::unix_now()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn handshake_reads_wait_for_marker_replacement() {
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::time::Duration as StdDuration;
+
+        let dir = temp_dir("handshake-read-lock");
+        let marker = handshake_path(&dir, Browser::Chrome);
+        record_handshake_for(&dir, Browser::Chrome);
+        let replacement = std::fs::read(&marker).expect("marker exists");
+        let (removed_tx, removed_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let writer_marker = marker.clone();
+        let writer = std::thread::spawn(move || {
+            spool::with_lock(&writer_marker, || {
+                let temp = unique_temp(&writer_marker);
+                std::fs::write(&temp, replacement)?;
+                std::fs::remove_file(&writer_marker)?;
+                removed_tx.send(()).expect("writer signals removal");
+                resume_rx.recv().expect("writer resumes");
+                std::fs::rename(temp, writer_marker)
+            })
+            .expect("replacement succeeds");
+        });
+        removed_rx
+            .recv_timeout(StdDuration::from_secs(1))
+            .expect("writer removes the live marker under its lock");
+
+        let reader_dir = dir.clone();
+        let (fresh_tx, fresh_rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            fresh_tx
+                .send(handshake_is_fresh(&reader_dir, Browser::Chrome, crate::monitor::unix_now()))
+                .expect("reader returns marker health");
+        });
+        let early = fresh_rx.recv_timeout(StdDuration::from_millis(100));
+        resume_tx.send(()).expect("release marker writer");
+        writer.join().expect("writer finishes");
+        reader.join().expect("reader finishes");
+        let waited_for_writer = matches!(&early, Err(RecvTimeoutError::Timeout));
+        let fresh = match early {
+            Ok(fresh) => fresh,
+            Err(RecvTimeoutError::Timeout) => fresh_rx
+                .recv_timeout(StdDuration::from_secs(1))
+                .expect("reader returns after replacement"),
+            Err(RecvTimeoutError::Disconnected) => panic!("reader disconnected"),
+        };
+
+        assert!(waited_for_writer);
+        assert!(fresh);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
