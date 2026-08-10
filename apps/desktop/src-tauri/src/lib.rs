@@ -149,11 +149,28 @@ where
 {
     match result {
         Err(error) if error.kind == ErrorKind::Auth => {
-            teardown().await?;
+            let _ = teardown().await;
             Err(error)
         }
         result => result,
     }
+}
+
+async fn complete_identity_deactivation<F, G, H, HFut>(
+    revoke_collection: F,
+    clear_active_identity: G,
+    finish: H,
+) -> ApiResult<()>
+where
+    F: FnOnce() -> ApiResult<()>,
+    G: FnOnce() -> ApiResult<()>,
+    H: FnOnce() -> HFut,
+    HFut: std::future::Future<Output = ()>,
+{
+    let browser_result = revoke_collection();
+    let identity_result = clear_active_identity();
+    finish().await;
+    browser_result.and(identity_result)
 }
 
 impl AppState {
@@ -259,23 +276,25 @@ impl AppState {
     async fn deactivate_identity(&self) -> ApiResult<()> {
         self.monitor.stop().await;
         let active = spool::active_identity();
-        let mut browser_error = None;
-        if self.active_identity.lock().await.take().is_some() || active.is_some() {
-            let browser_dir = active
+        let browser_dir = (self.active_identity.lock().await.take().is_some() || active.is_some())
+            .then(|| active
                 .as_ref()
                 .map(spool::evidence_paths)
                 .map(|paths| paths.browser_dir)
-                .unwrap_or_else(|| self.monitor.browser_dir());
-            browser_error = browser::deactivate_collection(&browser_dir).err();
-        }
-        spool::clear_active_identity()
-            .map_err(|_| BridgeError::unknown("Could not secure offline evidence."))?;
-        self.monitor.deactivate_identity().await;
-        *self.recovery.lock().await = RecoveryState::default();
-        if browser_error.is_some() {
-            return Err(BridgeError::unknown("Could not revoke browser attribution."));
-        }
-        Ok(())
+                .unwrap_or_else(|| self.monitor.browser_dir()));
+        complete_identity_deactivation(
+            move || match browser_dir {
+                Some(browser_dir) => browser::deactivate_collection(&browser_dir),
+                None => Ok(()),
+            },
+            || spool::clear_active_identity()
+                .map_err(|_| BridgeError::unknown("Could not secure offline evidence.")),
+            || async {
+                self.monitor.deactivate_identity().await;
+                *self.recovery.lock().await = RecoveryState::default();
+            },
+        )
+        .await
     }
 
     async fn deactivate_invalid_session(&self) -> ApiResult<()> {
@@ -1414,7 +1433,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auth_failure_runs_the_shared_identity_teardown() {
+    async fn auth_failure_preserves_its_kind_when_teardown_fails() {
         let teardown_ran = Arc::new(AtomicBool::new(false));
         let observed = Arc::clone(&teardown_ran);
 
@@ -1422,14 +1441,38 @@ mod tests {
             Err(BridgeError::auth("session expired")),
             move || async move {
                 observed.store(true, Ordering::SeqCst);
-                Ok(())
+                Err(BridgeError::unknown("active identity file could not be cleared"))
             },
         )
         .await
-        .expect_err("auth failures must not bypass identity teardown");
+        .expect_err("auth failures must still reach the renderer after teardown errors");
 
         assert_eq!(error.kind, ErrorKind::Auth);
         assert!(teardown_ran.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn identity_deactivation_finishes_after_collection_cleanup_fails() {
+        let effects = RefCell::new(Vec::new());
+
+        let error = complete_identity_deactivation(
+            || {
+                effects.borrow_mut().push("revoke");
+                Err(BridgeError::unknown("browser revocation file could not be cleared"))
+            },
+            || {
+                effects.borrow_mut().push("clear-active-identity");
+                Ok(())
+            },
+            || async {
+                effects.borrow_mut().push("deactivate-monitor");
+            },
+        )
+        .await
+        .expect_err("cleanup failures remain observable after every deactivation step runs");
+
+        assert_eq!(error.kind, ErrorKind::Unknown);
+        assert_eq!(effects.into_inner(), vec!["revoke", "clear-active-identity", "deactivate-monitor"]);
     }
 
     #[test]
