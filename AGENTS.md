@@ -2,35 +2,34 @@
 
 This file is the project's committed home for project-intrinsic agent knowledge: build, test, release, architecture, and sharp-edge notes that should travel with the code.
 
-- Add durable project-specific notes here as they are discovered through real work.
+## The product model, so you don't restore a dead one
 
-## Verifying the Tauri crate locally
+**There is no manual timer.** Recording is automatic: the OS monitor's own
+working/idle/locked/suspended boundaries open and close sessions, and the consent
+toggle (`MonitorSettings.enabled`, on by default) is the product's only on/off.
+Anything that reads like start/stop, an away prompt, a suggested start, or a
+running-timer conflict belongs to the retired model. `POST /sessions`,
+`/sessions/:id/stop`, and `/sessions/current` still exist but are deprecated and
+called by nothing shipped; the live write path is `POST /sessions/observed`.
+Legacy rows keep `attribution = 'manual'` and are never rewritten.
 
-`apps/desktop/src-tauri` links against system webview and tray libraries, so *any* cargo
-command that builds it — `check`, `clippy`, `test`, not just a Tauri build — fails until those
-are installed. On Debian/Ubuntu:
+Reporting splits totals into **attributed** and **unattributed** seconds, not
+corroborated and uncorroborated. A session is attributed whole or not at all, by
+`time_sessions.attribution`. The README's "How session tracking works" section is
+the authoritative prose; keep it true when you change the model.
 
-```bash
-sudo apt-get install -y build-essential pkg-config libwebkit2gtk-4.1-dev \
-  libappindicator3-dev librsvg2-dev patchelf libssl-dev
-```
+## Sharp edges
 
-Run the same three commands CI's `rust` job runs (`.github/workflows/ci.yml`), all with
-`--manifest-path apps/desktop/src-tauri/Cargo.toml`: `cargo fmt --check`, `cargo clippy
---all-targets -- -D warnings`, and `cargo test`. Only `fmt` works without the packages above,
-and the first build of the dependency tree takes several minutes.
-
-Declare a module `pub mod` when nothing in `lib.rs` consumes all of its API, or `-D warnings`
-fails the lib target on `dead_code` — that is why `quota` and `spool` are public.
-
-## Adding a Tauri command
-
-A new command touches four places, and missing any one of them fails at runtime rather than at
-compile time: the `#[tauri::command]` function, its entry in `tauri::generate_handler![…]`, a
-decoder plus `TimerBridge` method in `apps/desktop/src/bridge.ts`, and the `bridgeFor` test
-double in `apps/desktop/src/App.test.tsx`. Payload structs use
-`#[serde(rename_all = "camelCase")]`; the bridge decoders are strict on purpose and reject a
-shape the UI could not render.
+- The Rust toolchain lives at `~/.cargo/bin` and may not be on `PATH`. Rust gate:
+  `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`,
+  all with `--manifest-path apps/desktop/src-tauri/Cargo.toml`.
+- Desktop settings are read with `#[serde(default)]`, so removing a field is safe
+  for existing installs, but *adding* one needs a sensible default or old files
+  parse into something surprising.
+- Migrations are generated, never hand-written: change `packages/database/src/schema.ts`,
+  then `pnpm exec drizzle-kit generate --name <slug>` from `packages/database`.
+- Both frontends share `packages/shared/styles/brand.css` and ship a single dark
+  theme; there is no light theme to match, so use the tokens rather than literals.
 
 ## Maintaining this file
 
