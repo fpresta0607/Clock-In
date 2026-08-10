@@ -558,27 +558,28 @@ export class DrizzleAccountStore implements AccountStore {
       }
 
       const previousOrganizationId = current.organizationId;
-      const [legacyClaim] = await tx
-        .select({ organizationId: organizationAdminClaims.organizationId })
-        .from(organizationAdminClaims)
-        .where(and(
-          eq(organizationAdminClaims.organizationId, previousOrganizationId),
-          eq(organizationAdminClaims.userId, subject.userId),
-          eq(organizationAdminClaims.kind, "legacy_first_admin"),
-        ))
-        .limit(1);
-      if (legacyClaim !== undefined) {
-        const [remaining] = await tx
-          .select({ total: count(users.id) })
+      if (current.role === "admin") {
+        const [remainingMember] = await tx
+          .select({ id: users.id })
           .from(users)
           .where(and(
             eq(users.organizationId, previousOrganizationId),
             ne(users.id, subject.userId),
-          ));
-        if (Number(remaining?.total ?? 0) > 0) {
+          ))
+          .limit(1);
+        const [remainingAdministrator] = await tx
+          .select({ id: users.id })
+          .from(users)
+          .where(and(
+            eq(users.organizationId, previousOrganizationId),
+            ne(users.id, subject.userId),
+            eq(users.role, "admin"),
+          ))
+          .limit(1);
+        if (remainingMember !== undefined && remainingAdministrator === undefined) {
           throw new AppError(
             "conflict",
-            "The first administrator cannot leave a legacy workspace while it still has members.",
+            "The final administrator cannot leave a workspace while it still has members.",
           );
         }
       }

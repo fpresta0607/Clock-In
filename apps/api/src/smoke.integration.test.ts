@@ -583,6 +583,65 @@ integration(integrationDescription, () => {
     expect(again.status).toBe(200);
   }, 90_000);
 
+  it("keeps a creator administrator in place while another member remains", async () => {
+    const { organization: target } = await (await app.request("/organization", { headers: authorized })).json();
+    const creatorAuth = await createTestAuth(config, new Date());
+    const creatorId = randomUUID();
+    const creatorApp = createApp({
+      config,
+      keys: creatorAuth.keys,
+      accounts: new DrizzleAccountStore(database.db),
+    });
+    const creatorHeaders = {
+      authorization: await creatorAuth.bearer(creatorId, { email: "creator-continuity@clock-in.test", name: "Creator Continuity" }),
+      "content-type": "application/json",
+    };
+    const creator = (await (await creatorApp.request("/me", { headers: creatorHeaders })).json()).user;
+    const memberId = randomUUID();
+    await database.client`
+      insert into users (id, organization_id, email, name)
+      values (${memberId}, ${creator.organizationId}, 'creator-continuity-member@clock-in.test', 'Creator Continuity Member')
+    `;
+
+    const blocked = await creatorApp.request("/organization/join", {
+      method: "POST",
+      headers: creatorHeaders,
+      body: JSON.stringify({ inviteCode: target.inviteCode }),
+    });
+    expect(blocked.status).toBe(409);
+    await expect(blocked.json()).resolves.toEqual({
+      error: {
+        code: "conflict",
+        message: "The final administrator cannot leave a workspace while it still has members.",
+      },
+    });
+
+    const members = await database.client`
+      select id, organization_id, role from users
+      where organization_id = ${creator.organizationId}
+      order by id
+    `;
+    expect(members).toEqual([
+      { id: creatorId, organization_id: creator.organizationId, role: "admin" },
+      { id: memberId, organization_id: creator.organizationId, role: "member" },
+    ].sort((left, right) => left.id.localeCompare(right.id)));
+
+    const memberAuth = await createTestAuth(config, new Date());
+    const memberApp = createApp({
+      config,
+      keys: memberAuth.keys,
+      accounts: new DrizzleAccountStore(database.db),
+    });
+    const claim = await memberApp.request("/organization/claim-admin", {
+      method: "POST",
+      headers: {
+        authorization: await memberAuth.bearer(memberId, { email: "creator-continuity-member@clock-in.test", name: "Creator Continuity Member" }),
+        "content-type": "application/json",
+      },
+    });
+    expect(claim.status).toBe(409);
+  }, 60_000);
+
   it("refuses to move an account that already recorded time", async () => {
     const { organization } = await (await app.request("/organization", { headers: authorized })).json();
 

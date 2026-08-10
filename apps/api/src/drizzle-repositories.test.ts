@@ -35,7 +35,7 @@ describe("Drizzle session repository", () => {
 });
 
 describe("Drizzle account store", () => {
-  it("refuses to move a legacy first administrator away from active members", async () => {
+  it("refuses to move the final active administrator away from members", async () => {
     const targetOrganizationId = "a1c7e513-b094-4d4c-ae55-21790ae019a4";
     const currentOrganizationId = "b1c7e513-b094-4d4c-ae55-21790ae019a4";
     const deleted: unknown[] = [];
@@ -60,8 +60,8 @@ describe("Drizzle account store", () => {
           }]);
         }
         if (selectStep >= 3 && selectStep <= 6) return { from: () => ({ where: async () => [{ total: 0 }] }) };
-        if (selectStep === 7) return limited([{ organizationId: currentOrganizationId }]);
-        if (selectStep === 8) return { from: () => ({ where: async () => [{ total: 1 }] }) };
+        if (selectStep === 7) return limited([{ id: "remaining-member" }]);
+        if (selectStep === 8) return limited([]);
         throw new Error(`unexpected select ${selectStep}`);
       },
       delete: (table: unknown) => {
@@ -77,7 +77,7 @@ describe("Drizzle account store", () => {
     await expect(accounts.joinOrganization({ organizationId: currentOrganizationId, userId: input.userId }, "ACDEF-GHJKM"))
       .rejects.toMatchObject({
         code: "conflict",
-        message: "The first administrator cannot leave a legacy workspace while it still has members.",
+        message: "The final administrator cannot leave a workspace while it still has members.",
       });
     expect(deleted).toEqual([]);
   });
