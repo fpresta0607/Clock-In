@@ -170,6 +170,34 @@ describe("background startup", () => {
     expect((starts[1]?.["event"] as Record<string, unknown>)["occurredAt"]).toBe(new Date(start + 135_001).toISOString());
   });
 
+  it("revalidates before crediting an unmatched late tick", async () => {
+    vi.useFakeTimers();
+    const start = Date.parse("2026-08-09T12:00:00.000Z");
+    vi.setSystemTime(start);
+    const harness = backgroundHarness([{ id: 1, url: "https://example.com", incognito: false }]);
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({ type: "rules", collectionEnabled: true, collectionId: "collection-one", rules: [] } as never);
+    await settle();
+
+    await vi.advanceTimersByTimeAsync(45_000);
+    harness.alarm.emit({ name: TICK_ALARM_NAME } as never);
+    await settle();
+
+    const afterLateTick = hostMessages(harness.port).findLast((message) => message["type"] === "tally");
+    expect(afterLateTick).toEqual(expect.objectContaining({ entries: [] }));
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    harness.alarm.emit({ name: TICK_ALARM_NAME } as never);
+    await settle();
+
+    const afterRevalidation = hostMessages(harness.port).findLast((message) => message["type"] === "tally");
+    expect(afterRevalidation).toEqual(expect.objectContaining({
+      entries: [{ origin: "example.com", seconds: 30 }],
+    }));
+  });
+
   it("closes at the last tick when a heartbeat deadline arrives late", async () => {
     vi.useFakeTimers();
     const start = Date.parse("2026-08-09T12:00:00.000Z");
@@ -538,13 +566,19 @@ describe("background startup", () => {
       await settle();
       harness.portMessages.emit({ type: "rules", collectionEnabled: true, collectionId: "collection-one", rules: [] } as never);
       await settle();
-      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(30_000);
+      harness.alarm.emit({ name: TICK_ALARM_NAME } as never);
+      await settle();
+      await vi.advanceTimersByTimeAsync(30_000);
+      harness.alarm.emit({ name: TICK_ALARM_NAME } as never);
+      await settle();
+      await vi.advanceTimersByTimeAsync(30_000);
       harness.alarm.emit({ name: TICK_ALARM_NAME } as never);
       await settle();
 
       const tally = hostMessages(harness.port).findLast((message) => message["type"] === "tally");
       expect(tally).toEqual(expect.objectContaining({
-        entries: [{ origin: "example.com", seconds: 30 }],
+        entries: [{ origin: "example.com", seconds: 60 }],
       }));
     } finally {
       if (originalTimezone === undefined) delete process.env.TZ;

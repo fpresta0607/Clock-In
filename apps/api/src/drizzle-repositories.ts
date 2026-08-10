@@ -724,6 +724,8 @@ export class DrizzleReportRepository implements ReportRepository {
           and source = 'browser'
           and rule_id is not null
           and received_at <= coalesce(ended_at, last_event_at) + interval '7 days'
+          ${query.from === undefined ? sql`` : sql`and coalesce(ended_at, last_event_at) > ${query.from.toISOString()}`}
+          ${query.toExclusive === undefined ? sql`` : sql`and started_at < ${query.toExclusive.toISOString()}`}
       ),
       islands as (
         select rule_id, started_at, ended_at,
@@ -750,6 +752,8 @@ export class DrizzleReportRepository implements ReportRepository {
           and user_id = ${subject.userId}
           and kind = 'active'
           and received_at <= ended_at + interval '7 days'
+          ${query.from === undefined ? sql`` : sql`and ended_at > ${query.from.toISOString()}`}
+          ${query.toExclusive === undefined ? sql`` : sql`and started_at < ${query.toExclusive.toISOString()}`}
       ),
       active_islands as (
         select started_at, ended_at,
