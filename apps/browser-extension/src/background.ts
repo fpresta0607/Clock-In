@@ -188,7 +188,8 @@ function fenceUnobservedGap(now: number, deadlineMissed: boolean = false): boole
 function prepareMachineTransition(now: number): boolean {
   const deadline = nextAdvanceAt(machine);
   const deadlineMissed = deadline !== null && now - deadline >= machine.gapMergeMs;
-  if (fenceUnobservedGap(now, deadlineMissed)) {
+  const tallyIntervalLate = unmatchedOrigin !== null && now - lastTickAt >= TICK_MS + machine.gapMergeMs;
+  if (fenceUnobservedGap(now, deadlineMissed || tallyIntervalLate)) {
     return false;
   }
   settleTally(now);

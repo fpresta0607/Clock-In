@@ -473,6 +473,15 @@ integration(integrationDescription, () => {
       { mapping: { id: ruleId, pattern: "github.com/acme/*", projectId }, durationSeconds: 180 },
     ]);
 
+    const rangedStats = await app.request(
+      `/me/stats?fromAt=${encodeURIComponent(at(90_000))}&toExclusiveAt=${encodeURIComponent(at(150_000))}`,
+      { headers: authorized },
+    );
+    expect(rangedStats.status).toBe(200);
+    expect((await rangedStats.json()).sites).toEqual([
+      { mapping: { id: ruleId, pattern: "github.com/acme/*", projectId }, durationSeconds: 60 },
+    ]);
+
     // Corroboration is the active-segment overlap only; the linked browser span adds nothing.
     const project = body.projects.find((entry: { project: { id: string } }) => entry.project.id === projectId);
     expect(project).toMatchObject({ durationSeconds: 600, corroboratedSeconds: 300, sessionCount: 1 });

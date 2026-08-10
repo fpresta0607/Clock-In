@@ -721,13 +721,22 @@ fn tally_week_start_at<Tz: TimeZone>(now: &DateTime<Tz>) -> u64 {
 /// origins a current `url_rule` already covers (the extension's next snapshot
 /// still carries them until its rules refresh; the desktop filters them).
 pub fn read_suggestions(dir: &Path, mappings: &[PathMapping]) -> Vec<TallyEntry> {
-    let never = read_origin_set(&dir.join("never-suggest.json"));
+    let tally = dir.join("unmatched-tally.json");
+    let never = dir.join("never-suggest.json");
+    spool::with_lock(&tally, || {
+        spool::with_lock(&never, || Ok(read_suggestions_locked(&tally, &never, mappings)))
+    })
+    .unwrap_or_default()
+}
+
+fn read_suggestions_locked(tally: &Path, never_path: &Path, mappings: &[PathMapping]) -> Vec<TallyEntry> {
+    let never = read_origin_set(never_path);
     let ruled: Vec<String> = mappings
         .iter()
         .filter(|mapping| mapping.kind == MappingKind::UrlRule)
         .map(|mapping| pattern_host(&mapping.path_prefix))
         .collect();
-    let bytes = match std::fs::read(dir.join("unmatched-tally.json")) {
+    let bytes = match std::fs::read(tally) {
         Ok(bytes) => bytes,
         Err(_) => return Vec::new(),
     };
@@ -774,13 +783,16 @@ pub fn never_suggest(dir: &Path, origin: &str) -> ApiResult<()> {
             "Origin must not be empty.",
         ));
     }
-    let mut origins = read_origin_set(&dir.join("never-suggest.json"));
-    origins.insert(origin.to_string());
-    let mut sorted: Vec<&String> = origins.iter().collect();
-    sorted.sort();
-    let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "origins": sorted }))
-        .map_err(|_| BridgeError::unknown("Could not save that answer."))?;
-    write_if_changed(&dir.join("never-suggest.json"), &bytes)
+    let never = dir.join("never-suggest.json");
+    spool::with_lock(&never, || {
+        let mut origins = read_origin_set(&never);
+        origins.insert(origin.to_string());
+        let mut sorted: Vec<&String> = origins.iter().collect();
+        sorted.sort();
+        let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "origins": sorted }))
+            .map_err(io::Error::other)?;
+        write_if_changed_locked(&never, &bytes)
+    })
         .map_err(|_| BridgeError::unknown("Could not save that answer."))
 }
 
@@ -788,11 +800,14 @@ pub fn never_suggest(dir: &Path, origin: &str) -> ApiResult<()> {
 /// never-suggest list. Both are local-only; nothing here was ever uploaded.
 pub fn clear_suggestion_data(dir: &Path) -> ApiResult<()> {
     let tally = dir.join("unmatched-tally.json");
+    let never = dir.join("never-suggest.json");
     spool::with_lock(&browser_spool_path(dir), || {
         spool::with_lock(&tally, || {
-            write_if_changed_locked(&tally_clear_path(dir), b"{}")?;
-            remove_if_exists(&tally)?;
-            remove_if_exists(&dir.join("never-suggest.json"))
+            spool::with_lock(&never, || {
+                write_if_changed_locked(&tally_clear_path(dir), b"{}")?;
+                remove_if_exists(&tally)?;
+                remove_if_exists(&never)
+            })
         })
     })
     .map_err(|_| BridgeError::unknown("Could not clear the saved answers."))
@@ -1147,6 +1162,135 @@ mod tests {
             vec![TallyEntry {
                 origin: "quickbooks.com".to_string(),
                 seconds: 10800,
+            }]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn suggestion_reads_wait_for_tally_replacement() {
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::time::Duration as StdDuration;
+
+        let dir = temp_dir("suggestion-tally-read-lock");
+        let tally = dir.join("unmatched-tally.json");
+        let week_start = tally_week_start(crate::monitor::unix_now());
+        std::fs::write(
+            &tally,
+            format!(r#"{{"weekStart":{week_start},"entries":[{{"origin":"quickbooks.com","seconds":600}}]}}"#),
+        )
+        .expect("initial tally writes");
+        let replacement = format!(r#"{{"weekStart":{week_start},"entries":[{{"origin":"figma.com","seconds":900}}]}}"#);
+        let (removed_tx, removed_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let writer_tally = tally.clone();
+        let writer = std::thread::spawn(move || {
+            spool::with_lock(&writer_tally, || {
+                let temp = unique_temp(&writer_tally);
+                std::fs::write(&temp, replacement)?;
+                std::fs::remove_file(&writer_tally)?;
+                removed_tx.send(()).expect("writer signals removal");
+                resume_rx.recv().expect("writer resumes");
+                std::fs::rename(temp, writer_tally)
+            })
+            .expect("replacement succeeds");
+        });
+        removed_rx
+            .recv_timeout(StdDuration::from_secs(1))
+            .expect("writer removes the live tally under its lock");
+
+        let reader_dir = dir.clone();
+        let (entries_tx, entries_rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            entries_tx
+                .send(read_suggestions(&reader_dir, &[]))
+                .expect("reader returns suggestions");
+        });
+        let early = entries_rx.recv_timeout(StdDuration::from_millis(100));
+        resume_tx.send(()).expect("release tally writer");
+        writer.join().expect("writer finishes");
+        reader.join().expect("reader finishes");
+        let waited_for_writer = matches!(&early, Err(RecvTimeoutError::Timeout));
+        let entries = match early {
+            Ok(entries) => entries,
+            Err(RecvTimeoutError::Timeout) => entries_rx
+                .recv_timeout(StdDuration::from_secs(1))
+                .expect("reader returns after replacement"),
+            Err(RecvTimeoutError::Disconnected) => panic!("reader disconnected"),
+        };
+
+        assert!(waited_for_writer);
+        assert_eq!(
+            entries,
+            vec![TallyEntry {
+                origin: "figma.com".to_string(),
+                seconds: 900,
+            }]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn suggestion_reads_wait_for_never_suggest_replacement() {
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::time::Duration as StdDuration;
+
+        let dir = temp_dir("suggestion-never-read-lock");
+        let tally = dir.join("unmatched-tally.json");
+        let never = dir.join("never-suggest.json");
+        let week_start = tally_week_start(crate::monitor::unix_now());
+        std::fs::write(
+            &tally,
+            format!(r#"{{"weekStart":{week_start},"entries":[{{"origin":"quickbooks.com","seconds":600}},{{"origin":"figma.com","seconds":900}}]}}"#),
+        )
+        .expect("initial tally writes");
+        std::fs::write(&never, r#"{"origins":["figma.com"]}"#).expect("initial dismissal writes");
+        let (removed_tx, removed_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let writer_never = never.clone();
+        let writer = std::thread::spawn(move || {
+            spool::with_lock(&writer_never, || {
+                let temp = unique_temp(&writer_never);
+                std::fs::write(&temp, r#"{"origins":["figma.com","netflix.com"]}"#)?;
+                std::fs::remove_file(&writer_never)?;
+                removed_tx.send(()).expect("writer signals removal");
+                resume_rx.recv().expect("writer resumes");
+                std::fs::rename(temp, writer_never)
+            })
+            .expect("replacement succeeds");
+        });
+        removed_rx
+            .recv_timeout(StdDuration::from_secs(1))
+            .expect("writer removes the live dismissal list under its lock");
+
+        let reader_dir = dir.clone();
+        let (entries_tx, entries_rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            entries_tx
+                .send(read_suggestions(&reader_dir, &[]))
+                .expect("reader returns suggestions");
+        });
+        let early = entries_rx.recv_timeout(StdDuration::from_millis(100));
+        resume_tx.send(()).expect("release dismissal writer");
+        writer.join().expect("writer finishes");
+        reader.join().expect("reader finishes");
+        let waited_for_writer = matches!(&early, Err(RecvTimeoutError::Timeout));
+        let entries = match early {
+            Ok(entries) => entries,
+            Err(RecvTimeoutError::Timeout) => entries_rx
+                .recv_timeout(StdDuration::from_secs(1))
+                .expect("reader returns after replacement"),
+            Err(RecvTimeoutError::Disconnected) => panic!("reader disconnected"),
+        };
+
+        assert!(waited_for_writer);
+        assert_eq!(
+            entries,
+            vec![TallyEntry {
+                origin: "quickbooks.com".to_string(),
+                seconds: 600,
             }]
         );
 
