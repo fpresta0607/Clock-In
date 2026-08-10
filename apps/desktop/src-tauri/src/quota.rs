@@ -395,9 +395,6 @@ fn read_provider(entry: &ProviderEntry, value: &Value) -> AgentQuota {
             stale,
             label,
             sources,
-            // A provider can name its login and still refuse a usable figure;
-            // saying who is signed in is worth more than saying nothing.
-            account,
             ..AgentQuota::unknown(entry, "")
         },
     }
@@ -828,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn a_signed_out_provider_still_names_whoever_it_last_knew() {
+    fn a_signed_out_provider_does_not_name_a_last_known_account() {
         let report = r#"{"providers":[{"provider":"copilot",
             "account":{"email":"dev@example.com"},"windows":[],
             "state":{"status":"auth_required","error":"GitHub Copilot sign-in required"}}]}"#;
@@ -836,10 +833,7 @@ mod tests {
         let readings = parse_quota_axi(report).expect("the report parses");
         let copilot = reading(&readings, "copilot");
         assert_eq!(copilot.status, QuotaStatus::Unknown);
-        assert_eq!(
-            copilot.account.as_ref().and_then(|a| a.email.as_deref()),
-            Some("dev@example.com")
-        );
+        assert_eq!(copilot.account, None);
     }
 
     #[test]
