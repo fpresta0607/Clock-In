@@ -479,6 +479,10 @@ pub struct OpenSession {
 pub struct SessionTracker {
     open: Option<OpenSession>,
     previous: Option<(SegmentKind, u64)>,
+    /// Last time an agent was active during the current open session. Used to
+    /// exclude agent-covered idle from trimmed-idle accounting so overnight
+    /// agent runs survive into the session duration instead of being subtracted.
+    agent_seen_at: u64,
 }
 
 /// What the tracker needs to know about the world on each tick.
@@ -521,13 +525,29 @@ impl SessionTracker {
         };
         if let Some((idle_started_at, idle_seconds)) = resumed_idle {
             if idle_seconds >= input.away_threshold_seconds && !input.agent_active {
-                // A long idle spell closes at its first idle boundary even if
-                // the next poll sees the person back at work.
-                closed.extend(self.close_at(idle_started_at));
+                // A long idle spell closes at its last active boundary: if an
+                // agent was working during the idle, close where the agent
+                // stopped; otherwise close at the first idle boundary.
+                let close_boundary = if self.agent_seen_at >= idle_started_at {
+                    self.agent_seen_at
+                } else {
+                    idle_started_at
+                };
+                closed.extend(self.close_at(close_boundary));
             } else if let Some(open) = self.open.as_mut() {
-                // A short gap is kept as trimmed idle on the session that was
-                // already open, never on a later project.
-                open.idle_seconds += idle_seconds;
+                // Exclude any portion of the idle gap that was covered by an
+                // active agent: that time counts as work, not trimmed idle.
+                let agent_covered = if self.agent_seen_at >= idle_started_at {
+                    self.agent_seen_at
+                        .min(span_started_at)
+                        .saturating_sub(idle_started_at)
+                } else {
+                    0
+                };
+                let added = idle_seconds.saturating_sub(agent_covered);
+                if added > 0 {
+                    open.idle_seconds += added;
+                }
             }
         }
         self.previous = Some((kind, span_started_at));
@@ -572,13 +592,25 @@ impl SessionTracker {
                 let quiet_for = input.now.saturating_sub(span_started_at);
                 if quiet_for >= input.away_threshold_seconds && !input.agent_active {
                     closed.extend(self.close_at(span_started_at));
+                } else if input.agent_active {
+                    if let Some(open) = self.open.as_mut() {
+                        open.last_active_at = input.now;
+                    }
+                    self.agent_seen_at = input.now;
                 }
             }
             // The screen locked or the machine slept: the person left, and the
-            // session ends where they stopped working.
+            // session ends where they stopped working — or where the agent
+            // last reported, whichever is later.
             SegmentKind::Locked | SegmentKind::Suspended => {
                 if !input.agent_active {
-                    closed.extend(self.close_at(span_started_at));
+                    let boundary = span_started_at.max(
+                        self.open.as_ref().map_or(0, |o| o.last_active_at),
+                    );
+                    closed.extend(self.close_at(boundary));
+                } else if let Some(open) = self.open.as_mut() {
+                    open.last_active_at = input.now;
+                    self.agent_seen_at = input.now;
                 }
             }
         }
@@ -602,6 +634,7 @@ impl SessionTracker {
 
     fn close_at(&mut self, stopped_at: u64) -> Option<ObservedSession> {
         let open = self.open.take()?;
+        self.agent_seen_at = 0;
         let stopped_at = stopped_at.max(open.started_at);
         // A session with no elapsed time is not evidence of anything.
         if stopped_at <= open.started_at {
@@ -2146,6 +2179,125 @@ mod tests {
         assert!(quiet.is_empty());
         assert!(locked.is_empty());
         assert!(tracker.open_session().is_some());
+    }
+
+    #[test]
+    fn agent_evidence_advances_the_counted_boundary_on_lock() {
+        // R10: an overnight agent run on a locked machine must count the
+        // agent's working time as session duration, not trim it as idle.
+        let mut tracker = SessionTracker::new();
+        let project = project("p1", Attribution::Agent);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
+
+        // Machine locks; agent is still running.
+        tick(
+            &mut tracker,
+            2_000,
+            Some((SegmentKind::Locked, 2_000)),
+            Some(&project),
+            true,
+        );
+        let open = tracker.open_session().expect("session survives lock");
+        assert_eq!(
+            open.last_active_at, 2_000,
+            "agent evidence advances the boundary past the lock"
+        );
+
+        // Agent keeps running while the machine stays locked.
+        tick(
+            &mut tracker,
+            3_000,
+            Some((SegmentKind::Locked, 2_000)),
+            Some(&project),
+            true,
+        );
+        let open = tracker.open_session().unwrap();
+        assert_eq!(
+            open.last_active_at, 3_000,
+            "each agent event advances the boundary"
+        );
+
+        // Agent finishes; machine stays locked. Session closes at the last
+        // agent boundary, not at the original lock moment.
+        let closed = tick(
+            &mut tracker,
+            5_000,
+            Some((SegmentKind::Locked, 2_000)),
+            Some(&project),
+            false,
+        );
+        let [session] = closed.as_slice() else {
+            panic!("session closes when agent stops on a locked machine")
+        };
+        assert_eq!(session.started_at, iso8601(1_000));
+        assert_eq!(session.stopped_at, iso8601(3_000));
+        // The post-agent locked gap (3_000 to 5_000) is NOT inside the session.
+        assert!(tracker.open_session().is_none());
+    }
+
+    #[test]
+    fn agent_covered_idle_is_not_subtracted_from_session_duration() {
+        // R10: idle time with an active agent must not be booked as trimmed
+        // idle. The agent's working interval survives into the session.
+        let mut tracker = SessionTracker::new();
+        let project = project("p1", Attribution::Agent);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
+
+        // Person steps away; machine goes idle — short gap, under threshold.
+        tick(
+            &mut tracker,
+            1_100,
+            Some((SegmentKind::Idle, 1_100)),
+            Some(&project),
+            false,
+        );
+
+        // Agent runs while machine is idle: advances the boundary.
+        tick(
+            &mut tracker,
+            1_300,
+            Some((SegmentKind::Idle, 1_100)),
+            Some(&project),
+            true,
+        );
+        assert_eq!(tracker.open_session().unwrap().last_active_at, 1_300);
+
+        tick(
+            &mut tracker,
+            1_500,
+            Some((SegmentKind::Idle, 1_100)),
+            Some(&project),
+            true,
+        );
+        assert_eq!(tracker.open_session().unwrap().last_active_at, 1_500);
+
+        // Person returns while agent is still running.
+        tick(
+            &mut tracker,
+            1_600,
+            Some((SegmentKind::Active, 1_600)),
+            Some(&project),
+            true,
+        );
+
+        let finished = tracker.flush(1_600).expect("session closes");
+        assert_eq!(finished.started_at, iso8601(1_000));
+        assert_eq!(finished.stopped_at, iso8601(1_600));
+        // The idle gap from 1_100 to 1_600 had agent coverage, so only the
+        // pre-agent portion (1_100–1_300 = 200 s) is trimmed idle.
+        assert_eq!(finished.idle_seconds, 200);
     }
 
     #[test]
