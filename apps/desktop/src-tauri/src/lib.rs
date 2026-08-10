@@ -366,12 +366,10 @@ struct OrganizationOverview {
 async fn reserve_extension_namespace_capacity(
     dir: &Path,
     target: &spool::EvidenceIdentity,
-) -> ApiResult<Option<browser::ExtensionNamespaceReservation>> {
-    let Some(reservation) = browser::request_extension_namespace_reservation(dir, target)? else {
-        return Ok(None);
-    };
+) -> ApiResult<browser::ExtensionNamespaceReservation> {
+    let reservation = browser::request_extension_namespace_reservation(dir, target)?;
     await_extension_namespace_reservation(dir, &reservation, EXTENSION_RESERVATION_WAIT).await?;
-    Ok(Some(reservation))
+    Ok(reservation)
 }
 
 async fn await_extension_namespace_reservation(
@@ -415,15 +413,20 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
         .await?;
     let target_identity = spool::EvidenceIdentity::new(&current_identity.account_id, &target.id)
         .ok_or_else(|| BridgeError::unknown("Could not identify the destination workspace."))?;
-    spool::ensure_identity_namespace_capacity(&target_identity)
+    let desktop_reservation = spool::reserve_identity_namespace(&target_identity)
         .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
     let browser_dir = state.monitor.browser_dir();
-    let extension_reservation = reserve_extension_namespace_capacity(&browser_dir, &target_identity).await?;
+    let extension_reservation = match reserve_extension_namespace_capacity(&browser_dir, &target_identity).await {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            let _ = spool::release_identity_namespace_reservation(&desktop_reservation);
+            return Err(error);
+        }
+    };
     let previous = state.active_identity.lock().await.clone();
     if let Err(error) = state.deactivate_identity().await {
-        if let Some(reservation) = extension_reservation.as_ref() {
-            let _ = browser::release_extension_namespace_reservation(&browser_dir, reservation);
-        }
+        let _ = browser::release_extension_namespace_reservation(&browser_dir, &extension_reservation);
+        let _ = spool::release_identity_namespace_reservation(&desktop_reservation);
         return Err(error);
     }
     if let Err(error) = state
@@ -431,9 +434,8 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
         .join_organization(&access_token, input.invite_code.trim(), &target.id)
         .await
     {
-        if let Some(reservation) = extension_reservation.as_ref() {
-            let _ = browser::release_extension_namespace_reservation(&browser_dir, reservation);
-        }
+        let _ = browser::release_extension_namespace_reservation(&browser_dir, &extension_reservation);
+        let _ = spool::release_identity_namespace_reservation(&desktop_reservation);
         if let Some(identity) = previous {
             let _ = state.bind_identity(identity).await;
             let _ = state.enable_active_collection().await;
@@ -1204,8 +1206,7 @@ mod tests {
         let target = spool::EvidenceIdentity::new("account-one", "organization-next")
             .expect("target identity is valid");
         let reservation = browser::request_extension_namespace_reservation(&dir, &target)
-            .expect("reservation request records")
-            .expect("connected extension requires a reservation");
+            .expect("reservation request records");
 
         let error = await_extension_namespace_reservation(&dir, &reservation, Duration::ZERO)
             .await
@@ -1218,6 +1219,25 @@ mod tests {
                 .action,
             browser::ExtensionNamespaceReservationAction::Release,
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_extension_handshake_blocks_the_move_before_reservation() {
+        let dir = std::env::temp_dir().join(format!(
+            "clock-in-extension-reservation-missing-handshake-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        browser::enable_collection(&dir, "account-one").expect("collection enables");
+        let target = spool::EvidenceIdentity::new("account-one", "organization-next")
+            .expect("target identity is valid");
+
+        let error = browser::request_extension_namespace_reservation(&dir, &target)
+            .expect_err("a missing handshake blocks the move");
+
+        assert_eq!(error.kind, ErrorKind::Conflict);
+        assert!(browser::pending_extension_namespace_reservation(&dir).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

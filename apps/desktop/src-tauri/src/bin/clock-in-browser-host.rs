@@ -1031,8 +1031,7 @@ mod tests {
         let target = spool::EvidenceIdentity::new("u1", "organization-next")
             .expect("target identity is valid");
         let reservation = browser::request_extension_namespace_reservation(&dir, &target)
-            .expect("reservation request records")
-            .expect("connected extension requires a reservation");
+            .expect("reservation request records");
         let mut out = Vec::new();
 
         dispatch(br#"{"type":"get-collection-state"}"#, &paths, &mut out)
