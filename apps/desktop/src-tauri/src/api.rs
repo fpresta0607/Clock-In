@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::monitor::SegmentRecord;
 use crate::recovery::{PendingStop, RunningTimer, StartIntent};
-use crate::spool::SpoolEvent;
+use crate::spool::{EvidenceIdentity, SpoolEvent};
 
 /// Matches the `BridgeErrorKind` union the React bridge narrows on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +141,7 @@ struct MeUser {
     id: String,
     email: String,
     name: String,
+    organization_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -605,6 +606,27 @@ impl ApiClient {
             email: body.user.email,
             name: body.user.name,
         })
+    }
+
+    pub async fn me_with_identity(
+        &self,
+        access_token: &str,
+    ) -> ApiResult<(TimerUser, EvidenceIdentity)> {
+        let body: MeResponse = self.get_json(access_token, "/me").await?;
+        let identity = EvidenceIdentity::new(&body.user.id, &body.user.organization_id)
+            .ok_or_else(|| BridgeError::unknown("The account identity could not be read."))?;
+        Ok((
+            TimerUser {
+                id: body.user.id,
+                email: body.user.email,
+                name: body.user.name,
+            },
+            identity,
+        ))
+    }
+
+    pub async fn identity(&self, access_token: &str) -> ApiResult<EvidenceIdentity> {
+        self.me_with_identity(access_token).await.map(|(_, identity)| identity)
     }
 
     pub async fn projects(&self, access_token: &str) -> ApiResult<ProjectSelection> {

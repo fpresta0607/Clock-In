@@ -252,6 +252,8 @@ const COLLECTION_AUTHORIZATION_SECONDS: u64 = 10 * 60;
 #[serde(rename_all = "camelCase")]
 struct BrowserCollection {
     account_id: String,
+    #[serde(default)]
+    organization_id: String,
     collection_id: String,
     admission_id: String,
 }
@@ -292,6 +294,7 @@ fn read_collection(dir: &Path) -> Option<BrowserCollection> {
         serde_json::from_slice::<BrowserCollection>(&std::fs::read(collection_path(dir)).ok()?)
             .ok()?;
     (!collection.account_id.trim().is_empty()
+        && !collection.organization_id.trim().is_empty()
         && !collection.collection_id.trim().is_empty()
         && !collection.admission_id.trim().is_empty())
     .then_some(collection)
@@ -389,29 +392,37 @@ fn revoke_collection_authorization_locked(dir: &Path) -> io::Result<()> {
 }
 
 pub fn enable_collection(dir: &Path, account_id: &str) -> ApiResult<()> {
-    let account_id = account_id.trim();
-    if account_id.is_empty() {
+    let Some(identity) = spool::EvidenceIdentity::new(account_id, "legacy") else {
         return Err(BridgeError::new(
             crate::api::ErrorKind::Validation,
             "Could not identify the signed-in account.",
         ));
-    }
+    };
+    enable_collection_for_identity(dir, &identity)
+}
+
+pub fn enable_collection_for_identity(
+    dir: &Path,
+    identity: &spool::EvidenceIdentity,
+) -> ApiResult<()> {
     ensure_browser_dir(dir)
         .map_err(|_| BridgeError::unknown("Could not enable browser attribution."))?;
     let spool = browser_spool_path(dir);
     spool::with_lock(&spool, || {
         if !collection_is_revoked(dir) {
-            if let Some(collection) =
-                read_collection(dir).filter(|collection| collection.account_id == account_id)
+            if let Some(collection) = read_collection(dir).filter(|collection| {
+                collection.account_id == identity.account_id
+                    && collection.organization_id == identity.organization_id
+            })
             {
                 return authorize_collection_locked(dir, &collection);
             }
         }
         remove_if_exists(&collection_path(dir))?;
         remove_if_exists(&collection_authorization_path(dir))?;
-        discard_browser_evidence(dir)?;
         let collection = BrowserCollection {
-            account_id: account_id.to_string(),
+            account_id: identity.account_id.clone(),
+            organization_id: identity.organization_id.clone(),
             collection_id: next_collection_id(),
             admission_id: next_collection_id(),
         };
@@ -421,6 +432,23 @@ pub fn enable_collection(dir: &Path, account_id: &str) -> ApiResult<()> {
         remove_if_exists(&collection_revocation_path(dir))
     })
     .map_err(|_| BridgeError::unknown("Could not enable browser attribution."))
+}
+
+pub fn deactivate_collection(dir: &Path) -> ApiResult<()> {
+    ensure_browser_dir(dir)
+        .map_err(|_| BridgeError::unknown("Could not disable browser attribution."))?;
+    let spool = browser_spool_path(dir);
+    spool::with_lock(&spool, || {
+        revoke_collection_authorization_locked(dir)?;
+        write_if_changed_locked(&collection_revocation_path(dir), b"{}")?;
+        remove_if_exists(&collection_path(dir))?;
+        remove_if_exists(&dir.join("browser-rules.json"))?;
+        remove_if_exists(&dir.join("unmatched-tally.json"))?;
+        remove_if_exists(&dir.join("never-suggest.json"))?;
+        remove_if_exists(&tally_clear_path(dir))?;
+        Ok(())
+    })
+    .map_err(|_| BridgeError::unknown("Could not disable browser attribution."))
 }
 
 pub fn revoke_collection(dir: &Path) -> ApiResult<()> {
@@ -1500,23 +1528,26 @@ mod tests {
     }
 
     #[test]
-    fn collection_changes_discard_browser_evidence_and_disable_future_collection() {
+    fn matching_identity_reactivation_preserves_browser_evidence() {
         let dir = temp_dir("collection");
-        enable_collection(&dir, "user-one").expect("first account enables collection");
+        let identity = spool::EvidenceIdentity::new("user-one", "organization-one")
+            .expect("identity is valid");
+        enable_collection_for_identity(&dir, &identity).expect("collection enables");
         let first_id = collection_id(&dir).expect("collection id exists");
         let spool = dir.join("browser-spool.jsonl");
         spool::append_line(&spool, b"old evidence\n", 1).expect("spool writes");
         spool::append_line(&spool, b"older evidence\n", 1).expect("spool rotates");
-        std::fs::write(dir.join("unmatched-tally.json"), "old tally").expect("tally writes");
-
-        enable_collection(&dir, "user-two").expect("second account enables collection");
+        deactivate_collection(&dir).expect("collection deactivates");
+        enable_collection_for_identity(&dir, &identity).expect("collection reactivates");
         let second_id = collection_id(&dir).expect("new collection id exists");
         assert_ne!(first_id, second_id);
-        assert!(!dir.join("browser-spool.jsonl").exists());
-        assert!(spool::pending_spool_paths(&spool).expect("spool reads").is_empty());
-        assert!(!dir.join("unmatched-tally.json").exists());
+        assert!(dir.join("browser-spool.jsonl").exists());
+        assert_eq!(
+            spool::pending_spool_paths(&spool).expect("spool reads").len(),
+            2
+        );
 
-        disable_collection(&dir).expect("logout disables collection");
+        deactivate_collection(&dir).expect("logout deactivates collection");
         assert!(collection_id(&dir).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);

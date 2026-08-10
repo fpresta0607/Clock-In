@@ -21,7 +21,7 @@ use crate::monitor::{
     BrowserTracking, MonitorShared, PendingSuggestion, SegmentRecord,
 };
 use crate::recovery::RecoveryState;
-use crate::spool::{self, AgentEventKind, AgentSource, SpoolEvent};
+use crate::spool::{self, AgentEventKind, AgentSource, EvidenceIdentity, SpoolEvent};
 
 /// The server's batch bound for both upload routes.
 const UPLOAD_BATCH_SIZE: usize = 500;
@@ -36,6 +36,7 @@ pub async fn upload_loop(
     segments_path: PathBuf,
     agent_path: PathBuf,
     browser_dir: PathBuf,
+    identity: EvidenceIdentity,
     recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
     upload_now: Arc<Notify>,
 ) {
@@ -54,6 +55,7 @@ pub async fn upload_loop(
             &agent_path,
             &browser_dir,
             &browser_path,
+            &identity,
             &recovery,
         )
         .await;
@@ -69,30 +71,36 @@ async fn upload_once(
     agent_path: &Path,
     browser_dir: &Path,
     browser_path: &Path,
+    identity: &EvidenceIdentity,
     recovery: &Arc<tokio::sync::Mutex<RecoveryState>>,
 ) {
     let Some(session) = crate::read_session_token() else {
-        if let Err(error) = crate::browser::revoke_collection(browser_dir) {
+        if let Err(error) = crate::browser::deactivate_collection(browser_dir) {
             eprintln!(
                 "clock-in: could not revoke browser attribution: {}",
                 error.message
             );
         }
-        let _ = crate::browser::discard_collection(browser_dir);
         return;
     };
     let token = match client.fetch_access_token(&session).await {
         Ok(token) => token,
         Err(error) => {
-            if error.kind == ErrorKind::Auth
-                && crate::browser::revoke_collection(browser_dir).is_ok()
-            {
+            if error.kind == ErrorKind::Auth {
+                let _ = crate::browser::deactivate_collection(browser_dir);
                 crate::clear_session_token();
-                let _ = crate::browser::discard_collection(browser_dir);
             }
             return;
         }
     };
+    match client.identity(&token).await {
+        Ok(current) if current == *identity => {}
+        Ok(_) => {
+            let _ = crate::browser::deactivate_collection(browser_dir);
+            return;
+        }
+        Err(_) => return,
+    }
     if let Err(error) = crate::browser::renew_collection_authorization(browser_dir) {
         eprintln!(
             "clock-in: could not renew browser attribution: {}",

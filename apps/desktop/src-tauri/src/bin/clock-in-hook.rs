@@ -38,7 +38,10 @@ fn run() -> Result<(), String> {
             HookStdin::Ignored => return Ok(()),
         },
     };
-    spool::append(&spool::default_spool_path(), &event)
+    let Some(path) = spool::active_agent_spool_path() else {
+        return Ok(());
+    };
+    spool::append(&path, &event)
         .map_err(|error| format!("could not write the spool: {error}"))
 }
 
