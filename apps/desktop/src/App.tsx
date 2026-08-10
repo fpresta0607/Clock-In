@@ -341,6 +341,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [statsRange, setStatsRange] = useState<StatsRange>("today");
   const [statsCalendarVersion, setStatsCalendarVersion] = useState(0);
+  const [workspaceVersion, setWorkspaceVersion] = useState(0);
   const [stats, setStats] = useState<MeStats | undefined>();
   const [statsError, setStatsError] = useState<string | undefined>();
   const [confirmedStops, setConfirmedStops] = useState(0);
@@ -454,8 +455,14 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     if (clearEmail) setEmail("");
   };
 
-  const applyAccountFields = (snapshot: Exclude<BootstrapSnapshot, { kind: "signed-out" }>): void => {
-    if (currentAccountId.current !== snapshot.user.id) clearAccountFields();
+  const applyAccountFields = (
+    snapshot: Exclude<BootstrapSnapshot, { kind: "signed-out" }>,
+    clearWorkspace = false,
+  ): void => {
+    if (clearWorkspace || currentAccountId.current !== snapshot.user.id) {
+      clearAccountFields();
+      setWorkspaceVersion((version) => version + 1);
+    }
     currentAccountId.current = snapshot.user.id;
   };
 
@@ -476,6 +483,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     isServiceCurrent: () => boolean,
     expectedEpoch?: number,
     establishAccount = false,
+    clearWorkspace = false,
   ): Promise<number | undefined> => {
     if (!isServiceCurrent() || (expectedEpoch !== undefined && accountEpoch.current !== expectedEpoch)) return undefined;
     if (snapshot.kind === "signed-out") {
@@ -488,7 +496,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     const snapshotEpoch = establishAccount ? invalidateAccount() : accountEpoch.current;
     const isSnapshotCurrent = (): boolean => isServiceCurrent() && accountEpoch.current === snapshotEpoch;
     if (!isSnapshotCurrent()) return undefined;
-    applyAccountFields(snapshot);
+    applyAccountFields(snapshot, clearWorkspace);
     dispatch({ type: "bootstrapped", snapshot });
     if (snapshot.kind !== "retry-local-start") return snapshotEpoch;
 
@@ -656,7 +664,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       },
     );
     return () => { active = false; };
-  }, [bridge, settingsOpen, confirmedStops, state.kind === "booting" || state.kind === "sign-in"]);
+  }, [bridge, settingsOpen, confirmedStops, workspaceVersion, state.kind === "booting" || state.kind === "sign-in"]);
 
   // The Today card is always on screen, so stats load with the account and
   // refresh on the same transitions as the board (a stopped timer changes
@@ -682,7 +690,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       },
     );
     return () => { active = false; };
-  }, [bridge, statsRange, statsCalendarVersion, confirmedStops, state.kind === "idle", state.kind === "booting" || state.kind === "sign-in"]);
+  }, [bridge, statsRange, statsCalendarVersion, workspaceVersion, confirmedStops, state.kind === "idle", state.kind === "booting" || state.kind === "sign-in"]);
 
   // Monitor status poll: fires on every state change (so a sign-in, start, or
   // stop refreshes it immediately, and a fresh account epoch is captured after
@@ -724,7 +732,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     poll();
     const timer = window.setInterval(poll, MONITOR_POLL_MS);
     return () => { active = false; window.clearInterval(timer); };
-  }, [bridge, state]);
+  }, [bridge, state, workspaceVersion]);
 
   // Settings load with the account, not just with the overlay: the first-run
   // flow keys off `onboarded`, so a fresh install must know before the main
@@ -748,7 +756,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       },
     );
     return () => { active = false; };
-  }, [bridge, state.kind === "booting" || state.kind === "sign-in"]);
+  }, [bridge, workspaceVersion, state.kind === "booting" || state.kind === "sign-in"]);
 
   const onboardingActive = settings !== undefined
     && !settings.onboarded
@@ -800,7 +808,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       if (isRequestCurrent()) setMappings(result);
     }, fail);
     return () => { active = false; };
-  }, [bridge, settingsOpen]);
+  }, [bridge, settingsOpen, workspaceVersion]);
 
   // The settings overlay closes on Escape, like the web app's help dialog.
   useEffect(() => {
@@ -1374,6 +1382,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     try {
       const result = await service.orgJoin(joinCode.trim());
       if (isRequestCurrent()) {
+        const snapshot = await service.bootstrap();
+        if (!isRequestCurrent()) return;
+        const workspaceEpoch = await applySnapshot(snapshot, service, () => isCurrent(service, generation), epoch, true, true);
+        if (workspaceEpoch === undefined || !isCurrent(service, generation, workspaceEpoch)) return;
         setOverview(result);
         setJoinCode("");
       }

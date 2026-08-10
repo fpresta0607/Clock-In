@@ -246,6 +246,16 @@ export class DrizzleProjectRepository implements ProjectRepository {
       throw new AppError("forbidden", "Only workspace admins can change projects.");
     }
     return this.db.transaction(async (tx) => {
+      const liveMembers = await tx.execute(sql`
+        select ${users.organizationId} as organization_id, ${users.role} as role
+        from ${users}
+        where ${users.id} = ${subject.userId}
+        for update
+      `) as unknown as Array<{ organization_id: string; role: "admin" | "member" }>;
+      const liveMember = liveMembers[0];
+      if (liveMember?.organization_id !== subject.organizationId || liveMember.role !== "admin") {
+        throw new AppError("forbidden", "Only workspace admins can change projects.");
+      }
       const targetRows = await tx
         .select({
           id: projects.id,
@@ -1120,22 +1130,36 @@ export class DrizzleReportRepository implements ReportRepository {
     }));
   }
 
-  private async snapshot<T>(callback: (db: Pick<DatabaseConnection["db"], "select">) => Promise<T>): Promise<T> {
+  private async snapshot<T>(
+    subject: AuthenticatedSubject,
+    callback: (db: Pick<DatabaseConnection["db"], "select">) => Promise<T>,
+  ): Promise<T> {
     return this.db.transaction(
-      async (transaction) => callback(transaction),
-      { isolationLevel: "repeatable read", accessMode: "read only" },
+      async (transaction) => {
+        const liveMembers = await transaction.execute(sql`
+          select ${users.organizationId} as organization_id
+          from ${users}
+          where ${users.id} = ${subject.userId}
+          for update
+        `) as unknown as Array<{ organization_id: string }>;
+        if (liveMembers[0]?.organization_id !== subject.organizationId) {
+          throw new AppError("forbidden", "Workspace access has changed.");
+        }
+        return callback(transaction);
+      },
+      { isolationLevel: "repeatable read" },
     );
   }
 
   public readPageForOrganization(subject: AuthenticatedSubject, query: ReportQuery, options: ReportPageOptions): Promise<ReportPageRead> {
-    return this.snapshot(async (db) => ({
+    return this.snapshot(subject, async (db) => ({
       summary: await this.summaryFor(db, subject, query),
       rows: await this.rowsFor(db, subject, query, options),
     }));
   }
 
   public readExportForOrganization(subject: AuthenticatedSubject, query: ReportQuery, maxRows: number): Promise<ReportExportRead> {
-    return this.snapshot(async (db) => {
+    return this.snapshot(subject, async (db) => {
       const summary = await this.summaryFor(db, subject, query);
       const totalRows = typeof summary.totalRows === "bigint"
         ? summary.totalRows
