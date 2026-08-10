@@ -39,11 +39,12 @@ export interface AccountStore {
    */
   resolve(identity: AuthIdentity, inviteCode?: string, workspaceName?: string): Promise<AuthenticatedUser>;
   findOrganization(organizationId: string, subject?: AuthenticatedSubject): Promise<OrganizationRecord | null>;
+  previewOrganizationJoin?(subject: AuthenticatedSubject, inviteCode: string): Promise<OrganizationRecord>;
   /**
    * Moves an existing account into the organization an invite code names, for
    * someone who signed up before they were given one.
    */
-  joinOrganization(subject: AuthenticatedSubject, inviteCode: string): Promise<AuthenticatedUser>;
+  joinOrganization(subject: AuthenticatedSubject, inviteCode: string, expectedOrganizationId?: string): Promise<AuthenticatedUser>;
   /**
    * Lets one active member explicitly bootstrap an ownerless legacy workspace.
    * Production stores make this a tenant-scoped atomic claim; test stores may

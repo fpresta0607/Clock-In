@@ -49,8 +49,21 @@ integration(integrationDescription, () => {
 
   afterAll(async () => {
     if (disposable === undefined) return;
-    if (preBackfillMigrations !== undefined) await rm(preBackfillMigrations, { recursive: true, force: true });
-    await disposable.cleanup();
+    let directoryError: unknown;
+    let cleanupError: unknown;
+    try {
+      if (preBackfillMigrations !== undefined) await rm(preBackfillMigrations, { recursive: true, force: true });
+    } catch (error) {
+      directoryError = error;
+    } finally {
+      try {
+        await disposable.cleanup();
+      } catch (error) {
+        cleanupError = error;
+      }
+    }
+    if (directoryError !== undefined) throw directoryError;
+    if (cleanupError !== undefined) throw cleanupError;
   });
 
   it("backfills legacy defaults and memberships without assigning an arbitrary administrator", async () => {

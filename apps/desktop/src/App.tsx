@@ -371,6 +371,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   /// The browser key currently repairing/connecting, and per-browser action
   /// errors shown as one sentence inside the card.
   const [browserBusy, setBrowserBusy] = useState<string | undefined>();
+  const [browserCaptureBusy, setBrowserCaptureBusy] = useState(false);
   const [browserErrors, setBrowserErrors] = useState<Readonly<Record<string, string>>>({});
   /// Local site tally from `suggestionsList`; answered origins are removed
   /// locally so the next entry shows on the next poll.
@@ -451,6 +452,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setOnboardingBusy(false);
     setOnboardingError(undefined);
     setBrowserBusy(undefined);
+    setBrowserCaptureBusy(false);
     setBrowserErrors({});
     setSuggestions([]);
     setAnsweredOrigins([]);
@@ -1403,6 +1405,42 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     }
   };
 
+  const retryBrowserSync = async (): Promise<void> => {
+    if (browserCaptureBusy) return;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
+    setBrowserCaptureBusy(true);
+    try {
+      await service.offlineSyncRetry?.();
+      const status = await service.monitorStatus();
+      if (isRequestCurrent()) setMonitorStatus(status);
+    } catch (error: unknown) {
+      if (isRequestCurrent()) setSettingsError(bridgeError(error).message);
+    } finally {
+      if (isRequestCurrent()) setBrowserCaptureBusy(false);
+    }
+  };
+
+  const resumeBrowserCapture = async (): Promise<void> => {
+    if (browserCaptureBusy) return;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
+    setBrowserCaptureBusy(true);
+    try {
+      await service.browserCaptureResume?.();
+      const status = await service.monitorStatus();
+      if (isRequestCurrent()) setMonitorStatus(status);
+    } catch (error: unknown) {
+      if (isRequestCurrent()) setSettingsError(bridgeError(error).message);
+    } finally {
+      if (isRequestCurrent()) setBrowserCaptureBusy(false);
+    }
+  };
+
   const joinWorkspace = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     if (joinBusy) return;
@@ -1829,7 +1867,21 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                 </div>
 
                 {monitorStatus !== undefined && monitorStatus.browsers.length > 0 && (
-                  <div className="browsers-setup">
+                <div className="browsers-setup">
+                  {monitorStatus?.browserCapturePaused && (
+                    <div className="sync-banner" role="status">
+                      <span>Browser tracking paused because Clock-In needs to sync saved activity.</span>
+                      <button type="button" disabled={browserCaptureBusy} onClick={() => void retryBrowserSync()}>
+                        {browserCaptureBusy ? "Retrying…" : "Retry sync"}
+                      </button>
+                      <button type="button" className="outline-button" disabled={browserCaptureBusy} onClick={() => void resumeBrowserCapture()}>
+                        Resume tracking
+                      </button>
+                      <button type="button" className="outline-button" disabled={browserCaptureBusy} onClick={() => setSettingsError(undefined)}>
+                        Stay paused
+                      </button>
+                    </div>
+                  )}
                     <h3>Browsers</h3>
                     <div className="browser-list">
                       {monitorStatus.browsers.map((health) => (

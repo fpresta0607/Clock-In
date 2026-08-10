@@ -194,6 +194,26 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
 
   app.use("/organization", authenticate);
   app.use("/organization/*", authenticate);
+  app.post("/organization/join-preview", async (context) => {
+    if (dependencies.accounts.previewOrganizationJoin === undefined) {
+      throw new AppError("internal_error", "Workspace preflight is unavailable.");
+    }
+    let body: unknown;
+    try {
+      body = await context.req.json();
+    } catch {
+      throw new AppError("validation_error", "Invalid request body.");
+    }
+    const input = joinOrganizationRequestSchema.safeParse(body);
+    if (!input.success) throw new AppError("validation_error", "Invalid request body.");
+    const normalized = normalizeInviteCode(input.data.inviteCode);
+    if (normalized === null) throw new AppError("validation_error", "That invite code is not in the right format.");
+    const organization = await dependencies.accounts.previewOrganizationJoin(
+      getAuthenticatedSubject(context),
+      normalized,
+    );
+    return context.json(organizationResponseSchema.parse({ organization }));
+  });
   app.post("/organization/join", async (context) => {
     let body: unknown;
     try {
@@ -205,7 +225,11 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
     if (!input.success) throw new AppError("validation_error", "Invalid request body.");
     const normalized = normalizeInviteCode(input.data.inviteCode);
     if (normalized === null) throw new AppError("validation_error", "That invite code is not in the right format.");
-    const user = await dependencies.accounts.joinOrganization(getAuthenticatedSubject(context), normalized);
+    const user = await dependencies.accounts.joinOrganization(
+      getAuthenticatedSubject(context),
+      normalized,
+      input.data.expectedOrganizationId,
+    );
     return context.json(meResponseSchema.parse({ user }));
   });
   app.get("/organization", async (context) => {

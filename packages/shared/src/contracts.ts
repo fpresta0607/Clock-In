@@ -49,7 +49,7 @@ export const provisionAccountRequestSchema = z
 
 /** Sent by an existing account that wants to move into a teammate's workspace. */
 export const joinOrganizationRequestSchema = z
-  .object({ inviteCode: z.string().min(1) })
+  .object({ inviteCode: z.string().min(1), expectedOrganizationId: idSchema.optional() })
   .strict();
 
 export const leaderboardFiltersSchema = z

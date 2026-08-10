@@ -181,15 +181,29 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
             }
             write_collection_state(writer, &paths)
         }
+        Some("capture-paused") => {
+            if let Some(collection_id) = message_collection_id(message.get("collectionId")) {
+                if let Err(error) = browser::record_capture_paused(&paths.dir, collection_id) {
+                    eprintln!("clock-in-browser-host: could not record browser backpressure: {error}");
+                }
+            }
+            write_collection_state(writer, &paths)
+        }
         // Unknown message types are ignored.
         _ => Ok(()),
     }
 }
 
 fn collection_state(paths: &HostPaths) -> serde_json::Value {
+    let _ = browser::consume_capture_resume(&paths.dir);
     match (admitted_collection_id(paths), browser::admitted_collection_namespace(&paths.dir)) {
         (Some(collection_id), Some(namespace)) => {
-            serde_json::json!({ "collectionEnabled": true, "collectionId": collection_id, "collectionNamespace": namespace })
+            serde_json::json!({
+                "collectionEnabled": true,
+                "collectionId": collection_id,
+                "collectionNamespace": namespace,
+                "capturePaused": browser::capture_is_paused(&paths.dir),
+            })
         }
         (None, _) => serde_json::json!({ "collectionEnabled": false }),
         _ => serde_json::json!({ "collectionEnabled": false }),

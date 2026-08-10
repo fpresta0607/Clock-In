@@ -1150,6 +1150,7 @@ pub struct MonitorStatus {
     pub last_upload_at: Option<String>,
     pub segment_backlog: u32,
     pub agent_backlog: u32,
+    pub browser_capture_paused: bool,
     pub hooks: Vec<HookRegistration>,
     /// Per-browser extension health, for the setup cards and settings badges.
     pub browsers: Vec<crate::browser::BrowserHealth>,
@@ -1187,6 +1188,8 @@ pub struct MonitorConfig {
     pub recovery_path: PathBuf,
 }
 
+type InvalidSessionHandler = Arc<dyn Fn() + Send + Sync>;
+
 struct MonitorTasks {
     /// No poll task on non-Windows builds (no `ActivitySource` ships there);
     /// the upload task still drains the agent spool.
@@ -1212,6 +1215,7 @@ pub struct Monitor {
     identity: Mutex<Option<spool::EvidenceIdentity>>,
     recording: Arc<AtomicBool>,
     identity_invalidated: Arc<AtomicBool>,
+    invalid_session_handler: Arc<Mutex<Option<InvalidSessionHandler>>>,
     client: ApiClient,
     recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
     // Read only by the Windows-gated poll/auto-stop path today.
@@ -1246,6 +1250,7 @@ impl Monitor {
             identity: Mutex::new(None),
             recording: Arc::new(AtomicBool::new(false)),
             identity_invalidated: Arc::new(AtomicBool::new(false)),
+            invalid_session_handler: Arc::new(Mutex::new(None)),
             client: config.client,
             recovery: config.recovery,
             recovery_path: Mutex::new(config.recovery_path),
@@ -1303,6 +1308,7 @@ impl Monitor {
             Arc::clone(&self.upload_now),
             Arc::clone(&self.recording),
             Arc::clone(&self.identity_invalidated),
+            Arc::clone(&self.invalid_session_handler),
         ));
         *guard = Some(MonitorTasks { poll, upload });
     }
@@ -1364,6 +1370,10 @@ impl Monitor {
 
     pub fn identity_invalidated(&self) -> bool {
         self.identity_invalidated.load(Ordering::SeqCst)
+    }
+
+    pub fn set_invalid_session_handler(&self, handler: InvalidSessionHandler) {
+        *lock(&self.invalid_session_handler) = Some(handler);
     }
 
     /// Starts the tasks when the setting is on; called after a successful
@@ -1511,6 +1521,7 @@ impl Monitor {
             last_upload_at: shared.last_upload_at.clone(),
             segment_backlog: active_identity.then(|| count_lines(&paths.segments_path)).unwrap_or(0),
             agent_backlog: active_identity.then(|| count_lines(&paths.agent_path)).unwrap_or(0),
+            browser_capture_paused: active_identity && crate::browser::capture_is_paused(&paths.browser_dir),
             hooks: detect_hooks(&default_hook_probes()),
             browsers: crate::browser::health_all(&paths.browser_dir),
             pending_suggestion: shared.agent.suggestion.clone(),

@@ -42,6 +42,7 @@ pub async fn upload_loop(
     upload_now: Arc<Notify>,
     recording: Arc<AtomicBool>,
     identity_invalidated: Arc<AtomicBool>,
+    invalid_session_handler: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 ) {
     let browser_path = browser_dir.join("browser-spool.jsonl");
     let mut tick = tokio::time::interval(Duration::from_secs(UPLOAD_INTERVAL_SECONDS));
@@ -65,6 +66,7 @@ pub async fn upload_loop(
             &recovery,
             &recording,
             &identity_invalidated,
+            &invalid_session_handler,
         )
         .await;
     }
@@ -83,6 +85,7 @@ async fn upload_once(
     recovery: &Arc<tokio::sync::Mutex<RecoveryState>>,
     recording: &Arc<AtomicBool>,
     identity_invalidated: &Arc<AtomicBool>,
+    invalid_session_handler: &Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 ) {
     let Some(session) = crate::read_session_token() else {
         if let Err(error) = crate::browser::deactivate_collection(browser_dir) {
@@ -99,7 +102,7 @@ async fn upload_once(
             if error.kind == ErrorKind::Auth {
                 let _ = crate::browser::deactivate_collection(browser_dir);
                 crate::clear_session_token();
-                deactivate_invalid_identity(shared, recording, identity_invalidated);
+                deactivate_invalid_identity(shared, recording, identity_invalidated, invalid_session_handler);
             }
             return;
         }
@@ -108,14 +111,14 @@ async fn upload_once(
         Ok(current) if current == *identity => {}
         Ok(_) => {
             let _ = crate::browser::deactivate_collection(browser_dir);
-            deactivate_invalid_identity(shared, recording, identity_invalidated);
+            deactivate_invalid_identity(shared, recording, identity_invalidated, invalid_session_handler);
             return;
         }
         Err(error) => {
             if error.kind == ErrorKind::Auth {
                 let _ = crate::browser::deactivate_collection(browser_dir);
                 crate::clear_session_token();
-                deactivate_invalid_identity(shared, recording, identity_invalidated);
+                deactivate_invalid_identity(shared, recording, identity_invalidated, invalid_session_handler);
             }
             return;
         }
@@ -163,6 +166,7 @@ fn deactivate_invalid_identity(
     shared: &Arc<Mutex<MonitorShared>>,
     recording: &Arc<AtomicBool>,
     identity_invalidated: &Arc<AtomicBool>,
+    invalid_session_handler: &Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 ) {
     recording.store(false, Ordering::SeqCst);
     identity_invalidated.store(true, Ordering::SeqCst);
@@ -173,6 +177,11 @@ fn deactivate_invalid_identity(
     shared.browser = BrowserTracking::default();
     shared.last_upload_at = None;
     shared.clock_change_at = None;
+    let handler = lock(invalid_session_handler).clone();
+    drop(shared);
+    if let Some(handler) = handler {
+        handler();
+    }
 }
 
 /// Uploads every buffered segment in batches, then truncates the acked

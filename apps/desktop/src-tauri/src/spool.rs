@@ -1421,6 +1421,23 @@ mod tests {
     }
 
     #[test]
+    fn a_retained_identity_remains_available_when_pending_namespaces_fill_the_cap() {
+        let dir = temp_dir("namespace-return");
+        for index in 0..MAX_RETAINED_NAMESPACES {
+            let namespace = dir.join(format!("account-{index}")).join(format!("organization-{index}"));
+            std::fs::create_dir_all(&namespace).expect("namespace creates");
+            append(&namespace.join("agent-spool.jsonl"), &event(&format!("pending-{index}")))
+                .expect("pending evidence writes");
+        }
+        let retained = EvidenceIdentity::new("account-3", "organization-3").expect("identity is valid");
+
+        reserve_namespace_slot_at(&dir, Some(&retained)).expect("retained namespace remains available");
+
+        assert!(dir.join("account-3").join("organization-3").join("agent-spool.jsonl").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_partial_tail_is_quarantined_before_the_next_append() {
         let dir = temp_dir("partial-append");
         let path = dir.join("agent-spool.jsonl");
