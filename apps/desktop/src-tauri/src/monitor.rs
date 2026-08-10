@@ -1193,6 +1193,13 @@ struct MonitorTasks {
     upload: tokio::task::JoinHandle<()>,
 }
 
+#[derive(Clone)]
+struct MonitorPaths {
+    segments_path: PathBuf,
+    agent_path: PathBuf,
+    browser_dir: PathBuf,
+}
+
 /// Owns the monitor's tasks and shared state. Constructed at app start; the
 /// tasks run only while monitoring is enabled and a session is signed in.
 pub struct Monitor {
@@ -1200,14 +1207,13 @@ pub struct Monitor {
     #[cfg_attr(not(windows), allow(dead_code))]
     events: Arc<PlatformEvents>,
     settings_path: PathBuf,
-    segments_path: PathBuf,
-    agent_path: PathBuf,
-    browser_dir: PathBuf,
+    paths: Mutex<MonitorPaths>,
+    identity: Mutex<Option<spool::EvidenceIdentity>>,
     client: ApiClient,
     recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
     // Read only by the Windows-gated poll/auto-stop path today.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    recovery_path: PathBuf,
+    recovery_path: Mutex<PathBuf>,
     tasks: tokio::sync::Mutex<Option<MonitorTasks>>,
     upload_now: Arc<Notify>,
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -1229,12 +1235,15 @@ impl Monitor {
             })),
             events: Arc::new(PlatformEvents::new()),
             settings_path: config.settings_path,
-            segments_path: config.segments_path,
-            agent_path: config.agent_path,
-            browser_dir: config.browser_dir,
+            paths: Mutex::new(MonitorPaths {
+                segments_path: config.segments_path,
+                agent_path: config.agent_path,
+                browser_dir: config.browser_dir,
+            }),
+            identity: Mutex::new(None),
             client: config.client,
             recovery: config.recovery,
-            recovery_path: config.recovery_path,
+            recovery_path: Mutex::new(config.recovery_path),
             tasks: tokio::sync::Mutex::new(None),
             upload_now: Arc::new(Notify::new()),
             event_thread_once: std::sync::Once::new(),
@@ -1255,6 +1264,10 @@ impl Monitor {
         if guard.is_some() {
             return;
         }
+        let Some(identity) = lock(&self.identity).clone() else {
+            return;
+        };
+        let paths = lock(&self.paths).clone();
 
         #[cfg(windows)]
         let poll = {
@@ -1264,9 +1277,9 @@ impl Monitor {
             Some(tokio::spawn(poll_loop(
                 Arc::clone(&self.shared),
                 Arc::clone(&self.events),
-                self.segments_path.clone(),
+                paths.segments_path.clone(),
                 Arc::clone(&self.recovery),
-                self.recovery_path.clone(),
+                lock(&self.recovery_path).clone(),
                 Arc::clone(&self.upload_now),
             )))
         };
@@ -1276,9 +1289,10 @@ impl Monitor {
         let upload = tokio::spawn(crate::uploader::upload_loop(
             Arc::clone(&self.shared),
             self.client.clone(),
-            self.segments_path.clone(),
-            self.agent_path.clone(),
-            self.browser_dir.clone(),
+            paths.segments_path,
+            paths.agent_path,
+            paths.browser_dir,
+            identity,
             Arc::clone(&self.recovery),
             Arc::clone(&self.upload_now),
         ));
@@ -1301,8 +1315,39 @@ impl Monitor {
             (shared.builder.flush(unix_now()), device_id)
         };
         if let Some(segment) = closed {
-            append_segment_line(&self.segments_path, &segment, &device_id);
+            if lock(&self.identity).is_some() {
+                append_segment_line(&lock(&self.paths).segments_path, &segment, &device_id);
+            }
         }
+    }
+
+    pub async fn activate_identity(&self, identity: spool::EvidenceIdentity) {
+        self.stop().await;
+        let evidence = spool::evidence_paths(&identity);
+        *lock(&self.paths) = MonitorPaths {
+            segments_path: evidence.segments_path,
+            agent_path: evidence.agent_path,
+            browser_dir: evidence.browser_dir,
+        };
+        *lock(&self.recovery_path) = evidence.recovery_path;
+        *lock(&self.identity) = Some(identity);
+        self.clear_identity_state();
+    }
+
+    pub async fn deactivate_identity(&self) {
+        self.stop().await;
+        *lock(&self.identity) = None;
+        self.clear_identity_state();
+    }
+
+    fn clear_identity_state(&self) {
+        let mut shared = lock(&self.shared);
+        shared.builder = SegmentBuilder::new();
+        shared.mappings.clear();
+        shared.agent = AgentTracking::default();
+        shared.browser = BrowserTracking::default();
+        shared.last_upload_at = None;
+        shared.clock_change_at = None;
     }
 
     /// Starts the tasks when the setting is on; called after a successful
@@ -1351,7 +1396,7 @@ impl Monitor {
     /// when the `url_rule` set changed; the extension picks it up through the
     /// host. A failed write keeps the old file — stale rules beat none.
     pub fn cache_mappings(&self, mappings: Vec<PathMapping>) {
-        if let Err(error) = crate::browser::write_rules_file(&self.browser_dir, &mappings) {
+        if let Err(error) = crate::browser::write_rules_file(&self.browser_dir(), &mappings) {
             eprintln!("clock-in: could not write the browser rules file: {error}");
         }
         lock(&self.shared).mappings = mappings;
@@ -1364,7 +1409,7 @@ impl Monitor {
 
     /// Where the browser spool, rules file, tally, and handshake marker live.
     pub fn browser_dir(&self) -> PathBuf {
-        self.browser_dir.clone()
+        lock(&self.paths).browser_dir.clone()
     }
 
     /// Asks the upload task to run now instead of at the next 5-minute tick
@@ -1442,14 +1487,16 @@ impl Monitor {
             None => (None, None),
         };
 
+        let paths = lock(&self.paths).clone();
+        let active_identity = lock(&self.identity).is_some();
         MonitorStatus {
             enabled: shared.settings.enabled,
             running,
             last_upload_at: shared.last_upload_at.clone(),
-            segment_backlog: count_lines(&self.segments_path),
-            agent_backlog: count_lines(&self.agent_path),
+            segment_backlog: active_identity.then(|| count_lines(&paths.segments_path)).unwrap_or(0),
+            agent_backlog: active_identity.then(|| count_lines(&paths.agent_path)).unwrap_or(0),
             hooks: detect_hooks(&default_hook_probes()),
-            browsers: crate::browser::health_all(&self.browser_dir),
+            browsers: crate::browser::health_all(&paths.browser_dir),
             pending_suggestion: shared.agent.suggestion.clone(),
             agent_active,
             session_idle_seconds,

@@ -127,6 +127,7 @@ struct PendingRetryResult {
 
 struct Account {
     user: TimerUser,
+    identity: spool::EvidenceIdentity,
     projects: Vec<TimerProject>,
     selected_project_id: Option<String>,
 }
@@ -135,6 +136,7 @@ pub struct AppState {
     client: ApiClient,
     recovery: Arc<Mutex<RecoveryState>>,
     recovery_path: Mutex<PathBuf>,
+    active_identity: Mutex<Option<spool::EvidenceIdentity>>,
     monitor: monitor::Monitor,
     /// An update downloaded in the background, waiting to install on quit.
     /// Auto-update is silent end to end: a failed check or download leaves
@@ -169,12 +171,13 @@ impl AppState {
     }
 
     async fn load_account(&self, access_token: &str) -> ApiResult<Account> {
-        let (user, selection) = tokio::try_join!(
-            self.client.me(access_token),
+        let ((user, identity), selection) = tokio::try_join!(
+            self.client.me_with_identity(access_token),
             self.client.projects(access_token)
         )?;
         Ok(Account {
             user,
+            identity,
             projects: selection.projects,
             selected_project_id: selection.selected_project_id,
         })
@@ -192,9 +195,60 @@ impl AppState {
         Ok(())
     }
 
+    async fn bind_identity(&self, identity: spool::EvidenceIdentity) -> ApiResult<()> {
+        let previous = self.active_identity.lock().await.clone();
+        if previous.as_ref() == Some(&identity) {
+            return Ok(());
+        }
+        self.monitor.stop().await;
+        let active = spool::active_identity();
+        if previous.is_some() || active.as_ref() != Some(&identity) {
+            let browser_dir = active
+                .as_ref()
+                .map(spool::evidence_paths)
+                .map(|paths| paths.browser_dir)
+                .unwrap_or_else(|| self.monitor.browser_dir());
+            browser::deactivate_collection(&browser_dir)?;
+        }
+        spool::activate_identity(&identity)
+            .map_err(|_| BridgeError::unknown("Could not prepare offline evidence."))?;
+        let paths = spool::evidence_paths(&identity);
+        *self.recovery.lock().await = load_recovery_from_disk(&paths.recovery_path);
+        *self.recovery_path.lock().await = paths.recovery_path;
+        self.monitor.activate_identity(identity.clone()).await;
+        *self.active_identity.lock().await = Some(identity);
+        Ok(())
+    }
+
+    async fn deactivate_identity(&self) -> ApiResult<()> {
+        self.monitor.stop().await;
+        let active = spool::active_identity();
+        if self.active_identity.lock().await.take().is_some() || active.is_some() {
+            let browser_dir = active
+                .as_ref()
+                .map(spool::evidence_paths)
+                .map(|paths| paths.browser_dir)
+                .unwrap_or_else(|| self.monitor.browser_dir());
+            browser::deactivate_collection(&browser_dir)?;
+        }
+        spool::clear_active_identity()
+            .map_err(|_| BridgeError::unknown("Could not secure offline evidence."))?;
+        self.monitor.deactivate_identity().await;
+        *self.recovery.lock().await = RecoveryState::default();
+        Ok(())
+    }
+
+    async fn enable_active_collection(&self) -> ApiResult<()> {
+        let identity = self.active_identity.lock().await.clone().ok_or_else(|| {
+            BridgeError::unknown("Could not identify the signed-in account.")
+        })?;
+        browser::enable_collection_for_identity(&self.monitor.browser_dir(), &identity)
+    }
+
     /// Builds the snapshot the UI boots from, given a valid access token.
     async fn snapshot(&self, access_token: &str) -> ApiResult<Snapshot> {
         let account = self.load_account(access_token).await?;
+        self.bind_identity(account.identity.clone()).await?;
         let server_running = self.client.current_session(access_token).await?;
         let state = self.read_recovery().await;
         Ok(Snapshot::account(
@@ -218,51 +272,29 @@ async fn timer_bootstrap(state: State<'_, AppState>) -> ApiResult<Snapshot> {
         // No stored session, or the stored one no longer works: show sign-in
         // rather than an error the user cannot act on.
         Err(error) if error.kind == ErrorKind::Auth => {
-            state.monitor.stop().await;
-            browser::revoke_collection(&state.monitor.browser_dir())?;
+            state.deactivate_identity().await?;
             state.clear_session_token();
-            let _ = browser::discard_collection(&state.monitor.browser_dir());
             return Ok(Snapshot::signed_out());
         }
         Err(error) => return Err(error),
     };
     let snapshot = state.snapshot(&access_token).await?;
-    if let Snapshot::Account { user, .. } = &snapshot {
-        browser::enable_collection(&state.monitor.browser_dir(), &user.id)?;
-    }
+    state.enable_active_collection().await?;
     // A signed-in session is what starts the monitor: recording while signed
     // out would attribute this machine's evidence to whoever signs in next.
     state.monitor.ensure_running().await;
     Ok(snapshot)
 }
 
-fn store_session_before_enabling_collection(
-    store_session: impl FnOnce() -> ApiResult<()>,
-    enable_collection: impl FnOnce() -> ApiResult<()>,
-) -> ApiResult<()> {
-    store_session()?;
-    enable_collection()
-}
-
 #[tauri::command]
 async fn auth_login(state: State<'_, AppState>, input: LoginInput) -> ApiResult<Snapshot> {
-    state.monitor.stop().await;
-    browser::disable_collection(&state.monitor.browser_dir())?;
+    state.deactivate_identity().await?;
     state.clear_session_token();
     let session = state.client.sign_in(&input.email, &input.password).await?;
-    // A new sign-in must never inherit the previous account's timers.
-    state.write_recovery(RecoveryState::default()).await?;
     let access_token = state.client.fetch_access_token(&session).await?;
     let snapshot = state.snapshot(&access_token).await?;
-    store_session_before_enabling_collection(
-        || state.store_session_token(&session),
-        || {
-            if let Snapshot::Account { user, .. } = &snapshot {
-                browser::enable_collection(&state.monitor.browser_dir(), &user.id)?;
-            }
-            Ok(())
-        },
-    )?;
+    state.store_session_token(&session)?;
+    state.enable_active_collection().await?;
     state.monitor.ensure_running().await;
     Ok(snapshot)
 }
@@ -286,14 +318,12 @@ pub struct SignupInput {
 
 #[tauri::command]
 async fn auth_signup(state: State<'_, AppState>, input: SignupInput) -> ApiResult<Snapshot> {
-    state.monitor.stop().await;
-    browser::disable_collection(&state.monitor.browser_dir())?;
+    state.deactivate_identity().await?;
     state.clear_session_token();
     let session = state
         .client
         .sign_up(&input.email, &input.password, &input.name)
         .await?;
-    state.write_recovery(RecoveryState::default()).await?;
     let access_token = state.client.fetch_access_token(&session).await?;
 
     // Provision explicitly and first: any other authenticated call would create a
@@ -306,15 +336,8 @@ async fn auth_signup(state: State<'_, AppState>, input: SignupInput) -> ApiResul
     state.client.provision_account(&access_token, code).await?;
 
     let snapshot = state.snapshot(&access_token).await?;
-    store_session_before_enabling_collection(
-        || state.store_session_token(&session),
-        || {
-            if let Snapshot::Account { user, .. } = &snapshot {
-                browser::enable_collection(&state.monitor.browser_dir(), &user.id)?;
-            }
-            Ok(())
-        },
-    )?;
+    state.store_session_token(&session)?;
+    state.enable_active_collection().await?;
     state.monitor.ensure_running().await;
     Ok(snapshot)
 }
@@ -329,10 +352,23 @@ struct OrganizationOverview {
 #[tauri::command]
 async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<OrganizationOverview> {
     let access_token = state.access_token().await?;
-    state
+    let previous = state.active_identity.lock().await.clone();
+    state.deactivate_identity().await?;
+    if let Err(error) = state
         .client
         .join_organization(&access_token, input.invite_code.trim())
-        .await?;
+        .await
+    {
+        if let Some(identity) = previous {
+            let _ = state.bind_identity(identity).await;
+            let _ = state.enable_active_collection().await;
+            state.monitor.ensure_running().await;
+        }
+        return Err(error);
+    }
+    state.bind_identity(state.client.identity(&access_token).await?).await?;
+    state.enable_active_collection().await?;
+    state.monitor.ensure_running().await;
     // Return the new workspace so the window updates without a reload.
     let (organization, entries) = tokio::try_join!(
         state.client.organization(&access_token),
@@ -367,11 +403,9 @@ async fn org_overview(state: State<'_, AppState>) -> ApiResult<OrganizationOverv
 async fn auth_logout(state: State<'_, AppState>) -> ApiResult<()> {
     // Signing out stops the monitor: nothing is recorded while there is no
     // account the evidence could belong to.
-    browser::revoke_collection(&state.monitor.browser_dir())?;
-    state.monitor.stop().await;
+    state.deactivate_identity().await?;
     state.clear_session_token();
-    state.write_recovery(RecoveryState::default()).await?;
-    browser::discard_collection(&state.monitor.browser_dir())
+    Ok(())
 }
 
 #[tauri::command]
@@ -769,7 +803,7 @@ pub fn run() {
                 .unwrap_or_else(|| PathBuf::from("."));
             let client = ApiClient::new(auth_base_url(), api_base_url())
                 .map_err(|error| std::io::Error::other(error.message))?;
-            let recovery = Arc::new(Mutex::new(load_recovery_from_disk(&recovery_path)));
+            let recovery = Arc::new(Mutex::new(RecoveryState::default()));
 
             let monitor = monitor::Monitor::new(monitor::MonitorConfig {
                 client: client.clone(),
@@ -791,6 +825,7 @@ pub fn run() {
                 client,
                 recovery,
                 recovery_path: Mutex::new(recovery_path),
+                active_identity: Mutex::new(None),
                 monitor,
                 pending_update: std::sync::Mutex::new(None),
             });
@@ -878,6 +913,7 @@ mod tests {
                 email: "alex@example.com".to_string(),
                 name: "Alex Morgan".to_string(),
             },
+            identity: spool::EvidenceIdentity::new("u1", "o1").expect("identity is valid"),
             projects: vec![TimerProject {
                 id: "p1".to_string(),
                 name: "General Work".to_string(),

@@ -46,7 +46,9 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let paths = HostPaths::default();
-    browser::record_handshake(&paths.dir);
+    if let Some(active) = paths.current() {
+        browser::record_handshake(&active.dir);
+    }
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut reader = stdin.lock();
@@ -57,26 +59,41 @@ fn run() -> Result<(), String> {
 /// The three files the host touches, all beside the agent spool so the
 /// `CLOCK_IN_SPOOL` override relocates the whole set for tests and support
 /// setups.
+#[derive(Clone)]
 struct HostPaths {
     dir: PathBuf,
     spool: PathBuf,
     rules: PathBuf,
+    active: bool,
     #[cfg(test)]
     tally: PathBuf,
 }
 
 impl HostPaths {
     fn default() -> Self {
-        Self::in_dir(&spool::default_browser_dir())
+        Self::in_dir_with_active(&spool::default_browser_dir(), true)
     }
 
     fn in_dir(dir: &Path) -> Self {
+        Self::in_dir_with_active(dir, false)
+    }
+
+    fn in_dir_with_active(dir: &Path, active: bool) -> Self {
         Self {
             dir: dir.to_path_buf(),
             spool: dir.join("browser-spool.jsonl"),
             rules: dir.join("browser-rules.json"),
+            active,
             #[cfg(test)]
             tally: dir.join("unmatched-tally.json"),
+        }
+    }
+
+    fn current(&self) -> Option<Self> {
+        if self.active {
+            spool::active_browser_dir().map(|dir| Self::in_dir_with_active(&dir, true))
+        } else {
+            Some(self.clone())
         }
     }
 }
@@ -100,10 +117,13 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
     let Ok(message) = serde_json::from_slice::<serde_json::Value>(body) else {
         return Ok(());
     };
+    let Some(paths) = paths.current() else {
+        return Ok(());
+    };
     browser::record_handshake(&paths.dir);
     match message.get("type").and_then(|kind| kind.as_str()) {
         Some("get-rules") => {
-            let state = collection_state(paths);
+            let state = collection_state(&paths);
             let rules = if state["collectionEnabled"].as_bool().unwrap_or(false) {
                 load_rules(&paths.rules)
             } else {
@@ -122,24 +142,24 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
                     );
                     native_messaging::write_json(
                         writer,
-                        &rules_reply(collection_state(paths), Vec::new()),
+                        &rules_reply(collection_state(&paths), Vec::new()),
                     )
                 }
             }
         }
         Some("span-event") => {
-            match append_span_event(message.get("event"), message.get("collectionId"), paths) {
+            match append_span_event(message.get("event"), message.get("collectionId"), &paths) {
                 SpanAppendOutcome::Appended => {
-                    write_span_reply(writer, paths, "span-ack", message.get("event"))
+                    write_span_reply(writer, &paths, "span-ack", message.get("event"))
                 }
-                SpanAppendOutcome::Dropped => write_collection_state(writer, paths),
+                SpanAppendOutcome::Dropped => write_collection_state(writer, &paths),
                 SpanAppendOutcome::Rejected(error) => {
                     eprintln!("clock-in-browser-host: {error}");
-                    write_collection_state(writer, paths)
+                    write_collection_state(writer, &paths)
                 }
                 SpanAppendOutcome::Retry(error) => {
                     eprintln!("clock-in-browser-host: {error}");
-                    write_span_reply(writer, paths, "span-retry", message.get("event"))
+                    write_span_reply(writer, &paths, "span-retry", message.get("event"))
                 }
             }
         }
@@ -148,7 +168,7 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
                 message.get("entries"),
                 message.get("weekStart"),
                 message.get("collectionId"),
-                paths,
+                &paths,
             ) {
                 Ok(TallyOutcome::ClearRequested) => native_messaging::write_json(
                     writer,
@@ -159,7 +179,7 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
                     eprintln!("clock-in-browser-host: could not store the tally: {error}")
                 }
             }
-            write_collection_state(writer, paths)
+            write_collection_state(writer, &paths)
         }
         // Unknown message types are ignored.
         _ => Ok(()),

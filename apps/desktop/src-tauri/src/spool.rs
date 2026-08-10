@@ -30,8 +30,80 @@ pub const SPOOL_ENV_VAR: &str = "CLOCK_IN_SPOOL";
 
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
 const LOCK_WAIT_LIMIT: Duration = Duration::from_secs(5);
+const MAX_RETAINED_NAMESPACES: usize = 8;
 
 pub type SpoolResult<T> = Result<T, io::Error>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceIdentity {
+    pub account_id: String,
+    pub organization_id: String,
+}
+
+impl EvidenceIdentity {
+    pub fn new(account_id: impl AsRef<str>, organization_id: impl AsRef<str>) -> Option<Self> {
+        let account_id = account_id.as_ref().trim();
+        let organization_id = organization_id.as_ref().trim();
+        if !identity_component_is_valid(account_id) || !identity_component_is_valid(organization_id) {
+            return None;
+        }
+        Some(Self {
+            account_id: account_id.to_string(),
+            organization_id: organization_id.to_string(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvidencePaths {
+    pub agent_path: PathBuf,
+    pub segments_path: PathBuf,
+    pub browser_dir: PathBuf,
+    pub recovery_path: PathBuf,
+}
+
+pub fn evidence_paths(identity: &EvidenceIdentity) -> EvidencePaths {
+    let browser_dir = evidence_root()
+        .join(&identity.account_id)
+        .join(&identity.organization_id);
+    EvidencePaths {
+        agent_path: browser_dir.join("agent-spool.jsonl"),
+        segments_path: browser_dir.join("segments-spool.jsonl"),
+        recovery_path: browser_dir.join("recovery.json"),
+        browser_dir,
+    }
+}
+
+pub fn active_identity() -> Option<EvidenceIdentity> {
+    let bytes = std::fs::read(active_identity_path()).ok()?;
+    let identity = serde_json::from_slice::<EvidenceIdentity>(&bytes).ok()?;
+    EvidenceIdentity::new(&identity.account_id, &identity.organization_id)
+}
+
+pub fn activate_identity(identity: &EvidenceIdentity) -> SpoolResult<()> {
+    let paths = evidence_paths(identity);
+    std::fs::create_dir_all(&paths.browser_dir)?;
+    std::fs::write(paths.browser_dir.join(".last-active"), unix_seconds().to_string())?;
+    with_lock(&active_identity_path(), || {
+        let body = serde_json::to_vec(identity).map_err(io::Error::other)?;
+        rewrite(&active_identity_path(), &body)
+    })?;
+    prune_stale_namespaces(identity)
+}
+
+pub fn clear_active_identity() -> SpoolResult<()> {
+    std::fs::create_dir_all(default_browser_dir())?;
+    with_lock(&active_identity_path(), || remove_if_exists(&active_identity_path()))
+}
+
+pub fn active_agent_spool_path() -> Option<PathBuf> {
+    active_identity().map(|identity| evidence_paths(&identity).agent_path)
+}
+
+pub fn active_browser_dir() -> Option<PathBuf> {
+    active_identity().map(|identity| evidence_paths(&identity).browser_dir)
+}
 
 /// Agent CLI families. The canonical form is snake_case (what the API's
 /// `agent_source` enum expects); kebab-case aliases are accepted on input
@@ -433,6 +505,67 @@ pub fn default_browser_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+fn active_identity_path() -> PathBuf {
+    default_browser_dir().join("active-identity.json")
+}
+
+fn evidence_root() -> PathBuf {
+    default_browser_dir().join("evidence")
+}
+
+fn identity_component_is_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn prune_stale_namespaces(active: &EvidenceIdentity) -> SpoolResult<()> {
+    let root = evidence_root();
+    let active_dir = evidence_paths(active).browser_dir;
+    let mut candidates = Vec::new();
+    match std::fs::read_dir(&root) {
+        Ok(accounts) => {
+            for account in accounts {
+                let account = account?;
+                if !account.file_type()?.is_dir() {
+                    continue;
+                }
+                for organization in std::fs::read_dir(account.path())? {
+                    let organization = organization?;
+                    if !organization.file_type()?.is_dir() {
+                        continue;
+                    }
+                    let path = organization.path();
+                    if path == active_dir {
+                        continue;
+                    }
+                    let touched = std::fs::read_to_string(path.join(".last-active"))
+                        .ok()
+                        .and_then(|value| value.trim().parse::<u64>().ok())
+                        .or_else(|| {
+                            std::fs::metadata(&path)
+                                .ok()
+                                .and_then(|metadata| metadata.modified().ok())
+                                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                                .map(|duration| duration.as_secs())
+                        })
+                        .unwrap_or(0);
+                    candidates.push((touched, path));
+                }
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    candidates.sort_by_key(|(touched, _)| std::cmp::Reverse(*touched));
+    for (_, path) in candidates.into_iter().skip(MAX_RETAINED_NAMESPACES.saturating_sub(1)) {
+        std::fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 fn default_data_dir() -> PathBuf {
     std::env::var_os("APPDATA")
@@ -455,11 +588,14 @@ fn default_data_dir() -> PathBuf {
 /// The current time in the ISO-8601 form the hook contract expects, computed
 /// by hand so the hook binary needs no datetime dependency.
 pub fn now_iso8601() -> String {
-    let secs = SystemTime::now()
+    format_iso8601(unix_seconds())
+}
+
+fn unix_seconds() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    format_iso8601(secs)
+        .unwrap_or(0)
 }
 
 pub(crate) fn format_iso8601(unix_secs: u64) -> String {
@@ -589,16 +725,28 @@ fn next_generation_path_locked(path: &Path) -> SpoolResult<PathBuf> {
         Ok(value) => value
             .trim()
             .parse::<u64>()
-            .map_err(|_| io::Error::other("spool generation sequence is invalid"))?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+            .unwrap_or_else(|_| recovered_generation_sequence()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => recovered_generation_sequence(),
         Err(error) => return Err(error),
     };
     let next = sequence
         .max(highest_existing)
         .checked_add(1)
         .ok_or_else(|| io::Error::other("spool generation sequence is exhausted"))?;
-    std::fs::write(generation_sequence_path(path), next.to_string())?;
+    rewrite(&generation_sequence_path(path), next.to_string().as_bytes())?;
     Ok(path.with_extension(format!("generation-{next:020}.jsonl")))
+}
+
+fn recovered_generation_sequence() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| {
+            duration
+                .as_secs()
+                .saturating_mul(1_000_000_000)
+                .saturating_add(u64::from(duration.subsec_nanos()))
+        })
+        .unwrap_or(0)
 }
 
 fn generation_sequence_path(path: &Path) -> PathBuf {
@@ -1098,6 +1246,29 @@ mod tests {
             .pop()
             .expect("generation exists");
         assert_ne!(later_generation, first_generation);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupted_generation_sequence_recovers_without_reusing_a_generation() {
+        let dir = temp_dir("sequence-recovery");
+        let path = dir.join("agent-spool.jsonl");
+        append_line(&path, b"first\n", 1).expect("first append succeeds");
+        append_line(&path, b"second\n", 1).expect("first rotation succeeds");
+        std::fs::write(generation_sequence_path(&path), b"partial")
+            .expect("interrupted sequence writes");
+        append_line(&path, b"third\n", 1).expect("rotation recovers");
+
+        let pending = pending_spool_paths(&path).expect("generations enumerate");
+        assert_eq!(pending.len(), 3);
+        assert_eq!(
+            pending
+                .iter()
+                .flat_map(|candidate| spool_lines(candidate))
+                .collect::<Vec<_>>(),
+            vec!["first", "second", "third"]
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
