@@ -491,6 +491,16 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     dispatch({ type: "auth-failed", message });
   };
 
+  const currentFailure = (error: unknown, current: () => boolean) => {
+    if (!current()) return undefined;
+    const problem = bridgeError(error);
+    if (problem.kind === "auth") {
+      resetToSignIn(problem.message);
+      return undefined;
+    }
+    return problem;
+  };
+
   const beginWorkspaceRefresh = (): number => {
     const workspaceEpoch = invalidateAccount();
     currentAccountId.current = undefined;
@@ -682,7 +692,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       (error: unknown) => {
         if (!active || !isCurrent(service, generation, epoch)) return;
         const problem = bridgeError(error);
-        if (problem.kind !== "auth") setOverviewError(problem.message);
+        if (problem.kind === "auth") resetToSignIn(problem.message);
+        else setOverviewError(problem.message);
       },
     );
     return () => { active = false; };
@@ -708,7 +719,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       (error: unknown) => {
         if (!active || !isCurrent(service, generation, epoch)) return;
         const problem = bridgeError(error);
-        if (problem.kind !== "auth") setStatsError(problem.message);
+        if (problem.kind === "auth") resetToSignIn(problem.message);
+        else setStatsError(problem.message);
       },
     );
     return () => { active = false; };
@@ -752,7 +764,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         (entries) => {
           if (active && isCurrent(service, generation, epoch)) setSuggestions(entries);
         },
-        () => undefined,
+        (error: unknown) => {
+          currentFailure(error, () => active && isCurrent(service, generation, epoch));
+        },
       );
     };
     poll();
@@ -777,8 +791,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         setAwayThresholdDraft(String(result.awayThresholdMinutes));
         setHardLimitDraft(String(result.hardAwayLimitMinutes));
       },
-      () => {
-        if (active && isCurrent(service, generation, epoch)) setSettingsUnavailable(true);
+      (error: unknown) => {
+        const problem = currentFailure(error, () => active && isCurrent(service, generation, epoch));
+        if (problem !== undefined) setSettingsUnavailable(true);
       },
     );
     return () => { active = false; };
@@ -802,7 +817,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         (status) => {
           if (active && isCurrent(service, generation, epoch)) setMonitorStatus(status);
         },
-        () => undefined,
+        (error: unknown) => {
+          currentFailure(error, () => active && isCurrent(service, generation, epoch));
+        },
       );
     };
     poll();
@@ -819,9 +836,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     const epoch = accountEpoch.current;
     const isRequestCurrent = (): boolean => active && isCurrent(service, generation, epoch);
     const fail = (error: unknown): void => {
-      if (!isRequestCurrent()) return;
-      const problem = bridgeError(error);
-      if (problem.kind !== "auth") setSettingsError(problem.message);
+      const problem = currentFailure(error, isRequestCurrent);
+      if (problem !== undefined) setSettingsError(problem.message);
     };
     void service.settingsGet().then((result) => {
       if (!isRequestCurrent()) return;
@@ -904,11 +920,13 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
 
   const dismissSuggestion = async (): Promise<void> => {
     dispatch({ type: "suggestion-cleared" });
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
     try {
-      await bridge.monitorDismissSuggestion();
-    } catch {
-      // A failed dismiss is self-healing: the next status poll re-raises the
-      // prompt if the host still holds the suggestion.
+      await service.monitorDismissSuggestion();
+    } catch (error: unknown) {
+      currentFailure(error, () => isCurrent(service, generation, epoch));
     }
   };
 
@@ -938,7 +956,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       setNewProjectName("");
       setNewProjectOpen(false);
     } catch (error: unknown) {
-      if (isRequestCurrent()) setNewProjectError(bridgeError(error).message);
+      const problem = currentFailure(error, isRequestCurrent);
+      if (problem !== undefined) setNewProjectError(problem.message);
     } finally {
       if (isRequestCurrent()) setNewProjectBusy(false);
     }
@@ -1079,7 +1098,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       const next = await service.settingsUpdate(patch);
       if (isRequestCurrent()) setSettings(next);
     } catch (error: unknown) {
-      if (isRequestCurrent()) setSettingsError(bridgeError(error).message);
+      const problem = currentFailure(error, isRequestCurrent);
+      if (problem !== undefined) setSettingsError(problem.message);
     }
   };
 
@@ -1098,7 +1118,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       const status = await service.monitorStatus();
       if (isRequestCurrent()) setMonitorStatus(status);
     } catch (error: unknown) {
-      if (isRequestCurrent()) setSettingsError(bridgeError(error).message);
+      const problem = currentFailure(error, isRequestCurrent);
+      if (problem !== undefined) setSettingsError(problem.message);
     }
   };
 
@@ -1126,7 +1147,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       const status = await service.monitorStatus();
       if (isRequestCurrent()) setMonitorStatus(status);
     } catch (error: unknown) {
-      if (isRequestCurrent()) setSettingsError(bridgeError(error).message);
+      const problem = currentFailure(error, isRequestCurrent);
+      if (problem !== undefined) setSettingsError(problem.message);
     }
   };
 
@@ -1152,7 +1174,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         setMappingPrefix("");
       }
     } catch (error: unknown) {
-      if (isRequestCurrent()) setSettingsError(bridgeError(error).message);
+      const problem = currentFailure(error, isRequestCurrent);
+      if (problem !== undefined) setSettingsError(problem.message);
     } finally {
       if (isRequestCurrent()) setMappingBusy(false);
     }
@@ -1168,7 +1191,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       await service.pathMappingsDelete(id);
       if (isRequestCurrent()) setMappings((current) => current?.filter((mapping) => mapping.id !== id));
     } catch (error: unknown) {
-      if (isRequestCurrent()) setSettingsError(bridgeError(error).message);
+      const problem = currentFailure(error, isRequestCurrent);
+      if (problem !== undefined) setSettingsError(problem.message);
     }
   };
 
@@ -1190,7 +1214,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         setRulePattern("");
       }
     } catch (error: unknown) {
-      if (isRequestCurrent()) setSettingsError(bridgeError(error).message);
+      const problem = currentFailure(error, isRequestCurrent);
+      if (problem !== undefined) setSettingsError(problem.message);
     } finally {
       if (isRequestCurrent()) setRuleBusy(false);
     }
@@ -1213,8 +1238,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       try {
         const status = await service.monitorStatus();
         if (isRequestCurrent()) setMonitorStatus(status);
-      } catch {
-        // The fast poll retries; a missing first read is not worth an error.
+      } catch (error: unknown) {
+        currentFailure(error, isRequestCurrent);
       }
     } catch (error: unknown) {
       if (!isRequestCurrent()) return;
@@ -1271,7 +1296,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           : { ...current, browsers: current.browsers.map((item) => item.browser === browser ? health : item) });
       }
     } catch (error: unknown) {
-      if (isRequestCurrent()) setBrowserErrors((current) => ({ ...current, [browser]: bridgeError(error).message }));
+      const problem = currentFailure(error, isRequestCurrent);
+      if (problem !== undefined) setBrowserErrors((current) => ({ ...current, [browser]: problem.message }));
     } finally {
       if (isRequestCurrent()) setBrowserBusy(undefined);
     }
@@ -1293,7 +1319,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     try {
       await service.browserOpenStorePage(browser);
     } catch (error: unknown) {
-      if (isRequestCurrent()) setBrowserErrors((current) => ({ ...current, [browser]: bridgeError(error).message }));
+      const problem = currentFailure(error, isRequestCurrent);
+      if (problem !== undefined) setBrowserErrors((current) => ({ ...current, [browser]: problem.message }));
     } finally {
       if (isRequestCurrent()) setBrowserBusy(undefined);
     }
@@ -1317,7 +1344,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       setSiteNarrowingOrigin(undefined);
       setSiteSegment("");
     } catch (error: unknown) {
-      if (isRequestCurrent()) setSiteError(bridgeError(error).message);
+      const problem = currentFailure(error, isRequestCurrent);
+      if (problem !== undefined) setSiteError(problem.message);
     } finally {
       if (isRequestCurrent()) setSiteBusy(false);
     }
@@ -1368,7 +1396,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       setSiteNarrowingOrigin(undefined);
       setSiteSegment("");
     } catch (error: unknown) {
-      if (isRequestCurrent()) setSiteError(bridgeError(error).message);
+      const problem = currentFailure(error, isRequestCurrent);
+      if (problem !== undefined) setSiteError(problem.message);
     } finally {
       if (isRequestCurrent()) setSiteBusy(false);
     }
@@ -1390,7 +1419,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       setAnsweredOrigins([]);
       setClearAnswersMessage("Cleared - Clock-In will ask about sites again as you use them.");
     } catch (error: unknown) {
-      if (isRequestCurrent()) setSettingsError(bridgeError(error).message);
+      const problem = currentFailure(error, isRequestCurrent);
+      if (problem !== undefined) setSettingsError(problem.message);
     } finally {
       if (isRequestCurrent()) setClearAnswersBusy(false);
     }
@@ -1407,7 +1437,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       const status = await service.monitorStatus();
       if (isRequestCurrent()) setMonitorStatus(status);
     } catch (error: unknown) {
-      if (isRequestCurrent()) setOverviewError(bridgeError(error).message);
+      const problem = currentFailure(error, isRequestCurrent);
+      if (problem !== undefined) setOverviewError(problem.message);
     } finally {
       if (isRequestCurrent()) setJoinBusy(false);
     }
@@ -1425,7 +1456,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       const status = await service.monitorStatus();
       if (isRequestCurrent()) setMonitorStatus(status);
     } catch (error: unknown) {
-      if (isRequestCurrent()) setSettingsError(bridgeError(error).message);
+      const problem = currentFailure(error, isRequestCurrent);
+      if (problem !== undefined) setSettingsError(problem.message);
     } finally {
       if (isRequestCurrent()) setBrowserCaptureBusy(false);
     }
@@ -1443,7 +1475,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       const status = await service.monitorStatus();
       if (isRequestCurrent()) setMonitorStatus(status);
     } catch (error: unknown) {
-      if (isRequestCurrent()) setSettingsError(bridgeError(error).message);
+      const problem = currentFailure(error, isRequestCurrent);
+      if (problem !== undefined) setSettingsError(problem.message);
     } finally {
       if (isRequestCurrent()) setBrowserCaptureBusy(false);
     }
@@ -1524,7 +1557,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       await service.logout();
       if (isRequestCurrent()) resetToSignIn("You have signed out.");
     } catch (error: unknown) {
-      if (isRequestCurrent()) setAccountError(bridgeError(error).message);
+      const problem = currentFailure(error, isRequestCurrent);
+      if (problem !== undefined) setAccountError(problem.message);
     } finally {
       if (isRequestCurrent()) setLogoutBusy(false);
     }

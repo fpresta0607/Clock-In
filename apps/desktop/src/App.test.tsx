@@ -190,6 +190,26 @@ describe("App", () => {
     expect(screen.getByLabelText("Password")).toHaveAttribute("type", "password");
   });
 
+  it("clears the account immediately when the Today refresh loses authorization", async () => {
+    const bridge = bridgeFor({
+      meStats: vi.fn().mockRejectedValue({ kind: "auth", message: "Your session expired. Sign in again." }),
+    });
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByRole("heading", { name: "Clock in" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Start timer" })).not.toBeInTheDocument();
+  });
+
+  it("clears the account immediately when settings lose authorization", async () => {
+    const bridge = bridgeFor({
+      settingsGet: vi.fn().mockRejectedValue({ kind: "auth", message: "Your session expired. Sign in again." }),
+    });
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByRole("heading", { name: "Clock in" })).toBeVisible();
+    expect(screen.queryByText("Timer User")).not.toBeInTheDocument();
+  });
+
   it("shows window controls but no settings gear on the sign-in screen", async () => {
     render(<App bridge={bridgeFor({ bootstrap: vi.fn().mockResolvedValue({ kind: "signed-out" }) })} />);
 

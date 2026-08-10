@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { App } from "./App.js";
+import { App, rangeQuery } from "./App.js";
 import { ClientError, type Client } from "./client.js";
 
 // jsdom has no WebGL context; the shader is decorative.
@@ -97,14 +97,29 @@ describe("dashboard", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("reloads with inclusive calendar bounds when the range changes", async () => {
+  it("reloads with device-local instant bounds when the range changes", async () => {
     const leaderboard = vi.fn().mockResolvedValue({ entries, totalDurationSeconds: 10_800, filters: {} });
     const person = await signIn(clientFor({ leaderboard }));
     await screen.findByRole("heading", { name: "SIQstack" });
 
     await person.selectOptions(screen.getByRole("combobox"), "7");
 
-    await waitFor(() => expect(leaderboard).toHaveBeenLastCalledWith(expect.stringMatching(/^\?from=\d{4}-\d{2}-\d{2}&to=\d{4}-\d{2}-\d{2}$/)));
+    await waitFor(() => expect(leaderboard).toHaveBeenCalled());
+    const query = new URLSearchParams(leaderboard.mock.calls.at(-1)?.[0]);
+    expect(query.get("fromAt")).not.toBeNull();
+    expect(query.get("toExclusiveAt")).not.toBeNull();
+  });
+
+  it("uses local calendar midnights across a daylight-saving boundary", () => {
+    const now = new Date(2026, 2, 8, 12);
+    const query = new URLSearchParams(rangeQuery("7", now));
+    const from = new Date(query.get("fromAt")!);
+    const toExclusive = new Date(query.get("toExclusiveAt")!);
+
+    expect(from.getHours()).toBe(0);
+    expect(toExclusive.getHours()).toBe(0);
+    expect(from.getDate()).toBe(2);
+    expect(toExclusive.getDate()).toBe(9);
   });
 
   it("passes the invite code through sign-up and omits it when blank", async () => {

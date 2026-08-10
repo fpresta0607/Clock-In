@@ -751,6 +751,43 @@ integration(integrationDescription, () => {
     const project = body.projects.find((entry: { project: { id: string } }) => entry.project.id === projectId);
     expect(project).toMatchObject({ durationSeconds: 600, corroboratedSeconds: 300, sessionCount: 1 });
 
+    const idleTimer = await app.request("/sessions", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({ clientId: randomUUID(), projectId, description: "Idle-boundary work", startedAt: at(0) }),
+    });
+    expect(idleTimer.status).toBe(200);
+    const idleTimerId = (await idleTimer.json()).session.id;
+    const idleEvidence = await app.request("/activity/segments", {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({
+        segments: [{
+          clientId: randomUUID(),
+          deviceId: randomUUID(),
+          kind: "idle",
+          startedAt: at(0),
+          endedAt: at(300_000),
+        }],
+      }),
+    });
+    expect(idleEvidence.status).toBe(200);
+    const idleStop = await app.request(`/sessions/${idleTimerId}/stop`, {
+      method: "POST",
+      headers: authorized,
+      body: JSON.stringify({ stoppedAt: at(600_000), idleSeconds: 300 }),
+    });
+    expect(idleStop.status).toBe(200);
+    const idleRange = await app.request(
+      `/reports?fromAt=${encodeURIComponent(at(0))}&toExclusiveAt=${encodeURIComponent(at(300_000))}`,
+      { headers: authorized },
+    );
+    expect(idleRange.status).toBe(200);
+    expect((await idleRange.json()).rows).toContainEqual(expect.objectContaining({
+      id: idleTimerId,
+      durationSeconds: 0,
+    }));
+
     // A span can cross a requested range while its only active overlap lies
     // before that range. The SQL repository must omit the resulting zero row.
     const zeroDay = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);

@@ -294,6 +294,16 @@ impl SegmentBuilder {
         })
     }
 
+    fn closing_segment(&self, now: u64) -> Option<Segment> {
+        let open = self.open.as_ref()?;
+        (now > open.started_at).then(|| Segment {
+            kind: open.kind,
+            process_name: open.process_name.clone(),
+            started_at: open.started_at,
+            ended_at: now,
+        })
+    }
+
     /// Splits the open span across a wall-clock jump: the old timeline's half
     /// closes at `end` (the last trusted wall reading) and the same state
     /// reopens at `restart` on the new timeline. Returns the closed half for
@@ -1578,6 +1588,22 @@ fn append_segment_line(path: &Path, segment: &Segment, device_id: &str) -> bool 
     true
 }
 
+pub(crate) fn flush_open_segment_to_spool(
+    shared: &Arc<Mutex<MonitorShared>>,
+    path: &Path,
+    now: u64,
+) -> bool {
+    let mut shared = lock(shared);
+    let Some(segment) = shared.builder.closing_segment(now) else {
+        return true;
+    };
+    if !append_segment_line(path, &segment, &shared.settings.device_id) {
+        return false;
+    }
+    let _ = shared.builder.flush(now);
+    true
+}
+
 /// The 30-second poll task: detect sleep/clock gaps, drain pushed session
 /// events, poll the OS, fold signals into segments, spool transitions,
 /// enforce the auto-stop policy.
@@ -2137,6 +2163,7 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn active(name: &str) -> ActivitySignal {
         ActivitySignal::Active {
@@ -2589,6 +2616,37 @@ mod tests {
         assert_eq!(measured_idle_seconds(&segments, 1_000, 2_000, true), 0);
         // A zero-length window measures zero, not a panic.
         assert_eq!(measured_idle_seconds(&segments, 2_000, 1_000, false), 0);
+    }
+
+    #[test]
+    fn durable_flush_preserves_an_open_segment_before_identity_teardown() {
+        let dir = std::env::temp_dir().join(format!(
+            "clock-in-monitor-auth-flush-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let path = dir.join("segments.jsonl");
+        let mut builder = SegmentBuilder::new();
+        builder.apply(1_000, &ActivitySignal::Active { process_name: Some("Code.exe".to_string()) });
+        let shared = Arc::new(Mutex::new(MonitorShared {
+            builder,
+            settings: MonitorSettings { device_id: "device-one".to_string(), ..MonitorSettings::default() },
+            mappings: Vec::new(),
+            agent: AgentTracking::default(),
+            browser: BrowserTracking::default(),
+            last_upload_at: None,
+            clock_change_at: None,
+        }));
+
+        assert!(flush_open_segment_to_spool(&shared, &path, 1_030));
+        let (records, _) = spool::read_pending_lines::<SegmentRecord>(&path).expect("durable segment reads");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, SegmentKind::Active);
+        assert_eq!(records[0].started_at, iso8601(1_000));
+        assert_eq!(records[0].ended_at, iso8601(1_030));
+        assert!(lock(&shared).builder.snapshot(1_060).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
