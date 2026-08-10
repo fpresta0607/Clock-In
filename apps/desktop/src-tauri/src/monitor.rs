@@ -541,11 +541,16 @@ impl SessionTracker {
             } else if let Some(open) = self.open.as_mut() {
                 // Exclude any portion of the idle gap that was covered by an
                 // active agent: that time counts as work, not trimmed idle.
+                let agent_end = if input.agent_active {
+                    span_started_at
+                } else {
+                    self.agent_seen_at
+                };
                 let agent_covered = if self.agent_first_in_idle >= idle_started_at
                     && self.agent_first_in_idle > 0
                 {
-                    // Agent became active mid-idle; cover from that point forward.
-                    span_started_at.saturating_sub(self.agent_first_in_idle)
+                    // Agent became active mid-idle; cover from that point to the agent's last known moment.
+                    agent_end.saturating_sub(self.agent_first_in_idle)
                 } else if self.agent_first_in_idle > 0 {
                     // Agent was already active before idle began: full coverage.
                     idle_seconds
@@ -605,6 +610,13 @@ impl SessionTracker {
                     } else {
                         span_started_at
                     };
+                    // Idle before the first agent evidence is not covered.
+                    if let Some(open) = self.open.as_mut() {
+                        if self.agent_first_in_idle > span_started_at {
+                            let uncovered = self.agent_first_in_idle.saturating_sub(span_started_at);
+                            open.idle_seconds += uncovered;
+                        }
+                    }
                     closed.extend(self.close_at(close_boundary));
                 } else if input.agent_active {
                     if let Some(open) = self.open.as_mut() {

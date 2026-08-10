@@ -296,12 +296,12 @@ fn track_agent_event(
                     external_session_id: event.external_session_id.clone(),
                     started_at: at,
                     last_event_at: at,
-                    project: resolve_project(&event.cwd, mappings),
+                    project: event.cwd.as_deref().and_then(|cwd| resolve_project(cwd, mappings)),
                 },
             );
         }
         AgentEventKind::Heartbeat => {
-            let resolved = resolve_project(&event.cwd, mappings);
+            let resolved = event.cwd.as_deref().and_then(|cwd| resolve_project(cwd, mappings));
             let active = tracking
                 .active
                 .entry(key.clone())
@@ -336,6 +336,7 @@ pub fn source_name(source: AgentSource) -> &'static str {
         AgentSource::Codex => "codex",
         AgentSource::KimiCode => "kimi_code",
         AgentSource::Cursor => "cursor",
+        AgentSource::Browser => "browser",
         AgentSource::Other => "other",
     }
 }
@@ -424,7 +425,8 @@ mod tests {
             external_session_id: external_session_id.to_string(),
             event: kind,
             occurred_at: occurred_at.to_string(),
-            cwd: cwd.to_string(),
+            cwd: Some(cwd.to_string()),
+            rule_id: None,
         }
     }
 

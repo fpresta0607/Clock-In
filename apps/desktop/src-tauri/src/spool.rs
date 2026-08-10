@@ -1118,9 +1118,7 @@ fn namespace_has_pending_evidence_while_leased(dir: &Path) -> SpoolResult<bool> 
     }
     match std::fs::read(dir.join("recovery.json")) {
         Ok(bytes) => match serde_json::from_slice::<crate::recovery::RecoveryState>(&bytes) {
-            Ok(recovery) => Ok(recovery.local_start.is_some()
-                || recovery.running.is_some()
-                || !recovery.pending_stops.is_empty()),
+            Ok(recovery) => Ok(!recovery.open_sessions.is_empty()),
             Err(_) => Ok(true),
         },
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),

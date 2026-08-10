@@ -557,7 +557,13 @@
           "primaryKey": false,
           "notNull": true
         },
-
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'path_prefix'"
+        },
         "path_prefix": {
           "name": "path_prefix",
           "type": "text",
@@ -641,6 +647,10 @@
         "project_path_mappings_path_prefix_length_valid": {
           "name": "project_path_mappings_path_prefix_length_valid",
           "value": "char_length(\"project_path_mappings\".\"path_prefix\") between 1 and 500"
+        },
+        "project_path_mappings_kind_valid": {
+          "name": "project_path_mappings_kind_valid",
+          "value": "\"project_path_mappings\".\"kind\" in ('path_prefix', 'url_rule')"
         }
       },
       "isRLSEnabled": false

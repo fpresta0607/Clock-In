@@ -326,7 +326,7 @@ an atomic write; where it can't, you get a snippet to paste.
 
 | CLI | Config | Signal quality | Registration |
 |---|---|---|---|
-| **Claude Code** | `~/.claude/settings.json` | true session boundaries (`SessionStart`/`SessionEnd`), plus `PostToolUse` heartbeats | merged automatically |
+| **Claude Code** | `~/.claude/settings.json` | true session boundaries (`SessionStart`/`SessionEnd`); `PostToolUse` heartbeats available with manual config | merged automatically |
 | **Cursor** | `~/.cursor/hooks.json` | true boundaries, IDE only — cloud agents never fire them | merged automatically |
 | **Codex** | `~/.codex/config.toml` | `notify` fires on turn completion: heartbeats only, boundaries synthesized from gaps | snippet to paste |
 | **Kimi Code** | `~/.kimi/config.toml` | event coverage unconfirmed pending verification | snippet to paste |
