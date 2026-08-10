@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { parseStartupStorage } from "./startup.js";
+import { weekStartAt } from "./tally.js";
 
 const NOW = Date.UTC(2026, 7, 9, 12, 0, 0);
-const WEEK_START = Date.UTC(2026, 7, 3, 0, 0, 0);
+const WEEK_START = weekStartAt(NOW);
 
 const VALID_EVENT = {
   event: "started",

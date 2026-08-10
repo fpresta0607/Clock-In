@@ -223,12 +223,12 @@ integration(integrationDescription, () => {
       [firstUserId, secondUserId].sort(),
     );
     const legacyRoles = await database.client`
-      select user_id, role from users where organization_id = ${organizationId} order by user_id
+      select id, role from users where organization_id = ${organizationId} order by id
     `;
     expect(legacyRoles).toEqual([
-      { user_id: firstUserId, role: "member" },
-      { user_id: secondUserId, role: "member" },
-    ].sort((left, right) => left.user_id.localeCompare(right.user_id)));
+      { id: firstUserId, role: "member" },
+      { id: secondUserId, role: "member" },
+    ].sort((left, right) => left.id.localeCompare(right.id)));
     await expect(legacyAccounts.claimFirstAdmin({ organizationId, userId: otherUserId })).resolves.toEqual({ kind: "not_member" });
     const secondList = await secondApp.request("/projects", { headers: secondHeaders });
     const secondProjectsBeforeReplacement = await secondList.json();
@@ -377,7 +377,7 @@ integration(integrationDescription, () => {
     // Joining grants access to the organization's existing projects.
     const teammateProjects = await teammateApp.request("/projects", { headers: teammateAuth });
     const sharedProject = (await teammateProjects.json()).projects[0];
-    expect(sharedProject.name).toBe("General");
+    expect(sharedProject.name).toBe("General Work");
 
     const teammateStart = new Date(Date.now() - 1_800_000).toISOString();
     const started = await teammateApp.request("/sessions", {
@@ -628,8 +628,10 @@ integration(integrationDescription, () => {
     });
     expect(stop.status).toBe(200);
 
-    const today = new Date().toISOString().slice(0, 10);
-    const stats = await app.request(`/me/stats?from=${today}&to=${today}`, { headers: authorized });
+    const stats = await app.request(
+      `/me/stats?fromAt=${encodeURIComponent(at(0))}&toExclusiveAt=${encodeURIComponent(at(600_000))}`,
+      { headers: authorized },
+    );
     expect(stats.status).toBe(200);
     const body = await stats.json();
 
@@ -770,7 +772,7 @@ integration(integrationDescription, () => {
         started_at, stopped_at, idle_seconds, duration_seconds
       ) values (
         ${randomUUID()}, ${user.organizationId}, ${user.id}, ${projectId}, ${randomUUID()}, 'stopped',
-        ${startedAt}, ${stoppedAt}, 0, 3600
+        ${startedAt.toISOString()}, ${stoppedAt.toISOString()}, 0, 3600
       )
     `;
     await database.client`
@@ -779,7 +781,7 @@ integration(integrationDescription, () => {
         started_at, ended_at, received_at
       ) values (
         ${user.organizationId}, ${user.id}, ${randomUUID()}, ${randomUUID()}, 'active', 'clock-in.exe',
-        ${startedAt}, ${stoppedAt}, ${new Date("2026-03-08T06:31:00.000Z")}
+        ${startedAt.toISOString()}, ${stoppedAt.toISOString()}, ${new Date("2026-03-08T06:31:00.000Z").toISOString()}
       )
     `;
 
