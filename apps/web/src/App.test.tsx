@@ -100,6 +100,8 @@ describe("dashboard", () => {
     const never = within(dialog).getByRole("heading", { name: "Clock-In never writes down" }).nextElementSibling;
     expect(never).toHaveTextContent("Not one keystroke.");
     expect(never).toHaveTextContent("Web addresses");
+    expect(never).toHaveTextContent("Anything you type into a form, chat, or document.");
+    expect(never).toHaveTextContent("Clock-In never reaches inside or controls your other apps.");
     expect(dialog).toHaveTextContent("Everyone sees the same numbers.");
 
     await person.keyboard("{Escape}");

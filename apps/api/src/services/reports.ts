@@ -37,7 +37,7 @@ export interface ReportExport {
 
 export interface ReportServiceDependencies {
   reports: ReportRepository;
-  /** Stale running agent sessions close at lastEventAt before any corroboration read. */
+  /** Stale running agent sessions close at lastEventAt before report aggregation. */
   reaper: AgentSessionReaper;
 }
 

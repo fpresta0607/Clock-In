@@ -126,6 +126,8 @@ pub struct TimerProject {
     pub name: String,
     #[serde(default)]
     pub color: Option<String>,
+    #[serde(skip_serializing)]
+    pub created_at: String,
 }
 
 #[derive(Deserialize)]
@@ -186,6 +188,7 @@ struct ProjectListItem {
     name: String,
     #[serde(default)]
     color: Option<String>,
+    created_at: String,
     is_archived: bool,
 }
 
@@ -279,14 +282,15 @@ pub struct PathMappingUpdateInput {
     pub project_id: Option<String>,
 }
 
-/// The `GET /me/stats` response: the reporting service's corroboration math
+/// The `GET /me/stats` response: the reporting service's attribution totals
 /// scoped to the caller.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeStats {
     pub filters: MeStatsFilters,
     pub total_duration_seconds: u64,
-    pub corroborated_seconds: u64,
+    pub attributed_seconds: u64,
+    pub unattributed_seconds: u64,
     pub projects: Vec<MeStatsProject>,
     // Without this field serde silently drops the array and the TS bridge
     // rejects the whole response as invalid.
@@ -314,7 +318,8 @@ pub struct MeStatsFilters {
 pub struct MeStatsProject {
     pub project: MeStatsProjectRef,
     pub duration_seconds: u64,
-    pub corroborated_seconds: u64,
+    pub attributed_seconds: u64,
+    pub unattributed_seconds: u64,
     pub session_count: u64,
 }
 
@@ -546,6 +551,7 @@ impl ApiClient {
                 id: project.id,
                 name: project.name,
                 color: project.color,
+                created_at: project.created_at,
             })
             .collect())
     }
@@ -573,6 +579,7 @@ impl ApiClient {
             id: body.id,
             name: body.name,
             color: body.color,
+            created_at: body.created_at,
         })
     }
 
@@ -821,8 +828,8 @@ mod tests {
     fn archived_projects_never_reach_the_picker() {
         let body: ProjectListResponse = serde_json::from_str(
             r##"{"projects":[
-                {"id":"a","name":"Active","color":null,"isArchived":false},
-                {"id":"b","name":"Archived","color":"#2563eb","isArchived":true}
+                {"id":"a","name":"Active","color":null,"createdAt":"2026-08-10T12:00:00Z","isArchived":false},
+                {"id":"b","name":"Archived","color":"#2563eb","createdAt":"2026-08-11T12:00:00Z","isArchived":true}
             ]}"##,
         )
         .expect("project list parses");
@@ -839,7 +846,7 @@ mod tests {
     #[test]
     fn reads_a_created_project_without_a_color() {
         let body: ProjectListItem =
-            serde_json::from_str(r#"{"id":"p1","name":"Field work","isArchived":false}"#)
+            serde_json::from_str(r#"{"id":"p1","name":"Field work","createdAt":"2026-08-10T12:00:00Z","isArchived":false}"#)
                 .expect("created project parses");
 
         assert_eq!(body.name, "Field work");
@@ -968,11 +975,13 @@ mod tests {
             r#"{
                 "filters": {"from": "2026-08-01"},
                 "totalDurationSeconds": 7200,
-                "corroboratedSeconds": 5400,
+                "attributedSeconds": 5400,
+                "unattributedSeconds": 1800,
                 "projects": [{
                     "project": {"id": "p1", "name": "Clock-In"},
                     "durationSeconds": 7200,
-                    "corroboratedSeconds": 5400,
+                    "attributedSeconds": 5400,
+                    "unattributedSeconds": 1800,
                     "sessionCount": 3
                 }],
                 "apps": [
@@ -986,7 +995,10 @@ mod tests {
         assert_eq!(stats.filters.from.as_deref(), Some("2026-08-01"));
         assert_eq!(stats.filters.to, None);
         assert_eq!(stats.projects[0].project.name, "Clock-In");
-        assert_eq!(stats.projects[0].corroborated_seconds, 5400);
+        assert_eq!(stats.attributed_seconds, 5400);
+        assert_eq!(stats.unattributed_seconds, 1_800);
+        assert_eq!(stats.projects[0].attributed_seconds, 5400);
+        assert_eq!(stats.projects[0].unattributed_seconds, 1_800);
         assert_eq!(stats.apps[0].process_name, "Code.exe");
         assert_eq!(stats.apps[0].duration_seconds, 4800);
     }

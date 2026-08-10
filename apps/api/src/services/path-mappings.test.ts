@@ -86,8 +86,8 @@ class MemoryPathMappings implements PathMappingRepository {
 }
 
 const projects: ProjectRecord[] = [
-  { id: ids.project, organizationId: ids.organization, name: "Alpha", archived: false },
-  { id: ids.archivedProject, organizationId: ids.organization, name: "Old", archived: true },
+  { id: ids.project, organizationId: ids.organization, name: "Alpha", archived: false, createdAt: new Date("2026-08-10T12:00:00.000Z") },
+  { id: ids.archivedProject, organizationId: ids.organization, name: "Old", archived: true, createdAt: new Date("2026-08-10T12:00:00.000Z") },
 ];
 
 function existingMapping(overrides: Partial<PathMappingRecord> = {}): PathMappingRecord {

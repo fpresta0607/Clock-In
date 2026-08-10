@@ -199,7 +199,7 @@ describe("report service", () => {
     expect(exported.exportReads).toBe(1);
   });
 
-  it("closes stale agent sessions before every corroboration read", async () => {
+  it("closes stale agent sessions before every report aggregation", async () => {
     const reaper = new Reaper();
     const service = createReportService({ reports: new Reports(), reaper });
 

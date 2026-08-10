@@ -85,6 +85,7 @@ describe("project contracts", () => {
         id: ids.project,
         name: "Website redesign",
         color: "#2563eb",
+        createdAt: "2026-08-10T12:00:00.000Z",
         isArchived: false,
         isDefault: true,
       }),

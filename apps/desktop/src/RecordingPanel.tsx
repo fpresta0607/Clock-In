@@ -47,6 +47,8 @@ const NEVER = [
   "The titles of your windows, files, or documents.",
   "Web addresses, or the pages you visit.",
   "Anything inside your files, messages, or email.",
+  "Anything you type into a form, chat, or document.",
+  "Clock-In never reaches inside or controls your other apps.",
 ];
 
 const clockTime = (iso: string): string =>

@@ -118,6 +118,7 @@ export const projectListItemSchema = z
     id: idSchema,
     name: z.string().min(1),
     color: z.string().regex(/^#[0-9a-fA-F]{6}$/).nullable().optional(),
+    createdAt: z.string().datetime(),
     isArchived: z.boolean(),
     isDefault: z.boolean().default(false),
   })

@@ -41,17 +41,17 @@ pub(crate) fn read_session_token() -> Option<String> {
         .and_then(|entry| entry.get_password().ok())
 }
 
-/// Persists recovery state so an unexpected exit cannot lose a running timer.
-/// Shared with the monitor, whose auto-stop enqueues through the same file.
+/// Persists recovery state so an unexpected exit cannot lose a recorded
+/// session. Shared with the monitor, which updates it on every poll.
 pub(crate) fn write_recovery_file(path: &Path, state: &RecoveryState) -> ApiResult<()> {
     let encoded = serde_json::to_vec(state)
-        .map_err(|_| BridgeError::unknown("Could not record the timer locally."))?;
+        .map_err(|_| BridgeError::unknown("Could not record the session locally."))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|_| BridgeError::unknown("Could not record the timer locally."))?;
+            .map_err(|_| BridgeError::unknown("Could not record the session locally."))?;
     }
     std::fs::write(path, encoded)
-        .map_err(|_| BridgeError::unknown("Could not record the timer locally."))
+        .map_err(|_| BridgeError::unknown("Could not record the session locally."))
 }
 
 /// Compiled in, not read at runtime. An empty value counts as unset so a CI
@@ -169,11 +169,25 @@ impl AppState {
         self.recovery.lock().await.clone()
     }
 
-    /// Persists recovery state so an unexpected exit cannot lose an open session.
-    async fn write_recovery(&self, next: RecoveryState) -> ApiResult<()> {
+    /// Removes a recovered open session only after it has been handed to the
+    /// matching account's scoped session spool.
+    async fn clear_recovery_for(&self, user_id: &str) -> ApiResult<()> {
         let path = self.recovery_path.lock().await.clone();
-        write_recovery_file(&path, &next)?;
-        *self.recovery.lock().await = next;
+        let mut recovery = self.recovery.lock().await;
+        recovery.open_sessions.remove(user_id);
+        write_recovery_file(&path, &recovery)?;
+        Ok(())
+    }
+
+    async fn start_recording_for_account(&self) -> ApiResult<()> {
+        let user_id = self
+            .monitor
+            .account_id()
+            .ok_or_else(|| BridgeError::unknown("Could not prepare recording for this account."))?;
+        let carried = self.read_recovery().await;
+        self.monitor.carry_over(&carried, &user_id);
+        self.clear_recovery_for(&user_id).await?;
+        self.monitor.ensure_running().await;
         Ok(())
     }
 
@@ -181,27 +195,36 @@ impl AppState {
     /// Establishing the default project is part of booting: without one there
     /// is nowhere for automatic time to land.
     async fn snapshot(&self, access_token: &str) -> ApiResult<Snapshot> {
-        let mut account = self.load_account(access_token).await?;
-        // The oldest project is the default; a brand-new account gets one made
-        // for it rather than a question it has no way to answer.
-        let default_project_id = match account.projects.first() {
-            Some(project) => project.id.clone(),
-            None => {
-                let created = self.client.create_project(access_token, "Default").await?;
-                let id = created.id.clone();
-                account.projects.push(created);
-                id
-            }
-        };
-        self.monitor
-            .set_default_project(Some(default_project_id.clone()));
+        let account = self.load_account(access_token).await?;
+        // `/projects` is alphabetized for people. The automatic fallback is
+        // the oldest project, using its creation time explicitly.
+        self.monitor.begin_account(&account.user.id);
+        let default_project_id = oldest_project_id(&account.projects);
+        self.monitor.cache_mappings(
+            self.client
+                .path_mappings(access_token)
+                .await
+                .unwrap_or_default(),
+        );
+        self.monitor.set_default_project(default_project_id.clone());
         let selected_project_id = self.monitor.status().await.selected_project_id;
         Ok(Snapshot::account(
             account,
-            Some(default_project_id),
+            default_project_id,
             selected_project_id,
         ))
     }
+}
+
+fn oldest_project_id(projects: &[TimerProject]) -> Option<String> {
+    projects
+        .iter()
+        .min_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        })
+        .map(|project| project.id.clone())
 }
 
 fn load_recovery_from_disk(path: &PathBuf) -> RecoveryState {
@@ -221,26 +244,18 @@ async fn timer_bootstrap(state: State<'_, AppState>) -> ApiResult<Snapshot> {
         Err(error) => return Err(error),
     };
     let snapshot = state.snapshot(&access_token).await?;
-    // Close whatever the previous run left open before this one starts adding
-    // to the spool, so a crash never merges two days into one session.
-    let carried = state.read_recovery().await;
-    state.monitor.carry_over(&carried);
-    state.write_recovery(RecoveryState::default()).await?;
-    // A signed-in session is what starts the monitor: recording while signed
-    // out would attribute this machine's evidence to whoever signs in next.
-    state.monitor.ensure_running().await;
+    state.start_recording_for_account().await?;
     Ok(snapshot)
 }
 
 #[tauri::command]
 async fn auth_login(state: State<'_, AppState>, input: LoginInput) -> ApiResult<Snapshot> {
+    state.monitor.stop().await;
     let session = state.client.sign_in(&input.email, &input.password).await?;
     state.store_session_token(&session)?;
-    // A new sign-in must never inherit the previous account's timers.
-    state.write_recovery(RecoveryState::default()).await?;
     let access_token = state.client.fetch_access_token(&session).await?;
     let snapshot = state.snapshot(&access_token).await?;
-    state.monitor.ensure_running().await;
+    state.start_recording_for_account().await?;
     Ok(snapshot)
 }
 
@@ -263,12 +278,12 @@ pub struct SignupInput {
 
 #[tauri::command]
 async fn auth_signup(state: State<'_, AppState>, input: SignupInput) -> ApiResult<Snapshot> {
+    state.monitor.stop().await;
     let session = state
         .client
         .sign_up(&input.email, &input.password, &input.name)
         .await?;
     state.store_session_token(&session)?;
-    state.write_recovery(RecoveryState::default()).await?;
     let access_token = state.client.fetch_access_token(&session).await?;
 
     // Provision explicitly and first: any other authenticated call would create a
@@ -281,7 +296,7 @@ async fn auth_signup(state: State<'_, AppState>, input: SignupInput) -> ApiResul
     state.client.provision_account(&access_token, code).await?;
 
     let snapshot = state.snapshot(&access_token).await?;
-    state.monitor.ensure_running().await;
+    state.start_recording_for_account().await?;
     Ok(snapshot)
 }
 
@@ -335,7 +350,8 @@ async fn auth_logout(state: State<'_, AppState>) -> ApiResult<()> {
     // account the evidence could belong to.
     state.monitor.stop().await;
     state.clear_session_token();
-    state.write_recovery(RecoveryState::default()).await
+    state.monitor.clear_account();
+    Ok(())
 }
 
 /// Pins recording to one project, or clears the pin so agent working
@@ -560,6 +576,7 @@ pub fn run() {
                 sessions_path: data_dir.join("sessions-spool.jsonl"),
                 agent_path: spool::default_spool_path(),
                 recovery_path: recovery_path.clone(),
+                recovery: Arc::clone(&recovery),
             });
 
             app.manage(AppState {
@@ -624,6 +641,7 @@ mod tests {
                 id: "p1".to_string(),
                 name: "General".to_string(),
                 color: None,
+                created_at: "2026-08-10T12:00:00Z".to_string(),
             }],
         }
     }
@@ -662,18 +680,43 @@ mod tests {
     }
 
     #[test]
+    fn the_default_project_is_the_oldest_not_the_first_alphabetical_result() {
+        let projects = vec![
+            TimerProject {
+                id: "p-zebra".to_string(),
+                name: "Zebra".to_string(),
+                color: None,
+                created_at: "2026-08-10T12:00:00Z".to_string(),
+            },
+            TimerProject {
+                id: "p-alpha".to_string(),
+                name: "Alpha".to_string(),
+                color: None,
+                created_at: "2026-08-09T12:00:00Z".to_string(),
+            },
+        ];
+
+        assert_eq!(oldest_project_id(&projects).as_deref(), Some("p-alpha"));
+    }
+
+    #[test]
     fn recovery_state_round_trips_through_disk_without_holding_a_token() {
         let state = RecoveryState {
-            open_session: Some(monitor::OpenSession {
-                client_id: "c1".to_string(),
-                project: monitor::SessionProject {
-                    project_id: "p1".to_string(),
-                    attribution: monitor::Attribution::Default,
+            open_sessions: [(
+                "u1".to_string(),
+                monitor::OpenSession {
+                    client_id: "c1".to_string(),
+                    project: monitor::SessionProject {
+                        project_id: "p1".to_string(),
+                        attribution: monitor::Attribution::Default,
+                    },
+                    started_at: 1_000,
+                    idle_seconds: 60,
+                    last_active_at: 2_000,
                 },
-                started_at: 1_000,
-                idle_seconds: 60,
-                last_active_at: 2_000,
-            }),
+            )]
+            .into_iter()
+            .collect(),
         };
 
         let encoded = serde_json::to_string(&state).expect("state serializes");

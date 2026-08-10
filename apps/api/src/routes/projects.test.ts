@@ -30,14 +30,14 @@ beforeAll(async () => {
 
 class MemoryProjects implements ProjectRepository {
   private readonly records: ProjectRecord[] = [
-    { id: ids.project, organizationId: ids.organization, name: "General Work", archived: false, isDefault: true },
+    { id: ids.project, organizationId: ids.organization, name: "General", archived: false, createdAt: new Date("2026-08-10T12:00:00.000Z") },
   ];
   public async listForMember() { return this.records.filter((record) => !record.archived); }
   public async findForMember(subject: { organizationId: string }, projectId: string) {
     return this.records.find((record) => record.id === projectId && record.organizationId === subject.organizationId) ?? null;
   }
   public async createForMember(subject: { organizationId: string; userId: string }, name: string) {
-    const record: ProjectRecord = { id: crypto.randomUUID(), organizationId: subject.organizationId, name, archived: false };
+    const record: ProjectRecord = { id: crypto.randomUUID(), organizationId: subject.organizationId, name, archived: false, createdAt: new Date("2026-08-10T12:00:00.000Z") };
     this.records.push(record);
     return record;
   }
@@ -69,15 +69,14 @@ describe("project routes", () => {
     });
     expect(created.status).toBe(201);
     const project = await created.json();
-    expect(project).toEqual({ id: expect.any(String), name: "Field work", isArchived: false, isDefault: false });
+    expect(project).toEqual({ id: expect.any(String), name: "Field work", createdAt: "2026-08-10T12:00:00.000Z", isArchived: false });
 
     const listed = await app.request("http://api.test/projects", { headers });
     await expect(listed.json()).resolves.toEqual({
       projects: [
-        { id: expect.any(String), name: "Field work", isArchived: false, isDefault: false },
-        { id: ids.project, name: "General Work", isArchived: false, isDefault: true },
+        { id: expect.any(String), name: "Field work", createdAt: "2026-08-10T12:00:00.000Z", isArchived: false },
+        { id: ids.project, name: "General", createdAt: "2026-08-10T12:00:00.000Z", isArchived: false },
       ],
-      selectedProjectId: expect.any(String),
     });
   });
 

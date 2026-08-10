@@ -95,6 +95,8 @@ describe("RecordingPanel", () => {
     expect(within(panel).queryByText("This computer")).not.toBeInTheDocument();
     // The lists and the explainer are always true, so they stay on screen.
     expect(within(panel).getByText("What you type. Not one keystroke.")).toBeInTheDocument();
+    expect(within(panel).getByText("Anything you type into a form, chat, or document.")).toBeInTheDocument();
+    expect(within(panel).getByText("Clock-In never reaches inside or controls your other apps.")).toBeInTheDocument();
     expect(within(panel).getByText(/You do nothing/)).toBeInTheDocument();
   });
 

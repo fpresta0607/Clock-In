@@ -26,7 +26,7 @@
 //! Active/Idle signal closes the span, which is the same code path a
 //! transition would take.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -330,34 +330,85 @@ pub struct SettingsPatch {
 }
 
 /// What the drain side reports about agent activity. In-memory only: after a
-/// restart the override simply stays off until the next agent event drains,
-/// which fails toward the manual-timer behavior Phase 1 already had.
+/// restart the override simply stays off until the next agent event drains.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentTracking {
-    pub open: bool,
     pub last_event_at: u64,
-    /// The session behind `open`: which CLI and when it began. Cleared with
-    /// `open`; drives the `agentActive` status field.
-    pub active: Option<ActiveAgent>,
-    /// The project the open agent session's working directory resolved to, if
-    /// any. This is what attributes a session to real work rather than to the
-    /// default project.
-    pub project: Option<String>,
+    /// Every currently running agent session. A source and its external
+    /// session id identify the lifecycle independently, so ending one tool
+    /// cannot clear another tool that is still running.
+    pub active: BTreeMap<(String, String), ActiveAgent>,
+    /// The latest event already applied per lifecycle. Finished sessions leave
+    /// a small tombstone here so a failed upload replay cannot reopen them.
+    pub seen: BTreeMap<(String, String), SeenAgentEvent>,
 }
 
-/// The agent session currently holding the tracking open, in unix seconds.
-/// The ISO form the UI sees is produced at status time.
+/// A currently running agent session. The ISO form the UI sees is produced at
+/// status time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActiveAgent {
     pub source: String,
+    pub external_session_id: String,
     pub started_at: u64,
+    pub last_event_at: u64,
+    pub project: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeenAgentEvent {
+    pub occurred_at: u64,
+    pub kind: crate::spool::AgentEventKind,
 }
 
 impl AgentTracking {
     pub fn is_active(&self, now: u64, override_enabled: bool) -> bool {
         override_enabled
-            && self.open
-            && now.saturating_sub(self.last_event_at) <= AGENT_ACTIVE_WINDOW_SECONDS
+            && self
+                .active
+                .values()
+                .any(|agent| now.saturating_sub(agent.last_event_at) <= AGENT_ACTIVE_WINDOW_SECONDS)
+    }
+
+    pub fn effective_agent(&self, now: u64) -> Option<&ActiveAgent> {
+        self.active
+            .values()
+            .filter(|agent| now.saturating_sub(agent.last_event_at) <= AGENT_ACTIVE_WINDOW_SECONDS)
+            .max_by(|left, right| {
+                (
+                    left.last_event_at,
+                    left.started_at,
+                    &left.source,
+                    &left.external_session_id,
+                )
+                    .cmp(&(
+                        right.last_event_at,
+                        right.started_at,
+                        &right.source,
+                        &right.external_session_id,
+                    ))
+            })
+    }
+
+    pub fn effective_project(&self, now: u64) -> Option<&str> {
+        self.active
+            .values()
+            .filter(|agent| now.saturating_sub(agent.last_event_at) <= AGENT_ACTIVE_WINDOW_SECONDS)
+            .filter_map(|agent| agent.project.as_deref().map(|project| (agent, project)))
+            .max_by(|(left, _), (right, _)| {
+                (
+                    left.last_event_at,
+                    left.started_at,
+                    &left.source,
+                    &left.external_session_id,
+                )
+                    .cmp(&(
+                        right.last_event_at,
+                        right.started_at,
+                        &right.source,
+                        &right.external_session_id,
+                    ))
+            })
+            .map(|(_, project)| project)
     }
 }
 
@@ -461,13 +512,22 @@ impl SessionTracker {
             return closed;
         };
 
-        // An idle run that ended under the threshold sits inside the session:
-        // count it as trimmed idle rather than closing anything.
-        if let (Some((SegmentKind::Idle, idle_started_at)), Some(open)) =
-            (self.previous, self.open.as_mut())
-        {
-            if kind != SegmentKind::Idle {
-                open.idle_seconds += span_started_at.saturating_sub(idle_started_at);
+        let resumed_idle = match self.previous {
+            Some((SegmentKind::Idle, idle_started_at)) if kind != SegmentKind::Idle => Some((
+                idle_started_at,
+                span_started_at.saturating_sub(idle_started_at),
+            )),
+            _ => None,
+        };
+        if let Some((idle_started_at, idle_seconds)) = resumed_idle {
+            if idle_seconds >= input.away_threshold_seconds && !input.agent_active {
+                // A long idle spell closes at its first idle boundary even if
+                // the next poll sees the person back at work.
+                closed.extend(self.close_at(idle_started_at));
+            } else if let Some(open) = self.open.as_mut() {
+                // A short gap is kept as trimmed idle on the session that was
+                // already open, never on a later project.
+                open.idle_seconds += idle_seconds;
             }
         }
         self.previous = Some((kind, span_started_at));
@@ -491,7 +551,9 @@ impl SessionTracker {
                 {
                     let boundary = self.last_boundary(input.now);
                     closed.extend(self.close_at(boundary));
-                    opens_at = boundary;
+                    // The new project cannot inherit a just-finished short
+                    // idle gap as active work. It begins when activity resumed.
+                    opens_at = resumed_idle.map_or(boundary, |_| span_started_at);
                 }
                 match self.open.as_mut() {
                     Some(open) => open.last_active_at = input.now,
@@ -569,6 +631,9 @@ pub struct MonitorShared {
     pub tracker: SessionTracker,
     /// The user's fallback project, resolved once per sign-in.
     pub default_project: Option<String>,
+    /// The account the monitor is currently allowed to record for. This is
+    /// separate from the token so locally queued sessions retain their owner.
+    pub account_id: Option<String>,
     /// An explicit choice to track into one project, which outranks the
     /// working directory an agent happens to be in.
     pub selected_project: Option<String>,
@@ -577,16 +642,16 @@ pub struct MonitorShared {
 impl MonitorShared {
     /// Precedence: what the person chose, then what an agent's working
     /// directory resolved to, then the default project that catches the rest.
-    pub fn current_project(&self) -> Option<SessionProject> {
+    pub fn current_project(&self, now: u64) -> Option<SessionProject> {
         if let Some(project_id) = &self.selected_project {
             return Some(SessionProject {
                 project_id: project_id.clone(),
                 attribution: Attribution::Selected,
             });
         }
-        if let Some(project_id) = &self.agent.project {
+        if let Some(project_id) = self.agent.effective_project(now) {
             return Some(SessionProject {
-                project_id: project_id.clone(),
+                project_id: project_id.to_string(),
                 attribution: Attribution::Agent,
             });
         }
@@ -1027,6 +1092,7 @@ pub struct MonitorConfig {
     pub agent_path: PathBuf,
     pub sessions_path: PathBuf,
     pub recovery_path: PathBuf,
+    pub recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
 }
 
 struct MonitorTasks {
@@ -1045,11 +1111,13 @@ pub struct Monitor {
     settings_path: PathBuf,
     segments_path: PathBuf,
     agent_path: PathBuf,
-    sessions_path: PathBuf,
+    sessions_path: Mutex<PathBuf>,
+    sessions_path_base: PathBuf,
     client: ApiClient,
     // Written by the Windows-gated poll task, which persists the open session.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     recovery_path: PathBuf,
+    recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
     tasks: tokio::sync::Mutex<Option<MonitorTasks>>,
     upload_now: Arc<Notify>,
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -1068,15 +1136,18 @@ impl Monitor {
                 last_upload_at: None,
                 tracker: SessionTracker::new(),
                 default_project: None,
+                account_id: None,
                 selected_project: None,
             })),
             events: Arc::new(PlatformEvents::new()),
             settings_path: config.settings_path,
             segments_path: config.segments_path,
             agent_path: config.agent_path,
-            sessions_path: config.sessions_path,
+            sessions_path: Mutex::new(config.sessions_path.clone()),
+            sessions_path_base: config.sessions_path,
             client: config.client,
             recovery_path: config.recovery_path,
+            recovery: config.recovery,
             tasks: tokio::sync::Mutex::new(None),
             upload_now: Arc::new(Notify::new()),
             event_thread_once: std::sync::Once::new(),
@@ -1107,8 +1178,10 @@ impl Monitor {
                 Arc::clone(&self.shared),
                 Arc::clone(&self.events),
                 self.segments_path.clone(),
-                self.sessions_path.clone(),
+                self.agent_path.clone(),
+                self.session_spool_path(),
                 self.recovery_path.clone(),
+                Arc::clone(&self.recovery),
             )))
         };
         #[cfg(not(windows))]
@@ -1119,7 +1192,7 @@ impl Monitor {
             self.client.clone(),
             self.segments_path.clone(),
             self.agent_path.clone(),
-            self.sessions_path.clone(),
+            self.session_spool_path(),
             Arc::clone(&self.upload_now),
         ));
         *guard = Some(MonitorTasks { poll, upload });
@@ -1136,21 +1209,25 @@ impl Monitor {
             tasks.upload.abort();
         }
         let now = unix_now();
-        let (closed, finished, device_id) = {
+        let (closed, finished, device_id, account_id) = {
             let mut shared = lock(&self.shared);
             let device_id = shared.settings.device_id.clone();
+            let account_id = shared.account_id.clone();
             let segment = shared.builder.flush(now);
             // Recording stopping is a session boundary like any other: the work
             // already done is written down, not discarded.
             let session = shared.tracker.flush(now);
-            (segment, session, device_id)
+            (segment, session, device_id, account_id)
         };
         if let Some(segment) = closed {
             append_segment_line(&self.segments_path, &segment, &device_id);
         }
         if let Some(session) = finished {
-            append_session_line(&self.sessions_path, &session);
+            if account_id.is_some() {
+                append_session_line(&self.session_spool_path(), &session);
+            }
         }
+        self.persist_open_session(account_id.as_deref(), None).await;
     }
 
     /// Starts the tasks when the setting is on; called after a successful
@@ -1196,7 +1273,7 @@ impl Monitor {
             .agent
             .is_active(now, shared.settings.agent_override_enabled)
         {
-            shared.agent.active.as_ref().map(|active| AgentActive {
+            shared.agent.effective_agent(now).map(|active| AgentActive {
                 source: active.source.clone(),
                 since: iso8601(active.started_at),
             })
@@ -1210,7 +1287,7 @@ impl Monitor {
             last_upload_at: shared.last_upload_at.clone(),
             segment_backlog: count_lines(&self.segments_path),
             agent_backlog: count_lines(&self.agent_path),
-            session_backlog: count_lines(&self.sessions_path),
+            session_backlog: count_lines(&self.session_spool_path()),
             hooks: detect_hooks(&default_hook_probes()),
             agent_active,
             current_session: shared.tracker.open_session().map(|open| CurrentSession {
@@ -1236,13 +1313,81 @@ impl Monitor {
         lock(&self.shared).default_project = project_id;
     }
 
+    /// Starts a clean account-bound recording context. Callers stop the old
+    /// context first, so no session can survive into a different account.
+    pub fn begin_account(&self, user_id: &str) {
+        let mut shared = lock(&self.shared);
+        shared.mappings.clear();
+        shared.agent = AgentTracking::default();
+        shared.tracker = SessionTracker::new();
+        shared.default_project = None;
+        shared.selected_project = None;
+        shared.account_id = Some(user_id.to_string());
+        *lock(&self.sessions_path) = scoped_sessions_path(&self.sessions_path_base, user_id);
+    }
+
+    /// Removes account-bound in-memory state after its sessions have been
+    /// flushed, so a later sign-in cannot inherit a project or agent source.
+    pub fn clear_account(&self) {
+        let mut shared = lock(&self.shared);
+        shared.mappings.clear();
+        shared.agent = AgentTracking::default();
+        shared.tracker = SessionTracker::new();
+        shared.default_project = None;
+        shared.selected_project = None;
+        shared.account_id = None;
+    }
+
+    pub fn account_id(&self) -> Option<String> {
+        lock(&self.shared).account_id.clone()
+    }
+
     /// Closes whatever the previous run left open, so a crash or a forced
     /// shutdown still reports the work it had already recorded.
-    pub fn carry_over(&self, state: &RecoveryState) {
-        if let Some(session) = crate::recovery::close_carried_session(state) {
-            append_session_line(&self.sessions_path, &session);
+    pub fn carry_over(&self, state: &RecoveryState, user_id: &str) {
+        if let Some(session) = crate::recovery::close_carried_session(state, user_id) {
+            append_session_line(&self.session_spool_path(), &session);
         }
     }
+
+    fn session_spool_path(&self) -> PathBuf {
+        lock(&self.sessions_path).clone()
+    }
+
+    async fn persist_open_session(&self, user_id: Option<&str>, open_session: Option<OpenSession>) {
+        persist_open_session(&self.recovery_path, &self.recovery, user_id, open_session).await;
+    }
+}
+
+fn scoped_sessions_path(base: &Path, user_id: &str) -> PathBuf {
+    let stem = base
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("sessions");
+    base.with_file_name(format!("{stem}-{user_id}.jsonl"))
+}
+
+async fn persist_open_session(
+    path: &Path,
+    recovery: &Arc<tokio::sync::Mutex<RecoveryState>>,
+    user_id: Option<&str>,
+    open_session: Option<OpenSession>,
+) {
+    let Some(user_id) = user_id else {
+        return;
+    };
+    let mut state = recovery.lock().await;
+    match open_session {
+        Some(open_session) => {
+            state
+                .open_sessions
+                .insert(user_id.to_string(), open_session);
+        }
+        None => {
+            state.open_sessions.remove(user_id);
+        }
+    }
+    let _ = crate::write_recovery_file(path, &state);
 }
 
 pub fn load_settings(path: &Path) -> MonitorSettings {
@@ -1289,8 +1434,10 @@ async fn poll_loop(
     shared: Arc<Mutex<MonitorShared>>,
     events: Arc<PlatformEvents>,
     segments_path: PathBuf,
+    agent_path: PathBuf,
     sessions_path: PathBuf,
     recovery_path: PathBuf,
+    recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
 ) {
     let source = platform::Poller::new();
     let mut tick = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECONDS));
@@ -1300,9 +1447,10 @@ async fn poll_loop(
         tick.tick().await;
         let now = unix_now();
         let pushed = events.drain();
+        let replayed = crate::uploader::replay_agent_spool(&shared, &agent_path);
 
         let mut closed = Vec::new();
-        let (device_id, finished) = {
+        let (device_id, finished, account_id, open_session) = {
             let mut shared = lock(&shared);
             // Event timestamps come from when the OS broadcast fired, which
             // can be long ago (a suspend/resume pair spanning the night).
@@ -1312,25 +1460,36 @@ async fn poll_loop(
             let signal = source.poll();
             closed.extend(shared.builder.apply(now, &signal));
             let device_id = shared.settings.device_id.clone();
-            (device_id, advance_sessions(&mut shared, now))
+            let mut finished = replayed;
+            finished.extend(advance_sessions(&mut shared, now));
+            let account_id = shared.account_id.clone();
+            let open_session = shared.tracker.open_session().cloned();
+            (device_id, finished, account_id, open_session)
         };
         for segment in &closed {
             append_segment_line(&segments_path, segment, &device_id);
         }
         for session in &finished {
-            append_session_line(&sessions_path, session);
+            if account_id.is_some() {
+                append_session_line(&sessions_path, session);
+            }
         }
         // The open session goes to disk every tick: a crash then costs the gap
         // since the last tick, not the whole session.
-        let open_session = lock(&shared).tracker.open_session().cloned();
-        let _ = crate::write_recovery_file(&recovery_path, &RecoveryState { open_session });
+        persist_open_session(
+            &recovery_path,
+            &recovery,
+            account_id.as_deref(),
+            open_session,
+        )
+        .await;
     }
 }
 
 /// Folds this tick's activity boundaries into sessions. Split out from the
 /// poll task so it stays a plain function over shared state.
 pub fn advance_sessions(shared: &mut MonitorShared, now: u64) -> Vec<ObservedSession> {
-    let project = shared.current_project();
+    let project = shared.current_project(now);
     let agent_active = shared
         .agent
         .is_active(now, shared.settings.agent_override_enabled);
@@ -2030,6 +2189,51 @@ mod tests {
     }
 
     #[test]
+    fn a_project_change_after_a_short_idle_gap_starts_when_activity_resumes() {
+        let mut tracker = SessionTracker::new();
+        let first = project("p1", Attribution::Default);
+        let second = project("p2", Attribution::Agent);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&first),
+            false,
+        );
+        tick(
+            &mut tracker,
+            1_030,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&first),
+            false,
+        );
+        tick(
+            &mut tracker,
+            1_400,
+            Some((SegmentKind::Idle, 1_200)),
+            Some(&first),
+            false,
+        );
+
+        let closed = tick(
+            &mut tracker,
+            1_500,
+            Some((SegmentKind::Active, 1_500)),
+            Some(&second),
+            false,
+        );
+
+        let [session] = closed.as_slice() else {
+            panic!("the first project closes");
+        };
+        assert_eq!(session.project_id, "p1");
+        assert_eq!(session.idle_seconds, 30);
+        let open = tracker.open_session().expect("the second project opens");
+        assert_eq!(open.project.project_id, "p2");
+        assert_eq!(open.started_at, 1_500);
+    }
+
+    #[test]
     fn nothing_is_recorded_while_no_project_can_be_named() {
         let mut tracker = SessionTracker::new();
 
@@ -2124,47 +2328,60 @@ mod tests {
             last_upload_at: None,
             tracker: SessionTracker::new(),
             default_project: Some("default".to_string()),
+            account_id: None,
             selected_project: None,
         };
 
         assert_eq!(
-            shared.current_project(),
+            shared.current_project(10_000),
             Some(project("default", Attribution::Default)),
         );
 
-        shared.agent.project = Some("agent".to_string());
+        shared.agent.active.insert(
+            ("claude_code".to_string(), "s1".to_string()),
+            ActiveAgent {
+                source: "claude_code".to_string(),
+                external_session_id: "s1".to_string(),
+                started_at: 10_000,
+                last_event_at: 10_000,
+                project: Some("agent".to_string()),
+            },
+        );
         assert_eq!(
-            shared.current_project(),
+            shared.current_project(10_000),
             Some(project("agent", Attribution::Agent)),
         );
 
         shared.selected_project = Some("pinned".to_string());
         assert_eq!(
-            shared.current_project(),
+            shared.current_project(10_000),
             Some(project("pinned", Attribution::Selected)),
         );
 
         shared.default_project = None;
-        shared.agent.project = None;
+        shared.agent.active.clear();
         shared.selected_project = None;
-        assert_eq!(shared.current_project(), None);
+        assert_eq!(shared.current_project(10_000), None);
     }
 
     #[test]
     fn agent_tracking_is_active_only_inside_the_staleness_window() {
-        let tracking = AgentTracking {
-            open: true,
-            last_event_at: 10_000,
-            active: None,
-            project: None,
-        };
+        let mut tracking = AgentTracking::default();
+        tracking.active.insert(
+            ("claude_code".to_string(), "s1".to_string()),
+            ActiveAgent {
+                source: "claude_code".to_string(),
+                external_session_id: "s1".to_string(),
+                started_at: 10_000,
+                last_event_at: 10_000,
+                project: None,
+            },
+        );
         assert!(tracking.is_active(10_000 + AGENT_ACTIVE_WINDOW_SECONDS, true));
         assert!(!tracking.is_active(10_001 + AGENT_ACTIVE_WINDOW_SECONDS, true));
         assert!(!tracking.is_active(10_000, false), "the setting gates it");
-        let closed = AgentTracking {
-            open: false,
-            ..tracking.clone()
-        };
+        let mut closed = tracking.clone();
+        closed.active.clear();
         assert!(!closed.is_active(10_000, true), "an ended session is over");
     }
 
@@ -2310,6 +2527,7 @@ mod tests {
             agent_path: dir.join("agent-spool.jsonl"),
             sessions_path: dir.join("sessions-spool.jsonl"),
             recovery_path: dir.join("recovery.json"),
+            recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
         });
 
         assert!(!monitor.is_running().await);
@@ -2322,6 +2540,55 @@ mod tests {
         assert!(status.agent_active.is_none());
         assert!(status.selected_project_id.is_none());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_spools_are_scoped_to_the_recording_account() {
+        let base = PathBuf::from("sessions-spool.jsonl");
+        assert_ne!(
+            scoped_sessions_path(&base, "u1"),
+            scoped_sessions_path(&base, "u2")
+        );
+        assert_eq!(
+            scoped_sessions_path(&base, "u1")
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("sessions-spool-u1.jsonl"),
+        );
+    }
+
+    #[test]
+    fn changing_accounts_clears_the_previous_project_override() {
+        let dir =
+            std::env::temp_dir().join(format!("clock-in-monitor-account-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let client = ApiClient::new(
+            "http://127.0.0.1:9/auth".to_string(),
+            "http://127.0.0.1:9".to_string(),
+        )
+        .expect("client builds");
+        let monitor = Monitor::new(MonitorConfig {
+            client,
+            settings_path: dir.join("settings.json"),
+            segments_path: dir.join("segments-spool.jsonl"),
+            agent_path: dir.join("agent-spool.jsonl"),
+            sessions_path: dir.join("sessions-spool.jsonl"),
+            recovery_path: dir.join("recovery.json"),
+            recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
+        });
+
+        monitor.begin_account("u1");
+        monitor.set_default_project(Some("p-default-u1".to_string()));
+        monitor.select_project(Some("p-selected-u1".to_string()));
+        monitor.begin_account("u2");
+
+        let state = lock(&monitor.shared);
+        assert_eq!(state.account_id.as_deref(), Some("u2"));
+        assert!(state.selected_project.is_none());
+        assert!(state.default_project.is_none());
+        assert!(state.mappings.is_empty());
+        drop(state);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2342,18 +2609,22 @@ mod tests {
             agent_path: dir.join("agent-spool.jsonl"),
             sessions_path: dir.join("sessions-spool.jsonl"),
             recovery_path: dir.join("recovery.json"),
+            recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
         });
 
         let now = unix_now();
-        lock(&monitor.shared).agent = AgentTracking {
-            open: true,
-            last_event_at: now,
-            active: Some(ActiveAgent {
+        let mut tracking = AgentTracking::default();
+        tracking.active.insert(
+            ("kimi_code".to_string(), "s1".to_string()),
+            ActiveAgent {
                 source: "kimi_code".to_string(),
+                external_session_id: "s1".to_string(),
                 started_at: now - 600,
-            }),
-            project: None,
-        };
+                last_event_at: now,
+                project: None,
+            },
+        );
+        lock(&monitor.shared).agent = tracking;
 
         let status = monitor.status().await;
         let active = status
@@ -2371,7 +2642,7 @@ mod tests {
         assert!(monitor.status().await.agent_active.is_none());
 
         lock(&monitor.shared).settings.agent_override_enabled = true;
-        lock(&monitor.shared).agent.open = false;
+        lock(&monitor.shared).agent.active.clear();
         assert!(
             monitor.status().await.agent_active.is_none(),
             "an ended session is over"

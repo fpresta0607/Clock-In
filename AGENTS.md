@@ -14,7 +14,7 @@ called by nothing shipped; the live write path is `POST /sessions/observed`.
 Legacy rows keep `attribution = 'manual'` and are never rewritten.
 
 Reporting splits totals into **attributed** and **unattributed** seconds, not
-corroborated and uncorroborated. A session is attributed whole or not at all, by
+verified and unverified. A session is attributed whole or not at all, by
 `time_sessions.attribution`. The README's "How session tracking works" section is
 the authoritative prose; keep it true when you change the model.
 

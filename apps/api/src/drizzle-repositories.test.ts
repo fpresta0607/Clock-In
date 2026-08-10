@@ -263,7 +263,7 @@ describe("Drizzle report repository", () => {
 describe("Drizzle project repository", () => {
   it("creates the project and the creator's membership in one transaction", async () => {
     const subject = { organizationId: input.organizationId, userId: input.userId };
-    const row = { id: input.projectId, organizationId: subject.organizationId, name: "Field work", archived: false };
+    const row = { id: input.projectId, organizationId: subject.organizationId, name: "Field work", archived: false, createdAt: new Date("2026-08-10T12:00:00.000Z") };
     const inserted: Array<{ table: unknown; values: unknown }> = [];
     const db = {
       transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback({

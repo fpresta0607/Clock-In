@@ -29,9 +29,10 @@ decides the hours:
 - **OS activity.** A slow, read-only monitor folds the machine's state into coarse segments
   (`active`, `idle`, `locked`, `suspended`). No hooks, no injection, no keystrokes. Those
   boundaries are the sessions.
-- **Agent sessions.** Claude Code, Cursor, Codex, and Kimi Code fire lifecycle hooks into a
-  tiny binary that spools them locally. A session's working directory resolves to a project,
-  so an hour on the leaderboard can name *what* produced it.
+- **Agent sessions.** Claude Code and Cursor fire true lifecycle hooks into a tiny local spool.
+  Codex sends a completion heartbeat, so Clock-In infers its boundaries from the gaps. Kimi
+  Code's event coverage is unconfirmed pending verification. A session's working directory
+  resolves to a project, so an hour on the leaderboard can name *what* produced it.
 
 Reports then split every total into **attributed** and **unattributed** seconds: hours
 something named a project for, and hours that fell to the account's default project because
@@ -105,7 +106,8 @@ Every session belongs to exactly one project, resolved in this order:
 
 1. **The project the person pinned.** The desktop app's picker is an override, not a start button.
 2. **The folder an agent is working in.** Agent CLIs report their working directory; `resolveProjectForCwd` matches it against the user's path mappings by normalized longest prefix on path-segment boundaries, so `c:/dev/clock` matches `c:/dev/clock/src` but never `c:/dev/clock-in-extra`.
-3. **The default project**, which is the oldest project on the account. An account with none gets one called `Default` created for it at sign-in, so there is always somewhere for the time to go.
+3. **The default project**, which is the oldest project on the account. Every new workspace
+   already starts with `General`, so there is always somewhere for the time to go.
 
 The project cannot change under an open session: when the answer changes, the
 session closes at its last active moment and the next one picks up there. No
@@ -198,10 +200,11 @@ Not by policy, but because the code never reads it:
   was. There are no input hooks anywhere in the codebase.
 - **Screenshots**, of any kind.
 - **Window titles.** The foreground query returns a process name and stops there.
+- **Input content.** Clock-In never records anything typed into a form, chat, or document.
 - **URLs, browsing history, or page content.** Nothing in the product talks to a browser.
 - **Document names, file contents, message or email bodies.**
-- **Anything injected into another process.** The monitor is read-only Win32 queries plus
-  broadcasts delivered to Clock-In's own hidden window.
+- **Injection.** Clock-In never reaches inside or controls another app. The monitor is read-only
+  Win32 queries plus broadcasts delivered to Clock-In's own hidden window.
 
 What *is* collected: coarse activity segments with timestamps, the foreground process name, agent
 session boundaries with their working directory, and the start and end of each session the monitor
@@ -326,7 +329,7 @@ an atomic write; where it can't, you get a snippet to paste.
 | **Claude Code** | `~/.claude/settings.json` | true session boundaries (`SessionStart`/`SessionEnd`), plus `PostToolUse` heartbeats | merged automatically |
 | **Cursor** | `~/.cursor/hooks.json` | true boundaries, IDE only — cloud agents never fire them | merged automatically |
 | **Codex** | `~/.codex/config.toml` | `notify` fires on turn completion: heartbeats only, boundaries synthesized from gaps | snippet to paste |
-| **Kimi Code** | `~/.kimi/config.toml` | event coverage varies by version | snippet to paste |
+| **Kimi Code** | `~/.kimi/config.toml` | event coverage unconfirmed pending verification | snippet to paste |
 | anything else | — | call `clock-in-hook --source other` yourself | manual |
 
 Because `session-end` is never guaranteed (a crash, a `kill -9`), the server reaps agent

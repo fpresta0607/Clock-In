@@ -74,7 +74,7 @@ class Reports implements ReportRepository {
   }
 }
 
-/** Report routes reap stale agent sessions before corroboration math; nothing else is used. */
+/** Report routes reap stale agent sessions before report aggregation; nothing else is used. */
 class AgentSessions implements Partial<AgentSessionRepository> {
   public reapCalls = 0;
   public async reapStale() {

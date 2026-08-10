@@ -7,7 +7,7 @@ export interface ProjectRecord {
   organizationId: string;
   name: string;
   archived: boolean;
-  isDefault?: boolean;
+  createdAt: Date;
 }
 
 export interface SessionRecord {
@@ -16,7 +16,6 @@ export interface SessionRecord {
   userId: string;
   clientId: string;
   projectId: string;
-  deviceId?: string;
   description: string | null;
   status: "running" | "stopped" | "needs_review";
   startedAt: Date;
@@ -31,16 +30,6 @@ export interface ProjectRepository {
   findForMember(subject: AuthenticatedSubject, projectId: string): Promise<ProjectRecord | null>;
   /** Creates the project and the creator's membership in one transaction. */
   createForMember(subject: AuthenticatedSubject, name: string): Promise<ProjectRecord>;
-  /** The per-member active selection, falling back to the organization default. */
-  preferredForMember?(subject: AuthenticatedSubject): Promise<ProjectRecord | null>;
-  /** Records an active, member-visible project as the caller's selection. */
-  rememberSelection?(subject: AuthenticatedSubject, projectId: string): Promise<void>;
-  /** Admin-only project lifecycle changes, including default replacement. */
-  updateForAdmin?(
-    subject: AuthenticatedSubject,
-    projectId: string,
-    input: { name?: string; archived?: boolean; replacementProjectId?: string },
-  ): Promise<ProjectRecord | null>;
 }
 
 export interface CreateRunningSession {
@@ -48,7 +37,6 @@ export interface CreateRunningSession {
   userId: string;
   clientId: string;
   projectId: string;
-  deviceId: string;
   description: string | null;
   startedAt: Date;
 }
@@ -120,7 +108,6 @@ export interface ReportRowRecord {
 export interface ReportQuery {
   from?: Date;
   toExclusive?: Date;
-  clipToRange?: boolean;
   projectId?: string;
   userId?: string;
 }
@@ -166,17 +153,6 @@ export interface AppTotalRecord {
   durationSeconds: number | string | bigint | null;
 }
 
-export interface SiteTotalRecord {
-  mapping: {
-    id: string;
-    /** The url-rule pattern, stored in the mapping's pathPrefix column. */
-    pattern: string;
-    projectId: string | null;
-  };
-  /** sql sums surface as string/bigint. */
-  durationSeconds: number | string | bigint | null;
-}
-
 export interface ReportRepository {
   findProjectForOrganization(subject: AuthenticatedSubject, projectId: string): Promise<ReportLookupRecord | null>;
   findUserForOrganization(subject: AuthenticatedSubject, userId: string): Promise<ReportLookupRecord | null>;
@@ -187,8 +163,6 @@ export interface ReportRepository {
   readProjectTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<ProjectTotalRecord[]>;
   /** Per-foreground-process totals for one member from active segments, for the /me/stats app breakdown. */
   readAppTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<AppTotalRecord[]>;
-  /** Per-url-rule browser-span totals for one member, clipped to fresh active segments, for /me/stats. */
-  readSiteTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<SiteTotalRecord[]>;
 }
 
 export interface ActivitySegmentInsert {
@@ -215,11 +189,8 @@ export interface AgentSessionRecord {
   source: AgentSource;
   externalSessionId: string;
   projectId: string | null;
-  /** Null for browser spans, which carry no working directory. */
-  cwd: string | null;
-  /** The url-rule mapping a browser span matched; null for agent-source rows. */
-  ruleId: string | null;
-  status: "running" | "ended" | "stale";
+  cwd: string;
+  status: "running" | "ended";
   startedAt: Date;
   endedAt: Date | null;
   lastEventAt: Date;
@@ -231,8 +202,7 @@ export interface UpsertStartedAgentSession {
   userId: string;
   source: AgentSource;
   externalSessionId: string;
-  cwd: string | null;
-  ruleId: string | null;
+  cwd: string;
   projectId: string | null;
   linkedSessionId: string | null;
   occurredAt: Date;
@@ -244,40 +214,30 @@ export interface InsertEndedAgentSession {
   userId: string;
   source: AgentSource;
   externalSessionId: string;
-  cwd: string | null;
-  ruleId: string | null;
+  cwd: string;
   projectId: string | null;
   occurredAt: Date;
   receivedAt: Date;
 }
 
-/** Browser spans heart beat every minute and reap fast; agent CLI sessions keep the long window. */
-export interface AgentSessionStaleCutoffs {
-  /** Running rows from non-browser sources with lastEventAt older than this close. */
-  default: Date;
-  /** Running browser spans with lastEventAt older than this close. */
-  browser: Date;
-}
-
 export interface AgentSessionRepository {
   findByExternalKey(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string): Promise<AgentSessionRecord | null>;
-  /** Inserts a running row; a replayed start only refreshes lastEventAt and never reopens a terminal row. */
+  /** Inserts a running row; a replayed start only refreshes lastEventAt and never reopens an ended row. */
   upsertStarted(input: UpsertStartedAgentSession): Promise<AgentSessionRecord>;
-  /** Closes an active row at endedAt; returns null when no active row matches the key. */
+  /** Closes a running row at endedAt; returns null when no running row matches the key. */
   closeRunning(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, endedAt: Date, now: Date): Promise<AgentSessionRecord | null>;
   /** Tolerated end-before-start: stores the row directly as ended at occurredAt. */
   insertEnded(input: InsertEndedAgentSession): Promise<void>;
-  /** Advances lastEventAt on an active row; false when nothing matched (unknown or terminal). */
+  /** Advances lastEventAt on a running row; false when nothing matched (unknown or already ended). */
   advanceLastEvent(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, occurredAt: Date, now: Date): Promise<boolean>;
-  /** Marks active rows stale at lastEventAt when their source's cutoff elapses. Returns the reaped count. */
-  reapStale(subject: AuthenticatedSubject, cutoffs: AgentSessionStaleCutoffs, now: Date): Promise<number>;
+  /** Closes running rows whose lastEventAt is older than cutoff, ending them at lastEventAt. Returns the reaped count. */
+  reapStale(subject: AuthenticatedSubject, cutoff: Date, now: Date): Promise<number>;
 }
 
 export interface PathMappingRecord {
   id: string;
   organizationId: string;
   userId: string;
-  kind: PathMappingKind;
   pathPrefix: string;
   repoUrl: string | null;
   projectId: string;
@@ -286,14 +246,12 @@ export interface PathMappingRecord {
 export interface CreatePathMapping {
   organizationId: string;
   userId: string;
-  kind: PathMappingKind;
   pathPrefix: string;
   repoUrl: string | null;
   projectId: string;
 }
 
 export interface UpdatePathMapping {
-  kind?: PathMappingKind;
   pathPrefix?: string;
   repoUrl?: string | null;
   projectId?: string;

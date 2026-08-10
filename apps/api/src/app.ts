@@ -276,7 +276,7 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
     }
     const reportService = createReportService({
       reports: dependencies.reportRepository,
-      // Corroboration math reads agent sessions, so stale ones close first.
+      // Report aggregation reads agent sessions, so stale ones close first.
       reaper: createAgentSessionReaper({ agentSessions: dependencies.agentSessionRepository, clock }),
     });
     app.use("/reports", authenticate);

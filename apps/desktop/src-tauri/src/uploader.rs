@@ -1,8 +1,7 @@
 //! The evidence uploader: one Tokio task that wakes every five minutes (and
 //! on demand at timer stop), uploads buffered activity segments, drains the
-//! agent-event spool, and performs the drain's local side effects —
-//! agent-activity tracking for the away override and suggested-start detection
-//! from the cached path mappings.
+//! agent-event spool, and keeps agent-activity tracking in step with the
+//! session-boundary tracker.
 //!
 //! Durability posture, same as the pending-stop queue: any failure — auth or
 //! transport — backs off to the next tick with both spools untouched, so the
@@ -17,16 +16,16 @@ use tokio::sync::Notify;
 
 use crate::api::{ApiClient, PathMapping};
 use crate::monitor::{
-    iso8601, lock, parse_iso8601, unix_now, ActiveAgent, AgentTracking, MonitorShared,
-    ObservedSession, SegmentRecord,
+    advance_sessions, iso8601, lock, parse_iso8601, unix_now, ActiveAgent, AgentTracking,
+    MonitorShared, ObservedSession, SeenAgentEvent, SegmentRecord,
 };
 use crate::spool::{self, AgentEventKind, AgentSource, SpoolEvent};
 
 /// The server's batch bound for both upload routes.
 const UPLOAD_BATCH_SIZE: usize = 500;
 
-/// Five minutes: frequent enough that corroboration survives a crash, rare
-/// enough that the monitor stays below notice.
+/// Five minutes: frequent enough to keep the server current without making
+/// the monitor noisy. Local agent events are replayed on every monitor poll.
 const UPLOAD_INTERVAL_SECONDS: u64 = 300;
 
 pub async fn upload_loop(
@@ -82,7 +81,7 @@ async fn upload_once(
         complete = false;
     }
 
-    complete &= drain_agent_spool(shared, client, &token, agent_path).await;
+    complete &= upload_agent_spool(client, &token, agent_path).await;
     complete &= upload_sessions(client, &token, sessions_path).await;
 
     if complete {
@@ -118,8 +117,6 @@ async fn upload_segments(client: &ApiClient, token: &str, path: &Path) -> bool {
     spool::truncate_acked(path, acked_bytes).is_ok()
 }
 
-/// Drains the agent spool: local tracking first (suggestions and the away
-/// override work offline), then the upload, then the truncation.
 /// Uploads finished sessions in batches, then truncates the acked prefix. A
 /// mid-batch failure skips the truncation, so the spool replays next pass —
 /// safe because the server ignores client ids it already stored.
@@ -145,26 +142,13 @@ async fn upload_sessions(client: &ApiClient, token: &str, path: &Path) -> bool {
     spool::truncate_acked(path, acked_bytes).is_ok()
 }
 
-async fn drain_agent_spool(
-    shared: &Arc<Mutex<MonitorShared>>,
-    client: &ApiClient,
-    token: &str,
-    path: &Path,
-) -> bool {
+async fn upload_agent_spool(client: &ApiClient, token: &str, path: &Path) -> bool {
     let pending = match spool::read_pending(path) {
         Ok(pending) => pending,
         Err(_) => return false,
     };
     if pending.events.is_empty() {
         return true;
-    }
-
-    {
-        let mut shared = lock(shared);
-        let MonitorShared {
-            mappings, agent, ..
-        } = &mut *shared;
-        track_agent_events(&pending.events, mappings, agent);
     }
 
     for chunk in pending.events.chunks(UPLOAD_BATCH_SIZE) {
@@ -181,10 +165,65 @@ async fn drain_agent_spool(
     spool::truncate_acked(path, pending.acked_bytes).is_ok()
 }
 
-/// The drain's local bookkeeping. Pure apart from the clocks inside the
-/// timestamps: events are replayed on every failed upload, so everything here
-/// is idempotent — timestamps only ever move forward, and a suggestion is
-/// replaced only by a strictly newer one.
+/// Replays every unseen event at its own timestamp, bracketing the lifecycle
+/// update with tracker ticks. A short agent run between uploader passes then
+/// still creates the right project boundaries instead of collapsing to its
+/// final state.
+pub fn replay_agent_spool(shared: &Arc<Mutex<MonitorShared>>, path: &Path) -> Vec<ObservedSession> {
+    let Ok(pending) = spool::read_pending(path) else {
+        return Vec::new();
+    };
+    replay_agent_events(shared, &pending.events)
+}
+
+pub fn replay_agent_events(
+    shared: &Arc<Mutex<MonitorShared>>,
+    events: &[SpoolEvent],
+) -> Vec<ObservedSession> {
+    let mut ordered: Vec<(u64, &SpoolEvent)> = events
+        .iter()
+        .filter_map(|event| parse_iso8601(&event.occurred_at).map(|at| (at, event)))
+        .collect();
+    ordered.sort_by(|(left_at, left), (right_at, right)| {
+        (
+            left_at,
+            source_name(left.source),
+            &left.external_session_id,
+            event_rank(left.event),
+        )
+            .cmp(&(
+                right_at,
+                source_name(right.source),
+                &right.external_session_id,
+                event_rank(right.event),
+            ))
+    });
+
+    let mut finished = Vec::new();
+    let mut shared = lock(shared);
+    for (at, event) in ordered {
+        if !agent_event_is_new(event, at, &shared.agent) {
+            continue;
+        }
+        let can_replay_boundary = shared
+            .tracker
+            .open_session()
+            .is_none_or(|open| at >= open.last_active_at);
+        if can_replay_boundary {
+            finished.extend(advance_sessions(&mut shared, at));
+        }
+        let mappings = shared.mappings.clone();
+        track_agent_event(event, at, &mappings, &mut shared.agent);
+        if can_replay_boundary {
+            finished.extend(advance_sessions(&mut shared, at));
+        }
+    }
+    finished
+}
+
+/// The drain's local bookkeeping. Replays are idempotent per agent lifecycle:
+/// a source plus external session id owns exactly one active marker.
+#[cfg(test)]
 pub fn track_agent_events(
     events: &[SpoolEvent],
     mappings: &[PathMapping],
@@ -194,51 +233,101 @@ pub fn track_agent_events(
         .iter()
         .filter_map(|event| parse_iso8601(&event.occurred_at).map(|at| (at, event)))
         .collect();
-    ordered.sort_by_key(|(at, _)| *at);
+    ordered.sort_by(|(left_at, left), (right_at, right)| {
+        (
+            left_at,
+            source_name(left.source),
+            &left.external_session_id,
+            event_rank(left.event),
+        )
+            .cmp(&(
+                right_at,
+                source_name(right.source),
+                &right.external_session_id,
+                event_rank(right.event),
+            ))
+    });
 
     for (at, event) in ordered {
-        tracking.last_event_at = tracking.last_event_at.max(at);
-        match event.event {
-            AgentEventKind::Started => {
-                tracking.open = true;
-                // Only a newer start moves the marker: replays never regress it.
-                let is_newer = tracking
-                    .active
-                    .as_ref()
-                    .is_none_or(|active| at >= active.started_at);
-                if is_newer {
-                    tracking.active = Some(ActiveAgent {
-                        source: source_name(event.source).to_string(),
-                        started_at: at,
-                    });
-                }
-            }
-            AgentEventKind::Heartbeat => {
-                tracking.open = true;
-                // A heartbeat without a seen start still opens the marker.
-                if tracking.active.is_none() {
-                    tracking.active = Some(ActiveAgent {
-                        source: source_name(event.source).to_string(),
-                        started_at: at,
-                    });
-                }
-            }
-            AgentEventKind::Ended => {
-                tracking.open = false;
-                tracking.active = None;
+        track_agent_event(event, at, mappings, tracking);
+    }
+}
+
+fn agent_key(event: &SpoolEvent) -> (String, String) {
+    (
+        source_name(event.source).to_string(),
+        event.external_session_id.clone(),
+    )
+}
+
+fn event_rank(kind: AgentEventKind) -> u8 {
+    match kind {
+        AgentEventKind::Started => 0,
+        AgentEventKind::Heartbeat => 1,
+        AgentEventKind::Ended => 2,
+    }
+}
+
+fn agent_event_is_new(event: &SpoolEvent, at: u64, tracking: &AgentTracking) -> bool {
+    let key = agent_key(event);
+    tracking.seen.get(&key).is_none_or(|seen| {
+        (at, event_rank(event.event)) > (seen.occurred_at, event_rank(seen.kind))
+    })
+}
+
+fn track_agent_event(
+    event: &SpoolEvent,
+    at: u64,
+    mappings: &[PathMapping],
+    tracking: &mut AgentTracking,
+) {
+    if !agent_event_is_new(event, at, tracking) {
+        return;
+    }
+    let key = agent_key(event);
+    let source = source_name(event.source).to_string();
+    tracking.last_event_at = tracking.last_event_at.max(at);
+    match event.event {
+        AgentEventKind::Started => {
+            tracking.active.insert(
+                key.clone(),
+                ActiveAgent {
+                    source,
+                    external_session_id: event.external_session_id.clone(),
+                    started_at: at,
+                    last_event_at: at,
+                    project: resolve_project(&event.cwd, mappings),
+                },
+            );
+        }
+        AgentEventKind::Heartbeat => {
+            let resolved = resolve_project(&event.cwd, mappings);
+            let active = tracking
+                .active
+                .entry(key.clone())
+                .or_insert_with(|| ActiveAgent {
+                    source,
+                    external_session_id: event.external_session_id.clone(),
+                    started_at: at,
+                    last_event_at: at,
+                    project: resolved.clone(),
+                });
+            active.last_event_at = at;
+            if let Some(project) = resolved {
+                active.project = Some(project);
             }
         }
-        // A started agent in a mapped directory is what attributes the open
-        // session to real work instead of to the default project.
-        match event.event {
-            AgentEventKind::Started | AgentEventKind::Heartbeat => {
-                if let Some(project_id) = resolve_project(&event.cwd, mappings) {
-                    tracking.project = Some(project_id);
-                }
-            }
-            AgentEventKind::Ended => tracking.project = None,
+        AgentEventKind::Ended => {
+            tracking.active.remove(&key);
         }
     }
+    tracking.seen.insert(
+        key,
+        SeenAgentEvent {
+            occurred_at: at,
+            kind: event.event,
+        },
+    );
 }
 
 pub fn source_name(source: AgentSource) -> &'static str {
@@ -320,9 +409,19 @@ mod tests {
     }
 
     fn event(kind: AgentEventKind, cwd: &str, occurred_at: &str) -> SpoolEvent {
+        event_for(AgentSource::ClaudeCode, "s1", kind, cwd, occurred_at)
+    }
+
+    fn event_for(
+        source: AgentSource,
+        external_session_id: &str,
+        kind: AgentEventKind,
+        cwd: &str,
+        occurred_at: &str,
+    ) -> SpoolEvent {
         SpoolEvent {
-            source: AgentSource::ClaudeCode,
-            external_session_id: "s1".to_string(),
+            source,
+            external_session_id: external_session_id.to_string(),
             event: kind,
             occurred_at: occurred_at.to_string(),
             cwd: cwd.to_string(),
@@ -399,16 +498,21 @@ mod tests {
             &[],
             &mut tracking,
         );
-        assert!(tracking.open);
+        assert_eq!(tracking.active.len(), 1);
         assert_eq!(
             tracking.last_event_at,
             parse_iso8601("2026-08-07T10:05:00Z").expect("timestamp parses")
         );
         assert_eq!(
-            tracking.active,
-            Some(ActiveAgent {
+            tracking
+                .active
+                .get(&("claude_code".to_string(), "s1".to_string())),
+            Some(&ActiveAgent {
                 source: "claude_code".to_string(),
+                external_session_id: "s1".to_string(),
                 started_at: parse_iso8601("2026-08-07T10:00:00Z").expect("timestamp parses"),
+                last_event_at: parse_iso8601("2026-08-07T10:05:00Z").expect("timestamp parses"),
+                project: None,
             }),
             "the start opens the marker; the heartbeat keeps the original start"
         );
@@ -422,8 +526,10 @@ mod tests {
             &[],
             &mut tracking,
         );
-        assert!(!tracking.open);
-        assert_eq!(tracking.active, None, "an ended session clears the marker");
+        assert!(
+            tracking.active.is_empty(),
+            "an ended session clears its marker"
+        );
     }
 
     #[test]
@@ -440,7 +546,12 @@ mod tests {
             &mappings,
             &mut tracking,
         );
-        assert_eq!(tracking.project.as_deref(), Some("p-clockin"));
+        assert_eq!(
+            tracking.effective_project(
+                parse_iso8601("2026-08-07T10:00:00Z").expect("timestamp parses")
+            ),
+            Some("p-clockin")
+        );
 
         // An unmapped directory names nothing, so the last name stands until
         // the session that carried it ends.
@@ -453,7 +564,12 @@ mod tests {
             &mappings,
             &mut tracking,
         );
-        assert_eq!(tracking.project.as_deref(), Some("p-clockin"));
+        assert_eq!(
+            tracking.effective_project(
+                parse_iso8601("2026-08-07T11:00:00Z").expect("timestamp parses")
+            ),
+            Some("p-clockin")
+        );
 
         track_agent_events(
             &[event(
@@ -465,19 +581,100 @@ mod tests {
             &mut tracking,
         );
         assert_eq!(
-            tracking.project, None,
+            tracking.effective_project(
+                parse_iso8601("2026-08-07T12:00:00Z").expect("timestamp parses")
+            ),
+            None,
             "with no agent running, time falls back to the default project"
         );
     }
 
     #[test]
+    fn ending_one_agent_keeps_an_overlapping_agent_active_and_attributed() {
+        let mappings = vec![
+            mapping("m1", "C:/one", "p-one"),
+            mapping("m2", "C:/two", "p-two"),
+        ];
+        let mut tracking = AgentTracking::default();
+        track_agent_events(
+            &[
+                event_for(
+                    AgentSource::ClaudeCode,
+                    "one",
+                    AgentEventKind::Started,
+                    "C:/one",
+                    "2026-08-07T10:00:00Z",
+                ),
+                event_for(
+                    AgentSource::Cursor,
+                    "two",
+                    AgentEventKind::Started,
+                    "C:/two",
+                    "2026-08-07T10:01:00Z",
+                ),
+                event_for(
+                    AgentSource::ClaudeCode,
+                    "one",
+                    AgentEventKind::Ended,
+                    "C:/one",
+                    "2026-08-07T10:02:00Z",
+                ),
+            ],
+            &mappings,
+            &mut tracking,
+        );
+
+        let now = parse_iso8601("2026-08-07T10:02:00Z").expect("timestamp parses");
+        assert!(tracking.is_active(now, true));
+        assert_eq!(tracking.effective_project(now), Some("p-two"));
+        assert!(tracking
+            .active
+            .contains_key(&("cursor".to_string(), "two".to_string())));
+    }
+
+    #[test]
+    fn replaying_a_short_agent_session_splits_the_tracker_at_event_times() {
+        let shared = Arc::new(Mutex::new(MonitorShared {
+            builder: crate::monitor::SegmentBuilder::new(),
+            settings: crate::monitor::MonitorSettings::default(),
+            mappings: vec![mapping("m1", "C:/clock", "p-clock")],
+            agent: AgentTracking::default(),
+            last_upload_at: None,
+            tracker: crate::monitor::SessionTracker::new(),
+            default_project: Some("p-default".to_string()),
+            account_id: Some("u1".to_string()),
+            selected_project: None,
+        }));
+        {
+            let mut state = lock(&shared);
+            state.builder.apply(
+                1_000,
+                &crate::monitor::ActivitySignal::Active { process_name: None },
+            );
+            advance_sessions(&mut state, 1_000);
+        }
+
+        let finished = replay_agent_events(
+            &shared,
+            &[
+                event(AgentEventKind::Started, "C:/clock", "1970-01-01T00:16:50Z"),
+                event(AgentEventKind::Ended, "C:/clock", "1970-01-01T00:17:00Z"),
+            ],
+        );
+
+        let agent = finished
+            .iter()
+            .find(|session| session.project_id == "p-clock")
+            .expect("the short agent interval becomes its own session");
+        assert_eq!(agent.started_at, iso8601(1_010));
+        assert_eq!(agent.stopped_at, iso8601(1_020));
+    }
+
+    #[test]
     fn out_of_order_events_replay_without_moving_state_backwards() {
-        let mut tracking = AgentTracking {
-            open: true,
-            last_event_at: parse_iso8601("2026-08-07T12:00:00Z").expect("timestamp parses"),
-            active: None,
-            project: None,
-        };
+        let mut tracking = AgentTracking::default();
+        let newer = event(AgentEventKind::Heartbeat, "C:/dev", "2026-08-07T12:00:00Z");
+        track_agent_events(&[newer], &[], &mut tracking);
         // A replayed drain delivers the same older events; state must not regress.
         track_agent_events(
             &[event(
@@ -503,6 +700,9 @@ mod tests {
             &[],
             &mut fresh,
         );
-        assert!(!fresh.open, "the end landed after the start in time order");
+        assert!(
+            fresh.active.is_empty(),
+            "the end landed after the start in time order"
+        );
     }
 }

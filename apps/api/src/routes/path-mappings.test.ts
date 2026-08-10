@@ -43,8 +43,8 @@ beforeAll(async () => {
 
 class MemoryProjects implements ProjectRepository {
   private readonly records: ProjectRecord[] = [
-    { id: ids.project, organizationId: ids.organization, name: "Alpha", archived: false },
-    { id: ids.archivedProject, organizationId: ids.organization, name: "Old", archived: true },
+    { id: ids.project, organizationId: ids.organization, name: "Alpha", archived: false, createdAt: new Date("2026-08-10T12:00:00.000Z") },
+    { id: ids.archivedProject, organizationId: ids.organization, name: "Old", archived: true, createdAt: new Date("2026-08-10T12:00:00.000Z") },
   ];
   public async listForMember() { return this.records.filter((record) => !record.archived); }
   public async findForMember(subject: { organizationId: string }, projectId: string) {
