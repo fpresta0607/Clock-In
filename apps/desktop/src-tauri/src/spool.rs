@@ -22,8 +22,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-/// Rotation threshold for a single spool file. Total retention is bounded by
-/// this plus one rotated file, so a desktop that never runs cannot fill the disk.
+/// Rotation threshold for a single spool file.
 pub const MAX_SPOOL_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Overrides the spool location; tests and support setups use this.
@@ -320,6 +319,21 @@ pub fn read_pending(path: &Path) -> SpoolResult<PendingEvents> {
     })
 }
 
+/// Returns every spool generation, oldest first.
+pub fn pending_spool_paths(path: &Path) -> SpoolResult<Vec<PathBuf>> {
+    with_lock(path, || {
+        let mut paths = Vec::new();
+        let rotated = rotated_path(path);
+        if has_pending_bytes(&rotated)? {
+            paths.push(rotated);
+        }
+        if has_pending_bytes(path)? {
+            paths.push(path.to_path_buf());
+        }
+        Ok(paths)
+    })
+}
+
 /// The line-typed core of `read_pending`, shared with the segment spool the
 /// activity monitor drains (same durability discipline, different row type).
 pub(crate) fn read_pending_lines<T: serde::de::DeserializeOwned>(
@@ -376,7 +390,23 @@ pub fn truncate_acked(path: &Path, acked_bytes: u64) -> SpoolResult<()> {
         if (content.len() as u64) < acked_bytes {
             return Ok(());
         }
+        if acked_bytes == content.len() as u64 && is_rotated_path(path) {
+            return std::fs::write(path, []);
+        }
         rewrite(path, &content[acked_bytes as usize..])
+    })
+}
+
+pub fn remove_empty_rotated(path: &Path) -> SpoolResult<()> {
+    with_lock(path, || {
+        let rotated = rotated_path(path);
+        match std::fs::metadata(&rotated) {
+            Ok(metadata) if metadata.len() == 0 => std::fs::remove_file(rotated)?,
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        Ok(())
     })
 }
 
@@ -467,7 +497,7 @@ fn append_line_locked(path: &Path, line: &[u8], max_bytes: u64) -> SpoolResult<(
         repair_partial_tail(path)?;
     }
     let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-    if size > 0 && size + line.len() as u64 > max_bytes {
+    if size > 0 && size + line.len() as u64 > max_bytes && !rotated_path(path).exists() {
         rotate(path)?;
     }
     OpenOptions::new()
@@ -501,16 +531,25 @@ fn repair_partial_tail(path: &Path) -> SpoolResult<()> {
     }
 }
 
-/// Rotates by replacing the single `.old` file: retention stays capped at one
-/// full spool plus one rotated spool no matter how long the desktop stays closed.
 fn rotate(path: &Path) -> SpoolResult<()> {
-    let rotated = path.with_extension("old.jsonl");
-    match std::fs::remove_file(&rotated) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    std::fs::rename(path, rotated_path(path))
+}
+
+fn rotated_path(path: &Path) -> PathBuf {
+    path.with_extension("old.jsonl")
+}
+
+fn is_rotated_path(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.to_string_lossy().ends_with(".old.jsonl"))
+}
+
+fn has_pending_bytes(path: &Path) -> SpoolResult<bool> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len() > 0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
     }
-    std::fs::rename(path, rotated)
 }
 
 fn quarantine(path: &Path, tag: &str, bytes: &[u8]) -> SpoolResult<()> {
@@ -927,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn the_spool_rotates_at_the_cap_and_keeps_one_old_file() {
+    fn rotation_preserves_every_unacknowledged_event_in_generation_order() {
         let dir = temp_dir("rotation");
         let path = dir.join("agent-spool.jsonl");
         let line = serde_json::to_vec(&event("s1")).expect("event serializes");
@@ -941,17 +980,28 @@ mod tests {
             append_line(&path, &line, cap).expect("append succeeds");
         }
 
-        let rotated = path.with_extension("old.jsonl");
+        let rotated = rotated_path(&path);
         assert!(rotated.exists());
-        assert!(std::fs::metadata(&path).expect("spool exists").len() <= cap);
         assert!(std::fs::metadata(&rotated).expect("rotated exists").len() <= cap);
-        // Every surviving line is still whole, in both generations.
-        for line in spool_lines(&path)
-            .iter()
-            .chain(spool_lines(&rotated).iter())
-        {
-            serde_json::from_str::<SpoolEvent>(line).expect("rotated lines stay whole");
+        assert!(
+            std::fs::metadata(&path).expect("live spool exists").len() > cap,
+            "the live generation grows while an older one waits for acknowledgement"
+        );
+
+        let mut sessions = Vec::new();
+        for generation in pending_spool_paths(&path).expect("generations enumerate") {
+            let pending = read_pending(&generation).expect("generation reads");
+            sessions.extend(
+                pending
+                    .events
+                    .iter()
+                    .map(|event| event.external_session_id.clone()),
+            );
+            truncate_acked(&generation, pending.acked_bytes).expect("generation acknowledges");
         }
+        remove_empty_rotated(&path).expect("completed drain removes the acknowledged generation");
+        assert_eq!(sessions, (0..9).map(|index| format!("s{index}")).collect::<Vec<_>>());
+        assert!(pending_spool_paths(&path).expect("generations enumerate").is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

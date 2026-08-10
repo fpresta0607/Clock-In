@@ -15,6 +15,9 @@ fn main() {
     }
     println!("cargo:rerun-if-env-changed=CLOCK_IN_AUTH_URL");
     println!("cargo:rerun-if-env-changed=CLOCK_IN_API_URL");
+    println!("cargo:rerun-if-env-changed=CLOCK_IN_CHROME_EXTENSION_ID");
+    println!("cargo:rerun-if-env-changed=CLOCK_IN_EDGE_EXTENSION_ID");
+    println!("cargo:rerun-if-env-changed=CLOCK_IN_FIREFOX_EXTENSION_ID");
 
     // The helpers ship as externalBin siblings (see release.yml's staging
     // step), and tauri-build validates those paths on every build — including

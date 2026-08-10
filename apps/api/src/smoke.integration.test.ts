@@ -166,11 +166,12 @@ integration(integrationDescription, () => {
     const secondUserId = randomUUID();
     const otherOrganizationId = randomUUID();
     const otherUserId = randomUUID();
+    const otherInviteCode = "ACDEF-GHJKM";
     await database.client`
       insert into organizations (id, name, invite_code)
       values
         (${organizationId}, 'Legacy workspace', ${randomUUID().replaceAll("-", "")}),
-        (${otherOrganizationId}, 'Other workspace', ${randomUUID().replaceAll("-", "")})
+        (${otherOrganizationId}, 'Other workspace', ${otherInviteCode})
     `;
     await database.client`
       insert into users (id, organization_id, email, name)
@@ -277,6 +278,21 @@ integration(integrationDescription, () => {
     const administratorHeaders = firstClaimWon ? firstHeaders : secondHeaders;
     const memberApp = firstClaimWon ? secondApp : legacyApp;
     const memberHeaders = firstClaimWon ? secondHeaders : firstHeaders;
+    const administratorId = firstClaimWon ? firstUserId : secondUserId;
+
+    const blockedMove = await administratorApp.request("/organization/join", {
+      method: "POST",
+      headers: administratorHeaders,
+      body: JSON.stringify({ inviteCode: otherInviteCode }),
+    });
+    expect(blockedMove.status).toBe(409);
+    await expect(blockedMove.json()).resolves.toMatchObject({
+      error: { code: "conflict", message: expect.stringContaining("first administrator") },
+    });
+    const administratorAfterBlockedMove = await database.client`
+      select organization_id, role from users where id = ${administratorId}
+    `;
+    expect(administratorAfterBlockedMove).toEqual([{ organization_id: organizationId, role: "admin" }]);
 
     const defaultStart = await administratorApp.request("/sessions", {
       method: "POST",

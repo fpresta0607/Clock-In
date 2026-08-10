@@ -5,10 +5,10 @@ import { fileURLToPath } from "node:url";
 const DEFAULT_WINDOWS_TIMESTAMP_URL = "http://timestamp.digicert.com";
 
 export function buildTauriConfig({ updaterEnabled, windowsSigningEnabled, certificateThumbprint, timestampUrl }) {
-  const bundle = {};
-  if (updaterEnabled) {
-    bundle.createUpdaterArtifacts = true;
+  if (!updaterEnabled) {
+    throw new Error("Production releases require the Tauri updater signing key.");
   }
+  const bundle = { createUpdaterArtifacts: true };
   if (windowsSigningEnabled) {
     const thumbprint = certificateThumbprint?.trim();
     if (thumbprint === undefined || thumbprint.length === 0) {

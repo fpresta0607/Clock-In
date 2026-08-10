@@ -260,12 +260,15 @@ type BrowserCardProps = {
 
 /// One browser's connection state as a single plain sentence plus at most one
 /// button: connected states itself, a registered browser offers the store
-/// page, anything broken offers [Fix]. Shared by onboarding and settings.
+/// page, disabled browsers state the release prerequisite, and anything broken
+/// offers [Fix]. Shared by onboarding and settings.
 const BrowserCard = ({ health, busy, error, onRepair, onConnect }: BrowserCardProps) => (
   <div className="browser-card">
     <p className="browser-name">{health.label}</p>
     {health.state === "connected" ? (
       <p className="browser-status is-connected">{health.label} is connected ✓</p>
+    ) : health.state === "disabled" ? (
+      <p className="subtle">Browser attribution is unavailable until its verified extension is released.</p>
     ) : health.state === "registered" ? (
       <>
         <p className="subtle">This opens the {health.label} extension page. Click Add to {health.label} there.</p>

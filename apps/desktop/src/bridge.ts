@@ -53,8 +53,8 @@ export type HookRegistration = {
 
 /// Per-browser extension health, in the order a setup flows through them.
 /// "registered" means the plumbing is done and only the store install is
-/// left; the card keeps offering [Connect] rather than showing an error.
-export type BrowserHealthState = "never-registered" | "binary-missing" | "registered" | "connected";
+/// left; "disabled" means no released extension ID was configured.
+export type BrowserHealthState = "disabled" | "never-registered" | "binary-missing" | "registered" | "connected";
 
 export type BrowserHealth = {
   browser: string;
@@ -423,7 +423,7 @@ const decodeAwayInfo = (value: unknown): AwayInfo => {
 const decodeBrowserHealth = (value: unknown): BrowserHealth => {
   const candidate = record(value);
   const state = candidate.state;
-  if (state !== "never-registered" && state !== "binary-missing" && state !== "registered" && state !== "connected") {
+  if (state !== "disabled" && state !== "never-registered" && state !== "binary-missing" && state !== "registered" && state !== "connected") {
     invalidResponse();
   }
   return {

@@ -122,13 +122,16 @@ The repo is public, so release assets are downloadable by anyone — the web
 dashboard's **Download** button pulls the latest installer for the visitor's
 platform straight from GitHub Releases.
 
-Two **repository variables** are already set (Settings → Secrets and variables →
-Actions → Variables), not secrets — they are baked into a public binary anyway:
+Set these **repository variables** (Settings → Secrets and variables → Actions →
+Variables). They are baked into a public binary, so do not use secrets:
 
 | Variable | Value |
 |---|---|
 | `CLOCK_IN_AUTH_URL` | `https://ep-tiny-mountain-ay0l41z3.neonauth.c-5.us-east-2.aws.neon.tech/neondb/auth` |
 | `CLOCK_IN_API_URL` | `https://api.clock.siqstack.com` |
+| `CLOCK_IN_CHROME_EXTENSION_ID` | Released Chrome Web Store ID, when available |
+| `CLOCK_IN_EDGE_EXTENSION_ID` | Released Edge Add-ons ID, when available |
+| `CLOCK_IN_FIREFOX_EXTENSION_ID` | Released Firefox add-on ID, when available |
 
 Then tag a release:
 
@@ -139,18 +142,18 @@ git tag v0.1.0 && git push origin v0.1.0
 The workflow builds Windows and macOS installers and **publishes** the release
 immediately, so the download links work as soon as the build finishes.
 
-If those variables are missing, the build **fails** rather than shipping an
-installer that points at localhost — `apps/desktop/src-tauri/build.rs` enforces
-that.
+The API and auth URL variables are required: the build **fails** rather than
+shipping an installer that points at localhost —
+`apps/desktop/src-tauri/build.rs` enforces that. Extension IDs are optional
+until their listings are released; without a valid ID, that browser's native
+messaging integration stays disabled.
 
 ### Code signing and auto-update
 
-The release workflow still builds and publishes installers when the signing
-secrets are absent; it just annotates the run with warnings. That keeps the
-pipeline usable while the certificates are being procured, but shipping to
-non-engineers is blocked until signing is on: an unsigned installer greets a
-novice with "Windows protected your PC", and macOS refuses to open an
-unnotarized app without right-click → Open.
+The release workflow refuses to publish when the Windows or macOS signing
+credentials, notarization credentials, or Tauri updater signing key are
+missing. Local non-production builds may remain unsigned; a tagged release
+must include signed installers and updater artifacts.
 
 The certificates have days-to-weeks of identity-verification lead time, so
 start procurement before the release, not after:
@@ -184,20 +187,17 @@ Set these under Settings → Secrets and variables → Actions → **Secrets**:
 | `WINDOWS_CERTIFICATE_THUMBPRINT` | Optional; use instead of the `.pfx` pair when the certificate already lives in the runner's store (Azure Key Vault / SafeNet flow) |
 | `APPLE_CERTIFICATE` | Base64 of the exported Developer ID Application `.p12` |
 | `APPLE_CERTIFICATE_PASSWORD` | The `.p12` export password |
-| `APPLE_SIGNING_IDENTITY` | Optional; the certificate's identity is used when omitted |
+| `APPLE_SIGNING_IDENTITY` | Developer ID Application signing identity |
 | `APPLE_ID` | Apple ID email used for notarization |
 | `APPLE_PASSWORD` | App-specific password for that Apple ID (from appleid.apple.com) |
 | `APPLE_TEAM_ID` | The 10-character team id |
 | `TAURI_SIGNING_PRIVATE_KEY` | The updater private key from `pnpm tauri signer generate` |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The password chosen when generating that key |
 
-With `TAURI_SIGNING_PRIVATE_KEY` set, the workflow enables
-`bundle.createUpdaterArtifacts` for that build only, so the release also
+The workflow always enables `bundle.createUpdaterArtifacts`, so the release
 carries the updater signatures and `latest.json` beside the installers, which
-is what the in-app updater verifies against. The override is conditional on
-purpose: `createUpdaterArtifacts` makes `tauri build` fail when the key is
-absent, and the unsigned fallback has to keep working while certificates are
-being procured. The matching public key goes into the updater config in
+is what the in-app updater verifies against. The matching public key goes into
+the updater config in
 `apps/desktop/src-tauri/tauri.conf.json`. Back the private key up somewhere
 durable: losing it means existing installs can never verify an update again.
 
@@ -229,6 +229,13 @@ artifact (the Chrome/Edge zip and the Firefox variant zip from
 2. Submit the same Chrome/Edge zip under Edge Add-ons with the same listing
    copy; Edge runs the same engine and accepts the same package.
 3. Same id step as Chrome once approved.
+
+After each store approves its listing, set the corresponding
+`CLOCK_IN_*_EXTENSION_ID` repository variable before building the next desktop
+release. The ID is compiled into that release's native-messaging manifest. A
+missing or invalid ID leaves that browser disabled and removes Clock-In's
+native-messaging registration, so pre-release placeholder IDs never authorize
+a production host.
 
 **Review latency is part of the release cadence.** Every submission queues
 for human review, from hours to days for Chrome and up to a week for Edge,

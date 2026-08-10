@@ -30,7 +30,7 @@ Off-the-record tabs are excluded via `tab.incognito` (Chrome's Guest windows rep
 
 ## Wire protocol
 
-The extension speaks Chrome native messaging to the host registered as `com.clock_in.browser_host` (the desktop registers it silently per browser).
+The extension speaks Chrome native messaging to the host registered as `com.clock_in.browser_host` after the desktop is built with that browser's released extension ID.
 Framing (4-byte little-endian length-prefixed JSON) is handled by `chrome.runtime.connectNative`; the JSON shapes are:
 
 - `{"type":"get-rules"}` -> `{"type":"rules","collectionEnabled","collectionId","rules":[{"id","pattern"}]}`; fetched on connect and every five minutes.
