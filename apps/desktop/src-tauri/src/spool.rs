@@ -14,6 +14,7 @@
 //! uploaded — a partial tail from a crashed append, a line that fails to
 //! parse — are quarantined to sibling files instead of failing the drain.
 
+use std::cell::RefCell;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -633,7 +634,9 @@ fn check_namespace_capacity_at_locked(
         return Ok(());
     }
     let evictable = candidates.iter().try_fold(0usize, |count, path| {
-        Ok::<_, io::Error>(count + usize::from(!namespace_has_pending_evidence(path)?))
+        Ok::<_, io::Error>(
+            count + usize::from(namespace_is_evictable_while_root_locked(path)?),
+        )
     })?;
     if evictable >= required_evictions {
         return Ok(());
@@ -697,7 +700,12 @@ fn reserve_namespace_slot_at_locked(
         if namespaces.saturating_add(reserve_count) <= MAX_RETAINED_NAMESPACES {
             break;
         }
-        if !namespace_has_pending_evidence(&path)? {
+        let Some(lease) = try_acquire_namespace_writer_lease_while_root_locked(&path)? else {
+            continue;
+        };
+        let has_pending_evidence = namespace_has_pending_evidence_while_leased(&path)?;
+        drop(lease);
+        if !has_pending_evidence {
             std::fs::remove_dir_all(path)?;
             namespaces = namespaces.saturating_sub(1);
         }
@@ -715,8 +723,21 @@ fn namespace_capacity_error() -> io::Error {
 }
 
 fn namespace_has_pending_evidence(dir: &Path) -> SpoolResult<bool> {
+    with_namespace_writer_lease(dir, || namespace_has_pending_evidence_while_leased(dir))
+}
+
+fn namespace_is_evictable_while_root_locked(dir: &Path) -> SpoolResult<bool> {
+    let Some(lease) = try_acquire_namespace_writer_lease_while_root_locked(dir)? else {
+        return Ok(false);
+    };
+    let evictable = !namespace_has_pending_evidence_while_leased(dir)?;
+    drop(lease);
+    Ok(evictable)
+}
+
+fn namespace_has_pending_evidence_while_leased(dir: &Path) -> SpoolResult<bool> {
     for name in ["agent-spool.jsonl", "segments-spool.jsonl", "browser-spool.jsonl"] {
-        if !pending_spool_paths(&dir.join(name))?.is_empty() {
+        if !pending_spool_paths_while_leased(&dir.join(name))?.is_empty() {
             return Ok(true);
         }
     }
@@ -732,6 +753,16 @@ fn namespace_has_pending_evidence(dir: &Path) -> SpoolResult<bool> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+fn pending_spool_paths_while_leased(path: &Path) -> SpoolResult<Vec<PathBuf>> {
+    with_lock_without_namespace_lease(path, || {
+        let mut paths = sealed_spool_paths_locked(path)?;
+        if has_pending_bytes(path)? {
+            paths.push(path.to_path_buf());
+        }
+        Ok(paths)
+    })
 }
 
 #[cfg(windows)]
@@ -793,6 +824,25 @@ pub(crate) fn format_iso8601(unix_secs: u64) -> String {
 /// exposed for writers with their own encoding).
 pub fn append_line(path: &Path, line: &[u8], max_bytes: u64) -> SpoolResult<()> {
     with_lock(path, || append_line_locked(path, line, max_bytes))
+}
+
+pub fn write_atomically(path: &Path, content: &[u8]) -> SpoolResult<()> {
+    with_lock(path, || rewrite(path, content))
+}
+
+pub fn ensure_namespace_directory(dir: &Path) -> SpoolResult<()> {
+    let Some(location) = namespace_location(dir) else {
+        return std::fs::create_dir_all(dir);
+    };
+    let root_guard = acquire_lock(&location.root)?;
+    if !location.namespace.is_dir() {
+        drop(root_guard);
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "evidence namespace is no longer active",
+        ));
+    }
+    std::fs::create_dir_all(dir)
 }
 
 fn append_line_locked(path: &Path, line: &[u8], max_bytes: u64) -> SpoolResult<()> {
@@ -1025,6 +1075,13 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 /// outside the append path (the browser files' temp-and-rename writes), which
 /// face the same multi-process races as the spool itself.
 pub fn with_lock<T>(path: &Path, action: impl FnOnce() -> SpoolResult<T>) -> SpoolResult<T> {
+    with_namespace_writer_lease(path, || with_lock_without_namespace_lease(path, action))
+}
+
+fn with_lock_without_namespace_lease<T>(
+    path: &Path,
+    action: impl FnOnce() -> SpoolResult<T>,
+) -> SpoolResult<T> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1032,6 +1089,93 @@ pub fn with_lock<T>(path: &Path, action: impl FnOnce() -> SpoolResult<T>) -> Spo
     recover_rewrite_files_locked(path)?;
     recover_numbered_generation_rewrite_files_locked(path)?;
     action()
+}
+
+#[derive(Clone)]
+struct NamespaceLocation {
+    root: PathBuf,
+    namespace: PathBuf,
+}
+
+fn namespace_location(path: &Path) -> Option<NamespaceLocation> {
+    let mut root = PathBuf::new();
+    let mut components = path.components();
+    while let Some(component) = components.next() {
+        root.push(component.as_os_str());
+        if component.as_os_str() != "evidence" {
+            continue;
+        }
+        let account = components.next()?.as_os_str().to_owned();
+        let organization = components.next()?.as_os_str().to_owned();
+        let namespace = root.join(account).join(organization);
+        return Some(NamespaceLocation { root, namespace });
+    }
+    None
+}
+
+fn namespace_writer_lease_path(namespace: &Path) -> PathBuf {
+    namespace.join(".namespace-writer")
+}
+
+thread_local! {
+    static HELD_NAMESPACE_LEASES: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+}
+
+fn namespace_lease_is_held(namespace: &Path) -> bool {
+    HELD_NAMESPACE_LEASES.with(|leases| leases.borrow().iter().any(|held| held == namespace))
+}
+
+struct NamespaceLeaseGuard {
+    namespace: PathBuf,
+    lease: LockGuard,
+}
+
+impl Drop for NamespaceLeaseGuard {
+    fn drop(&mut self) {
+        HELD_NAMESPACE_LEASES.with(|leases| {
+            let mut leases = leases.borrow_mut();
+            if let Some(index) = leases.iter().rposition(|held| held == &self.namespace) {
+                leases.remove(index);
+            }
+        });
+    }
+}
+
+fn with_namespace_writer_lease<T>(
+    path: &Path,
+    action: impl FnOnce() -> SpoolResult<T>,
+) -> SpoolResult<T> {
+    let Some(location) = namespace_location(path) else {
+        return action();
+    };
+    if namespace_lease_is_held(&location.namespace) {
+        return action();
+    }
+    let root_guard = acquire_lock(&location.root)?;
+    if !location.namespace.is_dir() {
+        drop(root_guard);
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "evidence namespace is no longer active",
+        ));
+    }
+    let lease = acquire_lock(&namespace_writer_lease_path(&location.namespace))?;
+    drop(root_guard);
+    HELD_NAMESPACE_LEASES.with(|leases| leases.borrow_mut().push(location.namespace.clone()));
+    let _guard = NamespaceLeaseGuard {
+        namespace: location.namespace,
+        lease,
+    };
+    action()
+}
+
+fn try_acquire_namespace_writer_lease_while_root_locked(
+    namespace: &Path,
+) -> SpoolResult<Option<LockGuard>> {
+    if !namespace.is_dir() {
+        return Ok(None);
+    }
+    try_acquire_lock(&namespace_writer_lease_path(namespace))
 }
 
 fn recover_rewrite_files_locked(path: &Path) -> SpoolResult<()> {
@@ -1070,6 +1214,20 @@ fn acquire_lock(path: &Path) -> SpoolResult<LockGuard> {
             }
             Err(std::fs::TryLockError::Error(error)) => return Err(error),
         }
+    }
+}
+
+fn try_acquire_lock(path: &Path) -> SpoolResult<Option<LockGuard>> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(sibling(path, ".lock"))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(LockGuard(lock))),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
     }
 }
 
@@ -1705,6 +1863,97 @@ mod tests {
                 .join("organization-next-b")
                 .is_dir()
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn namespace_append_waits_for_the_root_admission_lock() {
+        let dir = temp_dir("namespace-writer-root-lock");
+        let root = dir.join("evidence");
+        let path = root
+            .join("account-writer")
+            .join("organization-writer")
+            .join("agent-spool.jsonl");
+        std::fs::create_dir_all(path.parent().expect("writer parent exists"))
+            .expect("writer namespace creates");
+        let root_guard = acquire_lock(&root).expect("root lock acquires");
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let worker_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            result_tx
+                .send(append(&worker_path, &event("blocked-writer")))
+                .expect("writer result sends");
+        });
+
+        assert!(result_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err());
+        drop(root_guard);
+        result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("writer completes after the root lock releases")
+            .expect("writer preserves evidence");
+        writer.join().expect("writer joins");
+        assert_eq!(read_pending(&path).expect("writer spool reads").events, vec![event("blocked-writer")]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_leased_namespace_cannot_be_evicted_while_its_writer_is_in_flight() {
+        let dir = temp_dir("namespace-writer-lease");
+        let root = dir.join("evidence");
+        let writer_path = root
+            .join("account-writer")
+            .join("organization-writer")
+            .join("agent-spool.jsonl");
+        std::fs::create_dir_all(writer_path.parent().expect("writer parent exists"))
+            .expect("writer namespace creates");
+        for index in 0..MAX_RETAINED_NAMESPACES - 1 {
+            let path = root
+                .join(format!("account-{index}"))
+                .join(format!("organization-{index}"))
+                .join("agent-spool.jsonl");
+            append(&path, &event(&format!("pending-{index}"))).expect("pending evidence writes");
+        }
+
+        let (leased_tx, leased_rx) = std::sync::mpsc::sync_channel(0);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+        let writer_path_for_thread = writer_path.clone();
+        let writer = std::thread::spawn(move || {
+            let lease_path = namespace_writer_lease_path(
+                writer_path_for_thread.parent().expect("writer parent exists"),
+            );
+            let lease = acquire_lock(&lease_path)?;
+            leased_tx
+                .send(())
+                .map_err(|_| io::Error::other("test did not await writer lease"))?;
+            resume_rx
+                .recv()
+                .map_err(|_| io::Error::other("test did not resume writer"))?;
+            drop(lease);
+            append(&writer_path_for_thread, &event("in-flight"))
+        });
+
+        leased_rx.recv().expect("writer lease acquires");
+        let next = EvidenceIdentity::new("account-next", "organization-next")
+            .expect("identity is valid");
+        let error = activate_identity_at(&root, &active_identity_path_for_root(&root), &next)
+            .expect_err("a leased namespace is not evicted");
+        assert!(error.to_string().contains("unsynced work"));
+        assert!(writer_path.parent().expect("writer parent exists").is_dir());
+        assert!(!root
+            .join("account-next")
+            .join("organization-next")
+            .exists());
+
+        resume_tx.send(()).expect("writer resumes");
+        writer
+            .join()
+            .expect("writer joins")
+            .expect("writer preserves the evidence");
+        assert_eq!(read_pending(&writer_path).expect("writer spool reads").events, vec![event("in-flight")]);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
