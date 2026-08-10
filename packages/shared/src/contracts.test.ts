@@ -251,6 +251,22 @@ describe("report and error contracts", () => {
     ).toEqual({ from: "2026-08-01", to: "2026-08-06", projectId: ids.project, userId: ids.user, page: 2, pageSize: 100 });
   });
 
+  it("accepts exact instant report bounds and rejects ambiguous ranges", () => {
+    expect(reportFiltersSchema.parse({
+      fromAt: "2026-03-08T06:00:00.000Z",
+      toExclusiveAt: "2026-03-09T05:00:00.000Z",
+    })).toMatchObject({
+      fromAt: "2026-03-08T06:00:00.000Z",
+      toExclusiveAt: "2026-03-09T05:00:00.000Z",
+    });
+    expect(() => reportFiltersSchema.parse({ fromAt: "2026-03-08T06:00:00.000Z" })).toThrow();
+    expect(() => reportFiltersSchema.parse({
+      from: "2026-03-08",
+      fromAt: "2026-03-08T06:00:00.000Z",
+      toExclusiveAt: "2026-03-09T05:00:00.000Z",
+    })).toThrow();
+  });
+
   it("defaults and bounds coercible report pagination", () => {
     expect(reportFiltersSchema.parse({})).toMatchObject({ page: 1, pageSize: 50 });
     expect(() => reportFiltersSchema.parse({ page: "0" })).toThrow();

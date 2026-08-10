@@ -52,12 +52,29 @@ export const joinOrganizationRequestSchema = z
   .object({ inviteCode: z.string().min(1), expectedOrganizationId: idSchema.optional() })
   .strict();
 
+function validateCalendarAndInstantBounds(
+  value: { from?: string; to?: string; fromAt?: string; toExclusiveAt?: string },
+  context: z.RefinementCtx,
+): void {
+  const hasCalendarBoundary = value.from !== undefined || value.to !== undefined;
+  const hasInstantBoundary = value.fromAt !== undefined || value.toExclusiveAt !== undefined;
+  if (hasCalendarBoundary && hasInstantBoundary) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Calendar and instant bounds cannot be combined." });
+  }
+  if ((value.fromAt === undefined) !== (value.toExclusiveAt === undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Instant bounds must be supplied together." });
+  }
+}
+
 export const leaderboardFiltersSchema = z
   .object({
     from: dateSchema.optional(),
     to: dateSchema.optional(),
+    fromAt: timestampSchema.optional(),
+    toExclusiveAt: timestampSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine(validateCalendarAndInstantBounds);
 
 export const leaderboardEntrySchema = z
   .object({
@@ -168,12 +185,15 @@ export const reportFiltersSchema = z
   .object({
     from: dateSchema.optional(),
     to: dateSchema.optional(),
+    fromAt: timestampSchema.optional(),
+    toExclusiveAt: timestampSchema.optional(),
     projectId: idSchema.optional(),
     userId: idSchema.optional(),
     page: z.coerce.number().int().min(1).max(10_000).default(1),
     pageSize: z.coerce.number().int().min(1).max(200).default(50),
   })
-  .strict();
+  .strict()
+  .superRefine(validateCalendarAndInstantBounds);
 
 const completedReportStatusSchema = z.enum(["stopped", "needs_review"]);
 
@@ -362,16 +382,7 @@ export const meStatsFiltersSchema = z
     toExclusiveAt: timestampSchema.optional(),
   })
   .strict()
-  .superRefine((value, context) => {
-    const hasCalendarBoundary = value.from !== undefined || value.to !== undefined;
-    const hasInstantBoundary = value.fromAt !== undefined || value.toExclusiveAt !== undefined;
-    if (hasCalendarBoundary && hasInstantBoundary) {
-      context.addIssue({ code: z.ZodIssueCode.custom, message: "Calendar and instant bounds cannot be combined." });
-    }
-    if ((value.fromAt === undefined) !== (value.toExclusiveAt === undefined)) {
-      context.addIssue({ code: z.ZodIssueCode.custom, message: "Instant bounds must be supplied together." });
-    }
-  });
+  .superRefine(validateCalendarAndInstantBounds);
 
 export const meStatsProjectSchema = z
   .object({

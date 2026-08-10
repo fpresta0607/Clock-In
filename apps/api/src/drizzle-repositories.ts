@@ -821,29 +821,34 @@ export class DrizzleAccountStore implements AccountStore {
  * active intervals are unioned, so simultaneous devices never inflate corroborated
  * wall-clock time.
  */
-interface ExactStatsRange {
-  from: Date;
-  toExclusive: Date;
+interface ClippedRange {
+  from?: Date;
+  toExclusive?: Date;
 }
 
-function exactStatsRange(query: ReportQuery): ExactStatsRange | null {
-  if (!query.clipToRange || query.from === undefined || query.toExclusive === undefined) return null;
+function clippedRange(query: ReportQuery): ClippedRange | null {
+  if (!query.clipToRange || (query.from === undefined && query.toExclusive === undefined)) return null;
   return { from: query.from, toExclusive: query.toExclusive };
 }
 
-function sessionDurationSecondsSql(range: ExactStatsRange | null) {
-  if (range === null) return timeSessions.durationSeconds;
-  return sql<string | null>`least(${timeSessions.durationSeconds}, floor(greatest(0, extract(epoch from (
-    least(${timeSessions.stoppedAt}, ${range.toExclusive.toISOString()})
-    - greatest(${timeSessions.startedAt}, ${range.from.toISOString()})
-  )))))::bigint`;
-}
-
-function corroboratedSecondsSql(range: ExactStatsRange | null = null) {
-  const sessionStart = range === null
+function sessionDurationSecondsSql(range: ClippedRange | null) {
+  if (range === null) return sql<number>`${timeSessions.durationSeconds}`;
+  const sessionStart = range.from === undefined
     ? sql`${timeSessions.startedAt}`
     : sql`greatest(${timeSessions.startedAt}, ${range.from.toISOString()})`;
-  const sessionEnd = range === null
+  const sessionEnd = range.toExclusive === undefined
+    ? sql`${timeSessions.stoppedAt}`
+    : sql`least(${timeSessions.stoppedAt}, ${range.toExclusive.toISOString()})`;
+  return sql<number>`least(${timeSessions.durationSeconds}, floor(greatest(0, extract(epoch from (
+    ${sessionEnd} - ${sessionStart}
+  )))))::integer`;
+}
+
+function corroboratedSecondsSql(range: ClippedRange | null = null) {
+  const sessionStart = range === null || range.from === undefined
+    ? sql`${timeSessions.startedAt}`
+    : sql`greatest(${timeSessions.startedAt}, ${range.from.toISOString()})`;
+  const sessionEnd = range === null || range.toExclusive === undefined
     ? sql`${timeSessions.stoppedAt}`
     : sql`least(${timeSessions.stoppedAt}, ${range.toExclusive.toISOString()})`;
   const sessionDuration = sessionDurationSecondsSql(range);
@@ -923,10 +928,10 @@ export class DrizzleReportRepository implements ReportRepository {
       eq(timeSessions.organizationId, subject.organizationId),
       or(eq(timeSessions.status, "stopped"), eq(timeSessions.status, "needs_review")),
     ];
-    const exactRange = exactStatsRange(query);
-    if (exactRange !== null) {
-      conditions.push(lt(timeSessions.startedAt, exactRange.toExclusive));
-      conditions.push(gt(timeSessions.stoppedAt, exactRange.from));
+    const range = clippedRange(query);
+    if (range !== null) {
+      if (range.toExclusive !== undefined) conditions.push(lt(timeSessions.startedAt, range.toExclusive));
+      if (range.from !== undefined) conditions.push(gt(timeSessions.stoppedAt, range.from));
     } else {
       if (query.from !== undefined) conditions.push(gte(timeSessions.startedAt, query.from));
       if (query.toExclusive !== undefined) conditions.push(lt(timeSessions.startedAt, query.toExclusive));
@@ -937,8 +942,9 @@ export class DrizzleReportRepository implements ReportRepository {
   }
 
   private async summaryFor(db: Pick<DatabaseConnection["db"], "select">, subject: AuthenticatedSubject, query: ReportQuery): Promise<ReportSummaryRecord> {
+    const totalDuration = sum(sessionDurationSecondsSql(clippedRange(query)));
     const rows = await db
-      .select({ totalRows: count(timeSessions.id), totalDurationSeconds: sum(timeSessions.durationSeconds) })
+      .select({ totalRows: count(timeSessions.id), totalDurationSeconds: totalDuration })
       .from(timeSessions)
       .where(and(...this.predicates(subject, query)));
     return rows[0] ?? { totalRows: 0, totalDurationSeconds: 0 };
@@ -950,6 +956,7 @@ export class DrizzleReportRepository implements ReportRepository {
     query: ReportQuery,
     options: ReportPageOptions,
   ): Promise<ReportRowRecord[]> {
+    const range = clippedRange(query);
     const conditions = [
       ...this.predicates(subject, query),
       eq(users.organizationId, subject.organizationId),
@@ -967,8 +974,8 @@ export class DrizzleReportRepository implements ReportRepository {
         startedAt: timeSessions.startedAt,
         stoppedAt: timeSessions.stoppedAt,
         idleSeconds: timeSessions.idleSeconds,
-        durationSeconds: timeSessions.durationSeconds,
-        corroboratedSeconds: corroboratedSecondsSql(),
+        durationSeconds: sessionDurationSecondsSql(range),
+        corroboratedSeconds: corroboratedSecondsSql(range),
       })
       .from(timeSessions)
       .innerJoin(users, and(
@@ -1008,7 +1015,8 @@ export class DrizzleReportRepository implements ReportRepository {
     subject: AuthenticatedSubject,
     query: ReportQuery,
   ): Promise<LeaderboardRowRecord[]> {
-    const totalDuration = sum(timeSessions.durationSeconds);
+    const range = clippedRange(query);
+    const totalDuration = sum(sessionDurationSecondsSql(range));
     return this.snapshot(subject, async (db) => {
       const rows = await db
         .select({
@@ -1016,7 +1024,7 @@ export class DrizzleReportRepository implements ReportRepository {
           userName: users.name,
           durationSeconds: totalDuration,
           sessionCount: count(timeSessions.id),
-          corroboratedSeconds: sum(corroboratedSecondsSql()),
+          corroboratedSeconds: sum(corroboratedSecondsSql(range)),
         })
         .from(timeSessions)
         .innerJoin(users, and(
@@ -1042,8 +1050,8 @@ export class DrizzleReportRepository implements ReportRepository {
     subject: AuthenticatedSubject,
     query: ReportQuery,
   ): Promise<ProjectTotalRecord[]> {
-    const exactRange = exactStatsRange(query);
-    const sessionDuration = sessionDurationSecondsSql(exactRange);
+    const range = clippedRange(query);
+    const sessionDuration = sessionDurationSecondsSql(range);
     const totalDuration = sum(sessionDuration);
     return this.snapshot(subject, async (db) => {
       const rows = await db
@@ -1051,7 +1059,7 @@ export class DrizzleReportRepository implements ReportRepository {
           projectId: projects.id,
           projectName: projects.name,
           durationSeconds: totalDuration,
-          corroboratedSeconds: sum(corroboratedSecondsSql(exactRange)),
+          corroboratedSeconds: sum(corroboratedSecondsSql(range)),
           sessionCount: count(timeSessions.id),
         })
         .from(timeSessions)

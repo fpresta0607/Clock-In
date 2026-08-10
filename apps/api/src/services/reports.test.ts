@@ -112,6 +112,7 @@ describe("report service", () => {
       query: {
         from: new Date("2026-08-01T00:00:00.000Z"),
         toExclusive: new Date("2026-08-07T00:00:00.000Z"),
+        clipToRange: true,
         projectId: ids.project,
         userId: ids.user,
       },
@@ -121,6 +122,28 @@ describe("report service", () => {
 
   it("returns an empty report with a zero total", async () => {
     await expect(createReportService({ reports: new Reports(), reaper: silentReaper }).list(subject, { page: 1, pageSize: 50 })).resolves.toEqual({ filters: { page: 1, pageSize: 50 }, totalDurationSeconds: 0, pagination: { page: 1, pageSize: 50, totalRows: 0, totalPages: 0 }, rows: [] });
+  });
+
+  it("passes device-local instant bounds as an exact clipped report range", async () => {
+    const reports = new Reports([row()]);
+    const service = createReportService({ reports, reaper: silentReaper });
+
+    const result = await service.list(subject, {
+      fromAt: "2026-03-08T06:00:00.000Z",
+      toExclusiveAt: "2026-03-09T05:00:00.000Z",
+      page: 1,
+      pageSize: 50,
+    });
+
+    expect(result.filters).toMatchObject({
+      fromAt: "2026-03-08T06:00:00.000Z",
+      toExclusiveAt: "2026-03-09T05:00:00.000Z",
+    });
+    expect(reports.lastPage?.query).toEqual({
+      from: new Date("2026-03-08T06:00:00.000Z"),
+      toExclusive: new Date("2026-03-09T05:00:00.000Z"),
+      clipToRange: true,
+    });
   });
 
   it("rejects reversed or excessive date ranges", async () => {
@@ -265,6 +288,23 @@ describe("leaderboard", () => {
 
     expect(reports.lastLeaderboardQuery?.from).toEqual(new Date("2026-08-01T00:00:00.000Z"));
     expect(reports.lastLeaderboardQuery?.toExclusive).toEqual(new Date("2026-08-07T00:00:00.000Z"));
+    expect(reports.lastLeaderboardQuery?.clipToRange).toBe(true);
+  });
+
+  it("uses device-local instant bounds for clipped leaderboard totals", async () => {
+    const reports = new Reports();
+    const service = createReportService({ reports, reaper: silentReaper });
+
+    await service.leaderboard(subject, {
+      fromAt: "2026-03-08T06:00:00.000Z",
+      toExclusiveAt: "2026-03-09T05:00:00.000Z",
+    });
+
+    expect(reports.lastLeaderboardQuery).toEqual({
+      from: new Date("2026-03-08T06:00:00.000Z"),
+      toExclusive: new Date("2026-03-09T05:00:00.000Z"),
+      clipToRange: true,
+    });
   });
 
   it("rejects a range wider than a year and returns an empty board for no activity", async () => {
@@ -321,6 +361,7 @@ describe("me/stats", () => {
     expect(reports.lastProjectTotalsQuery).toEqual({
       from: new Date("2026-08-01T00:00:00.000Z"),
       toExclusive: new Date("2026-08-07T00:00:00.000Z"),
+      clipToRange: true,
       userId: ids.user,
     });
     expect(reports.lastAppTotalsQuery).toEqual(reports.lastProjectTotalsQuery);

@@ -54,7 +54,28 @@ function utcStart(date: string): Date {
   return new Date(`${date}T00:00:00.000Z`);
 }
 
-function normalizedQuery(filters: ReportFilters): ReportQuery {
+type ReportRangeFilters = Pick<ReportFilters, "from" | "to" | "fromAt" | "toExclusiveAt">;
+
+function normalizedQuery(filters: ReportRangeFilters & Partial<Pick<ReportFilters, "projectId" | "userId">>): ReportQuery {
+  const hasInstantBoundary = filters.fromAt !== undefined || filters.toExclusiveAt !== undefined;
+  if (hasInstantBoundary) {
+    if (filters.from !== undefined || filters.to !== undefined || filters.fromAt === undefined || filters.toExclusiveAt === undefined) {
+      throw new AppError("validation_error", "Report instant bounds must be supplied together without calendar dates.");
+    }
+    const from = new Date(filters.fromAt);
+    const toExclusive = new Date(filters.toExclusiveAt);
+    const durationMs = toExclusive.getTime() - from.getTime();
+    if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > 367 * millisecondsPerDay) {
+      throw new AppError("validation_error", "The report time range must be between zero and 367 days.");
+    }
+    return {
+      from,
+      toExclusive,
+      clipToRange: true,
+      ...(filters.projectId === undefined ? {} : { projectId: filters.projectId }),
+      ...(filters.userId === undefined ? {} : { userId: filters.userId }),
+    };
+  }
   const from = filters.from === undefined ? undefined : utcStart(filters.from);
   const inclusiveTo = filters.to === undefined ? undefined : utcStart(filters.to);
   if (from !== undefined && inclusiveTo !== undefined) {
@@ -66,24 +87,14 @@ function normalizedQuery(filters: ReportFilters): ReportQuery {
   return {
     ...(from === undefined ? {} : { from }),
     ...(inclusiveTo === undefined ? {} : { toExclusive: new Date(inclusiveTo.getTime() + millisecondsPerDay) }),
+    ...(from === undefined && inclusiveTo === undefined ? {} : { clipToRange: true }),
     ...(filters.projectId === undefined ? {} : { projectId: filters.projectId }),
     ...(filters.userId === undefined ? {} : { userId: filters.userId }),
   };
 }
 
 function normalizedMeStatsQuery(filters: MeStatsFilters): ReportQuery {
-  const hasInstantBoundary = filters.fromAt !== undefined || filters.toExclusiveAt !== undefined;
-  if (!hasInstantBoundary) return normalizedQuery({ ...filters, page: 1, pageSize: 1 });
-  if (filters.from !== undefined || filters.to !== undefined || filters.fromAt === undefined || filters.toExclusiveAt === undefined) {
-    throw new AppError("validation_error", "Stats instant bounds must be supplied together without calendar dates.");
-  }
-  const from = new Date(filters.fromAt);
-  const toExclusive = new Date(filters.toExclusiveAt);
-  const durationMs = toExclusive.getTime() - from.getTime();
-  if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > 367 * millisecondsPerDay) {
-    throw new AppError("validation_error", "The stats time range must be between zero and 367 days.");
-  }
-  return { from, toExclusive, clipToRange: true };
+  return normalizedQuery(filters);
 }
 
 function asReportRow(record: ReportRowRecord): ReportRow {
