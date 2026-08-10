@@ -11,14 +11,19 @@ const status: MonitorStatus = {
   lastUploadAt: "2026-08-09T14:55:00.000Z",
   segmentBacklog: 0,
   agentBacklog: 0,
+  sessionBacklog: 0,
   hooks: [
     { source: "claude_code", detected: true, configPath: "C:/Users/dev/.claude/settings.json" },
     { source: "codex", detected: false, configPath: "C:/Users/dev/.codex/config.toml" },
   ],
-  pendingSuggestion: null,
   agentActive: null,
-  sessionIdleSeconds: null,
-  away: null,
+  currentSession: {
+    projectId: "00000000-0000-4000-8000-000000000010",
+    attribution: "agent",
+    since: "2026-08-09T14:00:00.000Z",
+    idleSeconds: 0,
+  },
+  selectedProjectId: null,
 };
 
 const panelFor = (overrides: Partial<Parameters<typeof RecordingPanel>[0]> = {}) => {
@@ -27,6 +32,8 @@ const panelFor = (overrides: Partial<Parameters<typeof RecordingPanel>[0]> = {})
     onClose: vi.fn(),
     status,
     hookSnippets: {},
+    projectName: "Field work",
+    defaultProjectName: "Field work",
     onTurnOnRecording: vi.fn(),
     onConnectAgent: vi.fn(),
     ...overrides,
@@ -88,7 +95,7 @@ describe("RecordingPanel", () => {
     expect(within(panel).queryByText("This computer")).not.toBeInTheDocument();
     // The lists and the explainer are always true, so they stay on screen.
     expect(within(panel).getByText("What you type. Not one keystroke.")).toBeInTheDocument();
-    expect(within(panel).getByText(/You press start/)).toBeInTheDocument();
+    expect(within(panel).getByText(/You do nothing/)).toBeInTheDocument();
   });
 
   it("lists each agent tool as connected or not, with one button to connect it", async () => {
@@ -127,6 +134,7 @@ describe("RecordingPanel", () => {
     expect(kept).toHaveTextContent("away from it");
     expect(kept).toHaveTextContent("The name only.");
     expect(kept).toHaveTextContent("which folder it worked in");
+    expect(kept).not.toHaveTextContent(/press start/i);
 
     const never = within(panel).getByRole("heading", { name: "Clock-In never writes down" }).nextElementSibling;
     expect(never).toHaveTextContent("Not one keystroke.");
@@ -136,14 +144,14 @@ describe("RecordingPanel", () => {
     expect(never).toHaveTextContent("inside your files");
   });
 
-  it("explains the timer, the notes, and where the numbers go", () => {
+  it("explains that nothing is pressed, and where the numbers go", () => {
     panelFor();
 
     const panel = screen.getByRole("dialog", { name: "What Clock-In is recording" });
     const steps = within(panel).getByRole("heading", { name: "How Clock-In works" }).nextElementSibling;
-    expect(steps).toHaveTextContent("You press start.");
-    expect(steps).toHaveTextContent("never starts the timer for you");
-    expect(steps).toHaveTextContent("The rest still count as hours.");
+    expect(steps).toHaveTextContent("You do nothing.");
+    expect(steps).toHaveTextContent("no button to press and no timer to forget");
+    expect(steps).toHaveTextContent("Quiet time is never counted.");
     expect(steps).toHaveTextContent("You see what your team sees.");
   });
 

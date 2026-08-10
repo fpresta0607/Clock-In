@@ -11,8 +11,8 @@ vi.mock("./WebGLShader.js", () => ({ WebGLShader: () => null }));
 const organization = { id: "00000000-0000-4000-8000-000000000001", name: "SIQstack", inviteCode: "ACDEF-GHJKM" };
 
 const entries = [
-  { rank: 1, user: { id: "u1", name: "Sam" }, durationSeconds: 7_200, sessionCount: 3 },
-  { rank: 2, user: { id: "u2", name: "Alex" }, durationSeconds: 3_600, sessionCount: 1 },
+  { rank: 1, user: { id: "u1", name: "Sam" }, durationSeconds: 7_200, sessionCount: 3, attributedSeconds: 5_400, unattributedSeconds: 1_800 },
+  { rank: 2, user: { id: "u2", name: "Alex" }, durationSeconds: 3_600, sessionCount: 1, attributedSeconds: 3_600, unattributedSeconds: 0 },
 ];
 
 const rows = [
@@ -26,6 +26,9 @@ const rows = [
     stoppedAt: "2026-08-06T16:00:00.000Z",
     idleSeconds: 0,
     durationSeconds: 7_200,
+    attribution: "agent" as const,
+    attributedSeconds: 7_200,
+    unattributedSeconds: 0,
   },
 ];
 
@@ -90,7 +93,8 @@ describe("dashboard", () => {
     expect(within(dialog).getByRole("link", { name: /download/i })).toBeInTheDocument();
 
     // The same story the desktop app's "what's recorded" panel tells.
-    expect(dialog).toHaveTextContent("Hours the notes back up are marked as backed up");
+    expect(dialog).toHaveTextContent("There is no timer to start and none to forget.");
+    expect(dialog).toHaveTextContent("Hours are filed under a project.");
     const kept = within(dialog).getByRole("heading", { name: "Clock-In writes down" }).nextElementSibling;
     expect(kept).toHaveTextContent("The name only.");
     const never = within(dialog).getByRole("heading", { name: "Clock-In never writes down" }).nextElementSibling;
@@ -252,12 +256,22 @@ describe("dashboard", () => {
     expect(screen.getByText("Nothing recorded in this range.")).toBeInTheDocument();
   });
 
-  it("lists recent sessions with their project and duration", async () => {
+  it("lists recent sessions with their project and why they were filed there", async () => {
     await signIn(clientFor());
 
     const sessions = within(await screen.findByRole("region", { name: "Recent sessions" }));
-    expect(sessions.getByText("Wiring the relay")).toBeInTheDocument();
     expect(sessions.getByText("General")).toBeInTheDocument();
+    expect(sessions.getByText("AI tool's folder")).toBeInTheDocument();
+  });
+
+  it("shows each member's unattributed hours beside their total", async () => {
+    await signIn(clientFor());
+
+    const board = within(await screen.findByRole("region", { name: "Leaderboard" }));
+    expect(board.getByRole("columnheader", { name: "Unattributed" })).toBeInTheDocument();
+    // Sam has half an hour nothing named; Alex has none, so the cell stays quiet.
+    expect(board.getByText("00:30:00")).toBeInTheDocument();
+    expect(board.getByText("—")).toBeInTheDocument();
   });
 
   it("lets a stranded account join a teammate's workspace and reloads", async () => {

@@ -26,6 +26,7 @@
 
 .rank { width: 34px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .description { color: var(--text-secondary); max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subtle-cell { color: var(--text-secondary); }
 
 a.ghost { border-radius: 9999px; font-size: .84rem; font-weight: 650; letter-spacing: .06em; text-decoration: none; }
 a.link { display: inline-block; width: auto; margin-top: 0; }

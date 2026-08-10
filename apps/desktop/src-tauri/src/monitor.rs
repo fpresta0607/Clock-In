@@ -361,7 +361,6 @@ impl AgentTracking {
     }
 }
 
-
 /// How a session learned which project it belongs to. Mirrors the server's
 /// `session_attribution` enum minus `manual`, which only the retired timer
 /// could produce.
@@ -591,10 +590,12 @@ impl MonitorShared {
                 attribution: Attribution::Agent,
             });
         }
-        self.default_project.as_ref().map(|project_id| SessionProject {
-            project_id: project_id.clone(),
-            attribution: Attribution::Default,
-        })
+        self.default_project
+            .as_ref()
+            .map(|project_id| SessionProject {
+                project_id: project_id.clone(),
+                attribution: Attribution::Default,
+            })
     }
 }
 
@@ -1835,7 +1836,13 @@ mod tests {
         let mut tracker = SessionTracker::new();
         let project = project("p1", Attribution::Default);
 
-        let closed = tick(&mut tracker, 1_030, Some((SegmentKind::Active, 1_000)), Some(&project), false);
+        let closed = tick(
+            &mut tracker,
+            1_030,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
 
         assert!(closed.is_empty(), "an opening session finishes nothing");
         let open = tracker.open_session().expect("a session is open");
@@ -1847,15 +1854,35 @@ mod tests {
     fn quiet_time_past_the_threshold_closes_the_session_where_work_stopped() {
         let mut tracker = SessionTracker::new();
         let project = project("p1", Attribution::Agent);
-        tick(&mut tracker, 1_000, Some((SegmentKind::Active, 1_000)), Some(&project), false);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
 
         // Nine minutes of quiet is not enough to end anything.
-        let early = tick(&mut tracker, 2_140, Some((SegmentKind::Idle, 1_600)), Some(&project), false);
+        let early = tick(
+            &mut tracker,
+            2_140,
+            Some((SegmentKind::Idle, 1_600)),
+            Some(&project),
+            false,
+        );
         assert!(early.is_empty());
 
-        let closed = tick(&mut tracker, 2_200, Some((SegmentKind::Idle, 1_600)), Some(&project), false);
+        let closed = tick(
+            &mut tracker,
+            2_200,
+            Some((SegmentKind::Idle, 1_600)),
+            Some(&project),
+            false,
+        );
 
-        let [session] = closed.as_slice() else { panic!("one session closed") };
+        let [session] = closed.as_slice() else {
+            panic!("one session closed")
+        };
         assert_eq!(session.started_at, iso8601(1_000));
         // At the last active moment, never at "now": idle is never inside it.
         assert_eq!(session.stopped_at, iso8601(1_600));
@@ -1867,13 +1894,34 @@ mod tests {
     fn short_quiet_gaps_stay_inside_the_session_as_trimmed_idle() {
         let mut tracker = SessionTracker::new();
         let project = project("p1", Attribution::Default);
-        tick(&mut tracker, 1_000, Some((SegmentKind::Active, 1_000)), Some(&project), false);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
         // Four minutes idle, then back to work: one session, not two.
-        tick(&mut tracker, 1_300, Some((SegmentKind::Idle, 1_200)), Some(&project), false);
-        let closed = tick(&mut tracker, 1_500, Some((SegmentKind::Active, 1_440)), Some(&project), false);
+        tick(
+            &mut tracker,
+            1_300,
+            Some((SegmentKind::Idle, 1_200)),
+            Some(&project),
+            false,
+        );
+        let closed = tick(
+            &mut tracker,
+            1_500,
+            Some((SegmentKind::Active, 1_440)),
+            Some(&project),
+            false,
+        );
 
         assert!(closed.is_empty(), "a short gap fragments nothing");
-        assert_eq!(tracker.open_session().expect("still open").idle_seconds, 240);
+        assert_eq!(
+            tracker.open_session().expect("still open").idle_seconds,
+            240
+        );
 
         let finished = tracker.flush(1_500).expect("the session closes");
         assert_eq!(finished.idle_seconds, 240);
@@ -1885,11 +1933,25 @@ mod tests {
         for kind in [SegmentKind::Locked, SegmentKind::Suspended] {
             let mut tracker = SessionTracker::new();
             let project = project("p1", Attribution::Default);
-            tick(&mut tracker, 1_000, Some((SegmentKind::Active, 1_000)), Some(&project), false);
+            tick(
+                &mut tracker,
+                1_000,
+                Some((SegmentKind::Active, 1_000)),
+                Some(&project),
+                false,
+            );
 
-            let closed = tick(&mut tracker, 1_800, Some((kind, 1_700)), Some(&project), false);
+            let closed = tick(
+                &mut tracker,
+                1_800,
+                Some((kind, 1_700)),
+                Some(&project),
+                false,
+            );
 
-            let [session] = closed.as_slice() else { panic!("one session closed for {kind:?}") };
+            let [session] = closed.as_slice() else {
+                panic!("one session closed for {kind:?}")
+            };
             assert_eq!(session.stopped_at, iso8601(1_700));
         }
     }
@@ -1898,11 +1960,29 @@ mod tests {
     fn an_open_agent_session_holds_the_session_through_quiet_time_and_lock() {
         let mut tracker = SessionTracker::new();
         let project = project("p1", Attribution::Agent);
-        tick(&mut tracker, 1_000, Some((SegmentKind::Active, 1_000)), Some(&project), false);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
 
         // Hours of quiet, but an agent is working: this is unattended work.
-        let quiet = tick(&mut tracker, 40_000, Some((SegmentKind::Idle, 1_600)), Some(&project), true);
-        let locked = tick(&mut tracker, 44_000, Some((SegmentKind::Locked, 41_000)), Some(&project), true);
+        let quiet = tick(
+            &mut tracker,
+            40_000,
+            Some((SegmentKind::Idle, 1_600)),
+            Some(&project),
+            true,
+        );
+        let locked = tick(
+            &mut tracker,
+            44_000,
+            Some((SegmentKind::Locked, 41_000)),
+            Some(&project),
+            true,
+        );
 
         assert!(quiet.is_empty());
         assert!(locked.is_empty());
@@ -1914,12 +1994,32 @@ mod tests {
         let mut tracker = SessionTracker::new();
         let first = project("p1", Attribution::Default);
         let second = project("p2", Attribution::Agent);
-        tick(&mut tracker, 1_000, Some((SegmentKind::Active, 1_000)), Some(&first), false);
-        tick(&mut tracker, 1_500, Some((SegmentKind::Active, 1_000)), Some(&first), false);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&first),
+            false,
+        );
+        tick(
+            &mut tracker,
+            1_500,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&first),
+            false,
+        );
 
-        let closed = tick(&mut tracker, 1_800, Some((SegmentKind::Active, 1_000)), Some(&second), false);
+        let closed = tick(
+            &mut tracker,
+            1_800,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&second),
+            false,
+        );
 
-        let [session] = closed.as_slice() else { panic!("one session closed") };
+        let [session] = closed.as_slice() else {
+            panic!("one session closed")
+        };
         assert_eq!(session.project_id, "p1");
         // The first session keeps its own time; the second starts clean.
         assert_eq!(session.stopped_at, iso8601(1_500));
@@ -1933,7 +2033,13 @@ mod tests {
     fn nothing_is_recorded_while_no_project_can_be_named() {
         let mut tracker = SessionTracker::new();
 
-        let nothing = tick(&mut tracker, 1_030, Some((SegmentKind::Active, 1_000)), None, false);
+        let nothing = tick(
+            &mut tracker,
+            1_030,
+            Some((SegmentKind::Active, 1_000)),
+            None,
+            false,
+        );
 
         assert!(nothing.is_empty());
         assert!(tracker.open_session().is_none());
@@ -1943,12 +2049,32 @@ mod tests {
     fn a_signed_out_host_closes_what_it_had_already_recorded() {
         let mut tracker = SessionTracker::new();
         let project = project("p1", Attribution::Selected);
-        tick(&mut tracker, 1_000, Some((SegmentKind::Active, 1_000)), Some(&project), false);
-        tick(&mut tracker, 1_600, Some((SegmentKind::Active, 1_000)), Some(&project), false);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
+        tick(
+            &mut tracker,
+            1_600,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
 
-        let closed = tick(&mut tracker, 1_900, Some((SegmentKind::Active, 1_000)), None, false);
+        let closed = tick(
+            &mut tracker,
+            1_900,
+            Some((SegmentKind::Active, 1_000)),
+            None,
+            false,
+        );
 
-        let [session] = closed.as_slice() else { panic!("one session closed") };
+        let [session] = closed.as_slice() else {
+            panic!("one session closed")
+        };
         assert_eq!(session.stopped_at, iso8601(1_600));
     }
 
@@ -1956,15 +2082,36 @@ mod tests {
     fn flushing_never_bills_the_time_after_the_last_active_moment() {
         let mut tracker = SessionTracker::new();
         let project = project("p1", Attribution::Default);
-        tick(&mut tracker, 1_000, Some((SegmentKind::Active, 1_000)), Some(&project), false);
-        tick(&mut tracker, 1_030, Some((SegmentKind::Active, 1_000)), Some(&project), false);
-        tick(&mut tracker, 1_400, Some((SegmentKind::Idle, 1_200)), Some(&project), false);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
+        tick(
+            &mut tracker,
+            1_030,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
+        tick(
+            &mut tracker,
+            1_400,
+            Some((SegmentKind::Idle, 1_200)),
+            Some(&project),
+            false,
+        );
 
         let finished = tracker.flush(9_999).expect("the open session closes");
 
         // The last tick that saw the machine in use, not the moment of quitting.
         assert_eq!(finished.stopped_at, iso8601(1_030));
-        assert!(tracker.flush(9_999).is_none(), "there is nothing left to close");
+        assert!(
+            tracker.flush(9_999).is_none(),
+            "there is nothing left to close"
+        );
     }
 
     #[test]

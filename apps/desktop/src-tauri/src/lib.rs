@@ -102,7 +102,11 @@ impl Snapshot {
         Self::SignedOut { kind: "signed-out" }
     }
 
-    fn account(account: Account, default_project_id: Option<String>, selected_project_id: Option<String>) -> Self {
+    fn account(
+        account: Account,
+        default_project_id: Option<String>,
+        selected_project_id: Option<String>,
+    ) -> Self {
         Self::Account {
             kind: "ready",
             user: account.user,
@@ -635,12 +639,8 @@ mod tests {
 
     #[test]
     fn an_account_snapshot_carries_the_projects_and_where_time_lands() {
-        let json = serde_json::to_value(Snapshot::account(
-            account(),
-            Some("p1".to_string()),
-            None,
-        ))
-        .expect("snapshot serializes");
+        let json = serde_json::to_value(Snapshot::account(account(), Some("p1".to_string()), None))
+            .expect("snapshot serializes");
 
         assert_eq!(json["kind"], "ready");
         assert_eq!(json["user"]["email"], "alex@example.com");

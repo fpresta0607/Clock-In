@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { formatDuration, type LeaderboardEntry, type Organization, type ReportRow } from "@clock-in/shared";
+import {
+  formatDuration,
+  type LeaderboardEntry,
+  type Organization,
+  type ReportRow,
+  type SessionAttribution,
+} from "@clock-in/shared";
 
 import { ClientError, type Client } from "./client.js";
 import { DownloadApp } from "./DownloadApp.js";
@@ -23,6 +29,15 @@ export function rangeQuery(range: Range, now = new Date()): string {
   from.setDate(from.getDate() - Number(range));
   return `?fromAt=${encodeURIComponent(from.toISOString())}&toExclusiveAt=${encodeURIComponent(toExclusive.toISOString())}`;
 }
+
+/// Why a session is filed where it is, in the same plain words the desktop
+/// app uses. Nobody should have to learn a vocabulary to read a report.
+const attributionLabels: Record<SessionAttribution, string> = {
+  agent: "AI tool's folder",
+  selected: "Picked by hand",
+  default: "Nothing said",
+  manual: "Old timer",
+};
 
 const messageFor = (error: unknown): string =>
   error instanceof ClientError ? error.message : "Something went wrong. Try again.";
@@ -320,7 +335,13 @@ export const App = ({ client }: AppProps) => {
         ) : (
           <table>
             <thead>
-              <tr><th scope="col">#</th><th scope="col">Member</th><th scope="col">Sessions</th><th scope="col">Hours</th></tr>
+              <tr>
+                <th scope="col">#</th>
+                <th scope="col">Member</th>
+                <th scope="col">Sessions</th>
+                <th scope="col">Unattributed</th>
+                <th scope="col">Hours</th>
+              </tr>
             </thead>
             <tbody>
               {entries.map((entry) => (
@@ -328,6 +349,9 @@ export const App = ({ client }: AppProps) => {
                   <td className="rank">{entry.rank}</td>
                   <td>{entry.user.name}</td>
                   <td className="numeric">{entry.sessionCount}</td>
+                  <td className="numeric subtle-cell" title="Hours that landed in a default project because nothing named one">
+                    {entry.unattributedSeconds === 0 ? "—" : formatDuration(entry.unattributedSeconds)}
+                  </td>
                   <td className="numeric hours">{formatDuration(entry.durationSeconds)}</td>
                 </tr>
               ))}
@@ -343,14 +367,20 @@ export const App = ({ client }: AppProps) => {
         ) : (
           <table>
             <thead>
-              <tr><th scope="col">Member</th><th scope="col">Project</th><th scope="col">Description</th><th scope="col">Started</th><th scope="col">Duration</th></tr>
+              <tr>
+                <th scope="col">Member</th>
+                <th scope="col">Project</th>
+                <th scope="col">Filed because</th>
+                <th scope="col">Started</th>
+                <th scope="col">Duration</th>
+              </tr>
             </thead>
             <tbody>
               {rows.map((row) => (
                 <tr key={row.id}>
                   <td>{row.user.name}</td>
                   <td>{row.project.name}</td>
-                  <td className="description">{row.description ?? "—"}</td>
+                  <td className="description">{attributionLabels[row.attribution]}</td>
                   <td>{new Date(row.startedAt).toLocaleString()}</td>
                   <td className="numeric hours">{formatDuration(row.durationSeconds)}</td>
                 </tr>

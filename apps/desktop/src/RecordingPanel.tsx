@@ -22,10 +22,10 @@ const HEADLINE: Record<RecordingState, string> = {
 };
 
 const SUMMARY: Record<RecordingState, string> = {
-  on: "Clock-In is keeping a quiet note of when this computer was busy, so your hours have something behind them.",
-  paused: "It starts again on its own. Your hours keep counting either way.",
-  off: "Clock-In is noting nothing about this computer. Your timer still works and your hours still count. They just won't be marked as backed up.",
-  unknown: "It can't say what it is recording at the moment. Your timer still works and your hours still count.",
+  on: "Clock-In is writing your hours down for you, for as long as this app is open. There is nothing to start and nothing to stop.",
+  paused: "It starts again on its own.",
+  off: "Clock-In is writing nothing down and no hours are being recorded on this computer.",
+  unknown: "It can't say what it is doing at the moment.",
 };
 
 const COMPUTER_STATE: Record<RecordingState, string> = {
@@ -39,7 +39,6 @@ const KEPT = [
   "Whether you were using this computer, away from it, or had the screen locked.",
   "The name of the app in front of you, like “chrome” or “code”. The name only.",
   "When an AI coding tool starts and finishes, and which folder it worked in.",
-  "The moments you press start and stop.",
 ];
 
 const NEVER = [
@@ -58,6 +57,10 @@ type RecordingPanelProps = {
   onClose: () => void;
   /// `undefined` when the host never answered `monitor_status`.
   status: MonitorStatus | undefined;
+  /// The project the open stretch of work is being filed under.
+  projectName?: string | undefined;
+  /// Where time lands when nothing names a project.
+  defaultProjectName?: string | undefined;
   /// Paste-it-yourself instructions from a `Connect` that could not merge,
   /// keyed by CLI source.
   hookSnippets: Readonly<Record<string, string>>;
@@ -75,6 +78,8 @@ export const RecordingPanel = ({
   open,
   onClose,
   status,
+  projectName,
+  defaultProjectName,
   hookSnippets,
   onTurnOnRecording,
   onConnectAgent,
@@ -91,7 +96,10 @@ export const RecordingPanel = ({
   if (!open) return null;
 
   const state = recordingState(status);
-  const backlog = status === undefined ? 0 : status.segmentBacklog + status.agentBacklog;
+  const backlog = status === undefined
+    ? 0
+    : status.segmentBacklog + status.agentBacklog + status.sessionBacklog;
+  const current = status?.currentSession ?? null;
 
   return (
     <div className="modal-overlay recording-overlay" onClick={onClose}>
@@ -121,6 +129,16 @@ export const RecordingPanel = ({
             <strong>{HEADLINE[state]}</strong>
           </p>
           <p className="subtle">{SUMMARY[state]}</p>
+          {current !== null && (
+            <p className="subtle" data-testid="panel-current">
+              Right now your time is going to <strong>{projectName ?? "a project"}</strong>
+              {current.attribution === "agent"
+                ? ", because that is the folder your AI tool is working in."
+                : current.attribution === "selected"
+                  ? ", because you picked it."
+                  : ", because nothing else said otherwise."}
+            </p>
+          )}
           {state === "off" && (
             <button className="signal-button recording-fix" type="button" onClick={onTurnOnRecording}>
               Turn recording on
@@ -128,7 +146,7 @@ export const RecordingPanel = ({
           )}
         </div>
 
-        <h3>What's switched on</h3>
+        <h3>What&apos;s switched on</h3>
         {status === undefined ? (
           <p className="subtle">Clock-In will show this as soon as it can reach the recorder on this computer.</p>
         ) : (
@@ -154,7 +172,7 @@ export const RecordingPanel = ({
                   {hookSnippets[hook.source] !== undefined && (
                     <>
                       <p className="source-note">
-                        Clock-In can't switch this one on by itself. Copy the lines below into that tool's own
+                        Clock-In can&apos;t switch this one on by itself. Copy the lines below into that tool&apos;s own
                         settings file.
                       </p>
                       <pre className="hook-snippet">{hookSnippets[hook.source]}</pre>
@@ -180,24 +198,28 @@ export const RecordingPanel = ({
         <h3>How Clock-In works</h3>
         <ol className="help-steps">
           <li>
-            <strong>You press start.</strong> Those are your hours, and only you decide when they begin.
+            <strong>You do nothing.</strong> While this app is open and recording is on, Clock-In writes down the
+            hours you spend at this computer. There is no button to press and no timer to forget.
           </li>
           <li>
-            <strong>Clock-In takes notes in the background.</strong> It never starts the timer for you. It only stops
-            it if you lock the screen or stay away a long time, and it says so when it did.
+            <strong>A stretch of work ends when you stop.</strong> Go quiet for a while, lock the screen, or shut
+            the computer down, and that stretch is closed at the moment you stopped. Quiet time is never counted.
           </li>
           <li>
-            <strong>Your hours go to your workspace with the notes beside them.</strong> Hours the notes back up are
-            marked as backed up. The rest still count as hours.
+            <strong>Your hours are filed under a project.</strong> If an AI tool is working in a folder you have
+            matched to a project, they go there. Otherwise they go to
+            {" "}<strong>{defaultProjectName ?? "your default project"}</strong>, and you can pick a different one
+            whenever you like.
           </li>
           <li>
             <strong>You see what your team sees.</strong> The same hours, added up the same way, on the Clock-In
-            website.
+            website. Hours filed under a project on purpose are counted separately from hours that just fell to the
+            default, so nobody has to guess.
           </li>
         </ol>
 
         <p className="recording-foot">
-          Notes are saved on this computer first, then sent to your workspace every few minutes.
+          Your hours are saved on this computer first, then sent to your workspace every few minutes.
           {status?.lastUploadAt != null && ` Last sent at ${clockTime(status.lastUploadAt)}.`}
           {backlog > 0 && ` ${backlog} ${backlog === 1 ? "note is" : "notes are"} still waiting to be sent.`}
         </p>

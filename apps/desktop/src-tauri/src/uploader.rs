@@ -44,7 +44,14 @@ pub async fn upload_loop(
             _ = tick.tick() => {}
             _ = upload_now.notified() => {}
         }
-        upload_once(&shared, &client, &segments_path, &agent_path, &sessions_path).await;
+        upload_once(
+            &shared,
+            &client,
+            &segments_path,
+            &agent_path,
+            &sessions_path,
+        )
+        .await;
     }
 }
 

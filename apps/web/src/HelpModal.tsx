@@ -10,7 +10,6 @@ const KEPT = [
   "Whether you were using your computer, away from it, or had the screen locked.",
   "The name of the app in front of you, like “chrome” or “code”. The name only.",
   "When an AI coding tool starts and finishes, and which folder it worked in.",
-  "The moments you press start and stop.",
 ];
 
 const NEVER = [
@@ -60,13 +59,15 @@ export const HelpModal = ({ open, onClose }: HelpModalProps) => {
             hours land in this workspace automatically.
           </li>
           <li>
-            <strong>Pick a project and press start.</strong> The timer runs in the background while
-            you work. Press stop when you're done and the session syncs here on its own.
+            <strong>Then leave it alone.</strong> There is no timer to start and none to forget.
+            While the app is open, it writes down the hours you spend at that computer, and closes
+            a stretch of work when you go quiet, lock the screen, or shut down.
           </li>
           <li>
-            <strong>The app takes notes while you work.</strong> It notices when your computer was
-            busy and when your AI coding tools were running, so your hours have something behind
-            them. Hours the notes back up are marked as backed up; the rest still count as hours.
+            <strong>Hours are filed under a project.</strong> If an AI coding tool is working in a
+            folder matched to a project, they go there; if someone picks a project, they go there.
+            Anything else lands in that person's default project, and shows up here as
+            unattributed.
           </li>
           <li>
             <strong>This dashboard adds it up.</strong> The leaderboard ranks the team and recent
@@ -86,8 +87,10 @@ export const HelpModal = ({ open, onClose }: HelpModalProps) => {
 
         <p className="help-foot">
           Everyone sees the same numbers. The app shows each person their own hours, added up
-          exactly the way this dashboard adds up the team's. Open <strong>What's recorded</strong> in
-          the app to see what it is keeping on your computer right now, and to switch any of it off.
+          exactly the way this dashboard adds up the team's, with the same split between hours filed
+          under a project on purpose and hours that fell to the default. Open
+          {" "}<strong>What's recorded</strong> in the app to see what it is keeping on your computer
+          right now, and to switch all of it off.
         </p>
       </section>
     </div>

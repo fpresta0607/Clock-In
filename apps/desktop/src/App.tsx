@@ -1,50 +1,34 @@
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
+import type { AccountSnapshot, SignedInAccount } from "./account.js";
+import { sourceLabel } from "./agent-sources.js";
 import {
   bridgeError,
   defaultBridge,
-  type BrowserHealth,
-  type AgentQuota,
   type MeStats,
   type MeStatsApp,
   type MonitorSettings,
   type MonitorStatus,
   type OrganizationOverview,
   type PathMapping,
-  type QuotaSnapshot,
   type SettingsPatch,
-  type TallyEntry,
   type TimerBridge,
 } from "./bridge.js";
-import { QuotaDial } from "./QuotaDial.js";
 import { formatDuration } from "@clock-in/shared";
-import { sourceLabel } from "./agent-sources.js";
 import { RecordingPanel } from "./RecordingPanel.js";
-import {
-  initialTimerState,
-  stopIdleSeconds,
-  timerReducer,
-  type AwayDecision,
-  type BootstrapSnapshot,
-  type StartIntent,
-} from "./timer-machine.js";
 import { WebGLShader } from "./WebGLShader.js";
 
 type AppProps = {
   bridge?: TimerBridge;
 };
 
-const elapsedSeconds = (startedAt: string, now: number): number =>
-  Math.max(0, Math.floor((now - Date.parse(startedAt)) / 1_000));
-
 /// Status polls stay well above the host's own 30-second activity tick; the
-/// prompt latency this buys is fine for a tray utility.
+/// latency this buys is fine for a tray utility.
 const MONITOR_POLL_MS = 15_000;
 
-
 /// Agent CLI executables surface in the foreground-process stats under their
-/// binary name; they fold into a single row labelled via AGENT_SOURCE_LABELS.
+/// binary name; they fold into a single row labelled via the shared names.
 const AGENT_PROCESS_SOURCES: Record<string, string> = {
   claude: "claude_code",
   codex: "codex",
@@ -52,9 +36,6 @@ const AGENT_PROCESS_SOURCES: Record<string, string> = {
 };
 
 const FRIENDLY_APP_NAMES: Record<string, string> = {
-  claude: "Claude",
-  chatgpt: "ChatGPT",
-  gmail: "Gmail",
   chrome: "Google Chrome",
   msedge: "Microsoft Edge",
   firefox: "Firefox",
@@ -77,35 +58,6 @@ const FRIENDLY_APP_NAMES: Record<string, string> = {
   spotify: "Spotify",
 };
 
-type ActivityAppIconName = "agent" | "claude" | "chatgpt" | "gmail" | "browser" | "code" | "cursor" | "terminal" | "slack" | "design" | "notes" | "generic-web" | "generic-app";
-
-const ACTIVITY_APP_ICONS: Record<string, ActivityAppIconName> = {
-  claude: "claude",
-  chatgpt: "chatgpt",
-  gmail: "gmail",
-  chrome: "browser",
-  msedge: "browser",
-  firefox: "browser",
-  brave: "browser",
-  arc: "browser",
-  code: "code",
-  cursor: "cursor",
-  windowsterminal: "terminal",
-  pwsh: "terminal",
-  powershell: "terminal",
-  cmd: "terminal",
-  slack: "slack",
-  figma: "design",
-  notion: "notes",
-  obsidian: "notes",
-  webview2: "generic-web",
-};
-
-const AGENT_SOURCE_ICONS: Record<string, ActivityAppIconName> = {
-  claude_code: "claude",
-  cursor: "cursor",
-};
-
 /// "chrome.exe" -> "Google Chrome"; unknown processes lose the extension and
 /// get title-cased ("app-09.exe" -> "App 09").
 const friendlyAppName = (processName: string): string => {
@@ -119,43 +71,6 @@ const friendlyAppName = (processName: string): string => {
     .join(" ");
 };
 
-const activityAppIcon = (processName: string): ActivityAppIconName =>
-  ACTIVITY_APP_ICONS[processName.replace(/\.exe$/i, "").toLowerCase()] ?? "generic-app";
-
-const ActivityAppIcon = ({ icon, label }: { icon: ActivityAppIconName; label: string }) => {
-  const mark = (() => {
-    switch (icon) {
-      case "agent":
-        return <><rect x="3" y="4" width="18" height="16" rx="3" fill="#4f46e5" /><path d="m8 9 3 3-3 3M13 15h3" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></>;
-      case "claude":
-        return <><rect x="3" y="3" width="18" height="18" rx="5" fill="#d97706" /><path d="M15.5 8.5a4.5 4.5 0 1 0 0 7" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" /></>;
-      case "chatgpt":
-        return <><circle cx="12" cy="12" r="9" fill="#10a37f" /><path d="M12 6.5 15.8 8.7v4.5L12 15.5l-3.8-2.3V8.7L12 6.5Zm0 9V20M8.2 8.7 4.5 10.8m11.3-2.1 3.7 2.1" fill="none" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></>;
-      case "gmail":
-        return <><rect x="3" y="5" width="18" height="14" rx="2" fill="white" /><path d="m4 7 8 6 8-6M4 18V7l4.5 4M20 18V7l-4.5 4" fill="none" stroke="#ea4335" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></>;
-      case "browser":
-        return <><circle cx="12" cy="12" r="9" fill="#fbbc05" /><path d="M12 3a9 9 0 0 1 7.8 4.5H12Z" fill="#ea4335" /><path d="M4.2 7.5 8.5 15l-2.2 3.8A9 9 0 0 1 4.2 7.5Z" fill="#34a853" /><circle cx="12" cy="12" r="4" fill="#4285f4" stroke="white" strokeWidth="1.4" /></>;
-      case "code":
-        return <><rect x="3" y="3" width="18" height="18" rx="4" fill="#2563eb" /><path d="m10 8-3 4 3 4M14 16l3-4-3-4M13 7l-2 10" fill="none" stroke="white" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></>;
-      case "cursor":
-        return <><rect x="3" y="3" width="18" height="18" rx="4" fill="#171717" /><path d="m8 6 8 6-4.2.8L10 17Z" fill="#f8fafc" stroke="#a3e635" strokeWidth="1.3" strokeLinejoin="round" /></>;
-      case "terminal":
-        return <><rect x="3" y="4" width="18" height="16" rx="3" fill="#334155" /><path d="m8 9 3 3-3 3M13 15h3" stroke="#a3e635" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></>;
-      case "slack":
-        return <><circle cx="9" cy="6.5" r="2" fill="#36c5f0" /><circle cx="17.5" cy="9" r="2" fill="#2eb67d" /><circle cx="15" cy="17.5" r="2" fill="#ecb22e" /><circle cx="6.5" cy="15" r="2" fill="#e01e5a" /><path d="M9 8.5v4M11.5 9h4M15 11.5v4M12.5 15H9" stroke="white" strokeWidth="1.5" strokeLinecap="round" /></>;
-      case "design":
-        return <><path d="M12 3v9H3a4.5 4.5 0 0 1 9-4.5V3Z" fill="#a259ff" /><path d="M12 3h4.5a4.5 4.5 0 0 1 0 9H12Z" fill="#f24e1e" /><path d="M3 12h9v9a4.5 4.5 0 0 1-9-4.5Z" fill="#0acf83" /><path d="M12 12h9v4.5a4.5 4.5 0 0 1-9 0Z" fill="#ff7262" /></>;
-      case "notes":
-        return <><rect x="4" y="3" width="16" height="18" rx="3" fill="#f8fafc" /><path d="M8 8h8M8 12h8M8 16h5" stroke="#64748b" strokeWidth="1.6" strokeLinecap="round" /></>;
-      case "generic-web":
-        return <><circle cx="12" cy="12" r="9" fill="#0ea5e9" /><path d="M3.5 12h17M12 3c2.4 2.5 3.6 5.5 3.6 9S14.4 18.5 12 21M12 3C9.6 5.5 8.4 8.5 8.4 12s1.2 6.5 3.6 9" fill="none" stroke="white" strokeWidth="1.4" strokeLinecap="round" /></>;
-      case "generic-app":
-        return <><rect x="3" y="3" width="18" height="18" rx="5" fill="#64748b" /><circle cx="8.5" cy="8.5" r="1.4" fill="white" /><circle cx="15.5" cy="8.5" r="1.4" fill="white" /><circle cx="8.5" cy="15.5" r="1.4" fill="white" /><circle cx="15.5" cy="15.5" r="1.4" fill="white" /></>;
-    }
-  })();
-  return <span className="app-icon" role="img" aria-label={`${label} icon`} data-icon={icon}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">{mark}</svg></span>;
-};
-
 /// Compact durations for the Today card: "2h 12m", "45m", "30s".
 const formatCompact = (seconds: number): string => {
   const total = Math.max(0, Math.floor(seconds));
@@ -166,26 +81,14 @@ const formatCompact = (seconds: number): string => {
   return `${total}s`;
 };
 
-/// The site question's plain time figure: "3 hours", "45 minutes".
-const siteTimeLabel = (seconds: number): string => {
-  const hours = seconds / 3_600;
-  if (hours >= 1) {
-    const rounded = Math.max(1, Math.round(hours));
-    return `${rounded} hour${rounded === 1 ? "" : "s"}`;
-  }
-  const minutes = Math.max(1, Math.round(seconds / 60));
-  return `${minutes} minute${minutes === 1 ? "" : "s"}`;
-};
+const elapsedSeconds = (since: string, now: number): number =>
+  Math.max(0, Math.floor((now - Date.parse(since)) / 1_000));
 
 type AppRow = {
   key: string;
   label: string;
-  icon: ActivityAppIconName;
   durationSeconds: number;
   agent: boolean;
-  /// Agent sources the row is attributed to — one dial each. Empty for
-  /// ordinary applications, which have no plan to report.
-  sources: readonly string[];
 };
 
 const TOP_APP_ROWS = 8;
@@ -204,83 +107,33 @@ const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
       agentSources.add(agentSource);
       continue;
     }
-    rows.push({ key: app.processName, label: friendlyAppName(app.processName), icon: activityAppIcon(app.processName), durationSeconds: app.durationSeconds, agent: false, sources: [] });
+    rows.push({ key: app.processName, label: friendlyAppName(app.processName), durationSeconds: app.durationSeconds, agent: false });
   }
   if (agentSeconds > 0) {
     const sources = [...agentSources];
     rows.push({
       key: "agent-clis",
       label: sources.length === 1 ? sourceLabel(sources[0] ?? "") : "Agent CLIs",
-      icon: sources.length === 1 ? AGENT_SOURCE_ICONS[sources[0] ?? ""] ?? "agent" : "agent",
       durationSeconds: agentSeconds,
       agent: true,
-      sources,
     });
   }
   rows.sort((a, b) => b.durationSeconds - a.durationSeconds || a.label.localeCompare(b.label));
   if (rows.length <= TOP_APP_ROWS) return rows;
   const rest = rows.slice(TOP_APP_ROWS).reduce((sum, row) => sum + row.durationSeconds, 0);
-  return [...rows.slice(0, TOP_APP_ROWS), { key: "everything-else", label: "Everything else", icon: "generic-app", durationSeconds: rest, agent: false, sources: [] }];
+  return [...rows.slice(0, TOP_APP_ROWS), { key: "everything-else", label: "Everything else", durationSeconds: rest, agent: false }];
 };
 
-export type StatsRange = "today" | "week";
+type StatsRange = "today" | "week";
 
-export const statsRangeBounds = (range: StatsRange, now = new Date()): { fromAt: string; toExclusiveAt: string } => {
-  const start = new Date(now);
+/// Local midnight today, or local midnight on Monday for "this week".
+const rangeStart = (range: StatsRange): string => {
+  const start = new Date();
   if (range === "week") start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
   start.setHours(0, 0, 0, 0);
-  const toExclusive = new Date(now);
-  toExclusive.setHours(0, 0, 0, 0);
-  toExclusive.setDate(toExclusive.getDate() + 1);
-  return { fromAt: start.toISOString(), toExclusiveAt: toExclusive.toISOString() };
+  // The API reads calendar days, not timestamps: a full ISO datetime is a 400.
+  return start.toISOString().slice(0, 10);
 };
-
-export const nextLocalCalendarBoundaryAt = (now = new Date()): number => {
-  const next = new Date(now);
-  next.setHours(0, 0, 0, 0);
-  next.setDate(next.getDate() + 1);
-  return next.getTime();
-};
-
-const localTimeZone = (): string | undefined => Intl.DateTimeFormat().resolvedOptions().timeZone;
-
-type BrowserCardProps = {
-  health: BrowserHealth;
-  busy: boolean;
-  error?: string | undefined;
-  onRepair: (browser: string) => void;
-  onConnect: (browser: string) => void;
-};
-
-/// One browser's connection state as a single plain sentence plus at most one
-/// button: connected states itself, a registered browser offers the store
-/// page, disabled browsers state the release prerequisite, and anything broken
-/// offers [Fix]. Shared by onboarding and settings.
-const BrowserCard = ({ health, busy, error, onRepair, onConnect }: BrowserCardProps) => (
-  <div className="browser-card">
-    <p className="browser-name">{health.label}</p>
-    {health.state === "connected" ? (
-      <p className="browser-status is-connected">{health.label} is connected ✓</p>
-    ) : health.state === "disabled" ? (
-      <p className="subtle">Browser attribution is unavailable until its verified extension is released.</p>
-    ) : health.state === "registered" ? (
-      <>
-        <p className="subtle">This opens the {health.label} extension page. Click Add to {health.label} there.</p>
-        <button className="signal-button" type="button" disabled={busy} onClick={() => onConnect(health.browser)}>
-          {busy ? "Opening…" : `Connect ${health.label}`}
-        </button>
-      </>
-    ) : (
-      <>
-        <p className="subtle">The {health.label} connection needs a quick repair.</p>
-        <button className="outline-button" type="button" disabled={busy} onClick={() => onRepair(health.browser)}>
-          {busy ? "Fixing…" : "Fix"}
-        </button>
-      </>
-    )}
-    {error && <p className="form-error" role="alert">{error}</p>}
-  </div>
-);
 
 type TitlebarProps = {
   onOpenSettings?: (() => void) | undefined;
@@ -307,123 +160,51 @@ const Titlebar = ({ onOpenSettings }: TitlebarProps) => {
 };
 
 export const App = ({ bridge = defaultBridge }: AppProps) => {
-  const [state, dispatch] = useReducer(timerReducer, initialTimerState);
+  const [account, setAccount] = useState<AccountSnapshot | undefined>();
+  const [authError, setAuthError] = useState<string | undefined>();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [inviteCode, setInviteCode] = useState("");
   const [authMode, setAuthMode] = useState<"sign-in" | "sign-up">("sign-in");
+  const [authBusy, setAuthBusy] = useState(false);
   const [overview, setOverview] = useState<OrganizationOverview | undefined>();
   const [overviewError, setOverviewError] = useState<string | undefined>();
   const [joinCode, setJoinCode] = useState("");
   const [joinBusy, setJoinBusy] = useState(false);
-  const [joinRecovery, setJoinRecovery] = useState(false);
-  const [authBusy, setAuthBusy] = useState(false);
-  const [authError, setAuthError] = useState<string | undefined>();
   const [accountError, setAccountError] = useState<string | undefined>();
-  const [projectId, setProjectId] = useState("");
-  const [description, setDescription] = useState("");
-  const [newProjectOpen, setNewProjectOpen] = useState(false);
-  const [newProjectName, setNewProjectName] = useState("");
-  const [newProjectBusy, setNewProjectBusy] = useState(false);
-  const [newProjectError, setNewProjectError] = useState<string | undefined>();
-  const [switchBusy, setSwitchBusy] = useState(false);
-  const [now, setNow] = useState(() => Date.now());
-  const [retryPendingBusy, setRetryPendingBusy] = useState(false);
-  const [conflictBusy, setConflictBusy] = useState(false);
   const [logoutBusy, setLogoutBusy] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
   const [monitorStatus, setMonitorStatus] = useState<MonitorStatus | undefined>();
-  const [quota, setQuota] = useState<QuotaSnapshot | undefined>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [recordingOpen, setRecordingOpen] = useState(false);
   const [statsRange, setStatsRange] = useState<StatsRange>("today");
-  const [statsCalendarVersion, setStatsCalendarVersion] = useState(0);
-  const [workspaceVersion, setWorkspaceVersion] = useState(0);
   const [stats, setStats] = useState<MeStats | undefined>();
   const [statsError, setStatsError] = useState<string | undefined>();
-  const [confirmedStops, setConfirmedStops] = useState(0);
   const [settings, setSettings] = useState<MonitorSettings | undefined>();
-  /// A failed first settings read must not strand a fresh install on the boot
-  /// screen: fail open to the main screen, and the overlay retries on open.
-  const [settingsUnavailable, setSettingsUnavailable] = useState(false);
   const [settingsError, setSettingsError] = useState<string | undefined>();
-  const [awayThresholdDraft, setAwayThresholdDraft] = useState("");
-  const [hardLimitDraft, setHardLimitDraft] = useState("");
+  const [quietDraft, setQuietDraft] = useState("");
   const [mappings, setMappings] = useState<readonly PathMapping[] | undefined>();
   const [mappingPrefix, setMappingPrefix] = useState("");
   const [mappingProjectId, setMappingProjectId] = useState("");
   const [mappingBusy, setMappingBusy] = useState(false);
-  /// Raw site-rule add form behind the Advanced disclosure.
-  const [rulePattern, setRulePattern] = useState("");
-  const [ruleProjectId, setRuleProjectId] = useState("");
-  const [ruleBusy, setRuleBusy] = useState(false);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  /// First-run flow: "monitor" asks the one tracking question, "browsers"
-  /// shows one card per detected browser. Plain component state; onboarding
-  /// is gated on `settings.onboarded`, not the reducer.
-  const [onboardingStep, setOnboardingStep] = useState<"monitor" | "browsers">("monitor");
-  const [onboardingBusy, setOnboardingBusy] = useState(false);
-  const [onboardingError, setOnboardingError] = useState<string | undefined>();
-  /// The browser key currently repairing/connecting, and per-browser action
-  /// errors shown as one sentence inside the card.
-  const [browserBusy, setBrowserBusy] = useState<string | undefined>();
-  const [browserCaptureBusy, setBrowserCaptureBusy] = useState(false);
-  const [browserErrors, setBrowserErrors] = useState<Readonly<Record<string, string>>>({});
-  /// Local site tally from `suggestionsList`; answered origins are removed
-  /// locally so the next entry shows on the next poll.
-  const [suggestions, setSuggestions] = useState<readonly TallyEntry[]>([]);
-  const [answeredOrigins, setAnsweredOrigins] = useState<readonly string[]>([]);
-  const [siteProjectId, setSiteProjectId] = useState("");
-  const [siteNarrowing, setSiteNarrowing] = useState(false);
-  const [siteNarrowingOrigin, setSiteNarrowingOrigin] = useState<string | undefined>();
-  const [siteSegment, setSiteSegment] = useState("");
-  const [siteBusy, setSiteBusy] = useState(false);
-  const [siteError, setSiteError] = useState<string | undefined>();
-  const [clearAnswersBusy, setClearAnswersBusy] = useState(false);
-  const [clearAnswersMessage, setClearAnswersMessage] = useState<string | undefined>();
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [newProjectBusy, setNewProjectBusy] = useState(false);
+  const [newProjectError, setNewProjectError] = useState<string | undefined>();
   /// Manual hook-setup snippets returned by `hookRegister`, keyed by CLI source.
   const [hookSnippets, setHookSnippets] = useState<Readonly<Record<string, string>>>({});
   const latestBridge = useRef(bridge);
-  const bootstrapRequests = useRef(new WeakMap<TimerBridge, Promise<BootstrapSnapshot>>());
-  const recoveryRequests = useRef(new WeakMap<TimerBridge, Map<string, Promise<BootstrapSnapshot>>>());
   const mounted = useRef(true);
   const bridgeGeneration = useRef(0);
-  const accountEpoch = useRef(0);
-  const currentAccountId = useRef<string | undefined>(undefined);
-  const suggestedOrigin = suggestions.find((entry) => !answeredOrigins.includes(entry.origin))?.origin;
-  const snapshotProjects = state.kind === "booting" || state.kind === "sign-in" ? [] : state.projects;
-  const snapshotSelectedProjectId = state.kind === "booting" || state.kind === "sign-in"
-    ? null
-    : state.selectedProjectId;
 
   if (latestBridge.current !== bridge) bridgeGeneration.current += 1;
   latestBridge.current = bridge;
 
-  const isCurrent = (service: TimerBridge, generation: number, epoch?: number): boolean =>
-    mounted.current
-    && latestBridge.current === service
-    && bridgeGeneration.current === generation
-    && (epoch === undefined || accountEpoch.current === epoch);
+  const isCurrent = (service: TimerBridge, generation: number): boolean =>
+    mounted.current && latestBridge.current === service && bridgeGeneration.current === generation;
 
-  const invalidateAccount = (): number => {
-    accountEpoch.current += 1;
-    return accountEpoch.current;
-  };
-
-  const clearAccountFields = (clearEmail = false): void => {
-    setJoinBusy(false);
-    setJoinRecovery(false);
-    setAuthBusy(false);
-    setProjectId("");
-    setDescription("");
-    setNewProjectOpen(false);
-    setNewProjectName("");
-    setNewProjectError(undefined);
-    setNewProjectBusy(false);
-    setSwitchBusy(false);
-    setRetryPendingBusy(false);
-    setConflictBusy(false);
-    setLogoutBusy(false);
+  const clearAccountFields = (): void => {
     setPassword("");
     setName("");
     setInviteCode("");
@@ -431,145 +212,16 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setOverview(undefined);
     setOverviewError(undefined);
     setMonitorStatus(undefined);
-    setQuota(undefined);
     setStats(undefined);
     setStatsError(undefined);
     setSettings(undefined);
-    setSettingsUnavailable(false);
     setSettingsError(undefined);
     setMappings(undefined);
     setMappingPrefix("");
     setMappingProjectId("");
-    setMappingBusy(false);
-    setRulePattern("");
-    setRuleProjectId("");
-    setRuleBusy(false);
-    setAdvancedOpen(false);
-    setOnboardingStep("monitor");
-    setOnboardingBusy(false);
-    setOnboardingError(undefined);
-    setBrowserBusy(undefined);
-    setBrowserCaptureBusy(false);
-    setBrowserErrors({});
-    setSuggestions([]);
-    setAnsweredOrigins([]);
-    setSiteProjectId("");
-    setSiteNarrowing(false);
-    setSiteNarrowingOrigin(undefined);
-    setSiteSegment("");
-    setSiteBusy(false);
-    setSiteError(undefined);
-    setClearAnswersBusy(false);
-    setClearAnswersMessage(undefined);
     setHookSnippets({});
     setSettingsOpen(false);
     setRecordingOpen(false);
-    if (clearEmail) setEmail("");
-  };
-
-  const applyAccountFields = (
-    snapshot: Exclude<BootstrapSnapshot, { kind: "signed-out" }>,
-    clearWorkspace = false,
-  ): void => {
-    if (clearWorkspace || currentAccountId.current !== snapshot.user.id) {
-      clearAccountFields();
-      setWorkspaceVersion((version) => version + 1);
-    }
-    currentAccountId.current = snapshot.user.id;
-  };
-
-  const clearSignedOutAccount = (): void => {
-    currentAccountId.current = undefined;
-    clearAccountFields(true);
-  };
-
-  const resetToSignIn = (message: string, invalidate = true): void => {
-    if (invalidate) invalidateAccount();
-    clearSignedOutAccount();
-    dispatch({ type: "auth-failed", message });
-  };
-
-  const currentFailure = (error: unknown, current: () => boolean) => {
-    if (!current()) return undefined;
-    const problem = bridgeError(error);
-    if (problem.kind === "auth") {
-      resetToSignIn(problem.message);
-      return undefined;
-    }
-    return problem;
-  };
-
-  const beginWorkspaceRefresh = (): number => {
-    const workspaceEpoch = invalidateAccount();
-    currentAccountId.current = undefined;
-    clearAccountFields();
-    dispatch({ type: "workspace-reset" });
-    return workspaceEpoch;
-  };
-
-  const applySnapshot = async (
-    snapshot: BootstrapSnapshot,
-    service: TimerBridge,
-    isServiceCurrent: () => boolean,
-    expectedEpoch?: number,
-    establishAccount = false,
-    clearWorkspace = false,
-  ): Promise<number | undefined> => {
-    if (!isServiceCurrent() || (expectedEpoch !== undefined && accountEpoch.current !== expectedEpoch)) return undefined;
-    if (snapshot.kind === "signed-out") {
-      const snapshotEpoch = invalidateAccount();
-      clearSignedOutAccount();
-      dispatch({ type: "bootstrapped", snapshot });
-      return snapshotEpoch;
-    }
-
-    const snapshotEpoch = establishAccount ? invalidateAccount() : accountEpoch.current;
-    const isSnapshotCurrent = (): boolean => isServiceCurrent() && accountEpoch.current === snapshotEpoch;
-    if (!isSnapshotCurrent()) return undefined;
-    applyAccountFields(snapshot, clearWorkspace);
-    dispatch({ type: "bootstrapped", snapshot });
-    if (snapshot.kind !== "retry-local-start") return snapshotEpoch;
-
-    let recoveryRequest: Promise<BootstrapSnapshot> | undefined;
-    try {
-      let requests = recoveryRequests.current.get(service);
-      if (requests === undefined) {
-        requests = new Map();
-        recoveryRequests.current.set(service, requests);
-      }
-      recoveryRequest = requests.get(snapshot.start.clientId);
-      if (recoveryRequest === undefined) {
-        recoveryRequest = service.retryLocalStart(snapshot.start);
-        requests.set(snapshot.start.clientId, recoveryRequest);
-      }
-      const retriedSnapshot = await recoveryRequest;
-      if (isSnapshotCurrent()) {
-        if (retriedSnapshot.kind === "signed-out") {
-          const signedOutEpoch = invalidateAccount();
-          clearSignedOutAccount();
-          dispatch({ type: "bootstrapped", snapshot: retriedSnapshot });
-          return signedOutEpoch;
-        }
-        bootstrapRequests.current.set(service, Promise.resolve(retriedSnapshot));
-        applyAccountFields(retriedSnapshot);
-        dispatch({ type: "bootstrapped", snapshot: retriedSnapshot });
-      }
-    } catch (error: unknown) {
-      if (!isSnapshotCurrent()) return undefined;
-      const problem = bridgeError(error);
-      if (problem.kind === "auth") {
-        resetToSignIn(problem.message);
-        return accountEpoch.current;
-      }
-      dispatch({ type: "start-failed", message: problem.message });
-    } finally {
-      const requests = recoveryRequests.current.get(service);
-      if (requests !== undefined && requests.get(snapshot.start.clientId) === recoveryRequest) {
-        requests.delete(snapshot.start.clientId);
-        if (requests.size === 0) recoveryRequests.current.delete(service);
-      }
-    }
-    return isSnapshotCurrent() ? snapshotEpoch : undefined;
   };
 
   useEffect(() => {
@@ -578,277 +230,97 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   }, []);
 
   useEffect(() => {
-    let active = true;
+    const service = bridge;
     const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    let request = bootstrapRequests.current.get(bridge);
-    if (request === undefined) {
-      request = bridge.bootstrap();
-      bootstrapRequests.current.set(bridge, request);
-    }
-    const isRequestCurrent = (): boolean => active && isCurrent(bridge, generation);
-
-    void request.then(
-      (snapshot) => applySnapshot(snapshot, bridge, isRequestCurrent, epoch, true),
+    void service.bootstrap().then(
+      (snapshot) => {
+        if (!isCurrent(service, generation)) return;
+        clearAccountFields();
+        setAccount(snapshot);
+      },
       (error: unknown) => {
-        if (!isRequestCurrent() || accountEpoch.current !== epoch) return;
-        const problem = bridgeError(error);
-        if (problem.kind === "auth") {
-          resetToSignIn(problem.message);
-          return;
-        }
-        dispatch({ type: "bootstrap-failed", message: problem.message });
+        if (!isCurrent(service, generation)) return;
+        clearAccountFields();
+        setAccount({ kind: "signed-out" });
+        setAuthError(bridgeError(error).message);
       },
     );
-    return () => { active = false; };
   }, [bridge]);
 
-  useEffect(() => {
-    setAuthBusy(false);
-    setRetryPendingBusy(false);
-    setConflictBusy(false);
-    setLogoutBusy(false);
-    setNewProjectBusy(false);
-    setSwitchBusy(false);
-  }, [bridge]);
+  const signedIn = account?.kind === "ready" ? account : undefined;
 
-  // Suggestion polling can reorder the tally while the narrowing question is
-  // open. Never carry a segment typed for one origin into the next origin.
+  // The elapsed reading on the recording card ticks like a clock.
   useEffect(() => {
-    setSiteNarrowing(false);
-    setSiteNarrowingOrigin(undefined);
-    setSiteSegment("");
-    setSiteError(undefined);
-  }, [suggestedOrigin]);
-
-  useEffect(() => {
-    if (state.kind !== "running") return undefined;
+    if (monitorStatus?.currentSession == null) return undefined;
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, [state.kind]);
+  }, [monitorStatus?.currentSession?.since]);
 
   useEffect(() => {
-    const preferred = snapshotSelectedProjectId
-      ?? snapshotProjects.find((project) => project.isDefault === true)?.id
-      ?? snapshotProjects[0]?.id
-      ?? "";
-    setProjectId((current) => snapshotProjects.some((project) => project.id === current) ? current : preferred);
-  }, [snapshotProjects, snapshotSelectedProjectId]);
-
-  useEffect(() => {
-    if (state.kind === "booting" || state.kind === "sign-in") return undefined;
-    let timeZone = localTimeZone();
-    let boundaryTimer: number | undefined;
-    const refresh = (): void => setStatsCalendarVersion((version) => version + 1);
-    const scheduleBoundary = (): void => {
-      if (boundaryTimer !== undefined) window.clearTimeout(boundaryTimer);
-      boundaryTimer = window.setTimeout(() => {
-        refresh();
-        scheduleBoundary();
-      }, Math.max(1, nextLocalCalendarBoundaryAt() - Date.now()));
-    };
-    const refreshForTimeZoneChange = (): void => {
-      const nextTimeZone = localTimeZone();
-      if (nextTimeZone !== timeZone) {
-        timeZone = nextTimeZone;
-        refresh();
-        scheduleBoundary();
-      }
-    };
-    const refreshWhenVisible = (): void => {
-      if (document.visibilityState === "visible") refreshForTimeZoneChange();
-    };
-    scheduleBoundary();
-    const timeZoneTimer = window.setInterval(refreshForTimeZoneChange, CALENDAR_TIME_ZONE_POLL_MS);
-    window.addEventListener("focus", refreshForTimeZoneChange);
-    document.addEventListener("visibilitychange", refreshWhenVisible);
-    return () => {
-      if (boundaryTimer !== undefined) window.clearTimeout(boundaryTimer);
-      window.clearInterval(timeZoneTimer);
-      window.removeEventListener("focus", refreshForTimeZoneChange);
-      document.removeEventListener("visibilitychange", refreshWhenVisible);
-    };
-  }, [state.kind === "booting" || state.kind === "sign-in"]);
-
-  // The team board lives in settings now, so it loads with the overlay. A
-  // failed read only blanks the team section, never the timer.
-  useEffect(() => {
-    if (state.kind === "booting" || state.kind === "sign-in") return undefined;
-    if (!settingsOpen) return undefined;
+    if (signedIn === undefined) return undefined;
     let active = true;
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
     void service.orgOverview().then(
       (result) => {
-        if (active && isCurrent(service, generation, epoch)) {
+        if (active && isCurrent(service, generation)) {
           setOverview(result);
           setOverviewError(undefined);
         }
       },
       (error: unknown) => {
-        if (!active || !isCurrent(service, generation, epoch)) return;
+        if (!active || !isCurrent(service, generation)) return;
         const problem = bridgeError(error);
-        if (problem.kind === "auth") resetToSignIn(problem.message);
-        else setOverviewError(problem.message);
+        // An expired session is handled by whatever the user does next; the
+        // board going stale is not worth a sign-in bounce.
+        if (problem.kind !== "auth") setOverviewError(problem.message);
       },
     );
     return () => { active = false; };
-  }, [bridge, settingsOpen, confirmedStops, workspaceVersion, state.kind === "booting" || state.kind === "sign-in"]);
+  }, [bridge, signedIn?.user.id]);
 
-  // The Today card is always on screen, so stats load with the account and
-  // refresh on the same transitions as the board (a stopped timer changes
-  // today's total) plus whenever the range switches.
   useEffect(() => {
-    if (state.kind === "booting" || state.kind === "sign-in") return undefined;
+    if (signedIn === undefined) return undefined;
     let active = true;
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const bounds = statsRangeBounds(statsRange);
-    void service.meStats(bounds.fromAt, bounds.toExclusiveAt).then(
+    void service.meStats(rangeStart(statsRange)).then(
       (result) => {
-        if (active && isCurrent(service, generation, epoch)) {
+        if (active && isCurrent(service, generation)) {
           setStats(result);
           setStatsError(undefined);
         }
       },
       (error: unknown) => {
-        if (!active || !isCurrent(service, generation, epoch)) return;
+        if (!active || !isCurrent(service, generation)) return;
         const problem = bridgeError(error);
-        if (problem.kind === "auth") resetToSignIn(problem.message);
-        else setStatsError(problem.message);
+        if (problem.kind !== "auth") setStatsError(problem.message);
       },
     );
     return () => { active = false; };
-  }, [bridge, statsRange, statsCalendarVersion, workspaceVersion, confirmedStops, state.kind === "idle", state.kind === "booting" || state.kind === "sign-in"]);
+  }, [bridge, statsRange, signedIn?.user.id]);
 
-  // Monitor status poll: fires on every state change (so a sign-in, start, or
-  // stop refreshes it immediately, and a fresh account epoch is captured after
-  // each bootstrap) and on a slow interval in between. Failures — signed out,
-  // unsupported, offline — leave the surfaces hidden rather than noisy; there
-  // is no state where recording happens without the UI saying so.
+  // Status poll. Failures — signed out, unsupported, offline — leave the
+  // surfaces hidden rather than noisy; there is no state where recording
+  // happens without the UI saying so.
   useEffect(() => {
-    if (state.kind === "booting" || state.kind === "sign-in") return undefined;
+    if (signedIn === undefined) return undefined;
     let active = true;
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
     const poll = (): void => {
       void service.monitorStatus().then(
         (status) => {
-          if (!active || !isCurrent(service, generation, epoch)) return;
-          setMonitorStatus(status);
-          if (status.pendingSuggestion) dispatch({ type: "suggestion-received", suggestion: status.pendingSuggestion });
-          else dispatch({ type: "suggestion-cleared" });
-          const away = status.away;
-          if (away && !away.ongoing) {
-            dispatch({
-              type: "away-detected",
-              away: { startedAt: away.startedAt, seconds: away.seconds, exceedsHardLimit: away.exceedsHardLimit },
-            });
-          }
+          if (active && isCurrent(service, generation)) setMonitorStatus(status);
         },
-        (error: unknown) => {
-          if (!active || !isCurrent(service, generation, epoch)) return;
-          const problem = bridgeError(error);
-          if (problem.kind === "auth") resetToSignIn(problem.message);
-        },
-      );
-      // The local site tally rides the same cadence; failures leave the
-      // question hidden rather than noisy, same as the status poll.
-      void service.suggestionsList().then(
-        (entries) => {
-          if (active && isCurrent(service, generation, epoch)) setSuggestions(entries);
-        },
-        (error: unknown) => {
-          currentFailure(error, () => active && isCurrent(service, generation, epoch));
-        },
+        () => undefined,
       );
     };
     poll();
     const timer = window.setInterval(poll, MONITOR_POLL_MS);
     return () => { active = false; window.clearInterval(timer); };
-  }, [bridge, state, workspaceVersion]);
-
-  // Settings load with the account, not just with the overlay: the first-run
-  // flow keys off `onboarded`, so a fresh install must know before the main
-  // screen settles. A failure leaves the main screen up (fail-open); the
-  // overlay retries on open.
-  useEffect(() => {
-    if (state.kind === "booting" || state.kind === "sign-in") return undefined;
-    let active = true;
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    void service.settingsGet().then(
-      (result) => {
-        if (!active || !isCurrent(service, generation, epoch)) return;
-        setSettings(result);
-        setAwayThresholdDraft(String(result.awayThresholdMinutes));
-        setHardLimitDraft(String(result.hardAwayLimitMinutes));
-      },
-      (error: unknown) => {
-        const problem = currentFailure(error, () => active && isCurrent(service, generation, epoch));
-        if (problem !== undefined) setSettingsUnavailable(true);
-      },
-    );
-    return () => { active = false; };
-  }, [bridge, workspaceVersion, state.kind === "booting" || state.kind === "sign-in"]);
-
-  const onboardingActive = settings !== undefined
-    && !settings.onboarded
-    && state.kind !== "booting"
-    && state.kind !== "sign-in";
-
-  // While onboarding shows the browser cards, poll fast so a card flips to
-  // connected on its own the moment the extension handshake lands.
-  useEffect(() => {
-    if (!onboardingActive) return undefined;
-    let active = true;
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const poll = (): void => {
-      void service.monitorStatus().then(
-        (status) => {
-          if (active && isCurrent(service, generation, epoch)) setMonitorStatus(status);
-        },
-        (error: unknown) => {
-          currentFailure(error, () => active && isCurrent(service, generation, epoch));
-        },
-      );
-    };
-    poll();
-    const timer = window.setInterval(poll, ONBOARDING_POLL_MS);
-    return () => { active = false; window.clearInterval(timer); };
-  }, [bridge, onboardingActive]);
-
-  // Agent quota is decoration on attributed activity, never a gate on it. The
-  // host answers from its cache and re-reads providers on its own schedule, so
-  // this poll cannot slow a render, and a host that cannot answer at all just
-  // leaves every dial in its unknown state.
-  useEffect(() => {
-    if (state.kind === "booting" || state.kind === "sign-in") return undefined;
-    let active = true;
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const poll = (): void => {
-      void service.quotaStatus().then(
-        (snapshot) => {
-          if (active && isCurrent(service, generation, epoch)) setQuota(snapshot);
-        },
-        () => {
-          if (active && isCurrent(service, generation, epoch)) setQuota(QUOTA_UNREADABLE);
-        },
-      );
-    };
-    poll();
-    const timer = window.setInterval(poll, QUOTA_POLL_MS);
-    return () => { active = false; window.clearInterval(timer); };
-  }, [bridge, state.kind === "booting" || state.kind === "sign-in"]);
+  }, [bridge, signedIn?.user.id]);
 
   // Settings and path mappings only load while the settings overlay is open.
   useEffect(() => {
@@ -856,28 +328,27 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     let active = true;
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => active && isCurrent(service, generation, epoch);
+    const isRequestCurrent = (): boolean => active && isCurrent(service, generation);
     const fail = (error: unknown): void => {
-      const problem = currentFailure(error, isRequestCurrent);
-      if (problem !== undefined) setSettingsError(problem.message);
+      if (!isRequestCurrent()) return;
+      const problem = bridgeError(error);
+      if (problem.kind !== "auth") setSettingsError(problem.message);
     };
     void service.settingsGet().then((result) => {
       if (!isRequestCurrent()) return;
       setSettings(result);
-      setAwayThresholdDraft(String(result.awayThresholdMinutes));
-      setHardLimitDraft(String(result.hardAwayLimitMinutes));
+      setQuietDraft(String(result.awayThresholdMinutes));
       setSettingsError(undefined);
     }, fail);
     void service.pathMappingsList().then((result) => {
       if (isRequestCurrent()) setMappings(result);
     }, fail);
     return () => { active = false; };
-  }, [bridge, settingsOpen, workspaceVersion]);
+  }, [bridge, settingsOpen]);
 
-  // The settings overlay closes on Escape, like the web app's help dialog.
-  // The "what's recorded" panel opens over the top of it and owns Escape while
-  // it is up, so one press closes one dialog.
+  // The settings overlay closes on Escape. The "what's recorded" panel opens
+  // over the top of it and owns Escape while it is up, so one press closes
+  // one dialog.
   useEffect(() => {
     if (!settingsOpen || recordingOpen) return undefined;
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -893,9 +364,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setAuthError(undefined);
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const requestEpoch = invalidateAccount();
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, requestEpoch);
-    let snapshotEpoch: number | undefined;
     try {
       const snapshot = authMode === "sign-up"
         ? await service.signup({
@@ -905,258 +373,91 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             ...(inviteCode.trim() === "" ? {} : { inviteCode: inviteCode.trim() }),
           })
         : await service.login({ email, password });
-      snapshotEpoch = await applySnapshot(snapshot, service, () => isCurrent(service, generation), requestEpoch, true);
-      if (snapshotEpoch !== undefined && isCurrent(service, generation, snapshotEpoch)) {
-        setPassword("");
-        setName("");
-        setInviteCode("");
-      }
+      if (!isCurrent(service, generation)) return;
+      clearAccountFields();
+      setAccount(snapshot);
     } catch (error: unknown) {
-      if (isRequestCurrent()) setAuthError(bridgeError(error).message);
+      if (isCurrent(service, generation)) setAuthError(bridgeError(error).message);
     } finally {
-      if ((snapshotEpoch !== undefined && isCurrent(service, generation, snapshotEpoch)) || isRequestCurrent()) setAuthBusy(false);
+      if (isCurrent(service, generation)) setAuthBusy(false);
     }
   };
 
-  const startTimer = async (suggestedProjectId?: string): Promise<void> => {
-    const chosenProjectId = suggestedProjectId ?? projectId;
-    if (state.kind !== "idle" || chosenProjectId === "" || !state.projects.some((project) => project.id === chosenProjectId)) return;
-    const start: StartIntent = {
-      clientId: crypto.randomUUID(),
-      projectId: chosenProjectId,
-      description: description.trim(),
-      startedAt: new Date().toISOString(),
-    };
-    dispatch({ type: "start-requested", start });
+  const applyStatus = (status: MonitorStatus): void => setMonitorStatus(status);
+
+  const selectProject = async (projectId: string): Promise<void> => {
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
+    setAccountError(undefined);
     try {
-      const running = await service.start(start);
-      if (isRequestCurrent()) dispatch({ type: "start-confirmed", running });
+      const status = await service.sessionSelectProject(projectId === "" ? null : projectId);
+      if (isCurrent(service, generation)) applyStatus(status);
     } catch (error: unknown) {
-      if (!isRequestCurrent()) return;
-      const problem = bridgeError(error);
-      if (problem.kind === "auth") resetToSignIn(problem.message);
-      else dispatch({ type: "start-failed", message: problem.message });
+      if (isCurrent(service, generation)) setAccountError(bridgeError(error).message);
     }
   };
 
-  const dismissSuggestion = async (): Promise<void> => {
-    dispatch({ type: "suggestion-cleared" });
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    try {
-      await service.monitorDismissSuggestion();
-    } catch (error: unknown) {
-      currentFailure(error, () => isCurrent(service, generation, epoch));
-    }
-  };
-
-  /// Creates a project from the start form, then re-bootstraps so the picker
-  /// gains it everywhere (idle form, running hero, mapping form) from one
-  /// authoritative account read. The new project is preselected on success.
+  /// Creates a project and pins recording to it, which is the only reason to
+  /// make one from this screen.
   const createProject = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    const name = newProjectName.trim();
-    if (newProjectBusy || name === "") return;
+    const trimmed = newProjectName.trim();
+    if (newProjectBusy || trimmed === "") return;
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
     setNewProjectBusy(true);
     setNewProjectError(undefined);
     try {
-      const created = await service.projectCreate({ name });
-      if (!isRequestCurrent()) return;
-      const request = service.bootstrap();
-      bootstrapRequests.current.set(service, request);
-      const snapshot = await request;
-      if (!isRequestCurrent()) return;
-      await applySnapshot(snapshot, service, () => isCurrent(service, generation), epoch);
-      if (!isRequestCurrent()) return;
-      setProjectId(created.id);
+      const created = await service.projectCreate({ name: trimmed });
+      const snapshot = await service.bootstrap();
+      if (!isCurrent(service, generation)) return;
+      setAccount(snapshot);
       setNewProjectName("");
       setNewProjectOpen(false);
+      await selectProject(created.id);
     } catch (error: unknown) {
-      const problem = currentFailure(error, isRequestCurrent);
-      if (problem !== undefined) setNewProjectError(problem.message);
+      if (isCurrent(service, generation)) setNewProjectError(bridgeError(error).message);
     } finally {
-      if (isRequestCurrent()) setNewProjectBusy(false);
-    }
-  };
-
-  /// One-click project switch while running: stop the current session, then
-  /// start a fresh one on the picked project. A failed stop aborts the switch
-  /// and lands on the same error surface as a manual stop.
-  const switchProject = async (nextProjectId: string): Promise<void> => {
-    if (state.kind !== "running" || switchBusy) return;
-    if (nextProjectId === state.running.projectId || !state.projects.some((project) => project.id === nextProjectId)) return;
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
-    setSwitchBusy(true);
-    const stopInput = {
-      sessionId: state.running.sessionId,
-      stoppedAt: new Date().toISOString(),
-      idleSeconds: stopIdleSeconds(state.away, monitorStatus?.sessionIdleSeconds),
-    };
-    dispatch({ type: "stop-requested", stoppedAt: stopInput.stoppedAt });
-    try {
-      await service.stop(stopInput);
-    } catch (error: unknown) {
-      if (isRequestCurrent()) {
-        const problem = bridgeError(error);
-        if (problem.kind === "auth") resetToSignIn(problem.message);
-        else if (problem.kind === "transient") dispatch({ type: "stop-pending", message: problem.message });
-        else dispatch({ type: "stop-failed", message: problem.message });
-        setSwitchBusy(false);
-      }
-      return;
-    }
-    if (!isRequestCurrent()) return;
-    dispatch({ type: "stop-confirmed" });
-    setConfirmedStops((count) => count + 1);
-    const start: StartIntent = {
-      clientId: crypto.randomUUID(),
-      projectId: nextProjectId,
-      description: "",
-      startedAt: new Date().toISOString(),
-    };
-    dispatch({ type: "start-requested", start });
-    setDescription("");
-    try {
-      const running = await service.start(start);
-      if (isRequestCurrent()) dispatch({ type: "start-confirmed", running });
-    } catch (error: unknown) {
-      if (!isRequestCurrent()) return;
-      const problem = bridgeError(error);
-      if (problem.kind === "auth") resetToSignIn(problem.message);
-      else dispatch({ type: "start-failed", message: problem.message });
-    } finally {
-      if (isRequestCurrent()) setSwitchBusy(false);
-    }
-  };
-
-  const answerAway = (decision: AwayDecision): void => {
-    dispatch({ type: "away-answered", decision });
-  };
-
-  const stopTimer = async (): Promise<void> => {
-    if (state.kind !== "running") return;
-    // null leaves measurement to the host; a "keep" answer sends an explicit
-    // figure — possibly 0 — so the away span is not trimmed (other measured
-    // idle still is).
-    const idleSeconds = stopIdleSeconds(state.away, monitorStatus?.sessionIdleSeconds);
-    const input = { sessionId: state.running.sessionId, stoppedAt: new Date().toISOString(), idleSeconds };
-    dispatch({ type: "stop-requested", stoppedAt: input.stoppedAt });
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
-    try {
-      await service.stop(input);
-      if (isRequestCurrent()) {
-        dispatch({ type: "stop-confirmed" });
-        setConfirmedStops((count) => count + 1);
-      }
-    } catch (error: unknown) {
-      if (!isRequestCurrent()) return;
-      const problem = bridgeError(error);
-      if (problem.kind === "auth") resetToSignIn(problem.message);
-      else if (problem.kind === "transient") dispatch({ type: "stop-pending", message: problem.message });
-      else dispatch({ type: "stop-failed", message: problem.message });
-    }
-  };
-
-  const retryPending = async (): Promise<void> => {
-    if (state.kind !== "pending-sync" || retryPendingBusy) return;
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
-    setRetryPendingBusy(true);
-    try {
-      const result = await service.retryPending();
-      if (isRequestCurrent()) dispatch({ type: "pending-retried", ...result });
-    } catch (error: unknown) {
-      const problem = bridgeError(error);
-      if (!isRequestCurrent()) return;
-      if (problem.kind === "auth") resetToSignIn(problem.message);
-      else dispatch({ type: "pending-retry-failed", message: problem.message });
-    } finally {
-      if (isRequestCurrent()) setRetryPendingBusy(false);
-    }
-  };
-
-  const recover = async (choice: "server" | "local"): Promise<void> => {
-    if (state.kind !== "conflict" || conflictBusy) return;
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
-    setConflictBusy(true);
-    try {
-      const snapshot = choice === "server" ? await service.useServerTimer() : await service.retryLocalStart(state.localStart);
-      if (isRequestCurrent()) await applySnapshot(snapshot, service, () => isCurrent(service, generation), epoch);
-    } catch (error: unknown) {
-      const problem = bridgeError(error);
-      if (isRequestCurrent()) {
-        if (problem.kind === "auth") resetToSignIn(problem.message);
-        else dispatch({ type: "conflict-retry-failed", message: problem.message });
-      }
-    } finally {
-      if (isRequestCurrent()) setConflictBusy(false);
+      if (isCurrent(service, generation)) setNewProjectBusy(false);
     }
   };
 
   const applySettings = async (patch: SettingsPatch): Promise<void> => {
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
     setSettingsError(undefined);
     try {
       const next = await service.settingsUpdate(patch);
-      if (isRequestCurrent()) setSettings(next);
+      if (isCurrent(service, generation)) setSettings(next);
     } catch (error: unknown) {
-      const problem = currentFailure(error, isRequestCurrent);
-      if (problem !== undefined) setSettingsError(problem.message);
+      if (isCurrent(service, generation)) setSettingsError(bridgeError(error).message);
     }
   };
 
-  const applyMonitoringEnabled = async (enabled: boolean): Promise<void> => {
+  const applyRecordingEnabled = async (enabled: boolean): Promise<void> => {
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
     setSettingsError(undefined);
     try {
       const next = await service.monitorSetEnabled(enabled);
-      if (!isRequestCurrent()) return;
+      if (!isCurrent(service, generation)) return;
       setSettings(next);
-      // The status line reflects the new monitoring state immediately rather
-      // than at the next poll tick.
+      // The status line reflects the new state immediately rather than at the
+      // next poll tick.
       const status = await service.monitorStatus();
-      if (isRequestCurrent()) setMonitorStatus(status);
+      if (isCurrent(service, generation)) applyStatus(status);
     } catch (error: unknown) {
-      const problem = currentFailure(error, isRequestCurrent);
-      if (problem !== undefined) setSettingsError(problem.message);
+      if (isCurrent(service, generation)) setSettingsError(bridgeError(error).message);
     }
   };
 
   const registerHook = async (source: string): Promise<void> => {
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
     setSettingsError(undefined);
     try {
       const result = await service.hookRegister(source);
-      if (!isRequestCurrent()) return;
+      if (!isCurrent(service, generation)) return;
       if (result.status === "manual") {
         setHookSnippets((current) => ({ ...current, [source]: result.snippet }));
       } else {
@@ -1167,20 +468,17 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           return next;
         });
       }
-      // The list reflects the new registration immediately rather than at the
-      // next status poll.
       const status = await service.monitorStatus();
-      if (isRequestCurrent()) setMonitorStatus(status);
+      if (isCurrent(service, generation)) applyStatus(status);
     } catch (error: unknown) {
-      const problem = currentFailure(error, isRequestCurrent);
-      if (problem !== undefined) setSettingsError(problem.message);
+      if (isCurrent(service, generation)) setSettingsError(bridgeError(error).message);
     }
   };
 
-  const commitMinutes = (field: "awayThresholdMinutes" | "hardAwayLimitMinutes", raw: string): void => {
+  const commitQuietMinutes = (raw: string): void => {
     const minutes = Number.parseInt(raw, 10);
-    if (!settings || !Number.isSafeInteger(minutes) || minutes < 1 || settings[field] === minutes) return;
-    void applySettings({ [field]: minutes });
+    if (!settings || !Number.isSafeInteger(minutes) || minutes < 1 || settings.awayThresholdMinutes === minutes) return;
+    void applySettings({ awayThresholdMinutes: minutes });
   };
 
   const addMapping = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
@@ -1188,341 +486,31 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     if (mappingBusy || mappingProjectId === "") return;
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
     setMappingBusy(true);
     setSettingsError(undefined);
     try {
       const created = await service.pathMappingsCreate({ pathPrefix: mappingPrefix.trim(), projectId: mappingProjectId });
-      if (isRequestCurrent()) {
+      if (isCurrent(service, generation)) {
         setMappings((current) => [...(current ?? []), created]);
         setMappingPrefix("");
       }
     } catch (error: unknown) {
-      const problem = currentFailure(error, isRequestCurrent);
-      if (problem !== undefined) setSettingsError(problem.message);
+      if (isCurrent(service, generation)) setSettingsError(bridgeError(error).message);
     } finally {
-      if (isRequestCurrent()) setMappingBusy(false);
+      if (isCurrent(service, generation)) setMappingBusy(false);
     }
   };
 
   const deleteMapping = async (id: string): Promise<void> => {
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
     setSettingsError(undefined);
     try {
       await service.pathMappingsDelete(id);
-      if (isRequestCurrent()) setMappings((current) => current?.filter((mapping) => mapping.id !== id));
+      if (isCurrent(service, generation)) setMappings((current) => current?.filter((mapping) => mapping.id !== id));
     } catch (error: unknown) {
-      const problem = currentFailure(error, isRequestCurrent);
-      if (problem !== undefined) setSettingsError(problem.message);
+      if (isCurrent(service, generation)) setSettingsError(bridgeError(error).message);
     }
-  };
-
-  /// Raw site-rule add form behind the Advanced disclosure; answers to site
-  /// questions create the same rows through `createSiteRule` below.
-  const addRule = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
-    event.preventDefault();
-    if (ruleBusy || ruleProjectId === "") return;
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
-    setRuleBusy(true);
-    setSettingsError(undefined);
-    try {
-      const created = await service.pathMappingsCreate({ kind: "url_rule", pathPrefix: rulePattern.trim(), projectId: ruleProjectId });
-      if (isRequestCurrent()) {
-        setMappings((current) => [...(current ?? []), created]);
-        setRulePattern("");
-      }
-    } catch (error: unknown) {
-      const problem = currentFailure(error, isRequestCurrent);
-      if (problem !== undefined) setSettingsError(problem.message);
-    } finally {
-      if (isRequestCurrent()) setRuleBusy(false);
-    }
-  };
-
-  const turnOnMonitoring = async (): Promise<void> => {
-    if (onboardingBusy) return;
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
-    setOnboardingBusy(true);
-    setOnboardingError(undefined);
-    try {
-      const next = await service.monitorSetEnabled(true);
-      if (!isRequestCurrent()) return;
-      setSettings(next);
-      setOnboardingStep("browsers");
-      // Seed the browser cards immediately; the fast poll keeps them current.
-      try {
-        const status = await service.monitorStatus();
-        if (isRequestCurrent()) setMonitorStatus(status);
-      } catch (error: unknown) {
-        currentFailure(error, isRequestCurrent);
-      }
-    } catch (error: unknown) {
-      if (!isRequestCurrent()) return;
-      const problem = bridgeError(error);
-      // Same contract as every sibling handler: an expired session goes back
-      // to sign-in rather than stranding the user on the question screen.
-      if (problem.kind === "auth") resetToSignIn(problem.message);
-      else setOnboardingError(problem.message);
-    } finally {
-      if (isRequestCurrent()) setOnboardingBusy(false);
-    }
-  };
-
-  const finishOnboarding = async (): Promise<void> => {
-    if (onboardingBusy) return;
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
-    setOnboardingBusy(true);
-    setOnboardingError(undefined);
-    try {
-      const next = await service.settingsUpdate({ onboarded: true });
-      if (isRequestCurrent()) setSettings(next);
-    } catch (error: unknown) {
-      if (!isRequestCurrent()) return;
-      const problem = bridgeError(error);
-      if (problem.kind === "auth") resetToSignIn(problem.message);
-      else setOnboardingError(problem.message);
-    } finally {
-      if (isRequestCurrent()) setOnboardingBusy(false);
-    }
-  };
-
-  const repairBrowser = async (browser: string): Promise<void> => {
-    if (browserBusy !== undefined) return;
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
-    setBrowserBusy(browser);
-    setBrowserErrors((current) => {
-      if (!(browser in current)) return current;
-      const next = { ...current };
-      delete next[browser];
-      return next;
-    });
-    try {
-      const health = await service.browserRepair(browser);
-      if (isRequestCurrent()) {
-        // The repaired health replaces the card's state without waiting for a poll.
-        setMonitorStatus((current) => current === undefined
-          ? current
-          : { ...current, browsers: current.browsers.map((item) => item.browser === browser ? health : item) });
-      }
-    } catch (error: unknown) {
-      const problem = currentFailure(error, isRequestCurrent);
-      if (problem !== undefined) setBrowserErrors((current) => ({ ...current, [browser]: problem.message }));
-    } finally {
-      if (isRequestCurrent()) setBrowserBusy(undefined);
-    }
-  };
-
-  const connectBrowser = async (browser: string): Promise<void> => {
-    if (browserBusy !== undefined) return;
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
-    setBrowserBusy(browser);
-    setBrowserErrors((current) => {
-      if (!(browser in current)) return current;
-      const next = { ...current };
-      delete next[browser];
-      return next;
-    });
-    try {
-      await service.browserOpenStorePage(browser);
-    } catch (error: unknown) {
-      const problem = currentFailure(error, isRequestCurrent);
-      if (problem !== undefined) setBrowserErrors((current) => ({ ...current, [browser]: problem.message }));
-    } finally {
-      if (isRequestCurrent()) setBrowserBusy(undefined);
-    }
-  };
-
-  /// A "Yes" answer creates the URL rule and drops the origin from the local
-  /// list; the next poll then shows the following entry, if any.
-  const createSiteRule = async (origin: string, pattern: string, chosenProjectId: string): Promise<void> => {
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
-    setSiteBusy(true);
-    setSiteError(undefined);
-    try {
-      const created = await service.pathMappingsCreate({ kind: "url_rule", pathPrefix: pattern, projectId: chosenProjectId });
-      if (!isRequestCurrent()) return;
-      setMappings((current) => current === undefined ? current : [...current, created]);
-      setAnsweredOrigins((current) => [...current, origin]);
-      setSiteNarrowing(false);
-      setSiteNarrowingOrigin(undefined);
-      setSiteSegment("");
-    } catch (error: unknown) {
-      const problem = currentFailure(error, isRequestCurrent);
-      if (problem !== undefined) setSiteError(problem.message);
-    } finally {
-      if (isRequestCurrent()) setSiteBusy(false);
-    }
-  };
-
-  const answerSiteYes = async (origin: string, chosenProjectId: string): Promise<void> => {
-    if (siteBusy || chosenProjectId === "") return;
-    const plan = planRule(origin);
-    if (plan === null) {
-      setSiteError("That site address could not be turned into a rule.");
-      return;
-    }
-    if (plan.kind === "path-narrowed") {
-      // One site spans many projects here; ask which part before ruling.
-      setSiteNarrowing(true);
-      setSiteNarrowingOrigin(origin);
-      setSiteSegment("");
-      setSiteError(undefined);
-      return;
-    }
-    await createSiteRule(origin, plan.pattern, chosenProjectId);
-  };
-
-  const submitNarrowedSite = async (event: React.FormEvent<HTMLFormElement>, origin: string, chosenProjectId: string): Promise<void> => {
-    event.preventDefault();
-    if (siteBusy) return;
-    const pattern = narrowedPattern(origin, siteSegment);
-    if (pattern === null) {
-      setSiteError("Use only letters, numbers, and hyphens - like the name in the site's address.");
-      return;
-    }
-    await createSiteRule(origin, pattern, chosenProjectId);
-  };
-
-  const answerSiteNo = async (origin: string): Promise<void> => {
-    if (siteBusy) return;
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
-    setSiteBusy(true);
-    setSiteError(undefined);
-    try {
-      await service.suggestionNeverSuggest(origin);
-      if (!isRequestCurrent()) return;
-      setAnsweredOrigins((current) => [...current, origin]);
-      setSiteNarrowing(false);
-      setSiteNarrowingOrigin(undefined);
-      setSiteSegment("");
-    } catch (error: unknown) {
-      const problem = currentFailure(error, isRequestCurrent);
-      if (problem !== undefined) setSiteError(problem.message);
-    } finally {
-      if (isRequestCurrent()) setSiteBusy(false);
-    }
-  };
-
-  const clearSiteAnswers = async (): Promise<void> => {
-    if (clearAnswersBusy) return;
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
-    setClearAnswersBusy(true);
-    setClearAnswersMessage(undefined);
-    setSettingsError(undefined);
-    try {
-      await service.suggestionsClear();
-      if (!isRequestCurrent()) return;
-      setSuggestions([]);
-      setAnsweredOrigins([]);
-      setClearAnswersMessage("Cleared - Clock-In will ask about sites again as you use them.");
-    } catch (error: unknown) {
-      const problem = currentFailure(error, isRequestCurrent);
-      if (problem !== undefined) setSettingsError(problem.message);
-    } finally {
-      if (isRequestCurrent()) setClearAnswersBusy(false);
-    }
-  };
-
-  const retryWorkspaceSync = async (): Promise<void> => {
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
-    setJoinBusy(true);
-    try {
-      await service.offlineSyncRetry?.();
-      const status = await service.monitorStatus();
-      if (isRequestCurrent()) setMonitorStatus(status);
-    } catch (error: unknown) {
-      const problem = currentFailure(error, isRequestCurrent);
-      if (problem !== undefined) setOverviewError(problem.message);
-    } finally {
-      if (isRequestCurrent()) setJoinBusy(false);
-    }
-  };
-
-  const retryBrowserSync = async (): Promise<void> => {
-    if (browserCaptureBusy) return;
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
-    setBrowserCaptureBusy(true);
-    try {
-      await service.offlineSyncRetry?.();
-      const status = await service.monitorStatus();
-      if (isRequestCurrent()) setMonitorStatus(status);
-    } catch (error: unknown) {
-      const problem = currentFailure(error, isRequestCurrent);
-      if (problem !== undefined) setSettingsError(problem.message);
-    } finally {
-      if (isRequestCurrent()) setBrowserCaptureBusy(false);
-    }
-  };
-
-  const resumeBrowserCapture = async (): Promise<void> => {
-    if (browserCaptureBusy) return;
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
-    setBrowserCaptureBusy(true);
-    try {
-      await service.browserCaptureResume?.();
-      const status = await service.monitorStatus();
-      if (isRequestCurrent()) setMonitorStatus(status);
-    } catch (error: unknown) {
-      const problem = currentFailure(error, isRequestCurrent);
-      if (problem !== undefined) setSettingsError(problem.message);
-    } finally {
-      if (isRequestCurrent()) setBrowserCaptureBusy(false);
-    }
-  };
-
-  const retryWorkspaceRefresh = (): void => {
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    const workspaceEpoch = beginWorkspaceRefresh();
-    bootstrapRequests.current.delete(service);
-    void service.bootstrap().then(
-      async (snapshot) => {
-        await applySnapshot(snapshot, service, () => isCurrent(service, generation), workspaceEpoch, true, true);
-      },
-      (error: unknown) => {
-        if (!isCurrent(service, generation, workspaceEpoch)) return;
-        const problem = bridgeError(error);
-        if (problem.kind === "auth") resetToSignIn(problem.message);
-        else dispatch({ type: "bootstrap-failed", message: problem.message });
-      },
-    );
   };
 
   const joinWorkspace = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
@@ -1530,43 +518,19 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     if (joinBusy) return;
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
     setJoinBusy(true);
     setOverviewError(undefined);
-    setJoinRecovery(false);
-    let committedWorkspaceEpoch: number | undefined;
     try {
       const result = await service.orgJoin(joinCode.trim());
-      if (isRequestCurrent()) {
-        committedWorkspaceEpoch = beginWorkspaceRefresh();
-        const snapshot = await service.bootstrap();
-        const workspaceEpoch = await applySnapshot(
-          snapshot,
-          service,
-          () => isCurrent(service, generation),
-          committedWorkspaceEpoch,
-          true,
-          true,
-        );
-        if (workspaceEpoch === undefined || !isCurrent(service, generation, workspaceEpoch)) return;
+      if (isCurrent(service, generation)) {
         setOverview(result);
         setJoinCode("");
       }
     } catch (error: unknown) {
-      const requestEpoch = committedWorkspaceEpoch ?? epoch;
-      if (!isCurrent(service, generation, requestEpoch)) return;
-      const problem = bridgeError(error);
-      if (problem.kind === "auth") resetToSignIn(problem.message);
-      else if (committedWorkspaceEpoch !== undefined) {
-        dispatch({ type: "bootstrap-failed", message: problem.message });
-      }
-      else {
-        setOverviewError(problem.message);
-        setJoinRecovery(problem.kind === "conflict" && problem.message.includes("unsynced work"));
-      }
+      if (!isCurrent(service, generation)) return;
+      setOverviewError(bridgeError(error).message);
     } finally {
-      if (committedWorkspaceEpoch === undefined && isCurrent(service, generation, epoch)) setJoinBusy(false);
+      if (isCurrent(service, generation)) setJoinBusy(false);
     }
   };
 
@@ -1574,36 +538,35 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     if (logoutBusy) return;
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const epoch = accountEpoch.current;
-    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
     setLogoutBusy(true);
     setAccountError(undefined);
     try {
       await service.logout();
-      if (isRequestCurrent()) resetToSignIn("You have signed out.");
+      if (!isCurrent(service, generation)) return;
+      clearAccountFields();
+      setEmail("");
+      setAccount({ kind: "signed-out" });
+      setAuthError("You have signed out.");
     } catch (error: unknown) {
-      const problem = currentFailure(error, isRequestCurrent);
-      if (problem !== undefined) setAccountError(problem.message);
+      if (isCurrent(service, generation)) setAccountError(bridgeError(error).message);
     } finally {
-      if (isRequestCurrent()) setLogoutBusy(false);
+      if (isCurrent(service, generation)) setLogoutBusy(false);
     }
   };
 
-  if (state.kind === "booting") {
+  if (account === undefined) {
     return (
       <main className="app-shell">
         <WebGLShader />
         <Titlebar />
-        <div className="center-stage" aria-busy={state.error === undefined}>
-          <p className="boot-message" role="status">{state.error ?? "Connecting to clock service…"}</p>
-          {state.error !== undefined && <button className="outline-button" type="button" onClick={retryWorkspaceRefresh}>Retry connection</button>}
+        <div className="center-stage" aria-busy="true">
+          <p className="boot-message" role="status">Connecting to clock service…</p>
         </div>
       </main>
     );
   }
 
-  if (state.kind === "sign-in") {
-    const error = authError ?? state.error;
+  if (account.kind === "signed-out") {
     const isSignUp = authMode === "sign-up";
     return (
       <main className="app-shell">
@@ -1616,9 +579,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             <p className="subtle">
               {isSignUp
                 ? "Your workspace and first project are set up automatically."
-                : "Sign in with the same email and password as the dashboard."}
+                : "Sign in and Clock-In keeps your hours for you."}
             </p>
-            {error && <p className="form-error" role="alert">{error}</p>}
+            {authError && <p className="form-error" role="alert">{authError}</p>}
             <form onSubmit={submitAuth}>
               {isSignUp && <label>Name<input value={name} onChange={(event) => setName(event.target.value)} type="text" autoComplete="name" required /></label>}
               <label>Email<input value={email} onChange={(event) => setEmail(event.target.value)} type="email" autoComplete="email" required /></label>
@@ -1653,255 +616,94 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     );
   }
 
-  // A fresh install must not flash the main screen before the first-run flow
-  // knows whether to appear; a failed settings read fails open instead.
-  if (settings === undefined && !settingsUnavailable) {
-    return (
-      <main className="app-shell">
-        <WebGLShader />
-        <Titlebar />
-        <div className="center-stage" aria-busy="true">
-          <p className="boot-message" role="status">Connecting to clock service…</p>
-        </div>
-      </main>
-    );
-  }
-
-  // First run: two screens replace the main screen until `onboarded` is set.
-  // Screen 1 is one question and one button; screen 2 is one card per browser
-  // plus the finish button. Nothing else.
-  if (onboardingActive) {
-    const browsers = monitorStatus?.browsers;
-    return (
-      <main className="app-shell onboarding">
-        <WebGLShader />
-        <Titlebar />
-        <div className="center-stage">
-          {onboardingStep === "monitor" ? (
-            <section className="card onboarding-panel" aria-labelledby="onboarding-title">
-              <h1 id="onboarding-title">Track your work time on this computer?</h1>
-              {onboardingError && <p className="form-error" role="alert">{onboardingError}</p>}
-              <button className="signal-button" type="button" disabled={onboardingBusy} onClick={() => void turnOnMonitoring()}>
-                {onboardingBusy ? "Turning on…" : "Turn on"}
-              </button>
-              <button className="link-button" type="button" disabled={onboardingBusy} onClick={() => void finishOnboarding()}>
-                Skip for now
-              </button>
-            </section>
-          ) : (
-            <section className="card onboarding-panel" aria-labelledby="onboarding-browsers-title">
-              <h1 id="onboarding-browsers-title">Connect your browser</h1>
-              {browsers === undefined ? (
-                <p className="subtle" role="status">Checking for browsers...</p>
-              ) : browsers.length === 0 ? (
-                <p className="subtle">No supported browser found on this computer - you can connect one later from Settings.</p>
-              ) : (
-                <div className="browser-list">
-                  {browsers.map((health) => (
-                    <BrowserCard
-                      key={health.browser}
-                      health={health}
-                      busy={browserBusy === health.browser}
-                      error={browserErrors[health.browser]}
-                      onRepair={(browser) => void repairBrowser(browser)}
-                      onConnect={(browser) => void connectBrowser(browser)}
-                    />
-                  ))}
-                </div>
-              )}
-              {onboardingError && <p className="form-error" role="alert">{onboardingError}</p>}
-              <button className="signal-button" type="button" disabled={onboardingBusy} onClick={() => void finishOnboarding()}>
-                {onboardingBusy ? "Saving…" : "Start using Clock-In"}
-              </button>
-            </section>
-          )}
-          <button
-            className="link-button onboarding-sign-out"
-            type="button"
-            disabled={logoutBusy}
-            onClick={() => void logout()}
-          >
-            {logoutBusy ? "Signing out…" : "Sign out"}
-          </button>
-        </div>
-      </main>
-    );
-  }
-
-  const account = state;
-  const hasSelectedProject = account.projects.some((project) => project.id === projectId);
-  const activeRunning = state.kind === "running" || state.kind === "stopping" ? state.running : undefined;
-  const project = activeRunning ? account.projects.find((item) => item.id === activeRunning.projectId) : undefined;
-  const elapsedAt = state.kind === "stopping" ? Date.parse(state.stoppedAt) : now;
-  const suggestion = state.kind === "idle" ? state.suggestion : undefined;
-  const suggestedProject = suggestion ? account.projects.find((item) => item.id === suggestion.projectId) : undefined;
-  const awayPrompt = state.kind === "running" && state.away?.decision === undefined ? state.away : undefined;
-  const awayDecision = state.kind === "running" ? state.away?.decision : undefined;
-  // One site question at a time, and only while no other prompt card is up.
-  const siteSuggestion = awayPrompt === undefined && suggestion === undefined
-    ? suggestions.find((entry) => entry.origin === suggestedOrigin)
-    : undefined;
-  const siteChoice = siteProjectId !== ""
-    ? siteProjectId
-    : hasSelectedProject ? projectId : account.projects[0]?.id ?? "";
-  const monitorState = monitorStatus === undefined
+  const ready: SignedInAccount = account;
+  const recordingState = monitorStatus === undefined
     ? undefined
     : monitorStatus.enabled
       ? monitorStatus.running ? "on" : "paused"
       : "off";
+  const current = monitorStatus?.currentSession ?? null;
+  const currentProject = current ? ready.projects.find((item) => item.id === current.projectId) : undefined;
+  const pinnedProject = monitorStatus?.selectedProjectId ?? ready.selectedProjectId ?? "";
+  const defaultProject = ready.projects.find((item) => item.id === ready.defaultProjectId);
   const appRows = stats === undefined ? [] : buildAppRows(stats.apps);
-  const quotaPending = quota === undefined || quota.status === "pending";
 
   return (
-    <main className={`app-shell ${state.kind}`}>
+    <main className="app-shell">
       <WebGLShader />
       <Titlebar onOpenSettings={() => setSettingsOpen(true)} />
       <div className="screen">
-        {monitorStatus && monitorState && (
+        {monitorStatus && recordingState && (
           <p className="monitor-line">
-            <span className={`monitor-dot is-${monitorState}`} aria-hidden="true" />
+            <span className={`monitor-dot is-${recordingState}`} aria-hidden="true" />
             <span className="monitor-state">
-              {monitorState === "on" ? "Recording on" : monitorState === "paused" ? "Recording paused" : "Recording off"}
+              {recordingState === "on" ? "Recording on" : recordingState === "paused" ? "Recording paused" : "Recording off"}
             </span>
             <button className="monitor-explain" type="button" onClick={() => setRecordingOpen(true)}>
-              What's recorded?
+              What&apos;s recorded?
             </button>
           </p>
         )}
         {accountError && !settingsOpen && <p className="form-error" role="alert">{accountError}</p>}
 
-        {awayPrompt && (
-          <div className="prompt-card card">
-            <p className="eyebrow">Away</p>
-            <p>You were away {Math.max(1, Math.round(awayPrompt.seconds / 60))} minutes. Count that time?</p>
-            <div className="prompt-actions">
-              <button className="signal-button" type="button" onClick={() => answerAway("keep")}>Yes</button>
-              <button className="outline-button" type="button" onClick={() => answerAway("discard")}>No</button>
-            </div>
-          </div>
-        )}
-        {suggestion && (
-          <div className="prompt-card card">
-            <p className="eyebrow">Suggested start</p>
-            {suggestion.source === "browser" ? (
-              <p>Working on <strong>{suggestedProject?.name ?? "the mapped project"}</strong>?</p>
-            ) : (
-              <p>{sourceLabel(suggestion.source)} active - start tracking <strong>{suggestedProject?.name ?? "the mapped project"}</strong>?</p>
-            )}
-            <div className="prompt-actions">
-              {suggestedProject && (
-                <button className="signal-button" type="button" onClick={() => void startTimer(suggestion.projectId)}>
-                  {suggestion.source === "browser" ? "Start timer" : "Start"}
-                </button>
+        <section className="hero card recording-card" aria-labelledby="recording-heading">
+          {current ? (
+            <>
+              <p className="eyebrow">Recording · {currentProject?.name ?? "Unknown project"}</p>
+              <h2 id="recording-heading" className="visually-hidden">Recording now</h2>
+              <output className="elapsed" data-testid="elapsed-time" aria-label="Time in this stretch of work">
+                {formatDuration(elapsedSeconds(current.since, now))}
+              </output>
+              <p className="started-at">since {new Date(current.since).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
+              {current.idleSeconds > 0 && (
+                <p className="session-meta" data-testid="idle-trimmed">Quiet time taken off so far {formatDuration(current.idleSeconds)}</p>
               )}
-              <button className="outline-button" type="button" onClick={() => void dismissSuggestion()}>
-                {suggestion.source === "browser" ? "Not now" : "Dismiss"}
-              </button>
-            </div>
-          </div>
-        )}
-        {siteSuggestion && state.kind === "idle" && (
-          <div className="prompt-card card site-card">
-            <p className="eyebrow">New site</p>
-            <p>You spent {siteTimeLabel(siteSuggestion.seconds)} on {siteSuggestion.origin} this week. Is that work?</p>
-            {siteError && <p className="form-error" role="alert">{siteError}</p>}
-            {siteNarrowing && siteNarrowingOrigin === siteSuggestion.origin ? (
-              <form className="site-narrow-form" onSubmit={(event) => void submitNarrowedSite(event, siteSuggestion.origin, siteChoice)}>
-                <label>Organization or team name
-                  <input value={siteSegment} onChange={(event) => setSiteSegment(event.target.value)} autoComplete="off" spellCheck={false} required />
-                </label>
-                <div className="prompt-actions">
-                  <button className="signal-button" type="submit" disabled={siteBusy}>{siteBusy ? "Saving…" : "Yes, track it"}</button>
-                  <button className="outline-button" type="button" disabled={siteBusy} onClick={() => { setSiteNarrowing(false); setSiteNarrowingOrigin(undefined); setSiteSegment(""); setSiteError(undefined); }}>Back</button>
-                </div>
-              </form>
-            ) : (
-              <>
-                <label className="site-project">Yes, for
-                  <select aria-label="Project for this site" value={siteChoice} onChange={(event) => setSiteProjectId(event.target.value)}>
-                    {account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                  </select>
-                </label>
-                <div className="prompt-actions">
-                  <button className="signal-button" type="button" disabled={siteBusy || siteChoice === ""} onClick={() => void answerSiteYes(siteSuggestion.origin, siteChoice)}>
-                    {siteBusy ? "Saving…" : "Yes"}
-                  </button>
-                  <button className="outline-button" type="button" disabled={siteBusy} onClick={() => void answerSiteNo(siteSuggestion.origin)}>
-                    No - don&apos;t ask again
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {state.kind === "conflict" ? (
-          <section className="hero card conflict-panel" aria-labelledby="conflict-title">
-            <h2 id="conflict-title">We found two timers - pick one to keep</h2>
-            <p>Your device recorded <strong>{state.localStart.description || "a local start"}</strong>; the service has an active timer. Neither record has been discarded.</p>
-            {state.error && <p role="alert" className="form-error">{state.error}</p>}
-            <div className="action-stack">
-              <button className="signal-button" type="button" disabled={conflictBusy} onClick={() => void recover("server")}>{conflictBusy ? "Resolving…" : "Use server timer"}</button>
-              <button className="outline-button" type="button" disabled={conflictBusy} onClick={() => void recover("local")}>Retry local start</button>
-            </div>
-          </section>
-        ) : activeRunning ? (
-          <section className="hero card running-panel" aria-label="Running timer">
-            <p className="eyebrow">Working on: {project?.name ?? "General Work"}</p>
-            <output className="elapsed" data-testid="elapsed-time" aria-label="Elapsed time">{formatDuration(elapsedSeconds(activeRunning.startedAt, elapsedAt))}</output>
-            <p className="started-at">since {new Date(activeRunning.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
-            {monitorStatus?.enabled && monitorStatus.sessionIdleSeconds !== null && (
-              <p className="session-meta" data-testid="idle-trimmed">Idle trimmed so far {formatDuration(monitorStatus.sessionIdleSeconds)}</p>
-            )}
-            {monitorStatus?.enabled && monitorStatus.agentActive && (
-              <div className="agent-active-row">
+              {monitorStatus?.agentActive && (
                 <p className="session-meta agent-active" data-testid="agent-active">
-                  {sourceLabel(monitorStatus.agentActive.source)} active - idle trim paused
+                  {sourceLabel(monitorStatus.agentActive.source)} is working, so this keeps running
                 </p>
-                <QuotaDial
-                  agentLabel={sourceLabel(monitorStatus.agentActive.source)}
-                  quota={quotaFor(quota, monitorStatus.agentActive.source)}
-                  pending={quotaPending}
-                />
+              )}
+              <p className="session-meta">
+                {current.attribution === "agent"
+                  ? "Filed here because that is the folder your AI tool is working in."
+                  : current.attribution === "selected"
+                    ? "Filed here because you picked this project."
+                    : "Filed here because nothing else said otherwise."}
+              </p>
+            </>
+          ) : (
+            <>
+              <h2 id="recording-heading">{recordingState === "off" ? "Recording is off" : "Nothing to record yet"}</h2>
+              <p className="subtle">
+                {recordingState === "off"
+                  ? "Turn recording on and Clock-In keeps your hours without you doing anything."
+                  : "Clock-In starts writing your hours down as soon as you use this computer. There is nothing to press."}
+              </p>
+            </>
+          )}
+
+          <label className="hero-project">
+            File my time under
+            <select value={pinnedProject} onChange={(event) => void selectProject(event.target.value)}>
+              <option value="">
+                {defaultProject ? `Work it out for me (${defaultProject.name})` : "Work it out for me"}
+              </option>
+              {ready.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+            </select>
+          </label>
+          {newProjectOpen ? (
+            <form className="new-project-form" onSubmit={createProject}>
+              <label>New project name<input value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} maxLength={80} placeholder="e.g. Client work" autoComplete="off" required /></label>
+              {newProjectError && <p className="form-error" role="alert">{newProjectError}</p>}
+              <div className="new-project-actions">
+                <button className="signal-button" type="submit" disabled={newProjectBusy || newProjectName.trim() === ""}>{newProjectBusy ? "Creating…" : "Create project"}</button>
+                <button className="outline-button" type="button" disabled={newProjectBusy} onClick={() => { setNewProjectOpen(false); setNewProjectName(""); setNewProjectError(undefined); }}>Cancel</button>
               </div>
-            )}
-            {state.kind === "running" && state.error && <p className="form-error" role="alert">{state.error}</p>}
-            {awayDecision && (
-              <p className="session-meta">{awayDecision === "keep" ? "Away time kept - it stays on the timer." : "Away time will be trimmed at stop."}</p>
-            )}
-            <label className="hero-project">Move this time to....
-              <select
-                value={activeRunning.projectId}
-                disabled={state.kind === "stopping" || switchBusy}
-                onChange={(event) => void switchProject(event.target.value)}
-              >
-                {account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-              </select>
-            </label>
-            <button className="stop-button" type="button" disabled={state.kind === "stopping"} onClick={() => void stopTimer()}>{state.kind === "stopping" ? "Stopping…" : "Pause tracking"}</button>
-          </section>
-        ) : (
-          <section className="hero card idle-panel" aria-labelledby="timer-title">
-            <h2 id="timer-title">Working on: {account.projects.find((item) => item.id === projectId)?.name ?? "General Work"}</h2>
-            {state.kind === "idle" && state.error && <p className="form-error" role="alert">{state.error}</p>}
-            {state.kind === "pending-sync" && <><div className="sync-banner" role="status"><span>{state.message}</span><button type="button" disabled={retryPendingBusy} onClick={() => void retryPending()}>{retryPendingBusy ? "Retrying…" : "Retry sync"}</button></div>{state.error && <p className="form-error" role="alert">{state.error}</p>}</>}
-            <label>Change project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}>{account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-            {newProjectOpen ? (
-              <form className="new-project-form" onSubmit={createProject}>
-                <label>New project name<input value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} maxLength={80} placeholder="e.g. Client work" autoComplete="off" required /></label>
-                {newProjectError && <p className="form-error" role="alert">{newProjectError}</p>}
-                <div className="new-project-actions">
-                  <button className="signal-button" type="submit" disabled={newProjectBusy || newProjectName.trim() === ""}>{newProjectBusy ? "Creating…" : "Create project"}</button>
-                  <button className="outline-button" type="button" disabled={newProjectBusy} onClick={() => { setNewProjectOpen(false); setNewProjectName(""); setNewProjectError(undefined); }}>Cancel</button>
-                </div>
-              </form>
-            ) : (
-              <button className="new-project-trigger" type="button" onClick={() => setNewProjectOpen(true)}>New project…</button>
-            )}
-            <label className="description-field">Description <span className="optional">optional</span><input value={description} onChange={(event) => setDescription(event.target.value)} maxLength={1000} placeholder="One line, if it helps" /></label>
-            <div className="entry-foot"><button className="signal-button" type="button" disabled={state.kind === "starting" || state.kind === "pending-sync" || !hasSelectedProject} onClick={() => void startTimer()}>{state.kind === "starting" ? "Starting…" : "Start timer"}</button></div>
-          </section>
-        )}
+            </form>
+          ) : (
+            <button className="new-project-trigger" type="button" onClick={() => setNewProjectOpen(true)}>New project…</button>
+          )}
+        </section>
 
         <section className="today-card card" aria-labelledby="today-title">
           <div className="panel-head">
@@ -1916,43 +718,68 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             !statsError && <p className="subtle">Loading…</p>
           ) : (
             <>
-              <p className="today-total"><strong>{formatCompact(stats.totalDurationSeconds)}</strong> tracked</p>
+              <p className="today-total"><strong>{formatCompact(stats.totalDurationSeconds)}</strong> recorded</p>
               {appRows.length === 0 ? (
-                <p className="subtle">No activity yet. Turn on recording in settings to see where your time goes.</p>
+                <p className="subtle">Nothing yet. Turn on recording in settings to see where your time goes.</p>
               ) : (
                 <ul className="app-list">
                   {appRows.map((row) => (
-                    <li key={row.key} className={row.agent ? "app-row is-agent" : "app-row"}>
+                    <li key={row.key} className="app-row">
                       <span className="app-name">
-                        <ActivityAppIcon icon={row.icon} label={row.label} />
-                        <span className="app-label">
-                          {row.label}
-                          {row.agent && monitorStatus?.agentActive && <span className="app-active"> · active now</span>}
-                        </span>
+                        {row.label}
+                        {row.agent && monitorStatus?.agentActive && <span className="app-active"> · active now</span>}
                       </span>
-                      {row.sources.length > 0 && (
-                        <div className="app-quotas">
-                          {row.sources.map((source) => (
-                            <QuotaDial
-                              key={source}
-                              agentLabel={sourceLabel(source)}
-                              quota={quotaFor(quota, source)}
-                              pending={quotaPending}
-                            />
-                          ))}
-                        </div>
-                      )}
                       <span className="app-duration">{formatCompact(row.durationSeconds)}</span>
                     </li>
                   ))}
                 </ul>
               )}
-              {monitorStatus?.enabled === true && stats.corroboratedSeconds > 0 && (
-                <p className="verified-foot">{formatCompact(stats.corroboratedSeconds)} of {statsRange === "today" ? "today" : "this week"} verified</p>
+              {stats.unattributedSeconds > 0 && (
+                <p className="verified-foot" data-testid="unattributed-foot">
+                  {formatCompact(stats.unattributedSeconds)} of it landed in {defaultProject?.name ?? "your default project"},
+                  because nothing said which project it was for.
+                </p>
               )}
             </>
           )}
         </section>
+
+        {overview && (
+          <section className="board-panel card" aria-labelledby="board-title">
+            <div className="board-head">
+              <h2 id="board-title">{overview.organization.name}</h2>
+              <span className="invite-code" title="Share this code so teammates join this workspace">
+                {overview.organization.inviteCode}
+              </span>
+            </div>
+            {overviewError && <p className="form-error" role="alert">{overviewError}</p>}
+            {overview.entries.length <= 1 && (
+              <form className="join-form" onSubmit={joinWorkspace}>
+                <label>
+                  <span className="visually-hidden">Invite code to join a teammate</span>
+                  <input value={joinCode} onChange={(event) => setJoinCode(event.target.value)} placeholder="Join a team: ABCDE-FGHJK" autoComplete="off" spellCheck={false} required />
+                </label>
+                <button type="submit" disabled={joinBusy}>{joinBusy ? "Joining…" : "Join"}</button>
+              </form>
+            )}
+            {overview.entries.length === 0 ? (
+              <p className="subtle">No recorded time yet.</p>
+            ) : (
+              <ol className="board-list">
+                {overview.entries.slice(0, 5).map((entry) => (
+                  <li key={entry.user.id} className={entry.user.id === ready.user.id ? "is-you" : undefined}>
+                    <span className="board-rank">{entry.rank}</span>
+                    <span className="board-name">
+                      {entry.user.name}
+                      {entry.user.id === ready.user.id && <span className="you-tag"> you</span>}
+                    </span>
+                    <span className="board-hours">{formatDuration(entry.durationSeconds)}</span>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </section>
+        )}
       </div>
 
       {settingsOpen && (
@@ -1976,251 +803,91 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
               <>
                 <div className="setting-rows">
                   <label className="toggle-row">
-                    <span>Record activity on this computer</span>
-                    <input type="checkbox" checked={settings.enabled} onChange={(event) => void applyMonitoringEnabled(event.target.checked)} />
+                    <span>Record my work time on this computer</span>
+                    <input type="checkbox" checked={settings.enabled} onChange={(event) => void applyRecordingEnabled(event.target.checked)} />
+                  </label>
+                  <label className="setting-field">
+                    <span>End a stretch after this many quiet minutes</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={quietDraft}
+                      onChange={(event) => setQuietDraft(event.target.value)}
+                      onBlur={(event) => commitQuietMinutes(event.target.value)}
+                    />
                   </label>
                   <label className="toggle-row">
-                    <span>Stop the timer when the machine locks</span>
-                    <input type="checkbox" checked={settings.autoStopOnLock} onChange={(event) => void applySettings({ autoStopOnLock: event.target.checked })} />
-                  </label>
-                  <label className="toggle-row">
-                    <span>Count agent sessions as work while I&apos;m away</span>
+                    <span>Keep recording while an AI tool is working</span>
                     <input type="checkbox" checked={settings.agentOverrideEnabled} onChange={(event) => void applySettings({ agentOverrideEnabled: event.target.checked })} />
                   </label>
                 </div>
-
-                {monitorStatus !== undefined && monitorStatus.browsers.length > 0 && (
-                <div className="browsers-setup">
-                  {monitorStatus?.browserCapturePaused && (
-                    <div className="sync-banner" role="status">
-                      <span>Browser tracking paused because Clock-In needs to sync saved activity.</span>
-                      <button type="button" disabled={browserCaptureBusy} onClick={() => void retryBrowserSync()}>
-                        {browserCaptureBusy ? "Retrying…" : "Retry sync"}
-                      </button>
-                      <button type="button" className="outline-button" disabled={browserCaptureBusy} onClick={() => void resumeBrowserCapture()}>
-                        Resume tracking
-                      </button>
-                      <button type="button" className="outline-button" disabled={browserCaptureBusy} onClick={() => setSettingsError(undefined)}>
-                        Stay paused
-                      </button>
-                    </div>
-                  )}
-                    <h3>Browsers</h3>
-                    <div className="browser-list">
-                      {monitorStatus.browsers.map((health) => (
-                        <BrowserCard
-                          key={health.browser}
-                          health={health}
-                          busy={browserBusy === health.browser}
-                          error={browserErrors[health.browser]}
-                          onRepair={(browser) => void repairBrowser(browser)}
-                          onConnect={(browser) => void connectBrowser(browser)}
-                        />
+                <div className="mappings">
+                  <h3>Folders and projects</h3>
+                  <p className="subtle">Work your AI tools do in these folders is filed under the matching project.</p>
+                  {mappings === undefined ? (
+                    <p className="subtle">Loading…</p>
+                  ) : mappings.length === 0 ? (
+                    <p className="subtle">No folders yet.</p>
+                  ) : (
+                    <ul className="mapping-list">
+                      {mappings.map((mapping) => (
+                        <li key={mapping.id} className="mapping-row">
+                          <span className="mapping-path" title={mapping.pathPrefix}>{mapping.pathPrefix}</span>
+                          <span className="mapping-project">{ready.projects.find((item) => item.id === mapping.projectId)?.name ?? "Unknown project"}</span>
+                          <button type="button" onClick={() => void deleteMapping(mapping.id)}>Delete</button>
+                        </li>
                       ))}
-                    </div>
+                    </ul>
+                  )}
+                  <form className="mapping-form" onSubmit={addMapping}>
+                    <label>
+                      Folder
+                      <input value={mappingPrefix} onChange={(event) => setMappingPrefix(event.target.value)} placeholder="C:/dev/project" spellCheck={false} autoComplete="off" required />
+                    </label>
+                    <label>
+                      Project
+                      <select value={mappingProjectId} onChange={(event) => setMappingProjectId(event.target.value)} required>
+                        <option value="">Select project</option>
+                        {ready.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                      </select>
+                    </label>
+                    <button className="signal-button" type="submit" disabled={mappingBusy}>{mappingBusy ? "Adding…" : "Add folder"}</button>
+                  </form>
+                </div>
+                {monitorStatus !== undefined && monitorStatus.hooks.length > 0 && (
+                  <div className="hooks-setup">
+                    <h3>Watch my AI tools</h3>
+                    <p className="subtle">
+                      Opt in per tool: Clock-In adds its hook to the tool&apos;s own config, and only when you ask.
+                    </p>
+                    <ul className="hook-list">
+                      {monitorStatus.hooks.map((hook) => (
+                        <li key={hook.source} className="hook-row">
+                          <span
+                            className={`hook-badge ${hook.detected ? "is-detected" : "is-missing"}`}
+                            title={hook.configPath}
+                          >
+                            {sourceLabel(hook.source)}
+                          </span>
+                          {hook.detected ? (
+                            <span className="hook-state">Connected</span>
+                          ) : (
+                            <button type="button" onClick={() => void registerHook(hook.source)}>Connect</button>
+                          )}
+                          {hookSnippets[hook.source] !== undefined && (
+                            <pre className="hook-snippet">{hookSnippets[hook.source]}</pre>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
                   </div>
                 )}
-
-                <div className="team-setup">
-                  <h3>Your team</h3>
-                  {overview === undefined ? (
-                    overviewError
-                      ? <p className="form-error" role="alert">{overviewError}</p>
-                      : <p className="subtle">Loading…</p>
-                  ) : (
-                    <>
-                      <p className="team-line">
-                        <strong>{overview.organization.name}</strong>
-                        {" · invite code "}
-                        <span className="invite-code" title="Share this code so teammates join this workspace">{overview.organization.inviteCode}</span>
-                      </p>
-                      {overviewError && <p className="form-error" role="alert">{overviewError}</p>}
-                      <form className="join-form" onSubmit={joinWorkspace}>
-                        <label>
-                          <span className="visually-hidden">Invite code to join a teammate</span>
-                          <input value={joinCode} onChange={(event) => setJoinCode(event.target.value)} placeholder="Join a team: ABCDE-FGHJK" autoComplete="off" spellCheck={false} required />
-                        </label>
-                        <button type="submit" disabled={joinBusy}>{joinBusy ? "Joining…" : "Join"}</button>
-                      </form>
-                      {joinRecovery && (
-                        <div className="join-form">
-                          <button type="button" disabled={joinBusy} onClick={() => void retryWorkspaceSync()}>Retry sync</button>
-                          <button type="button" className="outline-button" disabled={joinBusy} onClick={() => {
-                            setJoinRecovery(false);
-                            setJoinCode("");
-                            setOverviewError(undefined);
-                          }}>Cancel switch</button>
-                        </div>
-                      )}
-                      {overview.entries.length === 0 ? (
-                        <p className="subtle">No recorded time yet. Stop a timer to appear here.</p>
-                      ) : (
-                        <ol className="board-list">
-                          {overview.entries.slice(0, 5).map((entry) => (
-                            <li key={entry.user.id} className={entry.user.id === account.user.id ? "is-you" : undefined}>
-                              <span className="board-rank">{entry.rank}</span>
-                              <span className="board-name">
-                                {entry.user.name}
-                                {entry.user.id === account.user.id && <span className="you-tag"> you</span>}
-                              </span>
-                              <span className="board-hours">{formatDuration(entry.durationSeconds)}</span>
-                            </li>
-                          ))}
-                        </ol>
-                      )}
-                    </>
-                  )}
-                </div>
-
-                <div className="answers-setup">
-                  <h3>Saved site answers</h3>
-                  <p className="subtle">Clock-In asks whether a new site is work. Clearing this makes it ask again. Nothing here ever leaves this computer.</p>
-                  {clearAnswersMessage && <p className="subtle" role="status">{clearAnswersMessage}</p>}
-                  <button className="outline-button" type="button" disabled={clearAnswersBusy} onClick={() => void clearSiteAnswers()}>
-                    {clearAnswersBusy ? "Clearing…" : "Clear saved site answers"}
-                  </button>
-                </div>
-
-                <div className="advanced">
-                  <button
-                    type="button"
-                    className="advanced-toggle"
-                    aria-expanded={advancedOpen}
-                    onClick={() => setAdvancedOpen((open) => !open)}
-                  >
-                    Advanced
-                  </button>
-                  {advancedOpen && (
-                    <>
-                      <div className="setting-rows">
-                        <label className="setting-field">
-                          <span>Away threshold (minutes)</span>
-                          <input
-                            type="number"
-                            min={1}
-                            value={awayThresholdDraft}
-                            onChange={(event) => setAwayThresholdDraft(event.target.value)}
-                            onBlur={(event) => commitMinutes("awayThresholdMinutes", event.target.value)}
-                          />
-                        </label>
-                        <label className="setting-field">
-                          <span>Hard away limit (minutes)</span>
-                          <input
-                            type="number"
-                            min={1}
-                            value={hardLimitDraft}
-                            onChange={(event) => setHardLimitDraft(event.target.value)}
-                            onBlur={(event) => commitMinutes("hardAwayLimitMinutes", event.target.value)}
-                          />
-                        </label>
-                      </div>
-
-                      <div className="mappings">
-                        <h3>Path mappings</h3>
-                        <p className="subtle">Agent activity in these directories counts toward the matching project.</p>
-                        {mappings === undefined ? (
-                          <p className="subtle">Loading…</p>
-                        ) : mappings.filter((mapping) => mapping.kind === "path_prefix").length === 0 ? (
-                          <p className="subtle">No path mappings yet.</p>
-                        ) : (
-                          <ul className="mapping-list">
-                            {mappings.filter((mapping) => mapping.kind === "path_prefix").map((mapping) => (
-                              <li key={mapping.id} className="mapping-row">
-                                <span className="mapping-path" title={mapping.pathPrefix}>{mapping.pathPrefix}</span>
-                                <span className="mapping-project">{account.projects.find((item) => item.id === mapping.projectId)?.name ?? "Unknown project"}</span>
-                                <button type="button" onClick={() => void deleteMapping(mapping.id)}>Delete</button>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                        <form className="mapping-form" onSubmit={addMapping}>
-                          <label>
-                            Path prefix
-                            <input value={mappingPrefix} onChange={(event) => setMappingPrefix(event.target.value)} placeholder="C:/dev/project" spellCheck={false} autoComplete="off" required />
-                          </label>
-                          <label>
-                            Project
-                            <select value={mappingProjectId} onChange={(event) => setMappingProjectId(event.target.value)} required>
-                              <option value="">Select project</option>
-                              {account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                            </select>
-                          </label>
-                          <button className="signal-button" type="submit" disabled={mappingBusy}>{mappingBusy ? "Adding…" : "Add mapping"}</button>
-                        </form>
-                      </div>
-
-                      <div className="mappings">
-                        <h3>Site rules</h3>
-                        <p className="subtle">Time on these sites counts toward the matching project. Most rules come from answering the site questions; edit patterns here only if you know the syntax.</p>
-                        {mappings === undefined ? (
-                          <p className="subtle">Loading…</p>
-                        ) : mappings.filter((mapping) => mapping.kind === "url_rule").length === 0 ? (
-                          <p className="subtle">No site rules yet.</p>
-                        ) : (
-                          <ul className="mapping-list">
-                            {mappings.filter((mapping) => mapping.kind === "url_rule").map((mapping) => (
-                              <li key={mapping.id} className="mapping-row">
-                                <span className="mapping-path" title={mapping.pathPrefix}>{mapping.pathPrefix}</span>
-                                <span className="mapping-project">{account.projects.find((item) => item.id === mapping.projectId)?.name ?? "Unknown project"}</span>
-                                <button type="button" onClick={() => void deleteMapping(mapping.id)}>Delete</button>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                        <form className="mapping-form" onSubmit={addRule}>
-                          <label>
-                            Site pattern
-                            <input value={rulePattern} onChange={(event) => setRulePattern(event.target.value)} placeholder="*.quickbooks.com" spellCheck={false} autoComplete="off" required />
-                          </label>
-                          <label>
-                            Project
-                            <select value={ruleProjectId} onChange={(event) => setRuleProjectId(event.target.value)} required>
-                              <option value="">Select project</option>
-                              {account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                            </select>
-                          </label>
-                          <button className="signal-button" type="submit" disabled={ruleBusy}>{ruleBusy ? "Adding…" : "Add rule"}</button>
-                        </form>
-                      </div>
-
-                      {monitorStatus !== undefined && monitorStatus.hooks.some((hook) => hook.installed) && (
-                        <div className="hooks-setup">
-                          <h3>Watch my agent CLIs</h3>
-                          <p className="subtle">
-                            Opt in per tool: Clock-In adds its hook to the tool&apos;s own config, and only when you ask.
-                          </p>
-                          <ul className="hook-list">
-                            {monitorStatus.hooks.filter((hook) => hook.installed).map((hook) => (
-                              <li key={hook.source} className="hook-row">
-                                <span
-                                  className={`hook-badge ${hook.detected ? "is-detected" : "is-missing"}`}
-                                  title={hook.configPath}
-                                >
-                                  {sourceLabel(hook.source)}
-                                </span>
-                                {hook.detected ? (
-                                  <span className="hook-state">Registered</span>
-                                ) : (
-                                  <button type="button" onClick={() => void registerHook(hook.source)}>Register</button>
-                                )}
-                                {hookSnippets[hook.source] !== undefined && (
-                                  <pre className="hook-snippet">{hookSnippets[hook.source]}</pre>
-                                )}
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
-
                 <div className="privacy-note">
                   <h3>What&apos;s recorded</h3>
                   <p className="subtle">
                     Clock-In notes when this computer was busy and which app was in front, by name. It never records
                     what you type, pictures of your screen, window titles, or web addresses. Turning recording off
-                    never stops your timer: time nobody can back up still counts.
+                    stops all of it, and your earlier hours stay where they are.
                   </p>
                   <button className="outline-button privacy-open" type="button" onClick={() => setRecordingOpen(true)}>
                     See exactly what&apos;s recorded
@@ -2237,8 +904,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         open={recordingOpen}
         onClose={() => setRecordingOpen(false)}
         status={monitorStatus}
+        projectName={currentProject?.name}
+        defaultProjectName={defaultProject?.name}
         hookSnippets={hookSnippets}
-        onTurnOnRecording={() => void applyMonitoringEnabled(true)}
+        onTurnOnRecording={() => void applyRecordingEnabled(true)}
         onConnectAgent={(source) => void registerHook(source)}
       />
     </main>
