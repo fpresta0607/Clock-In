@@ -344,8 +344,20 @@ export const meStatsFiltersSchema = z
   .object({
     from: dateSchema.optional(),
     to: dateSchema.optional(),
+    fromAt: timestampSchema.optional(),
+    toExclusiveAt: timestampSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    const hasCalendarBoundary = value.from !== undefined || value.to !== undefined;
+    const hasInstantBoundary = value.fromAt !== undefined || value.toExclusiveAt !== undefined;
+    if (hasCalendarBoundary && hasInstantBoundary) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Calendar and instant bounds cannot be combined." });
+    }
+    if ((value.fromAt === undefined) !== (value.toExclusiveAt === undefined)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Instant bounds must be supplied together." });
+    }
+  });
 
 export const meStatsProjectSchema = z
   .object({

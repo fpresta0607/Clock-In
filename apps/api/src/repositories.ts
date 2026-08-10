@@ -183,7 +183,7 @@ export interface AgentSessionRecord {
   cwd: string | null;
   /** The url-rule mapping a browser span matched; null for agent-source rows. */
   ruleId: string | null;
-  status: "running" | "ended";
+  status: "running" | "ended" | "stale";
   startedAt: Date;
   endedAt: Date | null;
   lastEventAt: Date;
@@ -223,23 +223,18 @@ export interface AgentSessionStaleCutoffs {
   browser: Date;
 }
 
-export interface AgentSessionStaleExclusion {
-  source: AgentSource;
-  externalSessionId: string;
-}
-
 export interface AgentSessionRepository {
   findByExternalKey(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string): Promise<AgentSessionRecord | null>;
-  /** Inserts a running row; a replayed start only refreshes lastEventAt and never reopens an ended row. */
+  /** Inserts a running row; a replayed start only refreshes lastEventAt and never reopens a terminal row. */
   upsertStarted(input: UpsertStartedAgentSession): Promise<AgentSessionRecord>;
-  /** Closes a running row at endedAt; returns null when no running row matches the key. */
+  /** Closes an active row at endedAt; returns null when no active row matches the key. */
   closeRunning(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, endedAt: Date, now: Date): Promise<AgentSessionRecord | null>;
   /** Tolerated end-before-start: stores the row directly as ended at occurredAt. */
   insertEnded(input: InsertEndedAgentSession): Promise<void>;
-  /** Advances lastEventAt on a running row; false when nothing matched (unknown or already ended). */
+  /** Advances lastEventAt on an active row; false when nothing matched (unknown or terminal). */
   advanceLastEvent(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, occurredAt: Date, now: Date): Promise<boolean>;
-  /** Closes running rows whose lastEventAt is older than their source's cutoff, ending them at lastEventAt. Returns the reaped count. */
-  reapStale(subject: AuthenticatedSubject, cutoffs: AgentSessionStaleCutoffs, now: Date, excluded?: readonly AgentSessionStaleExclusion[]): Promise<number>;
+  /** Marks active rows stale at lastEventAt when their source's cutoff elapses. Returns the reaped count. */
+  reapStale(subject: AuthenticatedSubject, cutoffs: AgentSessionStaleCutoffs, now: Date): Promise<number>;
 }
 
 export interface PathMappingRecord {

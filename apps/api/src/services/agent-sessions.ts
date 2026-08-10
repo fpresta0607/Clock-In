@@ -3,7 +3,6 @@ import type { AgentSessionEventBatchResponse, AgentSource } from "@clock-in/shar
 import type { AuthenticatedSubject } from "../auth.js";
 import type {
   AgentSessionRepository,
-  AgentSessionStaleExclusion,
   PathMappingRecord,
   PathMappingRepository,
   SessionRepository,
@@ -37,28 +36,28 @@ export interface AgentSessionServiceDependencies {
 }
 
 export interface AgentSessionReaper {
-  /** Closes running sessions with no event for their source's staleness window, ending them at lastEventAt. */
+  /** Marks sessions stale at lastEventAt after their source's staleness window. */
   reapStale(subject: AuthenticatedSubject): Promise<number>;
 }
 
 function createReapStale(
   dependencies: Pick<AgentSessionServiceDependencies, "agentSessions" | "clock" | "staleThresholdMs" | "browserStaleThresholdMs">,
-): (subject: AuthenticatedSubject, excluded?: readonly AgentSessionStaleExclusion[]) => Promise<number> {
+): (subject: AuthenticatedSubject) => Promise<number> {
   const clock = dependencies.clock ?? (() => new Date());
   const staleThresholdMs = dependencies.staleThresholdMs ?? defaultStaleThresholdMs;
   const browserStaleThresholdMs = dependencies.browserStaleThresholdMs ?? defaultBrowserStaleThresholdMs;
-  return (subject, excluded = []) => {
+  return (subject) => {
     const now = clock();
     return dependencies.agentSessions.reapStale(subject, {
       default: new Date(now.getTime() - staleThresholdMs),
       browser: new Date(now.getTime() - browserStaleThresholdMs),
-    }, now, excluded);
+    }, now);
   };
 }
 
 /**
- * Just the staleness reaper, for read paths (reports, stats) that close stale
- * agent sessions before corroboration math without the full ingestion service.
+ * Just the staleness reaper for report and stats read paths without the full
+ * ingestion service.
  */
 export function createAgentSessionReaper(
   dependencies: Pick<AgentSessionServiceDependencies, "agentSessions" | "clock" | "staleThresholdMs" | "browserStaleThresholdMs">,
@@ -71,7 +70,7 @@ export function createAgentSessionReaper(
 
 export interface AgentSessionService {
   ingest(subject: AuthenticatedSubject, events: AgentSessionEventInput[]): Promise<AgentSessionEventBatchResponse>;
-  /** Closes running sessions with no event for the staleness window; also runs after every batch. */
+  /** Marks sessions stale after the staleness window; also runs after every batch. */
   reapStale(subject: AuthenticatedSubject): Promise<number>;
 }
 
@@ -84,8 +83,6 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
 
     async ingest(subject: AuthenticatedSubject, events: AgentSessionEventInput[]): Promise<AgentSessionEventBatchResponse> {
       const now = clock();
-      const batchKeys = new Map<string, AgentSessionStaleExclusion>();
-
       // Mappings rarely change; one lookup per batch attributes every event in it.
       let mappings: Promise<PathMappingRecord[]> | null = null;
       const loadMappings = (): Promise<PathMappingRecord[]> => {
@@ -149,22 +146,16 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
               occurredAt: event.occurredAt,
               receivedAt: now,
             });
-          } else if (existing.status === "running") {
+          } else {
             await dependencies.agentSessions.closeRunning(subject, event.source, event.externalSessionId, event.occurredAt, now);
           }
           // An end for an already-ended session is a no-op replay.
         } else {
-          // Heartbeats only advance lastEventAt; an unknown or ended session is
-          // accepted as a no-op — a heartbeat must never create or resurrect one.
           await dependencies.agentSessions.advanceLastEvent(subject, event.source, event.externalSessionId, event.occurredAt, now);
         }
         results.push({ externalSessionId: event.externalSessionId, accepted: true });
-        batchKeys.set(`${event.source}\u0000${event.externalSessionId}`, {
-          source: event.source,
-          externalSessionId: event.externalSessionId,
-        });
       }
-      await reapStale(subject, [...batchKeys.values()]);
+      await reapStale(subject);
       return { results };
     },
   };

@@ -334,6 +334,25 @@ describe("me/stats", () => {
     expect(result).toEqual({ filters: {}, totalDurationSeconds: 0, corroboratedSeconds: 0, projects: [], apps: [], sites: [] });
   });
 
+  it("uses exact canonical instants for a user-device local calendar range", async () => {
+    const reports = new Reports();
+    const service = createReportService({ reports, reaper: silentReaper });
+
+    const result = await service.meStats(subject, {
+      fromAt: "2026-08-06T05:00:00.000Z",
+      toExclusiveAt: "2026-08-07T05:00:00.000Z",
+    });
+
+    expect(result.filters).toEqual({ fromAt: "2026-08-06T05:00:00.000Z", toExclusiveAt: "2026-08-07T05:00:00.000Z" });
+    expect(reports.lastProjectTotalsQuery).toEqual({
+      from: new Date("2026-08-06T05:00:00.000Z"),
+      toExclusive: new Date("2026-08-07T05:00:00.000Z"),
+      userId: ids.user,
+    });
+    expect(reports.lastAppTotalsQuery).toEqual(reports.lastProjectTotalsQuery);
+    expect(reports.lastSiteTotalsQuery).toEqual(reports.lastProjectTotalsQuery);
+  });
+
   it("rejects reversed or excessive date ranges like the org reports do", async () => {
     const service = createReportService({ reports: new Reports(), reaper: silentReaper });
 

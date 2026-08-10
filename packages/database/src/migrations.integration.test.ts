@@ -128,6 +128,14 @@ integration(integrationDescription, () => {
     `;
     expect(span?.cwd).toBeNull();
     expect(span?.rule_id).toMatch(/^[0-9a-f-]{36}$/i);
+    await expect(database.client`
+      insert into agent_sessions (organization_id, user_id, source, external_session_id, status, started_at, ended_at, last_event_at)
+      values (${organizationId}, ${userId}, 'browser', 'span-3', 'stale', now() - interval '10 minutes', now() - interval '5 minutes', now() - interval '5 minutes')
+    `).resolves.toBeDefined();
+    await expect(database.client`
+      insert into agent_sessions (organization_id, user_id, source, external_session_id, status, started_at, last_event_at)
+      values (${organizationId}, ${userId}, 'browser', 'span-4', 'stale', now(), now())
+    `).rejects.toThrow();
 
     // kind defaults to a path prefix, and the (org, user, prefix) uniqueness spans both kinds.
     const [defaulted] = await database.client`

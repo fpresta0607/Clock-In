@@ -71,6 +71,21 @@ function normalizedQuery(filters: ReportFilters): ReportQuery {
   };
 }
 
+function normalizedMeStatsQuery(filters: MeStatsFilters): ReportQuery {
+  const hasInstantBoundary = filters.fromAt !== undefined || filters.toExclusiveAt !== undefined;
+  if (!hasInstantBoundary) return normalizedQuery({ ...filters, page: 1, pageSize: 1 });
+  if (filters.from !== undefined || filters.to !== undefined || filters.fromAt === undefined || filters.toExclusiveAt === undefined) {
+    throw new AppError("validation_error", "Stats instant bounds must be supplied together without calendar dates.");
+  }
+  const from = new Date(filters.fromAt);
+  const toExclusive = new Date(filters.toExclusiveAt);
+  const durationMs = toExclusive.getTime() - from.getTime();
+  if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > 367 * millisecondsPerDay) {
+    throw new AppError("validation_error", "The stats time range must be between zero and 367 days.");
+  }
+  return { from, toExclusive };
+}
+
 function asReportRow(record: ReportRowRecord): ReportRow {
   const durationSeconds = record.durationSeconds;
   return {
@@ -231,9 +246,7 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
     },
 
     async meStats(subject: AuthenticatedSubject, filters: MeStatsFilters): Promise<MeStatsResponse> {
-      // The same completed-session set and inclusive calendar bounds the org
-      // reports use, pinned to the caller so nobody ever sees another member.
-      const query: ReportQuery = { ...normalizedQuery({ ...filters, page: 1, pageSize: 1 }), userId: subject.userId };
+      const query: ReportQuery = { ...normalizedMeStatsQuery(filters), userId: subject.userId };
       await dependencies.reaper.reapStale(subject);
       const projects = (await dependencies.reports.readProjectTotalsForMember(subject, query)).map(asProjectTotal);
       const apps = (await dependencies.reports.readAppTotalsForMember(subject, query)).map(asAppTotal);

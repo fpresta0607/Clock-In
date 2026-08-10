@@ -177,7 +177,7 @@ describe("database schema", () => {
     expect(agentSessions.ruleId.notNull).toBe(false);
     expect(agentSessions.ruleId.columnType).toBe("PgUUID");
     expect(agentSessions.status.notNull).toBe(true);
-    expect(agentSessions.status.enumValues).toEqual(["running", "ended"]);
+    expect(agentSessions.status.enumValues).toEqual(["running", "ended", "stale"]);
     expect(agentSessions.startedAt.notNull).toBe(true);
     expect(agentSessions.endedAt.notNull).toBe(false);
     expect(agentSessions.lastEventAt.notNull).toBe(true);
@@ -201,6 +201,7 @@ describe("database schema", () => {
     );
     const statusCheck = config.checks.find((constraint) => constraint.name === "agent_sessions_status_fields_valid");
     expect(new PgDialect().sqlToQuery(statusCheck!.value).sql).toContain("'running'");
+    expect(new PgDialect().sqlToQuery(statusCheck!.value).sql).toContain("'stale'");
     const externalIdCheck = config.checks.find(
       (constraint) => constraint.name === "agent_sessions_external_session_id_length_valid",
     );

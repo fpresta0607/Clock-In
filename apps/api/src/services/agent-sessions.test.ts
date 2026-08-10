@@ -4,7 +4,6 @@ import type { AuthenticatedSubject } from "../auth.js";
 import type {
   AgentSessionRecord,
   AgentSessionRepository,
-  AgentSessionStaleExclusion,
   AgentSessionStaleCutoffs,
   InsertEndedAgentSession,
   PathMappingRecord,
@@ -40,10 +39,14 @@ class MemoryAgentSessions implements AgentSessionRepository {
     return this.find(current, source, externalSessionId) ?? null;
   }
 
-  /** Mirrors the upsert: insert running; on replay refresh lastEventAt only, never reopen. */
+  /** Mirrors the upsert: insert running; on replay refresh lastEventAt only, never reopen a terminal row. */
   public async upsertStarted(input: UpsertStartedAgentSession): Promise<AgentSessionRecord> {
     const existing = this.find({ organizationId: input.organizationId, userId: input.userId }, input.source, input.externalSessionId);
     if (existing !== undefined) {
+      if (existing.status === "stale" && input.source === "browser" && input.occurredAt > existing.lastEventAt) {
+        existing.status = "running";
+        existing.endedAt = null;
+      }
       if (input.occurredAt > existing.lastEventAt) existing.lastEventAt = input.occurredAt;
       return existing;
     }
@@ -68,10 +71,12 @@ class MemoryAgentSessions implements AgentSessionRepository {
 
   public async closeRunning(current: AuthenticatedSubject, source: AgentSessionRecord["source"], externalSessionId: string, endedAt: Date): Promise<AgentSessionRecord | null> {
     const existing = this.find(current, source, externalSessionId);
-    if (existing === undefined || existing.status !== "running") return null;
+    if (existing === undefined || existing.status === "ended") return null;
+    if (existing.status === "stale" && (source !== "browser" || endedAt < existing.lastEventAt)) return null;
     existing.status = "ended";
-    existing.endedAt = endedAt;
-    if (endedAt > existing.lastEventAt) existing.lastEventAt = endedAt;
+    const terminalAt = endedAt > existing.lastEventAt ? endedAt : existing.lastEventAt;
+    existing.endedAt = terminalAt;
+    existing.lastEventAt = terminalAt;
     return existing;
   }
 
@@ -98,26 +103,28 @@ class MemoryAgentSessions implements AgentSessionRepository {
 
   public async advanceLastEvent(current: AuthenticatedSubject, source: AgentSessionRecord["source"], externalSessionId: string, occurredAt: Date): Promise<boolean> {
     const existing = this.find(current, source, externalSessionId);
-    if (existing === undefined || existing.status !== "running") return false;
+    if (existing === undefined || existing.status === "ended") return false;
+    if (existing.status === "stale") {
+      if (source !== "browser" || occurredAt <= existing.lastEventAt) return false;
+      existing.status = "running";
+      existing.endedAt = null;
+    }
     if (occurredAt > existing.lastEventAt) existing.lastEventAt = occurredAt;
     return true;
   }
 
-  /** Mirrors staleness reaping: running rows older than their source's cutoff end at lastEventAt. */
+  /** Mirrors staleness reaping: running rows older than their source's cutoff are marked stale at lastEventAt. */
   public async reapStale(
     current: AuthenticatedSubject,
     cutoffs: AgentSessionStaleCutoffs,
     _now?: Date,
-    excluded: readonly AgentSessionStaleExclusion[] = [],
   ): Promise<number> {
-    const excludedKeys = new Set(excluded.map((entry) => `${entry.source}\u0000${entry.externalSessionId}`));
     let reaped = 0;
     for (const record of this.records) {
       if (record.organizationId !== current.organizationId || record.userId !== current.userId) continue;
-      if (excludedKeys.has(`${record.source}\u0000${record.externalSessionId}`)) continue;
       const cutoff = record.source === "browser" ? cutoffs.browser : cutoffs.default;
       if (record.status === "running" && record.lastEventAt < cutoff) {
-        record.status = "ended";
+        record.status = "stale";
         record.endedAt = record.lastEventAt;
         reaped += 1;
       }
@@ -175,6 +182,7 @@ function createService(options: {
   mappings?: PathMappingRecord[];
   runningTimer?: SessionRecord | null;
   staleThresholdMs?: number;
+  clock?: () => Date;
 } = {}) {
   const agentSessions = new MemoryAgentSessions();
   const timers = new MemoryTimers();
@@ -183,7 +191,7 @@ function createService(options: {
     agentSessions,
     pathMappings: new MemoryPathMappings(options.mappings ?? []),
     sessions: timers as SessionRepository,
-    clock: () => now,
+    clock: options.clock ?? (() => now),
     ...(options.staleThresholdMs === undefined ? {} : { staleThresholdMs: options.staleThresholdMs }),
   });
   return { agentSessions, service };
@@ -297,28 +305,22 @@ describe("agent-session service", () => {
     expect(result.results).toEqual([{ externalSessionId: "fresh", accepted: true }]);
     expect(agentSessions.records[0]).toMatchObject({
       externalSessionId: "session-1",
-      status: "ended",
+      status: "stale",
       endedAt: new Date("2026-08-06T07:00:00.000Z"),
     });
     expect(agentSessions.records[1]).toMatchObject({ externalSessionId: "fresh", status: "running" });
   });
 
-  it("accepts a delayed browser batch before reaping its stale prior heartbeat", async () => {
-    const { agentSessions, service } = createService({ mappings: [urlRule] });
-    agentSessions.records.push({
-      id: crypto.randomUUID(),
-      organizationId: ids.organization,
-      userId: ids.user,
-      source: "browser",
-      externalSessionId: "span-1",
-      projectId: ids.project,
-      cwd: null,
-      ruleId: urlRule.id,
-      status: "running",
-      startedAt: new Date("2026-08-06T12:00:00.000Z"),
-      endedAt: null,
-      lastEventAt: new Date("2026-08-06T12:02:00.000Z"),
-      linkedSessionId: null,
+  it("reconciles later browser lifecycle events after a read path reaps an earlier upload chunk", async () => {
+    let current = new Date("2026-08-06T12:01:00.000Z");
+    const { agentSessions, service } = createService({ mappings: [urlRule], clock: () => current });
+    await service.ingest(subject, [browserEvent({ event: "started", occurredAt: new Date("2026-08-06T12:00:00.000Z") })]);
+    current = now;
+    await service.reapStale(subject);
+
+    expect(agentSessions.records[0]).toMatchObject({
+      status: "stale",
+      endedAt: new Date("2026-08-06T12:00:00.000Z"),
     });
 
     const result = await service.ingest(subject, [
@@ -343,9 +345,9 @@ describe("agent-session service", () => {
     const { agentSessions, service } = createService();
     await service.ingest(subject, [event({ occurredAt: new Date("2026-08-06T07:30:00.000Z") })]);
 
-    await expect(service.reapStale(subject)).resolves.toBe(1);
     await expect(service.reapStale(subject)).resolves.toBe(0);
-    expect(agentSessions.records[0]).toMatchObject({ status: "ended", endedAt: new Date("2026-08-06T07:30:00.000Z") });
+    await expect(service.reapStale(subject)).resolves.toBe(0);
+    expect(agentSessions.records[0]).toMatchObject({ status: "stale", endedAt: new Date("2026-08-06T07:30:00.000Z") });
   });
 
   it("rejects invalid or far-future events individually without failing the batch", async () => {
@@ -385,7 +387,7 @@ describe("agent-session service", () => {
     expect(result).toEqual({ results: [{ externalSessionId: "span-1", accepted: true }] });
     expect(agentSessions.records[0]).toMatchObject({
       source: "browser",
-      status: "running",
+      status: "stale",
       cwd: null,
       ruleId: urlRule.id,
       projectId: ids.project,
@@ -449,20 +451,20 @@ describe("agent-session service", () => {
     expect(agentSessions.records[0]).toMatchObject({ externalSessionId: "session-1", status: "running" });
     expect(agentSessions.records[1]).toMatchObject({
       externalSessionId: "span-1",
-      status: "ended",
+      status: "stale",
       endedAt: new Date("2026-08-06T13:40:00.000Z"),
     });
   });
 });
 
 describe("agent-session reaper", () => {
-  it("closes stale running sessions at lastEventAt for corroboration read paths", async () => {
+  it("marks stale running sessions at lastEventAt for corroboration read paths", async () => {
     const { agentSessions, service } = createService();
     await service.ingest(subject, [event({ occurredAt: new Date("2026-08-06T07:30:00.000Z") })]);
     const reaper = createAgentSessionReaper({ agentSessions, clock: () => now });
 
-    await expect(reaper.reapStale(subject)).resolves.toBe(1);
     await expect(reaper.reapStale(subject)).resolves.toBe(0);
-    expect(agentSessions.records[0]).toMatchObject({ status: "ended", endedAt: new Date("2026-08-06T07:30:00.000Z") });
+    await expect(reaper.reapStale(subject)).resolves.toBe(0);
+    expect(agentSessions.records[0]).toMatchObject({ status: "stale", endedAt: new Date("2026-08-06T07:30:00.000Z") });
   });
 });
