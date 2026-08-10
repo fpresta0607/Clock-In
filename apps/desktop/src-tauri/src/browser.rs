@@ -552,13 +552,72 @@ pub fn release_extension_namespace_reservation(
     dir: &Path,
     reservation: &ExtensionNamespaceReservation,
 ) -> ApiResult<()> {
+    release_extension_namespace_reservation_matching(
+        dir,
+        &reservation.source_namespace,
+        &reservation.target_namespace,
+        Some(&reservation.request_id),
+    )
+}
+
+pub fn release_extension_namespace_reservation_for_workspace_move(
+    dir: &Path,
+    source: &spool::EvidenceIdentity,
+    target: &spool::EvidenceIdentity,
+    request_id: Option<&str>,
+) -> ApiResult<()> {
+    release_extension_namespace_reservation_matching(
+        dir,
+        &format!("{}:{}", source.account_id, source.organization_id),
+        &format!("{}:{}", target.account_id, target.organization_id),
+        request_id,
+    )
+}
+
+pub fn complete_extension_namespace_reservation_for_workspace_move(
+    dir: &Path,
+    source: &spool::EvidenceIdentity,
+    target: &spool::EvidenceIdentity,
+    request_id: Option<&str>,
+) -> ApiResult<()> {
+    let (Some(request_id), source_namespace, target_namespace) = (
+        request_id,
+        format!("{}:{}", source.account_id, source.organization_id),
+        format!("{}:{}", target.account_id, target.organization_id),
+    ) else {
+        return Ok(());
+    };
+    spool::with_lock(&browser_spool_path(dir), || {
+        let Some(current) = read_extension_namespace_reservation(dir) else {
+            return Ok(());
+        };
+        if current.request_id == request_id
+            && current.source_namespace == source_namespace
+            && current.target_namespace == target_namespace
+            && current.action == ExtensionNamespaceReservationAction::Reserve
+            && current.acknowledgement
+                == Some(ExtensionNamespaceReservationAcknowledgement::Reserved)
+        {
+            remove_if_exists(&extension_namespace_reservation_path(dir))?;
+        }
+        Ok(())
+    })
+    .map_err(|_| extension_reservation_error())
+}
+
+fn release_extension_namespace_reservation_matching(
+    dir: &Path,
+    source_namespace: &str,
+    target_namespace: &str,
+    request_id: Option<&str>,
+) -> ApiResult<()> {
     spool::with_lock(&browser_spool_path(dir), || {
         let Some(mut current) = read_extension_namespace_reservation(dir) else {
             return Ok(());
         };
-        if current.request_id != reservation.request_id
-            || current.source_namespace != reservation.source_namespace
-            || current.target_namespace != reservation.target_namespace
+        if request_id.is_some_and(|request_id| current.request_id != request_id)
+            || current.source_namespace != source_namespace
+            || current.target_namespace != target_namespace
         {
             return Ok(());
         }
@@ -1996,6 +2055,90 @@ mod tests {
             .expect_err("connected extension must report capacity");
 
         assert_eq!(error.kind, crate::api::ErrorKind::Conflict);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workspace_move_recovery_releases_only_its_matching_extension_reservation() {
+        let dir = temp_dir("workspace-move-release");
+        let source = spool::EvidenceIdentity::new("account-source", "organization-source")
+            .expect("source identity is valid");
+        let target = spool::EvidenceIdentity::new("account-target", "organization-target")
+            .expect("target identity is valid");
+        let other = spool::EvidenceIdentity::new("account-other", "organization-other")
+            .expect("other identity is valid");
+        enable_collection_for_identity(&dir, &source).expect("collection enables");
+        record_handshake_for(&dir, Browser::Chrome);
+        let reservation = request_extension_namespace_reservation(&dir, &target)
+            .expect("extension reservation records");
+
+        release_extension_namespace_reservation_for_workspace_move(
+            &dir,
+            &source,
+            &other,
+            None,
+        )
+        .expect("unrelated recovery reads safely");
+        assert_eq!(
+            pending_extension_namespace_reservation(&dir)
+                .expect("reservation remains pending")
+                .action,
+            ExtensionNamespaceReservationAction::Reserve,
+        );
+
+        release_extension_namespace_reservation_for_workspace_move(
+            &dir,
+            &source,
+            &target,
+            Some(&reservation.request_id),
+        )
+        .expect("matching recovery releases");
+        assert_eq!(
+            pending_extension_namespace_reservation(&dir)
+                .expect("release remains pending for the extension")
+                .action,
+            ExtensionNamespaceReservationAction::Release,
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn completing_a_workspace_move_consumes_only_the_acknowledged_request() {
+        let dir = temp_dir("workspace-move-completion");
+        let source = spool::EvidenceIdentity::new("account-source", "organization-source")
+            .expect("source identity is valid");
+        let target = spool::EvidenceIdentity::new("account-target", "organization-target")
+            .expect("target identity is valid");
+        enable_collection_for_identity(&dir, &source).expect("collection enables");
+        record_handshake_for(&dir, Browser::Chrome);
+        let reservation = request_extension_namespace_reservation(&dir, &target)
+            .expect("extension reservation records");
+        acknowledge_extension_namespace_reservation(
+            &dir,
+            &reservation.request_id,
+            ExtensionNamespaceReservationAcknowledgement::Reserved,
+        )
+        .expect("extension acknowledgement records");
+
+        complete_extension_namespace_reservation_for_workspace_move(
+            &dir,
+            &source,
+            &target,
+            Some("another-operation"),
+        )
+        .expect("foreign completion cannot consume the reservation");
+        assert!(pending_extension_namespace_reservation(&dir).is_some());
+
+        complete_extension_namespace_reservation_for_workspace_move(
+            &dir,
+            &source,
+            &target,
+            Some(&reservation.request_id),
+        )
+        .expect("matching completion consumes the reservation");
+        assert!(pending_extension_namespace_reservation(&dir).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

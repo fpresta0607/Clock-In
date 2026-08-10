@@ -23,37 +23,27 @@ fn main() {
     ] {
         println!("cargo:rerun-if-env-changed={name}");
     }
+    println!("cargo:rerun-if-changed=tauri.conf.json");
 
     let release = !cfg!(debug_assertions);
-    let tauri_config = std::env::var("TAURI_CONFIG")
+    let base_config = std::fs::read_to_string("tauri.conf.json")
         .ok()
         .and_then(|config| serde_json::from_str::<serde_json::Value>(&config).ok())
-        .or_else(|| {
-            std::fs::read_to_string("tauri.conf.json")
-                .ok()
-                .and_then(|config| serde_json::from_str::<serde_json::Value>(&config).ok())
+        .expect("tauri.conf.json must contain a Tauri configuration");
+    let override_config = std::env::var("TAURI_CONFIG")
+        .ok()
+        .map(|config| {
+            serde_json::from_str::<serde_json::Value>(&config)
+                .expect("TAURI_CONFIG must contain a JSON configuration override")
         });
-    let updater_artifacts_requested = tauri_config
-        .as_ref()
-        .and_then(|config| {
-            config
-                .pointer("/bundle/createUpdaterArtifacts")
-                .and_then(serde_json::Value::as_bool)
-        })
-        .unwrap_or(false);
-    let updater_public_key = tauri_config.as_ref().and_then(|config| {
-        config
-            .pointer("/plugins/updater/pubkey")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-    });
+    let tauri_config = release_signing::effective_tauri_config(base_config, override_config.as_ref());
+    let signing_config = release_signing::signing_configuration(&tauri_config);
     let target_os = std::env::var("CARGO_CFG_TARGET_OS")
         .unwrap_or_else(|_| std::env::consts::OS.to_string());
     release_signing::validate_build_signing(
         release,
         &target_os,
-        updater_artifacts_requested,
-        updater_public_key,
+        &signing_config,
         |name| std::env::var(name).ok(),
     )
     .unwrap_or_else(|error| panic!("{error}"));
