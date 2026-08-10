@@ -136,7 +136,7 @@ async fn upload_once(
 /// prefix. A mid-batch failure skips the truncation, so the whole spool
 /// replays next pass — safe because `clientId` makes replays idempotent.
 async fn upload_segments(client: &ApiClient, token: &str, path: &Path) -> bool {
-    let generations = match spool::pending_spool_paths(path) {
+    let generations = match spool::seal_pending_spool_paths(path) {
         Ok(generations) => generations,
         Err(_) => return false,
     };
@@ -145,7 +145,7 @@ async fn upload_segments(client: &ApiClient, token: &str, path: &Path) -> bool {
             return false;
         }
     }
-    spool::remove_empty_rotated(path).is_ok()
+    true
 }
 
 async fn upload_segment_generation(client: &ApiClient, token: &str, path: &Path) -> bool {
@@ -182,7 +182,7 @@ async fn drain_agent_spool(
     path: &Path,
     timer_running: bool,
 ) -> bool {
-    let generations = match spool::pending_spool_paths(path) {
+    let generations = match spool::seal_pending_spool_paths(path) {
         Ok(generations) => generations,
         Err(_) => return false,
     };
@@ -191,7 +191,7 @@ async fn drain_agent_spool(
             return false;
         }
     }
-    spool::remove_empty_rotated(path).is_ok()
+    true
 }
 
 async fn drain_agent_spool_generation(
@@ -242,7 +242,7 @@ async fn drain_browser_spool(
     path: &Path,
     timer_running: bool,
 ) -> bool {
-    let generations = match spool::pending_spool_paths(path) {
+    let generations = match spool::seal_pending_spool_paths(path) {
         Ok(generations) => generations,
         Err(_) => return false,
     };
@@ -251,7 +251,7 @@ async fn drain_browser_spool(
             return false;
         }
     }
-    spool::remove_empty_rotated(path).is_ok()
+    true
 }
 
 async fn drain_browser_spool_generation(

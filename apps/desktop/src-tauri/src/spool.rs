@@ -322,16 +322,32 @@ pub fn read_pending(path: &Path) -> SpoolResult<PendingEvents> {
 /// Returns every spool generation, oldest first.
 pub fn pending_spool_paths(path: &Path) -> SpoolResult<Vec<PathBuf>> {
     with_lock(path, || {
-        let mut paths = Vec::new();
-        let rotated = rotated_path(path);
-        if has_pending_bytes(&rotated)? {
-            paths.push(rotated);
-        }
+        let mut paths = sealed_spool_paths_locked(path)?;
         if has_pending_bytes(path)? {
             paths.push(path.to_path_buf());
         }
         Ok(paths)
     })
+}
+
+pub fn seal_pending_spool_paths(path: &Path) -> SpoolResult<Vec<PathBuf>> {
+    with_lock(path, || {
+        let mut paths = sealed_spool_paths_locked(path)?;
+        if has_pending_bytes(path)? {
+            paths.push(rotate(path)?);
+        }
+        Ok(paths)
+    })
+}
+
+pub(crate) fn discard_locked(path: &Path) -> SpoolResult<()> {
+    for candidate in all_spool_paths_locked(path)? {
+        remove_if_exists(&candidate)?;
+        remove_if_exists(&sibling(&candidate, ".partial"))?;
+        remove_if_exists(&sibling(&candidate, ".corrupt"))?;
+        remove_if_exists(&sibling(&candidate, ".tmp"))?;
+    }
+    Ok(())
 }
 
 /// The line-typed core of `read_pending`, shared with the segment spool the
@@ -390,23 +406,7 @@ pub fn truncate_acked(path: &Path, acked_bytes: u64) -> SpoolResult<()> {
         if (content.len() as u64) < acked_bytes {
             return Ok(());
         }
-        if acked_bytes == content.len() as u64 && is_rotated_path(path) {
-            return std::fs::write(path, []);
-        }
         rewrite(path, &content[acked_bytes as usize..])
-    })
-}
-
-pub fn remove_empty_rotated(path: &Path) -> SpoolResult<()> {
-    with_lock(path, || {
-        let rotated = rotated_path(path);
-        match std::fs::metadata(&rotated) {
-            Ok(metadata) if metadata.len() == 0 => std::fs::remove_file(rotated)?,
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        Ok(())
     })
 }
 
@@ -497,7 +497,7 @@ fn append_line_locked(path: &Path, line: &[u8], max_bytes: u64) -> SpoolResult<(
         repair_partial_tail(path)?;
     }
     let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-    if size > 0 && size + line.len() as u64 > max_bytes && !rotated_path(path).exists() {
+    if size > 0 && size + line.len() as u64 > max_bytes {
         rotate(path)?;
     }
     OpenOptions::new()
@@ -531,23 +531,100 @@ fn repair_partial_tail(path: &Path) -> SpoolResult<()> {
     }
 }
 
-fn rotate(path: &Path) -> SpoolResult<()> {
-    std::fs::rename(path, rotated_path(path))
+fn rotate(path: &Path) -> SpoolResult<PathBuf> {
+    let target = next_generation_path_locked(path)?;
+    std::fs::rename(path, &target)?;
+    Ok(target)
 }
 
-fn rotated_path(path: &Path) -> PathBuf {
+fn legacy_rotated_path(path: &Path) -> PathBuf {
     path.with_extension("old.jsonl")
 }
 
-fn is_rotated_path(path: &Path) -> bool {
-    path.file_name()
-        .is_some_and(|name| name.to_string_lossy().ends_with(".old.jsonl"))
+fn all_spool_paths_locked(path: &Path) -> SpoolResult<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    let legacy = legacy_rotated_path(path);
+    match std::fs::metadata(&legacy) {
+        Ok(_) => paths.push(legacy),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    paths.extend(numbered_generation_paths_locked(path)?);
+    paths.push(path.to_path_buf());
+    Ok(paths)
+}
+
+fn sealed_spool_paths_locked(path: &Path) -> SpoolResult<Vec<PathBuf>> {
+    all_spool_paths_locked(path)?
+        .into_iter()
+        .filter(|candidate| candidate != path)
+        .filter_map(|candidate| match has_pending_bytes(&candidate) {
+            Ok(true) => Some(Ok(candidate)),
+            Ok(false) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+fn numbered_generation_paths_locked(path: &Path) -> SpoolResult<Vec<PathBuf>> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut generations = Vec::new();
+    for entry in std::fs::read_dir(parent)? {
+        let candidate = entry?.path();
+        if let Some(number) = generation_number(path, &candidate) {
+            generations.push((number, candidate));
+        }
+    }
+    generations.sort_by_key(|(number, _)| *number);
+    Ok(generations.into_iter().map(|(_, path)| path).collect())
+}
+
+fn next_generation_path_locked(path: &Path) -> SpoolResult<PathBuf> {
+    let highest_existing = numbered_generation_paths_locked(path)?
+        .iter()
+        .filter_map(|candidate| generation_number(path, candidate))
+        .max()
+        .unwrap_or(0);
+    let sequence = match std::fs::read_to_string(generation_sequence_path(path)) {
+        Ok(value) => value
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| io::Error::other("spool generation sequence is invalid"))?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error),
+    };
+    let next = sequence
+        .max(highest_existing)
+        .checked_add(1)
+        .ok_or_else(|| io::Error::other("spool generation sequence is exhausted"))?;
+    std::fs::write(generation_sequence_path(path), next.to_string())?;
+    Ok(path.with_extension(format!("generation-{next:020}.jsonl")))
+}
+
+fn generation_sequence_path(path: &Path) -> PathBuf {
+    sibling(path, ".generation-sequence")
+}
+
+fn generation_number(path: &Path, candidate: &Path) -> Option<u64> {
+    let stem = path.file_stem()?.to_str()?;
+    let name = candidate.file_name()?.to_str()?;
+    name.strip_prefix(&format!("{stem}.generation-"))?
+        .strip_suffix(".jsonl")?
+        .parse()
 }
 
 fn has_pending_bytes(path: &Path) -> SpoolResult<bool> {
     match std::fs::metadata(path) {
         Ok(metadata) => Ok(metadata.len() > 0),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn remove_if_exists(path: &Path) -> SpoolResult<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
 }
@@ -966,7 +1043,7 @@ mod tests {
     }
 
     #[test]
-    fn rotation_preserves_every_unacknowledged_event_in_generation_order() {
+    fn bounded_generations_survive_an_outage_and_drain_in_order() {
         let dir = temp_dir("rotation");
         let path = dir.join("agent-spool.jsonl");
         let line = serde_json::to_vec(&event("s1")).expect("event serializes");
@@ -980,16 +1057,27 @@ mod tests {
             append_line(&path, &line, cap).expect("append succeeds");
         }
 
-        let rotated = rotated_path(&path);
-        assert!(rotated.exists());
-        assert!(std::fs::metadata(&rotated).expect("rotated exists").len() <= cap);
-        assert!(
-            std::fs::metadata(&path).expect("live spool exists").len() > cap,
-            "the live generation grows while an older one waits for acknowledgement"
+        let pending = pending_spool_paths(&path).expect("generations enumerate");
+        assert_eq!(pending.len(), 5);
+        assert!(pending.iter().all(|generation| {
+            std::fs::metadata(generation)
+                .expect("generation exists")
+                .len()
+                <= cap
+        }));
+        assert_eq!(
+            pending
+                .iter()
+                .map(|generation| generation.file_name().expect("name").to_owned())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            pending.len(),
         );
 
         let mut sessions = Vec::new();
-        for generation in pending_spool_paths(&path).expect("generations enumerate") {
+        let sealed = seal_pending_spool_paths(&path).expect("generations seal");
+        let first_generation = sealed.first().expect("generation exists").clone();
+        for generation in sealed {
             let pending = read_pending(&generation).expect("generation reads");
             sessions.extend(
                 pending
@@ -999,9 +1087,17 @@ mod tests {
             );
             truncate_acked(&generation, pending.acked_bytes).expect("generation acknowledges");
         }
-        remove_empty_rotated(&path).expect("completed drain removes the acknowledged generation");
         assert_eq!(sessions, (0..9).map(|index| format!("s{index}")).collect::<Vec<_>>());
         assert!(pending_spool_paths(&path).expect("generations enumerate").is_empty());
+
+        let mut later = serde_json::to_vec(&event("s9")).expect("event serializes");
+        later.push(b'\n');
+        append_line(&path, &later, cap).expect("append succeeds");
+        let later_generation = seal_pending_spool_paths(&path)
+            .expect("generation seals")
+            .pop()
+            .expect("generation exists");
+        assert_ne!(later_generation, first_generation);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

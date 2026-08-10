@@ -42,6 +42,7 @@ describe("Drizzle account store", () => {
       from: () => ({ where: () => ({ limit: async () => rows }) }),
     });
     const transaction = {
+      execute: async () => [{ id: input.userId }],
       select: () => {
         selectStep += 1;
         if (selectStep === 1) return limited([{ id: targetOrganizationId }]);

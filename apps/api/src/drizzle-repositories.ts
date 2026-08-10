@@ -433,6 +433,13 @@ export class DrizzleAccountStore implements AccountStore {
         throw new AppError("not_found", "That invite code does not match an organization.");
       }
 
+      const lockedUser = await tx.execute(sql`
+        select ${users.id}
+        from ${users}
+        where ${users.id} = ${subject.userId}
+        for update
+      `);
+      if (lockedUser.length === 0) throw new AppError("not_found", "Account not found.");
       const [current] = await tx
         .select({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role })
         .from(users)
@@ -441,6 +448,18 @@ export class DrizzleAccountStore implements AccountStore {
       if (current === undefined) throw new AppError("not_found", "Account not found.");
       // Re-entering the same workspace is a no-op rather than an error.
       if (current.organizationId === target.id) return current;
+
+      for (const organizationId of [current.organizationId, target.id].sort()) {
+        const lockedOrganization = await tx.execute(sql`
+          select ${organizations.id}
+          from ${organizations}
+          where ${organizations.id} = ${organizationId}
+          for update
+        `);
+        if (lockedOrganization.length === 0) {
+          throw new AppError("not_found", "That invite code does not match an organization.");
+        }
+      }
 
       // A recorded session points at a project in the workspace being left, and
       // that project does not exist in the new one. Rather than invent a mapping
@@ -515,6 +534,13 @@ export class DrizzleAccountStore implements AccountStore {
 
   public async claimFirstAdmin(subject: AuthenticatedSubject): Promise<FirstAdminClaimResult> {
     return this.db.transaction(async (tx) => {
+      const lockedUser = await tx.execute(sql`
+        select ${users.id}
+        from ${users}
+        where ${users.id} = ${subject.userId}
+        for update
+      `);
+      if (lockedUser.length === 0) return { kind: "not_member" };
       const [member] = await tx
         .select({ role: users.role })
         .from(users)
@@ -522,6 +548,14 @@ export class DrizzleAccountStore implements AccountStore {
         .limit(1);
       if (member === undefined) return { kind: "not_member" };
       if (member.role === "admin") return { kind: "already_claimed" };
+
+      const lockedOrganization = await tx.execute(sql`
+        select ${organizations.id}
+        from ${organizations}
+        where ${organizations.id} = ${subject.organizationId}
+        for update
+      `);
+      if (lockedOrganization.length === 0) return { kind: "not_member" };
 
       const [claim] = await tx
         .insert(organizationAdminClaims)
@@ -569,6 +603,16 @@ export class DrizzleAccountStore implements AccountStore {
         .where(eq(organizations.inviteCode, inviteCode))
         .limit(1);
       if (organization === undefined) {
+        throw new AppError("not_found", "That invite code does not match an organization.");
+      }
+
+      const lockedOrganization = await tx.execute(sql`
+        select ${organizations.id}
+        from ${organizations}
+        where ${organizations.id} = ${organization.id}
+        for update
+      `);
+      if (lockedOrganization.length === 0) {
         throw new AppError("not_found", "That invite code does not match an organization.");
       }
 
