@@ -591,7 +591,12 @@ impl SessionTracker {
             SegmentKind::Idle => {
                 let quiet_for = input.now.saturating_sub(span_started_at);
                 if quiet_for >= input.away_threshold_seconds && !input.agent_active {
-                    closed.extend(self.close_at(span_started_at));
+                    let close_boundary = if self.agent_seen_at >= span_started_at {
+                        self.agent_seen_at
+                    } else {
+                        span_started_at
+                    };
+                    closed.extend(self.close_at(close_boundary));
                 } else if input.agent_active {
                     if let Some(open) = self.open.as_mut() {
                         open.last_active_at = input.now;
@@ -2298,6 +2303,63 @@ mod tests {
         // The idle gap from 1_100 to 1_600 had agent coverage, so only the
         // pre-agent portion (1_100–1_300 = 200 s) is trimmed idle.
         assert_eq!(finished.idle_seconds, 200);
+    }
+
+    #[test]
+    fn agent_stops_during_idle_then_idle_continues_past_threshold() {
+        // R10: when an agent runs during idle, then stops, and idle continues
+        // past the away threshold, the session closes at the last agent
+        // boundary — not at the original idle start.
+        let mut tracker = SessionTracker::new();
+        let project = project("p1", Attribution::Agent);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
+
+        // Person steps away; machine goes idle.
+        tick(
+            &mut tracker,
+            1_100,
+            Some((SegmentKind::Idle, 1_100)),
+            Some(&project),
+            false,
+        );
+
+        // Agent runs while machine is idle: advances the boundary.
+        tick(
+            &mut tracker,
+            1_200,
+            Some((SegmentKind::Idle, 1_100)),
+            Some(&project),
+            true,
+        );
+        tick(
+            &mut tracker,
+            1_500,
+            Some((SegmentKind::Idle, 1_100)),
+            Some(&project),
+            true,
+        );
+
+        // Agent stops; machine stays idle. Idle continues past threshold.
+        let closed = tick(
+            &mut tracker,
+            2_100,
+            Some((SegmentKind::Idle, 1_100)),
+            Some(&project),
+            false,
+        );
+        let [session] = closed.as_slice() else {
+            panic!("session closes when idle outlasts agent work")
+        };
+        // Session must close at the last agent boundary (1_500), not the
+        // original idle start (1_100).
+        assert_eq!(session.started_at, iso8601(1_000));
+        assert_eq!(session.stopped_at, iso8601(1_500));
     }
 
     #[test]
