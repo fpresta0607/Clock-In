@@ -73,7 +73,10 @@ async fn upload_once(
 ) {
     let Some(session) = crate::read_session_token() else {
         if let Err(error) = crate::browser::revoke_collection(browser_dir) {
-            eprintln!("clock-in: could not revoke browser attribution: {}", error.message);
+            eprintln!(
+                "clock-in: could not revoke browser attribution: {}",
+                error.message
+            );
         }
         let _ = crate::browser::discard_collection(browser_dir);
         return;
@@ -91,7 +94,10 @@ async fn upload_once(
         }
     };
     if let Err(error) = crate::browser::renew_collection_authorization(browser_dir) {
-        eprintln!("clock-in: could not renew browser attribution: {}", error.message);
+        eprintln!(
+            "clock-in: could not renew browser attribution: {}",
+            error.message
+        );
     }
 
     let mut complete = upload_segments(client, &token, segments_path).await;
@@ -333,7 +339,6 @@ pub fn track_browser_events(
             span_id: Some(span_id.clone()),
         });
     }
-
 }
 
 fn cap_browser_spans(tracking: &mut BrowserTracking) {
@@ -917,15 +922,24 @@ mod tests {
         let mut tracking = BrowserTracking::default();
         let mut suggestion = None;
         let events = (0..65)
-            .map(|index| browser_event(
-                AgentEventKind::Started,
-                &format!("span-{index}"),
-                "r1",
-                &format!("2026-08-09T12:{:02}:{:02}Z", index / 60, index % 60),
-            ))
+            .map(|index| {
+                browser_event(
+                    AgentEventKind::Started,
+                    &format!("span-{index}"),
+                    "r1",
+                    &format!("2026-08-09T12:{:02}:{:02}Z", index / 60, index % 60),
+                )
+            })
             .collect::<Vec<_>>();
 
-        track_browser_events(&events, &mappings, true, drain_now(), &mut tracking, &mut suggestion);
+        track_browser_events(
+            &events,
+            &mappings,
+            true,
+            drain_now(),
+            &mut tracking,
+            &mut suggestion,
+        );
 
         assert_eq!(tracking.spans.len(), 64);
         assert!(tracking.spans.contains_key("span-64"));

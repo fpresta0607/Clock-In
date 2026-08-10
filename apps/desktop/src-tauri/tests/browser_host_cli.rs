@@ -99,7 +99,10 @@ fn host_without_a_durable_authorization_fails_closed_to_empty_rules() {
     assert!(output.status.success());
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0]["type"], "rules");
-    assert!(replies[0]["rules"].as_array().expect("rules is an array").is_empty());
+    assert!(replies[0]["rules"]
+        .as_array()
+        .expect("rules is an array")
+        .is_empty());
     assert_eq!(replies[0]["collectionEnabled"], false);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -176,8 +179,10 @@ fn an_authorized_host_stores_tallies() {
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0]["type"], "collection-state");
     assert_eq!(replies[0]["collectionEnabled"], true);
-    let tally: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("unmatched-tally.json")).expect("tally is stored"))
-        .expect("tally parses");
+    let tally: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.join("unmatched-tally.json")).expect("tally is stored"),
+    )
+    .expect("tally parses");
     assert_eq!(tally["entries"][0]["origin"], "quickbooks.com");
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -266,7 +271,8 @@ fn concurrent_authorized_hosts_append_every_span() {
         handle.join().expect("host thread finishes");
     }
 
-    let lines = std::fs::read_to_string(dir.join("browser-spool.jsonl")).expect("spans are spooled");
+    let lines =
+        std::fs::read_to_string(dir.join("browser-spool.jsonl")).expect("spans are spooled");
     assert_eq!(lines.lines().count(), 15);
 
     let _ = std::fs::remove_dir_all(&dir);

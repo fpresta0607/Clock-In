@@ -127,7 +127,9 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
         }
         Some("span-event") => {
             match append_span_event(message.get("event"), message.get("collectionId"), paths) {
-                SpanAppendOutcome::Appended => write_span_reply(writer, paths, "span-ack", message.get("event")),
+                SpanAppendOutcome::Appended => {
+                    write_span_reply(writer, paths, "span-ack", message.get("event"))
+                }
                 SpanAppendOutcome::Dropped => write_collection_state(writer, paths),
                 SpanAppendOutcome::Rejected(error) => {
                     eprintln!("clock-in-browser-host: {error}");
@@ -140,12 +142,20 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
             }
         }
         Some("tally") => {
-            match store_tally(message.get("entries"), message.get("weekStart"), message.get("collectionId"), paths) {
-                Ok(TallyOutcome::ClearRequested) => {
-                    native_messaging::write_json(writer, &serde_json::json!({ "type": "clear-tally" }))?
-                }
+            match store_tally(
+                message.get("entries"),
+                message.get("weekStart"),
+                message.get("collectionId"),
+                paths,
+            ) {
+                Ok(TallyOutcome::ClearRequested) => native_messaging::write_json(
+                    writer,
+                    &serde_json::json!({ "type": "clear-tally" }),
+                )?,
                 Ok(TallyOutcome::Stored | TallyOutcome::Dropped) => {}
-                Err(error) => eprintln!("clock-in-browser-host: could not store the tally: {error}"),
+                Err(error) => {
+                    eprintln!("clock-in-browser-host: could not store the tally: {error}")
+                }
             }
             write_collection_state(writer, paths)
         }
@@ -156,7 +166,9 @@ fn dispatch(body: &[u8], paths: &HostPaths, writer: &mut impl Write) -> io::Resu
 
 fn collection_state(paths: &HostPaths) -> serde_json::Value {
     match admitted_collection_id(paths) {
-        Some(collection_id) => serde_json::json!({ "collectionEnabled": true, "collectionId": collection_id }),
+        Some(collection_id) => {
+            serde_json::json!({ "collectionEnabled": true, "collectionId": collection_id })
+        }
         None => serde_json::json!({ "collectionEnabled": false }),
     }
 }
@@ -167,7 +179,8 @@ fn admitted_collection_id(paths: &HostPaths) -> Option<String> {
 
 fn rules_reply(mut state: serde_json::Value, rules: Vec<Rule>) -> serde_json::Value {
     state["type"] = serde_json::Value::String("rules".to_string());
-    state["rules"] = serde_json::to_value(rules).unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
+    state["rules"] =
+        serde_json::to_value(rules).unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
     state
 }
 
@@ -256,7 +269,9 @@ impl SpanEventInput {
 }
 
 fn message_collection_id(value: Option<&serde_json::Value>) -> Option<&str> {
-    value.and_then(|value| value.as_str()).filter(|id| !id.trim().is_empty())
+    value
+        .and_then(|value| value.as_str())
+        .filter(|id| !id.trim().is_empty())
 }
 
 enum SpanAppendOutcome {
@@ -287,10 +302,19 @@ fn append_span_event(
     let collection_id = collection_id.to_string();
     let event = input.into_event();
     spool::append_if(&paths.spool, &event, || {
-        browser::admitted_collection_id_locked(&paths.dir).as_deref() == Some(collection_id.as_str())
+        browser::admitted_collection_id_locked(&paths.dir).as_deref()
+            == Some(collection_id.as_str())
     })
-    .map(|appended| if appended { SpanAppendOutcome::Appended } else { SpanAppendOutcome::Dropped })
-    .unwrap_or_else(|error| SpanAppendOutcome::Retry(format!("could not write the browser spool: {error}")))
+    .map(|appended| {
+        if appended {
+            SpanAppendOutcome::Appended
+        } else {
+            SpanAppendOutcome::Dropped
+        }
+    })
+    .unwrap_or_else(|error| {
+        SpanAppendOutcome::Retry(format!("could not write the browser spool: {error}"))
+    })
 }
 
 /// The unmatched-origin tally is pass-through: the extension keeps the
@@ -320,13 +344,21 @@ fn store_tally(
         return Ok(TallyOutcome::Dropped);
     };
     let collection_id = collection_id.to_string();
-    let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "weekStart": week_start, "entries": entries }))
-        .map_err(|error| error.to_string())?;
+    let bytes = serde_json::to_vec_pretty(
+        &serde_json::json!({ "weekStart": week_start, "entries": entries }),
+    )
+    .map_err(|error| error.to_string())?;
     spool::with_lock(&paths.spool, || {
-        if browser::admitted_collection_id_locked(&paths.dir).as_deref() != Some(collection_id.as_str()) {
+        if browser::admitted_collection_id_locked(&paths.dir).as_deref()
+            != Some(collection_id.as_str())
+        {
             return Ok(TallyOutcome::Dropped);
         }
-        match browser::store_tally_snapshot(&paths.dir, &bytes, entries.as_array().is_some_and(Vec::is_empty))? {
+        match browser::store_tally_snapshot(
+            &paths.dir,
+            &bytes,
+            entries.as_array().is_some_and(Vec::is_empty),
+        )? {
             browser::TallyStoreOutcome::Stored => Ok(TallyOutcome::Stored),
             browser::TallyStoreOutcome::ClearRequested => Ok(TallyOutcome::ClearRequested),
         }
@@ -479,8 +511,8 @@ mod tests {
         let reader = std::thread::spawn(move || {
             let paths = HostPaths::in_dir(&reader_dir);
             let mut out = Vec::new();
-            let reply = dispatch(br#"{"type":"get-rules"}"#, &paths, &mut out)
-                .map(|()| reply_values(&out));
+            let reply =
+                dispatch(br#"{"type":"get-rules"}"#, &paths, &mut out).map(|()| reply_values(&out));
             reply_tx.send(reply).expect("test receives the reply");
         });
 
@@ -488,7 +520,10 @@ mod tests {
             .recv_timeout(std::time::Duration::from_millis(50))
             .is_err());
         resume_tx.send(()).expect("writer resumes");
-        writer.join().expect("writer joins").expect("writer succeeds");
+        writer
+            .join()
+            .expect("writer joins")
+            .expect("writer succeeds");
         let replies = reply_rx
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("reader replies")
@@ -505,8 +540,8 @@ mod tests {
     fn get_rules_waits_for_a_collection_authorization_renewal() {
         let dir = temp_dir("authorization-renewal");
         let paths = configured_paths(&dir);
-        let collection_id = browser::enable_collection(&dir, "user-one")
-            .expect("collection enables");
+        browser::enable_collection(&dir, "user-one").expect("collection enables");
+        let collection_id = browser::collection_id(&dir).expect("collection id exists");
         std::fs::write(&paths.rules, r#"{"rules":[]}"#).expect("rules write");
         let authorization = dir.join("browser-collection-authorization.json");
         let replacement = dir.join("browser-collection-authorization.next.json");
@@ -518,12 +553,12 @@ mod tests {
         let writer = std::thread::spawn(move || {
             spool::with_lock(&spool_path, || {
                 std::fs::remove_file(&authorization)?;
-                removed_tx
-                    .send(())
-                    .map_err(|_| io::Error::other("test did not await authorization replacement"))?;
-                resume_rx
-                    .recv()
-                    .map_err(|_| io::Error::other("test did not resume authorization replacement"))?;
+                removed_tx.send(()).map_err(|_| {
+                    io::Error::other("test did not await authorization replacement")
+                })?;
+                resume_rx.recv().map_err(|_| {
+                    io::Error::other("test did not resume authorization replacement")
+                })?;
                 std::fs::rename(&replacement, &authorization)
             })
         });
@@ -534,8 +569,8 @@ mod tests {
         let reader = std::thread::spawn(move || {
             let paths = HostPaths::in_dir(&reader_dir);
             let mut out = Vec::new();
-            let reply = dispatch(br#"{"type":"get-rules"}"#, &paths, &mut out)
-                .map(|()| reply_values(&out));
+            let reply =
+                dispatch(br#"{"type":"get-rules"}"#, &paths, &mut out).map(|()| reply_values(&out));
             reply_tx.send(reply).expect("test receives the reply");
         });
 
@@ -543,7 +578,10 @@ mod tests {
             .recv_timeout(std::time::Duration::from_millis(50))
             .is_err());
         resume_tx.send(()).expect("writer resumes");
-        writer.join().expect("writer joins").expect("writer succeeds");
+        writer
+            .join()
+            .expect("writer joins")
+            .expect("writer succeeds");
         let replies = reply_rx
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("reader replies")
@@ -552,7 +590,10 @@ mod tests {
 
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0]["collectionEnabled"].as_bool(), Some(true));
-        assert_eq!(replies[0]["collectionId"].as_str(), Some(collection_id.as_str()));
+        assert_eq!(
+            replies[0]["collectionId"].as_str(),
+            Some(collection_id.as_str())
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -669,7 +710,10 @@ mod tests {
         let current_message = span_event_message(&paths, "new-span");
         out.clear();
         dispatch(&current_message, &paths, &mut out).expect("current message is handled");
-        assert_eq!(spool_lines(&paths.spool)[0]["externalSessionId"], "new-span");
+        assert_eq!(
+            spool_lines(&paths.spool)[0]["externalSessionId"],
+            "new-span"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -678,18 +722,33 @@ mod tests {
     fn a_collection_file_without_a_current_session_cannot_admit_any_browser_evidence() {
         let dir = temp_dir("session-admission");
         let paths = signed_out_paths(&dir);
-        std::fs::write(&paths.rules, r#"{"rules":[{"id":"r1","pattern":"github.com/acme/*"}]}"#)
-            .expect("rules file writes");
+        std::fs::write(
+            &paths.rules,
+            r#"{"rules":[{"id":"r1","pattern":"github.com/acme/*"}]}"#,
+        )
+        .expect("rules file writes");
         let mut out = Vec::new();
 
         dispatch(br#"{"type":"get-rules"}"#, &paths, &mut out).expect("rules are handled");
         dispatch(&span_event_message(&paths, "s1"), &paths, &mut out).expect("span is handled");
-        dispatch(&tally_message(&paths, serde_json::json!([{"origin":"quickbooks.com","seconds":60}])), &paths, &mut out)
-            .expect("tally is handled");
+        dispatch(
+            &tally_message(
+                &paths,
+                serde_json::json!([{"origin":"quickbooks.com","seconds":60}]),
+            ),
+            &paths,
+            &mut out,
+        )
+        .expect("tally is handled");
 
         let replies = reply_values(&out);
-        assert!(replies.iter().all(|reply| reply["collectionEnabled"] == false));
-        assert!(replies[0]["rules"].as_array().expect("rules is an array").is_empty());
+        assert!(replies
+            .iter()
+            .all(|reply| reply["collectionEnabled"] == false));
+        assert!(replies[0]["rules"]
+            .as_array()
+            .expect("rules is an array")
+            .is_empty());
         assert!(!paths.spool.exists());
         assert!(!paths.tally.exists());
 
@@ -701,7 +760,10 @@ mod tests {
         let dir = temp_dir("revoked-collection");
         let paths = configured_paths(&dir);
         let span = span_event_message(&paths, "s1");
-        let tally = tally_message(&paths, serde_json::json!([{"origin":"quickbooks.com","seconds":60}]));
+        let tally = tally_message(
+            &paths,
+            serde_json::json!([{"origin":"quickbooks.com","seconds":60}]),
+        );
         browser::revoke_collection(&dir).expect("collection revokes");
         let mut out = Vec::new();
 
@@ -731,7 +793,8 @@ mod tests {
                 std::thread::spawn(move || {
                     let mut out = Vec::new();
                     for index in 0..15 {
-                        let message = span_event_message(&paths, &format!("t{thread_index}-{index}"));
+                        let message =
+                            span_event_message(&paths, &format!("t{thread_index}-{index}"));
                         dispatch(&message, &paths, &mut out).expect("dispatch succeeds");
                     }
                 })
@@ -779,7 +842,14 @@ mod tests {
         let paths = configured_paths(&dir);
         let mut out = Vec::new();
 
-        dispatch(&tally_message(&paths, serde_json::json!([{"origin":"quickbooks.com","seconds":10800}])), &paths, &mut out)
+        dispatch(
+            &tally_message(
+                &paths,
+                serde_json::json!([{"origin":"quickbooks.com","seconds":10800}]),
+            ),
+            &paths,
+            &mut out,
+        )
         .expect("dispatch succeeds");
 
         assert_eq!(reply_values(&out)[0]["collectionEnabled"], true);
@@ -790,7 +860,12 @@ mod tests {
         assert_eq!(stored["entries"][0]["seconds"], 10800);
 
         // A second snapshot replaces the first; the extension's copy wins.
-        dispatch(&tally_message(&paths, serde_json::json!([])), &paths, &mut out).expect("dispatch succeeds");
+        dispatch(
+            &tally_message(&paths, serde_json::json!([])),
+            &paths,
+            &mut out,
+        )
+        .expect("dispatch succeeds");
         let stored: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.tally).expect("the tally reads"))
                 .expect("the tally parses");
@@ -809,17 +884,33 @@ mod tests {
         let mut out = Vec::new();
         browser::clear_suggestion_data(&dir).expect("clear queues");
 
-        dispatch(&tally_message(&paths, serde_json::json!([{"origin":"quickbooks.com","seconds":10800}])), &paths, &mut out)
-            .expect("stale tally is handled");
+        dispatch(
+            &tally_message(
+                &paths,
+                serde_json::json!([{"origin":"quickbooks.com","seconds":10800}]),
+            ),
+            &paths,
+            &mut out,
+        )
+        .expect("stale tally is handled");
         let replies = reply_values(&out);
         assert_eq!(replies[0]["type"], "clear-tally");
         assert!(!paths.tally.exists());
 
         out.clear();
-        dispatch(&tally_message(&paths, serde_json::json!([])), &paths, &mut out).expect("empty tally is handled");
-        let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(&paths.tally).expect("empty tally mirrors"))
-            .expect("empty tally parses");
-        assert!(stored["entries"].as_array().expect("entries is an array").is_empty());
+        dispatch(
+            &tally_message(&paths, serde_json::json!([])),
+            &paths,
+            &mut out,
+        )
+        .expect("empty tally is handled");
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&paths.tally).expect("empty tally mirrors"))
+                .expect("empty tally parses");
+        assert!(stored["entries"]
+            .as_array()
+            .expect("entries is an array")
+            .is_empty());
         assert!(!paths.dir.join("browser-tally-clear.json").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -853,7 +944,11 @@ mod tests {
         serve(&mut reader, &mut out, &paths).expect("serve runs to EOF");
 
         let replies = reply_values(&out);
-        assert_eq!(replies.len(), 2, "the port keeps serving after the fallback");
+        assert_eq!(
+            replies.len(),
+            2,
+            "the port keeps serving after the fallback"
+        );
         assert_eq!(replies[0]["type"], "rules");
         assert!(
             replies[0]["rules"]
