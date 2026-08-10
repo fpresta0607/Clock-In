@@ -321,8 +321,14 @@ impl AppState {
         match workspace_move {
             Some(spool::WorkspaceMoveRecovery::Rollback(reservation)) => {
                 let paths = spool::evidence_paths(reservation.source_identity());
-                release_workspace_move_reservations(&paths.browser_dir, &reservation)?;
                 self.bind_identity(account.identity.clone()).await?;
+                self.enable_active_collection().await?;
+                await_workspace_move_reservation_release(
+                    &paths.browser_dir,
+                    &reservation,
+                    EXTENSION_RESERVATION_WAIT,
+                )
+                .await?;
             }
             Some(spool::WorkspaceMoveRecovery::Complete(reservation)) => {
                 self.bind_identity_with_reservation(account.identity.clone(), Some(&reservation))
@@ -494,6 +500,21 @@ fn release_workspace_move_reservations(
                 .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))
         },
     )
+}
+
+async fn await_workspace_move_reservation_release(
+    browser_dir: &Path,
+    reservation: &spool::NamespaceReservation,
+    wait: Duration,
+) -> ApiResult<()> {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        match release_workspace_move_reservations(browser_dir, reservation) {
+            Ok(()) => return Ok(()),
+            Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
 }
 
 fn release_workspace_move_reservations_with(
