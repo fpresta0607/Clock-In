@@ -909,6 +909,7 @@ describe("App", () => {
 
     await waitFor(() => expect(orgJoin).toHaveBeenCalledWith("acdef-ghjkm"));
     expect(await within(dialog).findByText("Joined Team")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Join" })).toBeEnabled();
   });
 
   it("keeps the timer usable when a join is refused", async () => {

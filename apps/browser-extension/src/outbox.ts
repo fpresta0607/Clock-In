@@ -5,6 +5,7 @@
 //! worker restart does not lose queued verdicts.
 
 export const OUTBOX_CAPACITY = 1000;
+export const MAX_RETAINED_OUTBOX_NAMESPACES = 8;
 export const OUTBOX_STORAGE_KEY = "spanOutbox";
 export const OUTBOX_NAMESPACES_STORAGE_KEY = "spanOutboxesByNamespace";
 
@@ -53,6 +54,20 @@ export class Outbox<T> {
   /** Storage snapshot, oldest first. */
   snapshot(): T[] {
     return [...this.items];
+  }
+}
+
+export function pruneOutboxNamespaces<T>(
+  outboxes: Map<string, Outbox<T>>,
+  activeNamespace: string | undefined,
+): void {
+  for (const [namespace, outbox] of outboxes) {
+    if (outboxes.size <= MAX_RETAINED_OUTBOX_NAMESPACES) {
+      return;
+    }
+    if (namespace !== activeNamespace && outbox.size === 0) {
+      outboxes.delete(namespace);
+    }
   }
 }
 

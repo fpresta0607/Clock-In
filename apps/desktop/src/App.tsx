@@ -413,6 +413,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   };
 
   const clearAccountFields = (clearEmail = false): void => {
+    setJoinBusy(false);
     setProjectId("");
     setDescription("");
     setNewProjectOpen(false);
@@ -718,7 +719,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             });
           }
         },
-        () => undefined,
+        (error: unknown) => {
+          if (!active || !isCurrent(service, generation, epoch)) return;
+          const problem = bridgeError(error);
+          if (problem.kind === "auth") resetToSignIn(problem.message);
+        },
       );
       // The local site tally rides the same cadence; failures leave the
       // question hidden rather than noisy, same as the status poll.
@@ -1395,7 +1400,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       if (problem.kind === "auth") resetToSignIn(problem.message);
       else setOverviewError(problem.message);
     } finally {
-      if (isRequestCurrent()) setJoinBusy(false);
+      if (isCurrent(service, generation)) setJoinBusy(false);
     }
   };
 

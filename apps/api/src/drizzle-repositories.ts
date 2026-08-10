@@ -911,30 +911,32 @@ export class DrizzleReportRepository implements ReportRepository {
     query: ReportQuery,
   ): Promise<LeaderboardRowRecord[]> {
     const totalDuration = sum(timeSessions.durationSeconds);
-    const rows = await this.db
-      .select({
-        userId: users.id,
-        userName: users.name,
-        durationSeconds: totalDuration,
-        sessionCount: count(timeSessions.id),
-        corroboratedSeconds: sum(corroboratedSecondsSql()),
-      })
-      .from(timeSessions)
-      .innerJoin(users, and(
-        eq(users.organizationId, timeSessions.organizationId),
-        eq(users.id, timeSessions.userId),
-      ))
-      .where(and(...this.predicates(subject, query), eq(users.organizationId, subject.organizationId)))
-      .groupBy(users.id, users.name)
-      // id breaks ties so equal totals do not reorder between requests.
-      .orderBy(desc(totalDuration), asc(users.id));
+    return this.snapshot(subject, async (db) => {
+      const rows = await db
+        .select({
+          userId: users.id,
+          userName: users.name,
+          durationSeconds: totalDuration,
+          sessionCount: count(timeSessions.id),
+          corroboratedSeconds: sum(corroboratedSecondsSql()),
+        })
+        .from(timeSessions)
+        .innerJoin(users, and(
+          eq(users.organizationId, timeSessions.organizationId),
+          eq(users.id, timeSessions.userId),
+        ))
+        .where(and(...this.predicates(subject, query), eq(users.organizationId, subject.organizationId)))
+        .groupBy(users.id, users.name)
+        // id breaks ties so equal totals do not reorder between requests.
+        .orderBy(desc(totalDuration), asc(users.id));
 
-    return rows.map((row) => ({
-      user: { id: row.userId, name: row.userName },
-      durationSeconds: row.durationSeconds,
-      sessionCount: row.sessionCount,
-      corroboratedSeconds: row.corroboratedSeconds,
-    }));
+      return rows.map((row) => ({
+        user: { id: row.userId, name: row.userName },
+        durationSeconds: row.durationSeconds,
+        sessionCount: row.sessionCount,
+        corroboratedSeconds: row.corroboratedSeconds,
+      }));
+    });
   }
 
   /** One row per project the member recorded time in, heaviest first. */
@@ -945,34 +947,36 @@ export class DrizzleReportRepository implements ReportRepository {
     const exactRange = exactStatsRange(query);
     const sessionDuration = sessionDurationSecondsSql(exactRange);
     const totalDuration = sum(sessionDuration);
-    const rows = await this.db
-      .select({
-        projectId: projects.id,
-        projectName: projects.name,
-        durationSeconds: totalDuration,
-        corroboratedSeconds: sum(corroboratedSecondsSql(exactRange)),
-        sessionCount: count(timeSessions.id),
-      })
-      .from(timeSessions)
-      .innerJoin(projects, and(
-        eq(projects.organizationId, timeSessions.organizationId),
-        eq(projects.id, timeSessions.projectId),
-      ))
-      .where(and(
-        ...this.predicates(subject, query),
-        eq(timeSessions.userId, subject.userId),
-        eq(projects.organizationId, subject.organizationId),
-      ))
-      .groupBy(projects.id, projects.name)
-      // id breaks ties so equal totals do not reorder between requests.
-      .orderBy(desc(totalDuration), asc(projects.id));
+    return this.snapshot(subject, async (db) => {
+      const rows = await db
+        .select({
+          projectId: projects.id,
+          projectName: projects.name,
+          durationSeconds: totalDuration,
+          corroboratedSeconds: sum(corroboratedSecondsSql(exactRange)),
+          sessionCount: count(timeSessions.id),
+        })
+        .from(timeSessions)
+        .innerJoin(projects, and(
+          eq(projects.organizationId, timeSessions.organizationId),
+          eq(projects.id, timeSessions.projectId),
+        ))
+        .where(and(
+          ...this.predicates(subject, query),
+          eq(timeSessions.userId, subject.userId),
+          eq(projects.organizationId, subject.organizationId),
+        ))
+        .groupBy(projects.id, projects.name)
+        // id breaks ties so equal totals do not reorder between requests.
+        .orderBy(desc(totalDuration), asc(projects.id));
 
-    return rows.map((row) => ({
-      project: { id: row.projectId, name: row.projectName },
-      durationSeconds: row.durationSeconds,
-      corroboratedSeconds: row.corroboratedSeconds,
-      sessionCount: row.sessionCount,
-    }));
+      return rows.map((row) => ({
+        project: { id: row.projectId, name: row.projectName },
+        durationSeconds: row.durationSeconds,
+        corroboratedSeconds: row.corroboratedSeconds,
+        sessionCount: row.sessionCount,
+      }));
+    });
   }
 
   /**
@@ -995,29 +999,31 @@ export class DrizzleReportRepository implements ReportRepository {
       least(${activitySegments.endedAt}, ${rangeEnd})
       - greatest(${activitySegments.startedAt}, ${rangeStart})
     )))))`;
-    const rows = await this.db
-      .select({
-        processName: activitySegments.processName,
-        durationSeconds: duration,
-      })
-      .from(activitySegments)
-      .where(and(
-        eq(activitySegments.organizationId, subject.organizationId),
-        eq(activitySegments.userId, subject.userId),
-        eq(activitySegments.kind, "active"),
-        isNotNull(activitySegments.processName),
-        ...(query.from === undefined ? [] : [gt(activitySegments.endedAt, query.from)]),
-        ...(query.toExclusive === undefined ? [] : [lt(activitySegments.startedAt, query.toExclusive)]),
-        sql`${activitySegments.receivedAt} <= ${activitySegments.endedAt} + interval '7 days'`,
-      ))
-      .groupBy(activitySegments.processName)
-      .having(gt(duration, 0))
-      // processName breaks ties so equal totals do not reorder between requests.
-      .orderBy(desc(duration), asc(activitySegments.processName));
+    return this.snapshot(subject, async (db) => {
+      const rows = await db
+        .select({
+          processName: activitySegments.processName,
+          durationSeconds: duration,
+        })
+        .from(activitySegments)
+        .where(and(
+          eq(activitySegments.organizationId, subject.organizationId),
+          eq(activitySegments.userId, subject.userId),
+          eq(activitySegments.kind, "active"),
+          isNotNull(activitySegments.processName),
+          ...(query.from === undefined ? [] : [gt(activitySegments.endedAt, query.from)]),
+          ...(query.toExclusive === undefined ? [] : [lt(activitySegments.startedAt, query.toExclusive)]),
+          sql`${activitySegments.receivedAt} <= ${activitySegments.endedAt} + interval '7 days'`,
+        ))
+        .groupBy(activitySegments.processName)
+        .having(gt(duration, 0))
+        // processName breaks ties so equal totals do not reorder between requests.
+        .orderBy(desc(duration), asc(activitySegments.processName));
 
-    return rows.map((row) => {
-      if (row.processName === null) throw new Error("App totals query returned a null process name.");
-      return { processName: row.processName, durationSeconds: row.durationSeconds };
+      return rows.map((row) => {
+        if (row.processName === null) throw new Error("App totals query returned a null process name.");
+        return { processName: row.processName, durationSeconds: row.durationSeconds };
+      });
     });
   }
 
@@ -1046,8 +1052,9 @@ export class DrizzleReportRepository implements ReportRepository {
     // Overlapping and touching intervals collapse into islands via the running
     // max of previous ends. Spans partition by rule; active segments union
     // across devices because site totals represent focused wall-clock time.
-    const rows = await this.db.execute(sql`
-      with spans as (
+    return this.withLiveSubject(subject, async (db) => {
+      const rows = await db.execute(sql`
+        with spans as (
         select rule_id, started_at, coalesce(ended_at, last_event_at) as ended_at
         from agent_sessions
         where organization_id = ${subject.organizationId}
@@ -1122,33 +1129,44 @@ export class DrizzleReportRepository implements ReportRepository {
       from site_totals
       where "durationSeconds" > 0
       order by "durationSeconds" desc, "mappingId" asc
-    `);
+      `);
 
-    return (rows as unknown as { mappingId: string; pattern: string; projectId: string | null; durationSeconds: string | null }[]).map((row) => ({
-      mapping: { id: row.mappingId, pattern: row.pattern, projectId: row.projectId },
-      durationSeconds: row.durationSeconds,
-    }));
+      return (rows as unknown as { mappingId: string; pattern: string; projectId: string | null; durationSeconds: string | null }[]).map((row) => ({
+        mapping: { id: row.mappingId, pattern: row.pattern, projectId: row.projectId },
+        durationSeconds: row.durationSeconds,
+      }));
+    });
   }
 
-  private async snapshot<T>(
+  private async withLiveSubject<T>(
     subject: AuthenticatedSubject,
-    callback: (db: Pick<DatabaseConnection["db"], "select">) => Promise<T>,
+    callback: (db: Pick<DatabaseConnection["db"], "select" | "execute">) => Promise<T>,
   ): Promise<T> {
     return this.db.transaction(
       async (transaction) => {
         const liveMembers = await transaction.execute(sql`
-          select ${users.organizationId} as organization_id
+          select ${users.organizationId} as organization_id, ${users.role} as role
           from ${users}
           where ${users.id} = ${subject.userId}
           for update
-        `) as unknown as Array<{ organization_id: string }>;
-        if (liveMembers[0]?.organization_id !== subject.organizationId) {
+        `) as unknown as Array<{ organization_id: string; role: "admin" | "member" }>;
+        if (
+          liveMembers[0]?.organization_id !== subject.organizationId
+          || (subject.role !== undefined && liveMembers[0]?.role !== subject.role)
+        ) {
           throw new AppError("forbidden", "Workspace access has changed.");
         }
         return callback(transaction);
       },
       { isolationLevel: "repeatable read" },
     );
+  }
+
+  private async snapshot<T>(
+    subject: AuthenticatedSubject,
+    callback: (db: Pick<DatabaseConnection["db"], "select">) => Promise<T>,
+  ): Promise<T> {
+    return this.withLiveSubject(subject, callback);
   }
 
   public readPageForOrganization(subject: AuthenticatedSubject, query: ReportQuery, options: ReportPageOptions): Promise<ReportPageRead> {

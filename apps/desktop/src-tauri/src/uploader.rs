@@ -41,6 +41,7 @@ pub async fn upload_loop(
     recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
     upload_now: Arc<Notify>,
     recording: Arc<AtomicBool>,
+    identity_invalidated: Arc<AtomicBool>,
 ) {
     let browser_path = browser_dir.join("browser-spool.jsonl");
     let mut tick = tokio::time::interval(Duration::from_secs(UPLOAD_INTERVAL_SECONDS));
@@ -63,6 +64,7 @@ pub async fn upload_loop(
             &identity,
             &recovery,
             &recording,
+            &identity_invalidated,
         )
         .await;
     }
@@ -80,6 +82,7 @@ async fn upload_once(
     identity: &EvidenceIdentity,
     recovery: &Arc<tokio::sync::Mutex<RecoveryState>>,
     recording: &Arc<AtomicBool>,
+    identity_invalidated: &Arc<AtomicBool>,
 ) {
     let Some(session) = crate::read_session_token() else {
         if let Err(error) = crate::browser::deactivate_collection(browser_dir) {
@@ -96,7 +99,7 @@ async fn upload_once(
             if error.kind == ErrorKind::Auth {
                 let _ = crate::browser::deactivate_collection(browser_dir);
                 crate::clear_session_token();
-                deactivate_invalid_identity(shared, recording);
+                deactivate_invalid_identity(shared, recording, identity_invalidated);
             }
             return;
         }
@@ -105,10 +108,17 @@ async fn upload_once(
         Ok(current) if current == *identity => {}
         Ok(_) => {
             let _ = crate::browser::deactivate_collection(browser_dir);
-            deactivate_invalid_identity(shared, recording);
+            deactivate_invalid_identity(shared, recording, identity_invalidated);
             return;
         }
-        Err(_) => return,
+        Err(error) => {
+            if error.kind == ErrorKind::Auth {
+                let _ = crate::browser::deactivate_collection(browser_dir);
+                crate::clear_session_token();
+                deactivate_invalid_identity(shared, recording, identity_invalidated);
+            }
+            return;
+        }
     }
     if let Err(error) = crate::browser::renew_collection_authorization(browser_dir) {
         eprintln!(
@@ -149,8 +159,13 @@ async fn upload_once(
     }
 }
 
-fn deactivate_invalid_identity(shared: &Arc<Mutex<MonitorShared>>, recording: &Arc<AtomicBool>) {
+fn deactivate_invalid_identity(
+    shared: &Arc<Mutex<MonitorShared>>,
+    recording: &Arc<AtomicBool>,
+    identity_invalidated: &Arc<AtomicBool>,
+) {
     recording.store(false, Ordering::SeqCst);
+    identity_invalidated.store(true, Ordering::SeqCst);
     let mut shared = lock(shared);
     shared.builder = crate::monitor::SegmentBuilder::new();
     shared.mappings.clear();
@@ -158,7 +173,6 @@ fn deactivate_invalid_identity(shared: &Arc<Mutex<MonitorShared>>, recording: &A
     shared.browser = BrowserTracking::default();
     shared.last_upload_at = None;
     shared.clock_change_at = None;
-    let _ = spool::clear_active_identity();
 }
 
 /// Uploads every buffered segment in batches, then truncates the acked

@@ -58,8 +58,12 @@ enum ArgvInput {
 fn input_from_stdin(context: Option<ArgvContext>) -> Result<HookStdin, String> {
     let mut buffer = String::new();
     std::io::stdin()
+        .take((spool::MAX_SPOOL_RECORD_BYTES + 1) as u64)
         .read_to_string(&mut buffer)
         .map_err(|error| format!("could not read stdin: {error}"))?;
+    if buffer.len() > spool::MAX_SPOOL_RECORD_BYTES {
+        return Err("hook input exceeds the maximum size".to_string());
+    }
     spool::parse_stdin_with_context(&buffer, context)
 }
 
