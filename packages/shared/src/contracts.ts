@@ -53,7 +53,7 @@ export const joinOrganizationRequestSchema = z
   .strict();
 
 function validateCalendarAndInstantBounds(
-  value: { from?: string; to?: string; fromAt?: string; toExclusiveAt?: string },
+  value: { from?: string | undefined; to?: string | undefined; fromAt?: string | undefined; toExclusiveAt?: string | undefined },
   context: z.RefinementCtx,
 ): void {
   const hasCalendarBoundary = value.from !== undefined || value.to !== undefined;
