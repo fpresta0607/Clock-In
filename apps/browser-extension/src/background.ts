@@ -509,7 +509,13 @@ function revalidateAttention(focusedWindow: number | null = null): void {
       const focused = win.focused === true && win.id !== undefined;
       focusedWindowId = focused ? (win.id ?? null) : null;
       feedMachine({ type: "idle", state: state as IdleState });
+      if (attentionGeneration !== generation) {
+        return;
+      }
       feedMachine({ type: "window-focus", focused });
+      if (attentionGeneration !== generation) {
+        return;
+      }
       attentionConfirmed = true;
       if (focused && win.id !== undefined) {
         watchActiveTab(win.id);

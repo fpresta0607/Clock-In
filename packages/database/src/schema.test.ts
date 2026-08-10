@@ -10,6 +10,7 @@ import {
   projectPathMappings,
   projects,
   timeSessions,
+  userProjectSelections,
   users,
 } from "./schema.js";
 
@@ -26,6 +27,7 @@ describe("database schema", () => {
     expect(projects.organizationId.notNull).toBe(true);
     expect(projects.id.primary).toBe(true);
     expect(projects.archived.notNull).toBe(true);
+    expect(projects.isDefault.notNull).toBe(true);
     for (const table of [users, projects]) {
       expect(table.createdAt.notNull).toBe(true);
       expect(table.updatedAt.notNull).toBe(true);
@@ -35,6 +37,23 @@ describe("database schema", () => {
     expect(getTableConfig(users).uniqueConstraints.map((constraint) => constraint.name)).toContain(
       "users_organization_id_email_unique",
     );
+  });
+
+  it("constrains one active organization default and member-scoped selections", () => {
+    const projectConfig = getTableConfig(projects);
+    const defaultIndex = projectConfig.indexes.find((index) => index.config.name === "projects_one_default_per_organization");
+    expect(defaultIndex?.config.unique).toBe(true);
+    expect(defaultIndex?.config.where).toBeDefined();
+    expect(projectConfig.checks.map((constraint) => constraint.name)).toContain("projects_default_active");
+
+    const selectionConfig = getTableConfig(userProjectSelections);
+    expect(selectionConfig.uniqueConstraints.map((constraint) => constraint.name)).toContain(
+      "user_project_selections_organization_user_unique",
+    );
+    expect(selectionConfig.foreignKeys).toHaveLength(2);
+    expect(userProjectSelections.organizationId.notNull).toBe(true);
+    expect(userProjectSelections.userId.notNull).toBe(true);
+    expect(userProjectSelections.projectId.notNull).toBe(true);
   });
 
   it("defines project memberships scoped to an organization", () => {

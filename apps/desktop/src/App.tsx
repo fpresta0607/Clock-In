@@ -388,6 +388,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const accountEpoch = useRef(0);
   const currentAccountId = useRef<string | undefined>(undefined);
   const suggestedOrigin = suggestions.find((entry) => !answeredOrigins.includes(entry.origin))?.origin;
+  const snapshotProjects = state.kind === "booting" || state.kind === "sign-in" ? [] : state.projects;
+  const snapshotSelectedProjectId = state.kind === "booting" || state.kind === "sign-in"
+    ? null
+    : state.selectedProjectId;
 
   if (latestBridge.current !== bridge) bridgeGeneration.current += 1;
   latestBridge.current = bridge;
@@ -579,6 +583,14 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [state.kind]);
+
+  useEffect(() => {
+    const preferred = snapshotSelectedProjectId
+      ?? snapshotProjects.find((project) => project.isDefault === true)?.id
+      ?? snapshotProjects[0]?.id
+      ?? "";
+    setProjectId((current) => snapshotProjects.some((project) => project.id === current) ? current : preferred);
+  }, [snapshotProjects, snapshotSelectedProjectId]);
 
   useEffect(() => {
     if (state.kind === "booting" || state.kind === "sign-in") return undefined;
@@ -1552,7 +1564,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         {monitorStatus && monitorState && (
           <p className="monitor-line">
             <span className={`monitor-dot is-${monitorState}`} aria-hidden="true" />
-            {monitorState === "on" ? "Monitoring on" : monitorState === "paused" ? "Monitoring paused" : "Monitoring off"}
+            {monitorState === "on" ? "Tracking is on" : monitorState === "paused" ? "Monitoring paused" : "Monitoring off"}
           </p>
         )}
         {accountError && !settingsOpen && <p className="form-error" role="alert">{accountError}</p>}
@@ -1634,7 +1646,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           </section>
         ) : activeRunning ? (
           <section className="hero card running-panel" aria-label="Running timer">
-            <p className="eyebrow">Recording · {project?.name ?? "Unknown project"}</p>
+            <p className="eyebrow">Working on: {project?.name ?? "General Work"}</p>
             <output className="elapsed" data-testid="elapsed-time" aria-label="Elapsed time">{formatDuration(elapsedSeconds(activeRunning.startedAt, elapsedAt))}</output>
             <p className="started-at">since {new Date(activeRunning.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
             {monitorStatus?.enabled && monitorStatus.sessionIdleSeconds !== null && (
@@ -1649,7 +1661,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             {awayDecision && (
               <p className="session-meta">{awayDecision === "keep" ? "Away time kept - it stays on the timer." : "Away time will be trimmed at stop."}</p>
             )}
-            <label className="hero-project">Project
+            <label className="hero-project">Move this time to....
               <select
                 value={activeRunning.projectId}
                 disabled={state.kind === "stopping" || switchBusy}
@@ -1658,14 +1670,14 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                 {account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
               </select>
             </label>
-            <button className="stop-button" type="button" disabled={state.kind === "stopping"} onClick={() => void stopTimer()}>{state.kind === "stopping" ? "Stopping…" : "Stop timer"}</button>
+            <button className="stop-button" type="button" disabled={state.kind === "stopping"} onClick={() => void stopTimer()}>{state.kind === "stopping" ? "Stopping…" : "Pause tracking"}</button>
           </section>
         ) : (
           <section className="hero card idle-panel" aria-labelledby="timer-title">
-            <h2 id="timer-title">What are you working on?</h2>
+            <h2 id="timer-title">Working on: {account.projects.find((item) => item.id === projectId)?.name ?? "General Work"}</h2>
             {state.kind === "idle" && state.error && <p className="form-error" role="alert">{state.error}</p>}
             {state.kind === "pending-sync" && <><div className="sync-banner" role="status"><span>{state.message}</span><button type="button" disabled={retryPendingBusy} onClick={() => void retryPending()}>{retryPendingBusy ? "Retrying…" : "Retry sync"}</button></div>{state.error && <p className="form-error" role="alert">{state.error}</p>}</>}
-            <label>Project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Pick a project</option>{account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+            <label>Change project<select value={projectId} onChange={(event) => setProjectId(event.target.value)}>{account.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
             {newProjectOpen ? (
               <form className="new-project-form" onSubmit={createProject}>
                 <label>New project name<input value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} maxLength={80} placeholder="e.g. Client work" autoComplete="off" required /></label>

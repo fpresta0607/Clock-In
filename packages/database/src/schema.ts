@@ -46,11 +46,13 @@ export const users = pgTable(
     organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
     email: text("email").notNull(),
     name: text("name").notNull(),
+    role: text("role").$type<"admin" | "member">().default("member").notNull(),
     ...auditColumns,
   },
   (table) => [
     unique("users_organization_id_id_unique").on(table.organizationId, table.id),
     unique("users_organization_id_email_unique").on(table.organizationId, table.email),
+    check("users_role_valid", sql`${table.role} in ('admin', 'member')`),
     index("users_organization_id_idx").on(table.organizationId),
   ],
 );
@@ -62,11 +64,14 @@ export const projects = pgTable(
     organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     archived: boolean("archived").default(false).notNull(),
+    isDefault: boolean("is_default").default(false).notNull(),
     ...auditColumns,
   },
   (table) => [
     unique("projects_organization_id_id_unique").on(table.organizationId, table.id),
+    check("projects_default_active", sql`not (${table.isDefault} and ${table.archived})`),
     index("projects_organization_id_archived_idx").on(table.organizationId, table.archived),
+    uniqueIndex("projects_one_default_per_organization").on(table.organizationId).where(sql`${table.isDefault}`),
   ],
 );
 
@@ -96,6 +101,34 @@ export const projectMemberships = pgTable(
     }).onDelete("cascade"),
     index("project_memberships_user_id_idx").on(table.userId),
     index("project_memberships_project_id_idx").on(table.projectId),
+  ],
+);
+
+export const userProjectSelections = pgTable(
+  "user_project_selections",
+  {
+    organizationId: uuid("organization_id").notNull(),
+    userId: uuid("user_id").notNull(),
+    projectId: uuid("project_id").notNull(),
+    ...auditColumns,
+  },
+  (table) => [
+    unique("user_project_selections_organization_user_unique").on(table.organizationId, table.userId),
+    foreignKey({
+      columns: [table.organizationId, table.userId],
+      foreignColumns: [users.organizationId, users.id],
+      name: "user_project_selections_organization_user_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.organizationId, table.userId, table.projectId],
+      foreignColumns: [
+        projectMemberships.organizationId,
+        projectMemberships.userId,
+        projectMemberships.projectId,
+      ],
+      name: "user_project_selections_membership_fk",
+    }).onDelete("cascade"),
+    index("user_project_selections_project_id_idx").on(table.projectId),
   ],
 );
 

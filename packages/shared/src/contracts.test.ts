@@ -80,8 +80,9 @@ describe("project contracts", () => {
         name: "Website redesign",
         color: "#2563eb",
         isArchived: false,
+        isDefault: true,
       }),
-    ).toMatchObject({ id: ids.project, isArchived: false });
+    ).toMatchObject({ id: ids.project, isArchived: false, isDefault: true });
   });
 });
 
@@ -99,6 +100,13 @@ describe("session contracts", () => {
         startedAt,
       }),
     ).toMatchObject({ clientId: ids.client, projectId: ids.project });
+  });
+
+  it("allows a start to use the member's selected default project", () => {
+    expect(sessionStartRequestSchema.parse({ clientId: ids.client, description: "General work" })).toEqual({
+      clientId: ids.client,
+      description: "General work",
+    });
   });
 
   it("accepts the persisted running session returned after a start", () => {

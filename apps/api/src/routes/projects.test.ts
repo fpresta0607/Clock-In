@@ -30,7 +30,7 @@ beforeAll(async () => {
 
 class MemoryProjects implements ProjectRepository {
   private readonly records: ProjectRecord[] = [
-    { id: ids.project, organizationId: ids.organization, name: "General", archived: false },
+    { id: ids.project, organizationId: ids.organization, name: "General Work", archived: false, isDefault: true },
   ];
   public async listForMember() { return this.records.filter((record) => !record.archived); }
   public async findForMember(subject: { organizationId: string }, projectId: string) {
@@ -69,14 +69,15 @@ describe("project routes", () => {
     });
     expect(created.status).toBe(201);
     const project = await created.json();
-    expect(project).toEqual({ id: expect.any(String), name: "Field work", isArchived: false });
+    expect(project).toEqual({ id: expect.any(String), name: "Field work", isArchived: false, isDefault: false });
 
     const listed = await app.request("http://api.test/projects", { headers });
     await expect(listed.json()).resolves.toEqual({
       projects: [
-        { id: expect.any(String), name: "Field work", isArchived: false },
-        { id: ids.project, name: "General", isArchived: false },
+        { id: expect.any(String), name: "Field work", isArchived: false, isDefault: false },
+        { id: ids.project, name: "General Work", isArchived: false, isDefault: true },
       ],
+      selectedProjectId: expect.any(String),
     });
   });
 

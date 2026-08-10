@@ -12,5 +12,6 @@ export {
   projects,
   sessionStatus,
   timeSessions,
+  userProjectSelections,
   users,
 } from "./schema.js";

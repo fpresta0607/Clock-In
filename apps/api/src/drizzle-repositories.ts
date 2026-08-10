@@ -10,6 +10,7 @@ import {
   projectPathMappings,
   projects,
   timeSessions,
+  userProjectSelections,
   users,
   type DatabaseConnection,
 } from "@clock-in/database";
@@ -88,9 +89,47 @@ function mapCreateError(error: unknown): SessionRepositoryError | null {
 export class DrizzleProjectRepository implements ProjectRepository {
   public constructor(private readonly db: DatabaseConnection["db"]) {}
 
+  private async ensureDefaultForMember(subject: AuthenticatedSubject): Promise<ProjectRecord> {
+    return this.db.transaction(async (tx) => {
+      await tx
+        .insert(projects)
+        .values({ organizationId: subject.organizationId, name: "General Work", isDefault: true })
+        .onConflictDoNothing();
+      const rows = await tx
+        .select({
+          id: projects.id,
+          organizationId: projects.organizationId,
+          name: projects.name,
+          archived: projects.archived,
+          isDefault: projects.isDefault,
+        })
+        .from(projects)
+        .where(and(
+          eq(projects.organizationId, subject.organizationId),
+          eq(projects.isDefault, true),
+          eq(projects.archived, false),
+        ))
+        .limit(1);
+      const project = rows[0];
+      if (project === undefined) throw new Error("The organization has no usable default project.");
+      await tx
+        .insert(projectMemberships)
+        .values({ organizationId: subject.organizationId, projectId: project.id, userId: subject.userId })
+        .onConflictDoNothing();
+      return project;
+    });
+  }
+
   public async listForMember(subject: AuthenticatedSubject): Promise<ProjectRecord[]> {
+    await this.ensureDefaultForMember(subject);
     return this.db
-      .select({ id: projects.id, organizationId: projects.organizationId, name: projects.name, archived: projects.archived })
+      .select({
+        id: projects.id,
+        organizationId: projects.organizationId,
+        name: projects.name,
+        archived: projects.archived,
+        isDefault: projects.isDefault,
+      })
       .from(projects)
       .innerJoin(projectMemberships, and(
         eq(projectMemberships.organizationId, projects.organizationId),
@@ -106,8 +145,15 @@ export class DrizzleProjectRepository implements ProjectRepository {
   }
 
   public async findForMember(subject: AuthenticatedSubject, projectId: string): Promise<ProjectRecord | null> {
+    await this.ensureDefaultForMember(subject);
     const rows = await this.db
-      .select({ id: projects.id, organizationId: projects.organizationId, name: projects.name, archived: projects.archived })
+      .select({
+        id: projects.id,
+        organizationId: projects.organizationId,
+        name: projects.name,
+        archived: projects.archived,
+        isDefault: projects.isDefault,
+      })
       .from(projects)
       .innerJoin(projectMemberships, and(
         eq(projectMemberships.organizationId, projects.organizationId),
@@ -128,12 +174,142 @@ export class DrizzleProjectRepository implements ProjectRepository {
       const [project] = await tx
         .insert(projects)
         .values({ organizationId: subject.organizationId, name })
-        .returning({ id: projects.id, organizationId: projects.organizationId, name: projects.name, archived: projects.archived });
+        .returning({
+          id: projects.id,
+          organizationId: projects.organizationId,
+          name: projects.name,
+          archived: projects.archived,
+          isDefault: projects.isDefault,
+        });
       if (project === undefined) throw new Error("Failed to create the project.");
       await tx
         .insert(projectMemberships)
         .values({ organizationId: subject.organizationId, projectId: project.id, userId: subject.userId });
       return project;
+    });
+  }
+
+  public async preferredForMember(subject: AuthenticatedSubject): Promise<ProjectRecord | null> {
+    const fallback = await this.ensureDefaultForMember(subject);
+    const selected = await this.db
+      .select({
+        id: projects.id,
+        organizationId: projects.organizationId,
+        name: projects.name,
+        archived: projects.archived,
+        isDefault: projects.isDefault,
+      })
+      .from(userProjectSelections)
+      .innerJoin(projects, and(
+        eq(projects.organizationId, userProjectSelections.organizationId),
+        eq(projects.id, userProjectSelections.projectId),
+      ))
+      .where(and(
+        eq(userProjectSelections.organizationId, subject.organizationId),
+        eq(userProjectSelections.userId, subject.userId),
+        eq(projects.archived, false),
+      ))
+      .limit(1);
+    return selected[0] ?? fallback;
+  }
+
+  public async rememberSelection(subject: AuthenticatedSubject, projectId: string): Promise<void> {
+    const project = await this.findForMember(subject, projectId);
+    if (project === null || project.archived) return;
+    await this.db
+      .insert(userProjectSelections)
+      .values({ organizationId: subject.organizationId, userId: subject.userId, projectId: project.id })
+      .onConflictDoUpdate({
+        target: [userProjectSelections.organizationId, userProjectSelections.userId],
+        set: { projectId: project.id, updatedAt: new Date() },
+      });
+  }
+
+  public async updateForAdmin(
+    subject: AuthenticatedSubject,
+    projectId: string,
+    input: { name?: string; archived?: boolean; replacementProjectId?: string },
+  ): Promise<ProjectRecord | null> {
+    if (subject.role !== "admin") {
+      throw new AppError("forbidden", "Only workspace admins can change projects.");
+    }
+    return this.db.transaction(async (tx) => {
+      const targetRows = await tx
+        .select({
+          id: projects.id,
+          organizationId: projects.organizationId,
+          name: projects.name,
+          archived: projects.archived,
+          isDefault: projects.isDefault,
+        })
+        .from(projects)
+        .where(and(eq(projects.id, projectId), eq(projects.organizationId, subject.organizationId)))
+        .limit(1);
+      const target = targetRows[0];
+      if (target === undefined) return null;
+
+      const replacingDefault = target.isDefault && (input.archived === true || input.replacementProjectId !== undefined);
+      if (input.replacementProjectId !== undefined && !replacingDefault) {
+        throw new AppError("validation_error", "Only the default project can be replaced.");
+      }
+      if (target.isDefault && input.archived === true && input.replacementProjectId === undefined) {
+        throw new AppError("validation_error", "Choose a replacement before archiving the default project.");
+      }
+
+      if (replacingDefault) {
+        const replacementRows = await tx
+          .select({ id: projects.id, archived: projects.archived })
+          .from(projects)
+          .where(and(
+            eq(projects.id, input.replacementProjectId!),
+            eq(projects.organizationId, subject.organizationId),
+            eq(projects.archived, false),
+          ))
+          .limit(1);
+        const replacement = replacementRows[0];
+        if (replacement === undefined || replacement.id === target.id) {
+          throw new AppError("validation_error", "Choose another active project as the replacement.");
+        }
+        await tx
+          .update(projects)
+          .set({ isDefault: false, updatedAt: new Date() })
+          .where(eq(projects.id, target.id));
+        await tx
+          .update(projects)
+          .set({ isDefault: true, updatedAt: new Date() })
+          .where(eq(projects.id, replacement.id));
+        const members = await tx
+          .select({ id: users.id })
+          .from(users)
+          .where(eq(users.organizationId, subject.organizationId));
+        if (members.length > 0) {
+          await tx
+            .insert(projectMemberships)
+            .values(members.map((member) => ({
+              organizationId: subject.organizationId,
+              projectId: replacement.id,
+              userId: member.id,
+            })))
+            .onConflictDoNothing();
+        }
+      }
+
+      const rows = await tx
+        .update(projects)
+        .set({
+          ...(input.name === undefined ? {} : { name: input.name }),
+          ...(input.archived === undefined ? {} : { archived: input.archived }),
+          updatedAt: new Date(),
+        })
+        .where(and(eq(projects.id, target.id), eq(projects.organizationId, subject.organizationId)))
+        .returning({
+          id: projects.id,
+          organizationId: projects.organizationId,
+          name: projects.name,
+          archived: projects.archived,
+          isDefault: projects.isDefault,
+        });
+      return rows[0] ?? null;
     });
   }
 }
@@ -241,7 +417,7 @@ export class DrizzleAccountStore implements AccountStore {
       }
 
       const [current] = await tx
-        .select({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId })
+        .select({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role })
         .from(users)
         .where(eq(users.id, subject.userId))
         .limit(1);
@@ -267,9 +443,9 @@ export class DrizzleAccountStore implements AccountStore {
       await tx.delete(projectMemberships).where(eq(projectMemberships.userId, subject.userId));
       const [moved] = await tx
         .update(users)
-        .set({ organizationId: target.id, updatedAt: new Date() })
+        .set({ organizationId: target.id, role: "member", updatedAt: new Date() })
         .where(eq(users.id, subject.userId))
-        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
+        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role });
       if (moved === undefined) throw new Error("Failed to move the account into its new organization.");
 
       const active = await tx
@@ -327,8 +503,9 @@ export class DrizzleAccountStore implements AccountStore {
           organizationId: organization.id,
           email: identity.email,
           name: identity.name,
+          role: "member",
         })
-        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
+        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role });
       if (user === undefined) throw new Error("Failed to create a user for a joining account.");
 
       const active = await tx
@@ -351,7 +528,7 @@ export class DrizzleAccountStore implements AccountStore {
 
   private async find(authUserId: string): Promise<AuthenticatedUser | null> {
     const rows = await this.db
-      .select({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId })
+      .select({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role })
       .from(users)
       .where(eq(users.id, authUserId))
       .limit(1);
@@ -363,7 +540,7 @@ export class DrizzleAccountStore implements AccountStore {
       .update(users)
       .set({ email: identity.email, name: identity.name, updatedAt: new Date() })
       .where(eq(users.id, identity.authUserId))
-      .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
+      .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role });
     const row = rows[0];
     if (row === undefined) throw new Error("The signed-in account disappeared during profile sync.");
     return row;
@@ -387,13 +564,14 @@ export class DrizzleAccountStore implements AccountStore {
           organizationId: organization.id,
           email: identity.email,
           name: identity.name,
+          role: "admin",
         })
-        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
+        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role });
       if (user === undefined) throw new Error("Failed to create a user for a new account.");
 
       const [project] = await tx
         .insert(projects)
-        .values({ organizationId: organization.id, name: "General" })
+        .values({ organizationId: organization.id, name: "General Work", isDefault: true })
         .returning({ id: projects.id });
       if (project === undefined) throw new Error("Failed to create a starter project for a new account.");
 

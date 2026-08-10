@@ -106,7 +106,10 @@ describe("timer routes", () => {
 
     const projects = await app.request("http://api.test/projects", { headers });
     expect(projects.status).toBe(200);
-    await expect(projects.json()).resolves.toEqual({ projects: [{ id: ids.project, name: "Alpha", isArchived: false }] });
+    await expect(projects.json()).resolves.toEqual({
+      projects: [{ id: ids.project, name: "Alpha", isArchived: false, isDefault: false }],
+      selectedProjectId: ids.project,
+    });
 
     const current = await app.request("http://api.test/sessions/current", { headers });
     expect(current.status).toBe(200);

@@ -271,15 +271,25 @@ const decodeUser = (value: unknown): TimerUser => {
 const decodeProject = (value: unknown): TimerProject => {
   const candidate = record(value);
   if (candidate.color !== null && typeof candidate.color !== "string") invalidResponse();
-  return { id: uuid(candidate.id), name: string(candidate.name), color: candidate.color as string | null };
+  return {
+    id: uuid(candidate.id),
+    name: string(candidate.name),
+    color: candidate.color as string | null,
+    isDefault: candidate.isDefault === undefined ? false : boolean(candidate.isDefault),
+  };
 };
 
-type DecodedAccount = { user: TimerUser; projects: readonly TimerProject[] };
+type DecodedAccount = { user: TimerUser; projects: readonly TimerProject[]; selectedProjectId: string | null };
 
 const decodeAccount = (candidate: Record<string, unknown>): DecodedAccount => {
   const projects = candidate.projects;
   if (!Array.isArray(projects)) invalidResponse();
-  return { user: decodeUser(candidate.user), projects: (projects as unknown[]).map(decodeProject) };
+  const selectedProjectId = candidate.selectedProjectId;
+  return {
+    user: decodeUser(candidate.user),
+    projects: (projects as unknown[]).map(decodeProject),
+    selectedProjectId: selectedProjectId === undefined || selectedProjectId === null ? null : uuid(selectedProjectId),
+  };
 };
 
 export const decodeBootstrapSnapshot = (value: unknown): BootstrapSnapshot => {

@@ -9,11 +9,13 @@ export interface AuthenticatedUser {
   email: string;
   name: string;
   organizationId: string;
+  role?: "admin" | "member";
 }
 
 export interface AuthenticatedSubject {
   userId: string;
   organizationId: string;
+  role?: "admin" | "member";
 }
 
 /** A signed-in Neon Auth identity, before it is mapped onto a Clock-In account. */

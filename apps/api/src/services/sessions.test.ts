@@ -42,6 +42,8 @@ function running(overrides: Partial<SessionRecord> = {}): SessionRecord {
 }
 
 class MemoryProjects implements ProjectRepository {
+  private readonly selections = new Map<string, string>();
+
   public constructor(private readonly records: ProjectRecord[]) {}
 
   public async listForMember(): Promise<ProjectRecord[]> {
@@ -54,6 +56,23 @@ class MemoryProjects implements ProjectRepository {
 
   public async createForMember(): Promise<ProjectRecord> {
     throw new Error("not implemented");
+  }
+
+  public async preferredForMember(current: AuthenticatedSubject): Promise<ProjectRecord | null> {
+    const selected = this.selections.get(current.userId);
+    return this.records.find((record) => record.id === selected && !record.archived)
+      ?? this.records.find((record) => record.isDefault === true && !record.archived)
+      ?? null;
+  }
+
+  public async rememberSelection(current: AuthenticatedSubject, projectId: string): Promise<void> {
+    if (this.records.some((record) => record.id === projectId && !record.archived)) {
+      this.selections.set(current.userId, projectId);
+    }
+  }
+
+  public selectedFor(userId: string): string | undefined {
+    return this.selections.get(userId);
   }
 }
 
@@ -99,16 +118,27 @@ class MemorySessions implements SessionRepository {
 }
 
 function createService(records: SessionRecord[] = [], projects: ProjectRecord[] = [{
-  id: ids.project, organizationId: ids.organization, name: "Timer", archived: false,
+  id: ids.project, organizationId: ids.organization, name: "General Work", archived: false, isDefault: true,
 }]) {
   const sessions = new MemorySessions(records);
+  const projectRepository = new MemoryProjects(projects);
   return {
     sessions,
-    service: createSessionService({ projects: new MemoryProjects(projects), sessions, clock: () => now }),
+    projects: projectRepository,
+    service: createSessionService({ projects: projectRepository, sessions, clock: () => now }),
   };
 }
 
 describe("session service", () => {
+  it("uses the member-visible default when a start omits a project", async () => {
+    const { service, sessions, projects } = createService();
+
+    await service.start(subject, { clientId: ids.client, description: "General work" });
+
+    expect(sessions.records[0]).toMatchObject({ projectId: ids.project, organizationId: ids.organization, userId: ids.user });
+    expect(projects.selectedFor(ids.user)).toBe(ids.project);
+  });
+
   it("returns the persisted session for a compatible idempotent start before authorization checks", async () => {
     const persisted = running();
     const { service } = createService([persisted], []);

@@ -24,6 +24,7 @@ const account: AuthenticatedUser = {
   email: "alex@example.com",
   name: "Alex Morgan",
   organizationId: ids.organization,
+  role: "member",
 };
 
 const now = new Date("2026-08-06T14:00:00.000Z");

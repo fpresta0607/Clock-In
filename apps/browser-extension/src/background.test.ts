@@ -183,6 +183,61 @@ describe("background startup", () => {
     }));
   });
 
+  it("abandons an attention result that fences its restored machine", async () => {
+    vi.useFakeTimers();
+    const start = Date.parse("2026-08-09T12:00:00.000Z");
+    vi.setSystemTime(start);
+    const idleResolvers: Array<(state: "active" | "idle" | "locked") => void> = [];
+    const focusResolvers: Array<(window: chrome.windows.Window) => void> = [];
+    const savedAt = start - 1_000;
+    const harness = backgroundHarness(
+      [{ id: 1, windowId: 1, url: "https://github.com/acme/project", incognito: false }],
+      undefined,
+      () => new Promise((resolve) => { focusResolvers.push(resolve); }),
+      undefined,
+      () => new Promise((resolve) => { idleResolvers.push(resolve); }),
+      {
+        browserCollectionId: "collection-one",
+        lastTickAt: savedAt,
+        spanMachine: {
+          version: 2,
+          savedAt,
+          active: {
+            ruleId: "rule-1",
+            since: savedAt - 60_000,
+            sessionId: "durable-span",
+            lastHeartbeatAt: savedAt,
+            gapSince: null,
+          },
+          suspended: [],
+        },
+      },
+    );
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      rules: [{ id: "rule-1", pattern: "github.com/acme/*" }],
+    } as never);
+    await settle();
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    idleResolvers[0]?.("active");
+    focusResolvers[0]?.({ focused: true, id: 1 });
+    await settle();
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    harness.alarm.emit({ name: SPAN_ADVANCE_ALARM_NAME } as never);
+    await settle();
+
+    expect(spanMessages(harness.port)).not.toContainEqual(expect.objectContaining({
+      event: expect.objectContaining({ event: "started" }),
+    }));
+  });
+
   it("closes stale attention before a delayed span alarm can revive it", async () => {
     vi.useFakeTimers();
     const start = Date.parse("2026-08-09T12:00:00.000Z");

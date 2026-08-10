@@ -127,6 +127,8 @@ pub struct TimerProject {
     pub name: String,
     #[serde(default)]
     pub color: Option<String>,
+    #[serde(default)]
+    pub is_default: bool,
 }
 
 #[derive(Deserialize)]
@@ -178,6 +180,8 @@ struct LeaderboardResponse {
 #[derive(Deserialize)]
 struct ProjectListResponse {
     projects: Vec<ProjectListItem>,
+    #[serde(default, rename = "selectedProjectId")]
+    selected_project_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -188,6 +192,13 @@ struct ProjectListItem {
     #[serde(default)]
     color: Option<String>,
     is_archived: bool,
+    #[serde(default)]
+    is_default: bool,
+}
+
+pub struct ProjectSelection {
+    pub projects: Vec<TimerProject>,
+    pub selected_project_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -596,9 +607,9 @@ impl ApiClient {
         })
     }
 
-    pub async fn projects(&self, access_token: &str) -> ApiResult<Vec<TimerProject>> {
+    pub async fn projects(&self, access_token: &str) -> ApiResult<ProjectSelection> {
         let body: ProjectListResponse = self.get_json(access_token, "/projects").await?;
-        Ok(body
+        let projects = body
             .projects
             .into_iter()
             .filter(|project| !project.is_archived)
@@ -606,8 +617,10 @@ impl ApiClient {
                 id: project.id,
                 name: project.name,
                 color: project.color,
+                is_default: project.is_default,
             })
-            .collect())
+            .collect();
+        Ok(ProjectSelection { projects, selected_project_id: body.selected_project_id })
     }
 
     /// Creates a project for the signed-in member; the API answers 201 with the
@@ -633,6 +646,7 @@ impl ApiClient {
             id: body.id,
             name: body.name,
             color: body.color,
+            is_default: body.is_default,
         })
     }
 
