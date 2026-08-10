@@ -90,6 +90,36 @@ describe("background startup", () => {
     vi.resetModules();
   });
 
+  it("migrates a trusted legacy collection queue into its identity namespace", async () => {
+    vi.useFakeTimers();
+    const event = {
+      event: "started",
+      externalSessionId: "legacy-span",
+      ruleId: "rule-1",
+      occurredAt: "2026-08-09T12:00:00.000Z",
+    } as const;
+    const harness = backgroundHarness([], undefined, undefined, undefined, undefined, {
+      browserCollectionId: "collection-one",
+      spanOutbox: [event],
+    });
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      collectionNamespace: "account-one:organization-one",
+      rules: [],
+    } as never);
+    await settle();
+
+    expect(spanMessages(harness.port)).toContainEqual(expect.objectContaining({
+      collectionId: "collection-one",
+      event,
+    }));
+  });
+
   it("does not let an alarm overwrite restored state before initialization completes", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-09T12:00:00.000Z"));

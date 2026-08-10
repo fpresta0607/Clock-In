@@ -23,6 +23,7 @@ describe("Drizzle session repository", () => {
   it("maps PostgreSQL's one-running constraint field to a stable repository conflict", async () => {
     const db = {
       transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback({
+        execute: async () => [{ organization_id: input.organizationId, role: "member" }],
         insert: () => ({ values: () => ({ returning: async () => { throw { code: "23505", constraint_name: "time_sessions_one_running_user_unique" }; } }) }),
       }),
     } as unknown as DatabaseConnection["db"];
@@ -42,7 +43,9 @@ describe("Drizzle account store", () => {
       from: () => ({ where: () => ({ limit: async () => rows }) }),
     });
     const transaction = {
-      execute: async () => [{ id: input.userId }],
+      execute: async () => selectStep === 0
+        ? [{ organization_id: currentOrganizationId, role: "admin" }]
+        : [{ id: input.userId }],
       select: () => {
         selectStep += 1;
         if (selectStep === 1) return limited([{ id: targetOrganizationId }]);
@@ -220,6 +223,7 @@ describe("Drizzle project repository", () => {
     const inserted: Array<{ table: unknown; values: unknown }> = [];
     const db = {
       transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback({
+        execute: async () => [{ organization_id: subject.organizationId, role: "member" }],
         insert: (table: unknown) => ({
           values: (values: unknown) => {
             inserted.push({ table, values });
@@ -247,7 +251,10 @@ describe("Drizzle project repository", () => {
 describe("Drizzle path-mapping repository", () => {
   it("maps the duplicate-prefix unique constraint to a stable repository conflict", async () => {
     const db = {
-      insert: () => ({ values: () => ({ returning: async () => { throw { code: "23505", constraint_name: "project_path_mappings_organization_user_prefix_unique" }; } }) }),
+      transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback({
+        execute: async () => [{ organization_id: input.organizationId, role: "member" }],
+        insert: () => ({ values: () => ({ returning: async () => { throw { code: "23505", constraint_name: "project_path_mappings_organization_user_prefix_unique" }; } }) }),
+      }),
     } as unknown as DatabaseConnection["db"];
     const repository = new DrizzlePathMappingRepository(db);
 
@@ -272,11 +279,29 @@ describe("Drizzle path-mapping repository", () => {
       projectId: input.projectId,
     };
     const db = {
-      select: () => ({ from: () => ({ where: () => ({ limit: async () => [row] }) }) }),
+      transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback({
+        execute: async () => [{ organization_id: input.organizationId, role: "member" }],
+        select: () => ({ from: () => ({ where: () => ({ limit: async () => [row] }) }) }),
+      }),
     } as unknown as DatabaseConnection["db"];
     const repository = new DrizzlePathMappingRepository(db);
     const subject = { organizationId: input.organizationId, userId: input.userId };
 
     await expect(repository.findById(subject, row.id)).rejects.toThrow(`Path mapping ${row.id} has an unrecognized kind: glob`);
+  });
+
+  it("refuses a mapping read after its subject left the workspace", async () => {
+    const select = vi.fn();
+    const db = {
+      transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback({
+        execute: async () => [{ organization_id: "00000000-0000-4000-8000-000000000999", role: "member" }],
+        select,
+      }),
+    } as unknown as DatabaseConnection["db"];
+    const repository = new DrizzlePathMappingRepository(db);
+
+    await expect(repository.listForSubject({ organizationId: input.organizationId, userId: input.userId, role: "member" }))
+      .rejects.toMatchObject({ code: "forbidden" });
+    expect(select).not.toHaveBeenCalled();
   });
 });

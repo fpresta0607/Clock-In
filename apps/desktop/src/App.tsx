@@ -323,6 +323,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [overviewError, setOverviewError] = useState<string | undefined>();
   const [joinCode, setJoinCode] = useState("");
   const [joinBusy, setJoinBusy] = useState(false);
+  const [joinRecovery, setJoinRecovery] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | undefined>();
   const [accountError, setAccountError] = useState<string | undefined>();
@@ -414,12 +415,18 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
 
   const clearAccountFields = (clearEmail = false): void => {
     setJoinBusy(false);
+    setJoinRecovery(false);
+    setAuthBusy(false);
     setProjectId("");
     setDescription("");
     setNewProjectOpen(false);
     setNewProjectName("");
     setNewProjectError(undefined);
+    setNewProjectBusy(false);
     setSwitchBusy(false);
+    setRetryPendingBusy(false);
+    setConflictBusy(false);
+    setLogoutBusy(false);
     setPassword("");
     setName("");
     setInviteCode("");
@@ -435,8 +442,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setMappings(undefined);
     setMappingPrefix("");
     setMappingProjectId("");
+    setMappingBusy(false);
     setRulePattern("");
     setRuleProjectId("");
+    setRuleBusy(false);
     setAdvancedOpen(false);
     setOnboardingStep("monitor");
     setOnboardingBusy(false);
@@ -449,7 +458,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setSiteNarrowing(false);
     setSiteNarrowingOrigin(undefined);
     setSiteSegment("");
+    setSiteBusy(false);
     setSiteError(undefined);
+    setClearAnswersBusy(false);
     setClearAnswersMessage(undefined);
     setHookSnippets({});
     setSettingsOpen(false);
@@ -1375,6 +1386,23 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     }
   };
 
+  const retryWorkspaceSync = async (): Promise<void> => {
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
+    setJoinBusy(true);
+    try {
+      await service.offlineSyncRetry?.();
+      const status = await service.monitorStatus();
+      if (isRequestCurrent()) setMonitorStatus(status);
+    } catch (error: unknown) {
+      if (isRequestCurrent()) setOverviewError(bridgeError(error).message);
+    } finally {
+      if (isRequestCurrent()) setJoinBusy(false);
+    }
+  };
+
   const joinWorkspace = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     if (joinBusy) return;
@@ -1384,6 +1412,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     const isRequestCurrent = (): boolean => isCurrent(service, generation, epoch);
     setJoinBusy(true);
     setOverviewError(undefined);
+    setJoinRecovery(false);
     try {
       const result = await service.orgJoin(joinCode.trim());
       if (isRequestCurrent()) {
@@ -1398,7 +1427,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       if (!isRequestCurrent()) return;
       const problem = bridgeError(error);
       if (problem.kind === "auth") resetToSignIn(problem.message);
-      else setOverviewError(problem.message);
+      else {
+        setOverviewError(problem.message);
+        setJoinRecovery(problem.kind === "conflict" && problem.message.includes("unsynced work"));
+      }
     } finally {
       if (isCurrent(service, generation)) setJoinBusy(false);
     }
@@ -1835,6 +1867,16 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                         </label>
                         <button type="submit" disabled={joinBusy}>{joinBusy ? "Joining…" : "Join"}</button>
                       </form>
+                      {joinRecovery && (
+                        <div className="join-form">
+                          <button type="button" disabled={joinBusy} onClick={() => void retryWorkspaceSync()}>Retry sync</button>
+                          <button type="button" className="outline-button" disabled={joinBusy} onClick={() => {
+                            setJoinRecovery(false);
+                            setJoinCode("");
+                            setOverviewError(undefined);
+                          }}>Cancel switch</button>
+                        </div>
+                      )}
                       {overview.entries.length === 0 ? (
                         <p className="subtle">No recorded time yet. Stop a timer to appear here.</p>
                       ) : (

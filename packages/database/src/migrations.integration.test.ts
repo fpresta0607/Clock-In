@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { createDatabase } from "./client.js";
+import { type DatabaseConnection } from "./client.js";
+import { createDisposableTestDatabase, type DisposableTestDatabase } from "./disposable-test-database.js";
 import { runMigrations } from "./migrate.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL || undefined;
@@ -34,35 +35,22 @@ async function migrationsThrough(index: number): Promise<string> {
 }
 
 integration(integrationDescription, () => {
-  const database = databaseUrl ? createDatabase(databaseUrl, { max: 1 }) : undefined;
+  let disposable: DisposableTestDatabase | undefined;
+  let database = undefined as unknown as DatabaseConnection;
   let preBackfillMigrations: string | undefined;
 
   beforeAll(async () => {
-    if (!database || !databaseUrl) return;
-    // Migrations hard-reference the public schema (phase-2 enum types and
-    // foreign keys), so the disposable boundary is the database itself, not
-    // a schema. Refuse anything that is not obviously a scratch database.
-    const dbName = new URL(databaseUrl).pathname.replace("/", "");
-    if (!dbName.startsWith("clock_in_")) {
-      throw new Error(
-        `TEST_DATABASE_URL must point at a disposable database whose name starts with "clock_in_", got "${dbName}".`,
-      );
-    }
+    if (!databaseUrl) return;
+    disposable = await createDisposableTestDatabase(databaseUrl, "migrations");
+    database = disposable.database;
     preBackfillMigrations = await migrationsThrough(12);
     await runMigrations(database, { migrationsFolder: preBackfillMigrations });
   });
 
   afterAll(async () => {
-    if (!database) return;
-    try {
-      // Reset the scratch database so reruns start empty.
-      await database.client.unsafe(`drop schema public cascade`);
-      await database.client.unsafe(`create schema public`);
-      await database.client.unsafe(`drop schema if exists drizzle cascade`);
-    } finally {
-      if (preBackfillMigrations !== undefined) await rm(preBackfillMigrations, { recursive: true, force: true });
-      await database.client.end({ timeout: 5 });
-    }
+    if (disposable === undefined) return;
+    if (preBackfillMigrations !== undefined) await rm(preBackfillMigrations, { recursive: true, force: true });
+    await disposable.cleanup();
   });
 
   it("backfills legacy defaults and memberships without assigning an arbitrary administrator", async () => {

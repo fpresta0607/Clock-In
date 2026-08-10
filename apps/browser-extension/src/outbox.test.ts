@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { MAX_RETAINED_OUTBOX_NAMESPACES, Outbox, pruneOutboxNamespaces, reconnectBackoffMs } from "./outbox.js";
+import {
+  MAX_RETAINED_OUTBOX_NAMESPACES,
+  Outbox,
+  canActivateOutboxNamespace,
+  pruneOutboxNamespaces,
+  reconnectBackoffMs,
+} from "./outbox.js";
 
 describe("Outbox", () => {
   it("queues and drains first-in-first-out", () => {
@@ -46,6 +52,20 @@ describe("Outbox", () => {
     expect(outboxes.size).toBe(MAX_RETAINED_OUTBOX_NAMESPACES);
     expect(outboxes.get("pending")?.snapshot()).toEqual([1]);
     expect(outboxes.has("active")).toBe(true);
+  });
+
+  it("refuses a new namespace when every retained queue has unsynced evidence", () => {
+    const outboxes = new Map<string, Outbox<number>>();
+    for (let index = 0; index < MAX_RETAINED_OUTBOX_NAMESPACES; index += 1) {
+      const outbox = new Outbox<number>();
+      outbox.push(index);
+      outboxes.set(`pending-${index}`, outbox);
+    }
+
+    expect(canActivateOutboxNamespace(outboxes, "new-workspace", "pending-0")).toBe(false);
+    expect(outboxes.get("pending-0")?.snapshot()).toEqual([0]);
+    expect(outboxes.size).toBe(MAX_RETAINED_OUTBOX_NAMESPACES);
+    expect(canActivateOutboxNamespace(outboxes, "pending-3", "pending-0")).toBe(true);
   });
 });
 

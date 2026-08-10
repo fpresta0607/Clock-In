@@ -191,6 +191,7 @@ export interface TimerBridge {
   start(input: StartIntent): Promise<RunningTimer>;
   stop(input: StopInput): Promise<void>;
   retryPending(): Promise<PendingRetryResult>;
+  offlineSyncRetry?(): Promise<void>;
   useServerTimer(): Promise<BootstrapSnapshot>;
   retryLocalStart(input: StartIntent): Promise<BootstrapSnapshot>;
   orgOverview(): Promise<OrganizationOverview>;
@@ -579,6 +580,7 @@ export const defaultBridge: TimerBridge = {
   start: (input) => invokeDecoded("timer_start", decodeRunningTimer, { input }),
   stop: (input) => invokeDecoded("timer_stop", decodeVoid, { input }),
   retryPending: () => invokeDecoded("timer_retry_pending", decodePendingRetryResult),
+  offlineSyncRetry: () => invokeDecoded("offline_sync_retry", decodeVoid),
   useServerTimer: () => invokeDecoded("timer_use_server", decodeBootstrapSnapshot),
   retryLocalStart: (input) => invokeDecoded("timer_retry_local_start", decodeBootstrapSnapshot, { input }),
   orgOverview: () => invokeDecoded("org_overview", decodeOrganizationOverview),

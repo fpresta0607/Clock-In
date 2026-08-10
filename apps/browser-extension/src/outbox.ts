@@ -71,6 +71,18 @@ export function pruneOutboxNamespaces<T>(
   }
 }
 
+export function canActivateOutboxNamespace<T>(
+  outboxes: Map<string, Outbox<T>>,
+  namespace: string,
+  activeNamespace: string | undefined,
+): boolean {
+  if (outboxes.has(namespace)) {
+    return true;
+  }
+  pruneOutboxNamespaces(outboxes, activeNamespace);
+  return outboxes.size < MAX_RETAINED_OUTBOX_NAMESPACES;
+}
+
 /**
  * Reconnect delay after `attempt` consecutive failures: 1 s doubling to a
  * 60 s ceiling, so a missing host is retried forever without hot-looping.

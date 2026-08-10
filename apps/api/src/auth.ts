@@ -38,7 +38,7 @@ export interface AccountStore {
    * ignored for an existing account.
    */
   resolve(identity: AuthIdentity, inviteCode?: string, workspaceName?: string): Promise<AuthenticatedUser>;
-  findOrganization(organizationId: string): Promise<OrganizationRecord | null>;
+  findOrganization(organizationId: string, subject?: AuthenticatedSubject): Promise<OrganizationRecord | null>;
   /**
    * Moves an existing account into the organization an invite code names, for
    * someone who signed up before they were given one.
