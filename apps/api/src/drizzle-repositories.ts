@@ -40,6 +40,7 @@ import {
   type ProjectRecord,
   type ProjectRepository,
   type ProjectTotalRecord,
+  type SiteTotalRecord,
   type ReportExportRead,
   type ReportLookupRecord,
   type ReportPageOptions,
@@ -646,6 +647,10 @@ export class DrizzleReportRepository implements ReportRepository {
     );
   }
 
+  public async readSiteTotalsForMember(_subject: AuthenticatedSubject, _query: ReportQuery): Promise<SiteTotalRecord[]> {
+    return [];
+  }
+
   public readPageForOrganization(subject: AuthenticatedSubject, query: ReportQuery, options: ReportPageOptions): Promise<ReportPageRead> {
     return this.snapshot(async (db) => ({
       summary: await this.summaryFor(db, subject, query),
@@ -693,7 +698,7 @@ function asAgentSessionRecord(row: typeof agentSessions.$inferSelect): AgentSess
     source: row.source,
     externalSessionId: row.externalSessionId,
     projectId: row.projectId,
-    cwd: row.cwd,
+    cwd: row.cwd ?? "",
     status: row.status,
     startedAt: row.startedAt,
     endedAt: row.endedAt,

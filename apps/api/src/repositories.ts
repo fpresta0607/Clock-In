@@ -153,6 +153,17 @@ export interface AppTotalRecord {
   durationSeconds: number | string | bigint | null;
 }
 
+export interface SiteTotalRecord {
+  mapping: {
+    id: string;
+    /** The url-rule pattern, stored in the mapping's pathPrefix column. */
+    pattern: string;
+    projectId: string | null;
+  };
+  /** sql sums surface as string/bigint. */
+  durationSeconds: number | string | bigint | null;
+}
+
 export interface ReportRepository {
   findProjectForOrganization(subject: AuthenticatedSubject, projectId: string): Promise<ReportLookupRecord | null>;
   findUserForOrganization(subject: AuthenticatedSubject, userId: string): Promise<ReportLookupRecord | null>;
@@ -163,6 +174,8 @@ export interface ReportRepository {
   readProjectTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<ProjectTotalRecord[]>;
   /** Per-foreground-process totals for one member from active segments, for the /me/stats app breakdown. */
   readAppTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<AppTotalRecord[]>;
+  /** Per-url-rule browser-span totals for one member, clipped to fresh active segments, for /me/stats. */
+  readSiteTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<SiteTotalRecord[]>;
 }
 
 export interface ActivitySegmentInsert {

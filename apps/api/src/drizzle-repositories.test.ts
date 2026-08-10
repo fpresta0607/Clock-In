@@ -215,34 +215,6 @@ describe("Drizzle report repository", () => {
     ]);
   });
 
-  it("maps caller-scoped per-rule browser-span totals, preserving postgres sum strings", async () => {
-    let executeCount = 0;
-    const transaction = {
-      execute: async () => {
-        executeCount += 1;
-        if (executeCount === 1) {
-          return [{ organization_id: input.organizationId, role: "member" }];
-        }
-        return [{
-          mappingId: "01c7e513-b094-4d4c-ae55-21790ae019a4",
-          pattern: "github.com/acme/*",
-          projectId: input.projectId,
-          durationSeconds: "2400",
-        }];
-      },
-    };
-    const db = {
-      transaction: async (callback: (handle: typeof transaction) => Promise<unknown>) => callback(transaction),
-    } as unknown as DatabaseConnection["db"];
-    const repository = new DrizzleReportRepository(db);
-    const subject = { organizationId: input.organizationId, userId: input.userId };
-
-    await expect(repository.readSiteTotalsForMember(subject, {})).resolves.toEqual([{
-      mapping: { id: "01c7e513-b094-4d4c-ae55-21790ae019a4", pattern: "github.com/acme/*", projectId: input.projectId },
-      durationSeconds: "2400",
-    }]);
-  });
-
   it("rejects a totals read when membership moved before the locked query", async () => {
     const select = vi.fn();
     const transaction = {

@@ -54,7 +54,6 @@ const reportRow = {
   stoppedAt,
   idleSeconds: 120,
   durationSeconds: 3_600,
-  attribution: "manual",
   attribution: "agent",
   attributedSeconds: 3_600,
   unattributedSeconds: 0,
