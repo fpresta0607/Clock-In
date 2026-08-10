@@ -17,6 +17,7 @@ pub mod native_messaging;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{
@@ -35,6 +36,7 @@ use recovery::{reconcile, PendingStop, Reconciliation, RecoveryState, RunningTim
 
 const KEYRING_SERVICE: &str = "clock-in";
 const KEYRING_ACCOUNT: &str = "neon-auth-session";
+const EXTENSION_RESERVATION_WAIT: Duration = Duration::from_secs(35);
 
 /// Reads the session token the OS is holding for us, if any. A free function
 /// so the monitor's upload task can mint tokens without borrowing `AppState`.
@@ -365,6 +367,48 @@ struct OrganizationOverview {
     entries: Vec<LeaderboardEntry>,
 }
 
+async fn reserve_extension_namespace_capacity(
+    dir: &Path,
+    target: &spool::EvidenceIdentity,
+) -> ApiResult<Option<browser::ExtensionNamespaceReservation>> {
+    let Some(reservation) = browser::request_extension_namespace_reservation(dir, target)? else {
+        return Ok(None);
+    };
+    await_extension_namespace_reservation(dir, &reservation, EXTENSION_RESERVATION_WAIT).await?;
+    Ok(Some(reservation))
+}
+
+async fn await_extension_namespace_reservation(
+    dir: &Path,
+    reservation: &browser::ExtensionNamespaceReservation,
+    wait: Duration,
+) -> ApiResult<()> {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        match browser::extension_namespace_reservation_acknowledgement(dir, reservation)? {
+            Some(browser::ExtensionNamespaceReservationAcknowledgement::Reserved) => {
+                return Ok(());
+            }
+            Some(browser::ExtensionNamespaceReservationAcknowledgement::Rejected)
+            | Some(browser::ExtensionNamespaceReservationAcknowledgement::Released) => {
+                let _ = browser::release_extension_namespace_reservation(dir, reservation);
+                return Err(BridgeError::new(
+                    ErrorKind::Conflict,
+                    "Browser attribution could not reserve the destination workspace. Keep this workspace and try again.",
+                ));
+            }
+            None if tokio::time::Instant::now() >= deadline => {
+                let _ = browser::release_extension_namespace_reservation(dir, reservation);
+                return Err(BridgeError::new(
+                    ErrorKind::Conflict,
+                    "Browser attribution did not confirm the destination workspace. Keep this workspace and try again.",
+                ));
+            }
+            None => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+}
+
 #[tauri::command]
 async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<OrganizationOverview> {
     let access_token = state.access_token().await?;
@@ -377,14 +421,23 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
         .ok_or_else(|| BridgeError::unknown("Could not identify the destination workspace."))?;
     spool::ensure_identity_namespace_capacity(&target_identity)
         .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
-    browser::ensure_extension_namespace_capacity(&state.monitor.browser_dir(), &target_identity)?;
+    let browser_dir = state.monitor.browser_dir();
+    let extension_reservation = reserve_extension_namespace_capacity(&browser_dir, &target_identity).await?;
     let previous = state.active_identity.lock().await.clone();
-    state.deactivate_identity().await?;
+    if let Err(error) = state.deactivate_identity().await {
+        if let Some(reservation) = extension_reservation.as_ref() {
+            let _ = browser::release_extension_namespace_reservation(&browser_dir, reservation);
+        }
+        return Err(error);
+    }
     if let Err(error) = state
         .client
         .join_organization(&access_token, input.invite_code.trim(), &target.id)
         .await
     {
+        if let Some(reservation) = extension_reservation.as_ref() {
+            let _ = browser::release_extension_namespace_reservation(&browser_dir, reservation);
+        }
         if let Some(identity) = previous {
             let _ = state.bind_identity(identity).await;
             let _ = state.enable_active_collection().await;
@@ -1140,5 +1193,35 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(*blocked.borrow(), ["store"]);
+    }
+
+    #[tokio::test]
+    async fn an_unacknowledged_extension_reservation_fails_closed_and_releases() {
+        let dir = std::env::temp_dir().join(format!(
+            "clock-in-extension-reservation-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        browser::enable_collection(&dir, "account-one").expect("collection enables");
+        std::fs::write(dir.join("browser-handshake-chrome.json"), b"{}")
+            .expect("extension handshake records");
+        let target = spool::EvidenceIdentity::new("account-one", "organization-next")
+            .expect("target identity is valid");
+        let reservation = browser::request_extension_namespace_reservation(&dir, &target)
+            .expect("reservation request records")
+            .expect("connected extension requires a reservation");
+
+        let error = await_extension_namespace_reservation(&dir, &reservation, Duration::ZERO)
+            .await
+            .expect_err("unacknowledged reservation blocks the move");
+
+        assert_eq!(error.kind, ErrorKind::Conflict);
+        assert_eq!(
+            browser::pending_extension_namespace_reservation(&dir)
+                .expect("release remains durable until the extension observes it")
+                .action,
+            browser::ExtensionNamespaceReservationAction::Release,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

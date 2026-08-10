@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, Duration, Local, LocalResult, TimeZone};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::api::{ApiResult, BridgeError, MappingKind, PathMapping};
 use crate::spool;
@@ -249,6 +250,8 @@ const TALLY_CLEAR_FILE: &str = "browser-tally-clear.json";
 const CAPTURE_PAUSED_FILE: &str = "browser-capture-paused.json";
 const CAPTURE_RESUME_FILE: &str = "browser-capture-resume";
 const EXTENSION_NAMESPACE_CAPACITY_FILE: &str = "browser-extension-namespace-capacity.json";
+const EXTENSION_NAMESPACE_RESERVATION_FILE: &str =
+    "browser-extension-namespace-reservation.json";
 const COLLECTION_AUTHORIZATION_SECONDS: u64 = 10 * 60;
 const MAX_RETAINED_EXTENSION_NAMESPACES: usize = 8;
 
@@ -274,6 +277,32 @@ struct BrowserCollectionAuthorization {
 pub struct ExtensionNamespaceCapacity {
     pub namespace: String,
     pub pending: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExtensionNamespaceReservationAction {
+    Reserve,
+    Release,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExtensionNamespaceReservationAcknowledgement {
+    Reserved,
+    Rejected,
+    Released,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionNamespaceReservation {
+    pub request_id: String,
+    pub source_namespace: String,
+    pub target_namespace: String,
+    pub action: ExtensionNamespaceReservationAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledgement: Option<ExtensionNamespaceReservationAcknowledgement>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -309,6 +338,10 @@ fn capture_resume_path(dir: &Path) -> PathBuf {
 
 fn extension_namespace_capacity_path(dir: &Path) -> PathBuf {
     dir.join(EXTENSION_NAMESPACE_CAPACITY_FILE)
+}
+
+fn extension_namespace_reservation_path(dir: &Path) -> PathBuf {
+    dir.join(EXTENSION_NAMESPACE_RESERVATION_FILE)
 }
 
 fn browser_spool_path(dir: &Path) -> PathBuf {
@@ -437,6 +470,165 @@ pub fn ensure_extension_namespace_capacity(
         Ok(())
     })
     .map_err(|_| extension_capacity_error())
+}
+
+fn collection_namespace_is_reservation_source(
+    collection: &BrowserCollection,
+    reservation: &ExtensionNamespaceReservation,
+) -> bool {
+    reservation.source_namespace == collection_namespace(collection)
+}
+
+fn read_extension_namespace_reservation(dir: &Path) -> Option<ExtensionNamespaceReservation> {
+    serde_json::from_slice(&std::fs::read(extension_namespace_reservation_path(dir)).ok()?).ok()
+}
+
+fn extension_reservation_error() -> BridgeError {
+    BridgeError::new(
+        crate::api::ErrorKind::Conflict,
+        "Browser attribution could not reserve the destination workspace. Keep this workspace and try again.",
+    )
+}
+
+pub fn request_extension_namespace_reservation(
+    dir: &Path,
+    target: &spool::EvidenceIdentity,
+) -> ApiResult<Option<ExtensionNamespaceReservation>> {
+    ensure_browser_dir(dir).map_err(|_| extension_reservation_error())?;
+    spool::with_lock(&browser_spool_path(dir), || {
+        if !extension_capacity_tracking_is_active(dir) {
+            return Ok(None);
+        }
+        let Some(collection) = read_collection(dir) else {
+            return Err(io::Error::other("browser collection is unavailable"));
+        };
+        if admitted_collection_id_locked(dir).is_none() {
+            return Err(io::Error::other("browser collection is unavailable"));
+        }
+        let source_namespace = collection_namespace(&collection);
+        let target_namespace = format!("{}:{}", target.account_id, target.organization_id);
+        if let Some(existing) = read_extension_namespace_reservation(dir) {
+            if existing.action == ExtensionNamespaceReservationAction::Reserve
+                && existing.source_namespace == source_namespace
+                && existing.target_namespace == target_namespace
+            {
+                return Ok(Some(existing));
+            }
+            return Err(io::Error::other("browser namespace reservation is pending"));
+        }
+        let reservation = ExtensionNamespaceReservation {
+            request_id: Uuid::new_v4().to_string(),
+            source_namespace,
+            target_namespace,
+            action: ExtensionNamespaceReservationAction::Reserve,
+            acknowledgement: None,
+        };
+        let bytes = serde_json::to_vec(&reservation).map_err(io::Error::other)?;
+        write_if_changed_locked(&extension_namespace_reservation_path(dir), &bytes)?;
+        Ok(Some(reservation))
+    })
+    .map_err(|_| extension_reservation_error())
+}
+
+pub fn extension_namespace_reservation_acknowledgement(
+    dir: &Path,
+    reservation: &ExtensionNamespaceReservation,
+) -> ApiResult<Option<ExtensionNamespaceReservationAcknowledgement>> {
+    spool::with_lock(&browser_spool_path(dir), || {
+        let current = read_extension_namespace_reservation(dir);
+        Ok(current.and_then(|current| {
+            (current.request_id == reservation.request_id
+                && current.action == ExtensionNamespaceReservationAction::Reserve
+                && current.source_namespace == reservation.source_namespace
+                && current.target_namespace == reservation.target_namespace)
+                .then_some(current.acknowledgement)
+                .flatten()
+        }))
+    })
+    .map_err(|_| extension_reservation_error())
+}
+
+pub fn release_extension_namespace_reservation(
+    dir: &Path,
+    reservation: &ExtensionNamespaceReservation,
+) -> ApiResult<()> {
+    spool::with_lock(&browser_spool_path(dir), || {
+        let Some(mut current) = read_extension_namespace_reservation(dir) else {
+            return Ok(());
+        };
+        if current.request_id != reservation.request_id
+            || current.source_namespace != reservation.source_namespace
+            || current.target_namespace != reservation.target_namespace
+        {
+            return Ok(());
+        }
+        current.action = ExtensionNamespaceReservationAction::Release;
+        current.acknowledgement = None;
+        let bytes = serde_json::to_vec(&current).map_err(io::Error::other)?;
+        write_if_changed_locked(&extension_namespace_reservation_path(dir), &bytes)
+    })
+    .map_err(|_| extension_reservation_error())
+}
+
+pub fn pending_extension_namespace_reservation(
+    dir: &Path,
+) -> Option<ExtensionNamespaceReservation> {
+    spool::with_lock(&browser_spool_path(dir), || {
+        let Some(collection) = read_collection(dir) else {
+            return Ok(None);
+        };
+        if admitted_collection_id_locked(dir).is_none() {
+            return Ok(None);
+        }
+        Ok(read_extension_namespace_reservation(dir).filter(|reservation| {
+            reservation.acknowledgement.is_none()
+                && collection_namespace_is_reservation_source(&collection, reservation)
+        }))
+    })
+    .ok()
+    .flatten()
+}
+
+pub fn acknowledge_extension_namespace_reservation(
+    dir: &Path,
+    request_id: &str,
+    acknowledgement: ExtensionNamespaceReservationAcknowledgement,
+) -> io::Result<()> {
+    spool::with_lock(&browser_spool_path(dir), || {
+        let Some(collection) = read_collection(dir) else {
+            return Ok(());
+        };
+        if admitted_collection_id_locked(dir).is_none() {
+            return Ok(());
+        }
+        let Some(mut reservation) = read_extension_namespace_reservation(dir) else {
+            return Ok(());
+        };
+        if reservation.request_id != request_id
+            || !collection_namespace_is_reservation_source(&collection, &reservation)
+            || !matches!(
+                (reservation.action, acknowledgement),
+                (
+                    ExtensionNamespaceReservationAction::Reserve,
+                    ExtensionNamespaceReservationAcknowledgement::Reserved
+                ) | (
+                    ExtensionNamespaceReservationAction::Reserve,
+                    ExtensionNamespaceReservationAcknowledgement::Rejected
+                ) | (
+                    ExtensionNamespaceReservationAction::Release,
+                    ExtensionNamespaceReservationAcknowledgement::Released
+                )
+            )
+        {
+            return Ok(());
+        }
+        if acknowledgement == ExtensionNamespaceReservationAcknowledgement::Released {
+            return remove_if_exists(&extension_namespace_reservation_path(dir));
+        }
+        reservation.acknowledgement = Some(acknowledgement);
+        let bytes = serde_json::to_vec(&reservation).map_err(io::Error::other)?;
+        write_if_changed_locked(&extension_namespace_reservation_path(dir), &bytes)
+    })
 }
 
 pub fn collection_id(dir: &Path) -> Option<String> {

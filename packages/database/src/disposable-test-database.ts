@@ -69,6 +69,11 @@ export async function createDisposableTestDatabase(
     controlCloseError = error;
   }
   if (creationError !== undefined) {
+    try {
+      await dropDisposableDatabase(controlDatabaseUrl, name);
+    } catch (dropError) {
+      void dropError;
+    }
     throw creationError;
   }
   if (controlCloseError !== undefined) {

@@ -8,6 +8,7 @@ export const OUTBOX_CAPACITY = 1000;
 export const MAX_RETAINED_OUTBOX_NAMESPACES = 8;
 export const OUTBOX_STORAGE_KEY = "spanOutbox";
 export const OUTBOX_NAMESPACES_STORAGE_KEY = "spanOutboxesByNamespace";
+export const OUTBOX_NAMESPACE_RESERVATIONS_STORAGE_KEY = "spanOutboxNamespaceReservations";
 
 /** A first-in-first-out bounded queue that refuses an item when it is full. */
 export class Outbox<T> {

@@ -66,9 +66,11 @@ pub struct EvidencePaths {
 }
 
 pub fn evidence_paths(identity: &EvidenceIdentity) -> EvidencePaths {
-    let browser_dir = evidence_root()
-        .join(&identity.account_id)
-        .join(&identity.organization_id);
+    evidence_paths_at(&evidence_root(), identity)
+}
+
+fn evidence_paths_at(root: &Path, identity: &EvidenceIdentity) -> EvidencePaths {
+    let browser_dir = root.join(&identity.account_id).join(&identity.organization_id);
     EvidencePaths {
         agent_path: browser_dir.join("agent-spool.jsonl"),
         segments_path: browser_dir.join("segments-spool.jsonl"),
@@ -78,34 +80,59 @@ pub fn evidence_paths(identity: &EvidenceIdentity) -> EvidencePaths {
 }
 
 pub fn active_identity() -> Option<EvidenceIdentity> {
-    let bytes = std::fs::read(active_identity_path()).ok()?;
+    let root = evidence_root();
+    let active_path = active_identity_path();
+    with_lock(&root, || {
+        recover_rewrite_files_locked(&active_path)?;
+        Ok(active_identity_at(&active_path))
+    })
+    .ok()
+    .flatten()
+}
+
+fn active_identity_at(path: &Path) -> Option<EvidenceIdentity> {
+    let bytes = std::fs::read(path).ok()?;
     let identity = serde_json::from_slice::<EvidenceIdentity>(&bytes).ok()?;
     EvidenceIdentity::new(&identity.account_id, &identity.organization_id)
 }
 
 pub fn activate_identity(identity: &EvidenceIdentity) -> SpoolResult<()> {
-    ensure_identity_namespace_capacity(identity)?;
-    let paths = evidence_paths(identity);
-    std::fs::create_dir_all(&paths.browser_dir)?;
-    std::fs::write(paths.browser_dir.join(".last-active"), unix_seconds().to_string())?;
-    with_lock(&active_identity_path(), || {
+    activate_identity_at(&evidence_root(), &active_identity_path(), identity)
+}
+
+fn activate_identity_at(
+    root: &Path,
+    active_path: &Path,
+    identity: &EvidenceIdentity,
+) -> SpoolResult<()> {
+    with_lock(root, || {
+        recover_rewrite_files_locked(active_path)?;
+        let active_dir = active_identity_at(active_path)
+            .map(|identity| evidence_paths_at(root, &identity).browser_dir);
+        reserve_namespace_slot_at_locked(root, Some(identity), active_dir.as_deref())?;
+        let paths = evidence_paths_at(root, identity);
+        std::fs::create_dir_all(&paths.browser_dir)?;
+        std::fs::write(paths.browser_dir.join(".last-active"), unix_seconds().to_string())?;
         let body = serde_json::to_vec(identity).map_err(io::Error::other)?;
-        rewrite(&active_identity_path(), &body)
-    })?;
-    Ok(())
+        rewrite(active_path, &body)
+    })
 }
 
 pub fn ensure_identity_namespace_capacity(identity: &EvidenceIdentity) -> SpoolResult<()> {
-    reserve_namespace_slot(Some(identity))
+    check_namespace_capacity(&evidence_root(), Some(identity))
 }
 
 pub fn ensure_new_identity_namespace_capacity() -> SpoolResult<()> {
-    reserve_namespace_slot(None)
+    check_namespace_capacity(&evidence_root(), None)
 }
 
 pub fn clear_active_identity() -> SpoolResult<()> {
-    std::fs::create_dir_all(default_browser_dir())?;
-    with_lock(&active_identity_path(), || remove_if_exists(&active_identity_path()))
+    let root = evidence_root();
+    let active_path = active_identity_path();
+    with_lock(&root, || {
+        recover_rewrite_files_locked(&active_path)?;
+        remove_if_exists(&active_path)
+    })
 }
 
 pub fn active_agent_spool_path() -> Option<PathBuf> {
@@ -521,6 +548,12 @@ fn active_identity_path() -> PathBuf {
     default_browser_dir().join("active-identity.json")
 }
 
+fn active_identity_path_for_root(root: &Path) -> PathBuf {
+    root.parent()
+        .map(|parent| parent.join("active-identity.json"))
+        .unwrap_or_else(|| PathBuf::from("active-identity.json"))
+}
+
 fn evidence_root() -> PathBuf {
     default_browser_dir().join("evidence")
 }
@@ -533,13 +566,33 @@ fn identity_component_is_valid(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
-fn reserve_namespace_slot(reserved: Option<&EvidenceIdentity>) -> SpoolResult<()> {
-    reserve_namespace_slot_at(&evidence_root(), reserved)
+fn reserve_namespace_slot_at(root: &Path, reserved: Option<&EvidenceIdentity>) -> SpoolResult<()> {
+    with_lock(root, || {
+        let active_path = active_identity_path_for_root(root);
+        recover_rewrite_files_locked(&active_path)?;
+        let active_dir = active_identity_at(&active_path)
+            .map(|identity| evidence_paths_at(root, &identity).browser_dir);
+        reserve_namespace_slot_at_locked(root, reserved, active_dir.as_deref())
+    })
 }
 
-fn reserve_namespace_slot_at(root: &Path, reserved: Option<&EvidenceIdentity>) -> SpoolResult<()> {
-    let active_dir = active_identity().map(|identity| evidence_paths(&identity).browser_dir);
-    let reserved_dir = reserved.map(|identity| root.join(&identity.account_id).join(&identity.organization_id));
+fn check_namespace_capacity(root: &Path, reserved: Option<&EvidenceIdentity>) -> SpoolResult<()> {
+    let active_path = active_identity_path_for_root(root);
+    with_lock(root, || {
+        recover_rewrite_files_locked(&active_path)?;
+        let active_dir = active_identity_at(&active_path)
+            .map(|identity| evidence_paths_at(root, &identity).browser_dir);
+        check_namespace_capacity_at_locked(root, reserved, active_dir.as_deref())
+    })
+}
+
+fn check_namespace_capacity_at_locked(
+    root: &Path,
+    reserved: Option<&EvidenceIdentity>,
+    active_dir: Option<&Path>,
+) -> SpoolResult<()> {
+    let reserved_dir =
+        reserved.map(|identity| root.join(&identity.account_id).join(&identity.organization_id));
     let mut candidates = Vec::new();
     let mut namespaces = 0usize;
     match std::fs::read_dir(root) {
@@ -556,7 +609,62 @@ fn reserve_namespace_slot_at(root: &Path, reserved: Option<&EvidenceIdentity>) -
                     }
                     let path = organization.path();
                     namespaces += 1;
-                    if active_dir.as_ref().is_some_and(|active| path == *active)
+                    if active_dir.is_some_and(|active| path == active)
+                        || reserved_dir.as_ref().is_some_and(|reserved| path == *reserved)
+                    {
+                        continue;
+                    }
+                    candidates.push(path);
+                }
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    let reserve_count = match &reserved_dir {
+        Some(path) if path.is_dir() => 0,
+        Some(_) => 1,
+        None => 1,
+    };
+    let required_evictions = namespaces
+        .saturating_add(reserve_count)
+        .saturating_sub(MAX_RETAINED_NAMESPACES);
+    if required_evictions == 0 {
+        return Ok(());
+    }
+    let evictable = candidates.iter().try_fold(0usize, |count, path| {
+        Ok::<_, io::Error>(count + usize::from(!namespace_has_pending_evidence(path)?))
+    })?;
+    if evictable >= required_evictions {
+        return Ok(());
+    }
+    Err(namespace_capacity_error())
+}
+
+fn reserve_namespace_slot_at_locked(
+    root: &Path,
+    reserved: Option<&EvidenceIdentity>,
+    active_dir: Option<&Path>,
+) -> SpoolResult<()> {
+    let reserved_dir =
+        reserved.map(|identity| root.join(&identity.account_id).join(&identity.organization_id));
+    let mut candidates = Vec::new();
+    let mut namespaces = 0usize;
+    match std::fs::read_dir(root) {
+        Ok(accounts) => {
+            for account in accounts {
+                let account = account?;
+                if !account.file_type()?.is_dir() {
+                    continue;
+                }
+                for organization in std::fs::read_dir(account.path())? {
+                    let organization = organization?;
+                    if !organization.file_type()?.is_dir() {
+                        continue;
+                    }
+                    let path = organization.path();
+                    namespaces += 1;
+                    if active_dir.is_some_and(|active| path == active)
                         || reserved_dir.as_ref().is_some_and(|reserved| path == *reserved)
                     {
                         continue;
@@ -595,11 +703,15 @@ fn reserve_namespace_slot_at(root: &Path, reserved: Option<&EvidenceIdentity>) -
         }
     }
     if namespaces.saturating_add(reserve_count) > MAX_RETAINED_NAMESPACES {
-        return Err(io::Error::other(
-            "We saved unsynced work for another workspace. Sign back into that workspace and let Clock-In finish syncing before adding a new account.",
-        ));
+        return Err(namespace_capacity_error());
     }
     Ok(())
+}
+
+fn namespace_capacity_error() -> io::Error {
+    io::Error::other(
+        "We saved unsynced work for another workspace. Sign back into that workspace and let Clock-In finish syncing before adding a new account.",
+    )
 }
 
 fn namespace_has_pending_evidence(dir: &Path) -> SpoolResult<bool> {
@@ -972,7 +1084,7 @@ impl Drop for LockGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir =
@@ -1493,6 +1605,106 @@ mod tests {
         reserve_namespace_slot_at(&dir, Some(&retained)).expect("retained namespace remains available");
 
         assert!(dir.join("account-3").join("organization-3").join("agent-spool.jsonl").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn activation_waits_for_the_root_capacity_lock() {
+        let dir = temp_dir("namespace-root-lock");
+        let root = dir.join("evidence");
+        let active_path = active_identity_path_for_root(&root);
+        std::fs::create_dir_all(&root).expect("evidence root creates");
+        let identity = EvidenceIdentity::new("account-next", "organization-next")
+            .expect("identity is valid");
+        let guard = acquire_lock(&root).expect("root lock acquires");
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let worker_root = root.clone();
+        let worker_active_path = active_path.clone();
+        let worker = std::thread::spawn(move || {
+            result_tx
+                .send(activate_identity_at(&worker_root, &worker_active_path, &identity))
+                .expect("activation result sends");
+        });
+
+        assert!(result_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err());
+        drop(guard);
+        result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("activation completes after the root lock releases")
+            .expect("activation succeeds");
+        worker.join().expect("activation worker joins");
+
+        assert_eq!(
+            active_identity_at(&active_path),
+            Some(
+                EvidenceIdentity::new("account-next", "organization-next")
+                    .expect("identity is valid")
+            )
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_identity_activation_keeps_retained_namespaces_bounded() {
+        let dir = temp_dir("concurrent-namespace-capacity");
+        let root = dir.join("evidence");
+        let active_path = active_identity_path_for_root(&root);
+        for index in 0..MAX_RETAINED_NAMESPACES - 1 {
+            std::fs::create_dir_all(
+                root.join(format!("account-{index}"))
+                    .join(format!("organization-{index}")),
+            )
+            .expect("retained namespace creates");
+        }
+        let barrier = Arc::new(Barrier::new(3));
+        let identities = [
+            EvidenceIdentity::new("account-next-a", "organization-next-a")
+                .expect("identity is valid"),
+            EvidenceIdentity::new("account-next-b", "organization-next-b")
+                .expect("identity is valid"),
+        ];
+        let workers: Vec<_> = identities
+            .into_iter()
+            .map(|identity| {
+                let worker_root = root.clone();
+                let worker_active_path = active_path.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    activate_identity_at(&worker_root, &worker_active_path, &identity)
+                })
+            })
+            .collect();
+
+        barrier.wait();
+        for worker in workers {
+            worker
+                .join()
+                .expect("activation worker joins")
+                .expect("activation succeeds");
+        }
+        let retained = std::fs::read_dir(&root)
+            .expect("evidence root reads")
+            .filter_map(Result::ok)
+            .filter(|account| account.file_type().is_ok_and(|kind| kind.is_dir()))
+            .flat_map(|account| std::fs::read_dir(account.path()).expect("account reads"))
+            .filter_map(Result::ok)
+            .filter(|organization| organization.file_type().is_ok_and(|kind| kind.is_dir()))
+            .count();
+
+        assert_eq!(retained, MAX_RETAINED_NAMESPACES);
+        assert!(
+            root.join("account-next-a")
+                .join("organization-next-a")
+                .is_dir()
+        );
+        assert!(
+            root.join("account-next-b")
+                .join("organization-next-b")
+                .is_dir()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
