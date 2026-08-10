@@ -84,7 +84,7 @@ function createCorsMiddleware(config: AppConfig): MiddlewareHandler<ApiEnvironme
     }
     if (context.req.method === "OPTIONS") {
       if (allowed) {
-        context.header("access-control-allow-methods", "GET,POST,OPTIONS");
+        context.header("access-control-allow-methods", "GET,POST,PATCH,DELETE,OPTIONS");
         context.header("access-control-allow-headers", "authorization,content-type");
         context.header("access-control-max-age", "600");
       }
@@ -125,7 +125,7 @@ export function createAuthenticationMiddleware(
   return async (context, next) => identify(context, async () => {
     const user = await dependencies.accounts.resolve(context.get("authenticatedIdentity"));
     context.set("authenticatedUser", user);
-    context.set("authenticatedSubject", { userId: user.id, organizationId: user.organizationId });
+    context.set("authenticatedSubject", { userId: user.id, organizationId: user.organizationId, role: user.role ?? "member" });
     await next();
   });
 }

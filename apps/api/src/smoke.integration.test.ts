@@ -93,7 +93,7 @@ integration(integrationDescription, () => {
     expect(projects.status).toBe(200);
     const listed = (await projects.json()).projects;
     expect(listed).toHaveLength(1);
-    expect(listed[0]).toMatchObject({ name: "General", isArchived: false });
+    expect(listed[0]).toMatchObject({ name: "General Work", isArchived: false, isDefault: true });
     const projectId = listed[0].id;
 
     const created = await app.request("/projects", {
@@ -105,7 +105,7 @@ integration(integrationDescription, () => {
     const createdProject = await created.json();
     expect(createdProject).toMatchObject({ name: "Smoke Side Project", isArchived: false });
     const relisted = (await (await app.request("/projects", { headers: authorized })).json()).projects;
-    expect(relisted.map((project: { name: string }) => project.name)).toEqual(["General", "Smoke Side Project"]);
+    expect(relisted.map((project: { name: string }) => project.name)).toEqual(["General Work", "Smoke Side Project"]);
 
     const startedAt = new Date(Date.now() - 60_000).toISOString();
     const start = await app.request("/sessions", {
@@ -153,6 +153,88 @@ integration(integrationDescription, () => {
     expect(statsBody.apps).toEqual([]);
   }, 60_000);
 
+  it("repairs a legacy workspace once, keeps selections private, and replaces its default safely", async () => {
+    const organizationId = randomUUID();
+    const firstUserId = randomUUID();
+    const secondUserId = randomUUID();
+    await database.client`
+      insert into organizations (id, name, invite_code)
+      values (${organizationId}, 'Legacy workspace', ${randomUUID().replaceAll("-", "")})
+    `;
+    await database.client`
+      insert into users (id, organization_id, email, name)
+      values
+        (${firstUserId}, ${organizationId}, 'legacy-first@clock-in.test', 'Legacy First'),
+        (${secondUserId}, ${organizationId}, 'legacy-second@clock-in.test', 'Legacy Second')
+    `;
+    const firstAuth = await createTestAuth(config, new Date());
+    const secondAuth = await createTestAuth(config, new Date());
+    const legacyApp = createApp({
+      config,
+      keys: firstAuth.keys,
+      accounts: new DrizzleAccountStore(database.db),
+      projectRepository: new DrizzleProjectRepository(database.db),
+      sessionRepository: new DrizzleSessionRepository(database.db),
+    });
+    const firstHeaders = {
+      authorization: await firstAuth.bearer(firstUserId, { email: "legacy-first@clock-in.test", name: "Legacy First" }),
+      "content-type": "application/json",
+    };
+    const secondApp = createApp({
+      config,
+      keys: secondAuth.keys,
+      accounts: new DrizzleAccountStore(database.db),
+      projectRepository: new DrizzleProjectRepository(database.db),
+      sessionRepository: new DrizzleSessionRepository(database.db),
+    });
+    const secondHeaders = {
+      authorization: await secondAuth.bearer(secondUserId, { email: "legacy-second@clock-in.test", name: "Legacy Second" }),
+      "content-type": "application/json",
+    };
+
+    const responses = await Promise.all([
+      legacyApp.request("/projects", { headers: firstHeaders }),
+      legacyApp.request("/projects", { headers: firstHeaders }),
+      secondApp.request("/projects", { headers: secondHeaders }),
+    ]);
+    const lists = await Promise.all(responses.map((response) => response.json()));
+    const defaultIds = lists.map((list) => list.selectedProjectId);
+    expect(new Set(defaultIds).size).toBe(1);
+    expect(lists.every((list) => list.projects.length === 1 && list.projects[0].name === "General Work" && list.projects[0].isDefault)).toBe(true);
+
+    const defaultProjectId = defaultIds[0] as string;
+    const defaultStart = await legacyApp.request("/sessions", {
+      method: "POST",
+      headers: firstHeaders,
+      body: JSON.stringify({ clientId: randomUUID(), description: "Legacy default" }),
+    });
+    expect(defaultStart.status).toBe(200);
+    expect((await defaultStart.json()).session.projectId).toBe(defaultProjectId);
+
+    const privateCreate = await legacyApp.request("/projects", {
+      method: "POST",
+      headers: firstHeaders,
+      body: JSON.stringify({ name: "Restricted work" }),
+    });
+    const privateProject = await privateCreate.json();
+    const secondBeforeReplacement = await secondApp.request("/projects", { headers: secondHeaders });
+    expect((await secondBeforeReplacement.json()).projects.map((project: { id: string }) => project.id)).not.toContain(privateProject.id);
+
+    await database.client`update users set role = 'admin' where id = ${firstUserId}`;
+    const replacement = await legacyApp.request(`/projects/${defaultProjectId}`, {
+      method: "PATCH",
+      headers: firstHeaders,
+      body: JSON.stringify({ isArchived: true, replacementProjectId: privateProject.id }),
+    });
+    expect(replacement.status).toBe(200);
+    expect((await replacement.json())).toMatchObject({ id: defaultProjectId, isArchived: true, isDefault: false });
+
+    const secondAfterReplacement = await secondApp.request("/projects", { headers: secondHeaders });
+    const secondProjects = await secondAfterReplacement.json();
+    expect(secondProjects.selectedProjectId).toBe(privateProject.id);
+    expect(secondProjects.projects).toContainEqual(expect.objectContaining({ id: privateProject.id, isDefault: true }));
+  }, 60_000);
+
   it("keeps another account's data out of this account's projects and reports", async () => {
     const other = await createTestAuth(config, new Date());
     const otherApp = createApp({
@@ -170,7 +252,7 @@ integration(integrationDescription, () => {
     };
 
     const projects = await otherApp.request("/projects", { headers });
-    expect((await projects.json()).projects.map((project: { name: string }) => project.name)).toEqual(["General"]);
+    expect((await projects.json()).projects.map((project: { name: string }) => project.name)).toEqual(["General Work"]);
 
     const report = await otherApp.request("/reports", { headers });
     expect((await report.json()).rows).toEqual([]);
@@ -303,7 +385,7 @@ integration(integrationDescription, () => {
 
     // The move carries project access with it (the side project from the first test included).
     const projects = await latecomerApp.request("/projects", { headers });
-    expect((await projects.json()).projects.map((project: { name: string }) => project.name)).toEqual(["General", "Smoke Side Project"]);
+    expect((await projects.json()).projects.map((project: { name: string }) => project.name)).toEqual(["General Work", "Smoke Side Project"]);
 
     // The abandoned personal workspace is gone rather than left behind.
     const abandoned = await database.client<{ total: number }[]>`

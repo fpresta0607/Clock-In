@@ -46,7 +46,7 @@ export function createSessionRoutes(service: SessionService): Hono<ApiEnvironmen
     if (!input.success) throw new AppError("validation_error", "Invalid request body.");
     const session = await service.start(getAuthenticatedSubject(context), {
       clientId: input.data.clientId,
-      projectId: input.data.projectId,
+      ...(input.data.projectId === undefined ? {} : { projectId: input.data.projectId }),
       ...(input.data.description === undefined ? {} : { description: input.data.description }),
       ...(input.data.startedAt === undefined ? {} : { startedAt: new Date(input.data.startedAt) }),
     });

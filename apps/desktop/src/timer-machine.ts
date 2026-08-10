@@ -8,6 +8,7 @@ export type TimerProject = {
   id: string;
   name: string;
   color: string | null;
+  isDefault?: boolean;
 };
 
 export type StartIntent = {
@@ -54,7 +55,7 @@ export const stopIdleSeconds = (
   return Math.max(0, sessionIdleSeconds - away.seconds);
 };
 
-type Account = { user: TimerUser; projects: readonly TimerProject[] };
+type Account = { user: TimerUser; projects: readonly TimerProject[]; selectedProjectId?: string | null };
 
 export type BootstrapSnapshot =
   | { kind: "signed-out" }
@@ -103,6 +104,13 @@ export const initialTimerState: TimerState = { kind: "booting" };
 const account = (state: Exclude<TimerState, { kind: "booting" } | { kind: "sign-in" }>): Account => ({
   user: state.user,
   projects: state.projects,
+  ...(state.selectedProjectId === undefined ? {} : { selectedProjectId: state.selectedProjectId }),
+});
+
+const snapshotAccount = (snapshot: Exclude<BootstrapSnapshot, { kind: "signed-out" }>): Account => ({
+  user: snapshot.user,
+  projects: snapshot.projects,
+  ...(snapshot.selectedProjectId === undefined ? {} : { selectedProjectId: snapshot.selectedProjectId }),
 });
 
 const fromSnapshot = (snapshot: BootstrapSnapshot): TimerState => {
@@ -110,24 +118,22 @@ const fromSnapshot = (snapshot: BootstrapSnapshot): TimerState => {
     case "signed-out":
       return { kind: "sign-in", error: undefined };
     case "idle":
-      return { kind: "idle", user: snapshot.user, projects: snapshot.projects, error: undefined };
+      return { kind: "idle", ...snapshotAccount(snapshot), error: undefined };
     case "running":
-      return { kind: "running", user: snapshot.user, projects: snapshot.projects, running: snapshot.running };
+      return { kind: "running", ...snapshotAccount(snapshot), running: snapshot.running };
     case "retry-local-start":
-      return { kind: "starting", user: snapshot.user, projects: snapshot.projects, start: snapshot.start };
+      return { kind: "starting", ...snapshotAccount(snapshot), start: snapshot.start };
     case "pending-sync":
       return {
         kind: "pending-sync",
-        user: snapshot.user,
-        projects: snapshot.projects,
+        ...snapshotAccount(snapshot),
         pendingCount: snapshot.pendingCount,
         message: `${snapshot.pendingCount} stop${snapshot.pendingCount === 1 ? "" : "s"} waiting to sync`,
       };
     case "conflict":
       return {
         kind: "conflict",
-        user: snapshot.user,
-        projects: snapshot.projects,
+        ...snapshotAccount(snapshot),
         localStart: snapshot.localStart,
         serverRunning: snapshot.serverRunning,
         error: undefined,

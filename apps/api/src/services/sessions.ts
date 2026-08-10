@@ -13,7 +13,7 @@ const reviewThresholdSeconds = 12 * 60 * 60;
 
 export interface StartSessionInput {
   clientId: string;
-  projectId: string;
+  projectId?: string;
   description?: string;
   startedAt?: Date;
 }
@@ -60,9 +60,15 @@ export function createSessionService(dependencies: SessionServiceDependencies): 
     async start(subject: AuthenticatedSubject, input: StartSessionInput): Promise<SessionRecord> {
       const now = clock();
       const startedAt = input.startedAt ?? now;
+      const preferred = input.projectId === undefined
+        ? await dependencies.projects.preferredForMember?.(subject) ?? null
+        : null;
+      if (input.projectId === undefined && preferred === null) {
+        throw new AppError("not_found", "Project not found.");
+      }
       const normalized: NormalizedStartInput = {
         clientId: input.clientId,
-        projectId: input.projectId,
+        projectId: input.projectId ?? preferred!.id,
         description: input.description ?? null,
         startedAt,
         ...(input.startedAt === undefined ? {} : { requestedStartedAt: input.startedAt }),
@@ -87,6 +93,7 @@ export function createSessionService(dependencies: SessionServiceDependencies): 
       if (project.archived) {
         throw new AppError("project_archived", "Archived projects cannot be used for time sessions.");
       }
+      await dependencies.projects.rememberSelection?.(subject, project.id);
       if (await dependencies.sessions.findRunning(subject) !== null) {
         throw new AppError("session_already_running", "A time session is already running.");
       }

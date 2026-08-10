@@ -85,6 +85,13 @@
       "when": 1786324015545,
       "tag": "0011_agent_session_stale_check",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1786331719163,
+      "tag": "0012_organization_default_project",
+      "breakpoints": true
     }
   ]
 }

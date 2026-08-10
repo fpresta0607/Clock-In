@@ -100,6 +100,8 @@ enum Snapshot {
         state: Reconciliation,
         user: TimerUser,
         projects: Vec<TimerProject>,
+        #[serde(rename = "selectedProjectId")]
+        selected_project_id: Option<String>,
     },
 }
 
@@ -113,6 +115,7 @@ impl Snapshot {
             state,
             user: account.user,
             projects: account.projects,
+            selected_project_id: account.selected_project_id,
         }
     }
 }
@@ -125,6 +128,7 @@ struct PendingRetryResult {
 struct Account {
     user: TimerUser,
     projects: Vec<TimerProject>,
+    selected_project_id: Option<String>,
 }
 
 pub struct AppState {
@@ -165,11 +169,15 @@ impl AppState {
     }
 
     async fn load_account(&self, access_token: &str) -> ApiResult<Account> {
-        let (user, projects) = tokio::try_join!(
+        let (user, selection) = tokio::try_join!(
             self.client.me(access_token),
             self.client.projects(access_token)
         )?;
-        Ok(Account { user, projects })
+        Ok(Account {
+            user,
+            projects: selection.projects,
+            selected_project_id: selection.selected_project_id,
+        })
     }
 
     async fn read_recovery(&self) -> RecoveryState {
@@ -713,7 +721,7 @@ fn flush_monitor_and_exit(app: &tauri::AppHandle, code: i32) {
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show Clock-In", true, None::<&str>)?;
     let hide = MenuItem::with_id(app, "hide", "Hide", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Clock-In", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
 
     TrayIconBuilder::new()
@@ -872,9 +880,11 @@ mod tests {
             },
             projects: vec![TimerProject {
                 id: "p1".to_string(),
-                name: "General".to_string(),
+                name: "General Work".to_string(),
                 color: None,
+                is_default: true,
             }],
+            selected_project_id: Some("p1".to_string()),
         }
     }
 
@@ -894,7 +904,8 @@ mod tests {
 
         assert_eq!(json["kind"], "idle");
         assert_eq!(json["user"]["email"], "alex@example.com");
-        assert_eq!(json["projects"][0]["name"], "General");
+        assert_eq!(json["projects"][0]["name"], "General Work");
+        assert_eq!(json["selectedProjectId"], "p1");
     }
 
     #[test]

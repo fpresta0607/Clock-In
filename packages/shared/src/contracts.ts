@@ -22,6 +22,7 @@ export const userSchema = z
     email: z.string().email(),
     name: z.string().min(1),
     organizationId: idSchema,
+    role: z.enum(["admin", "member"]).default("member"),
   })
   .strict();
 
@@ -82,10 +83,14 @@ export const projectListItemSchema = z
     name: z.string().min(1),
     color: z.string().regex(/^#[0-9a-fA-F]{6}$/).nullable().optional(),
     isArchived: z.boolean(),
+    isDefault: z.boolean().default(false),
   })
   .strict();
 
-export const projectListResponseSchema = z.object({ projects: z.array(projectListItemSchema) }).strict();
+export const projectListResponseSchema = z.object({
+  projects: z.array(projectListItemSchema),
+  selectedProjectId: idSchema.nullable().default(null),
+}).strict();
 
 /** Desktop "New project…" affordance; the response reuses the list-item shape. */
 export const projectCreateRequestSchema = z
@@ -93,6 +98,15 @@ export const projectCreateRequestSchema = z
     name: z.string().trim().min(1).max(80),
   })
   .strict();
+
+export const projectUpdateRequestSchema = z
+  .object({
+    name: z.string().trim().min(1).max(80).optional(),
+    isArchived: z.boolean().optional(),
+    replacementProjectId: idSchema.optional(),
+  })
+  .strict()
+  .refine((value) => value.name !== undefined || value.isArchived !== undefined || value.replacementProjectId !== undefined);
 
 const sessionBaseSchema = z
   .object({
@@ -132,7 +146,7 @@ export const sessionSchema = z.discriminatedUnion("status", [
 export const sessionStartRequestSchema = z
   .object({
     clientId: idSchema,
-    projectId: idSchema,
+    projectId: idSchema.optional(),
     description: z.string().max(1_000).optional(),
     startedAt: timestampSchema.optional(),
   })
@@ -460,6 +474,7 @@ export type PathMappingUpdateRequest = z.infer<typeof pathMappingUpdateRequestSc
 export type ProjectCreateRequest = z.infer<typeof projectCreateRequestSchema>;
 export type ProjectListItem = z.infer<typeof projectListItemSchema>;
 export type ProjectListResponse = z.infer<typeof projectListResponseSchema>;
+export type ProjectUpdateRequest = z.infer<typeof projectUpdateRequestSchema>;
 export type ProjectPathMapping = z.infer<typeof projectPathMappingSchema>;
 export type ProvisionAccountRequest = z.infer<typeof provisionAccountRequestSchema>;
 export type ReportFilters = z.infer<typeof reportFiltersSchema>;

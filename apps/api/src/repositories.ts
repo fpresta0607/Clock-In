@@ -7,6 +7,7 @@ export interface ProjectRecord {
   organizationId: string;
   name: string;
   archived: boolean;
+  isDefault?: boolean;
 }
 
 export interface SessionRecord {
@@ -28,6 +29,16 @@ export interface ProjectRepository {
   findForMember(subject: AuthenticatedSubject, projectId: string): Promise<ProjectRecord | null>;
   /** Creates the project and the creator's membership in one transaction. */
   createForMember(subject: AuthenticatedSubject, name: string): Promise<ProjectRecord>;
+  /** The per-member active selection, falling back to the organization default. */
+  preferredForMember?(subject: AuthenticatedSubject): Promise<ProjectRecord | null>;
+  /** Records an active, member-visible project as the caller's selection. */
+  rememberSelection?(subject: AuthenticatedSubject, projectId: string): Promise<void>;
+  /** Admin-only project lifecycle changes, including default replacement. */
+  updateForAdmin?(
+    subject: AuthenticatedSubject,
+    projectId: string,
+    input: { name?: string; archived?: boolean; replacementProjectId?: string },
+  ): Promise<ProjectRecord | null>;
 }
 
 export interface CreateRunningSession {
