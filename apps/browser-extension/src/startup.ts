@@ -8,6 +8,7 @@ import { restoreTally, TALLY_STORAGE_KEY, type Tally } from "./tally.js";
 export const MACHINE_STORAGE_KEY = "spanMachine";
 export const LAST_TICK_STORAGE_KEY = "lastTickAt";
 export const COLLECTION_ID_STORAGE_KEY = "browserCollectionId";
+export const COLLECTION_NAMESPACE_STORAGE_KEY = "browserCollectionNamespace";
 export const CAPTURE_PAUSED_STORAGE_KEY = "spanCapturePaused";
 export const CAPTURE_PAUSED_NAMESPACES_STORAGE_KEY = "spanCapturePausedByNamespace";
 
@@ -17,6 +18,7 @@ export interface StartupStorage {
   machineSnapshot: unknown;
   lastTickAt: number | undefined;
   collectionId: string | undefined;
+  collectionNamespace: string | undefined;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -37,21 +39,27 @@ export function isSpanEvent(value: unknown): value is SpanEvent {
     new Date(candidate["occurredAt"]).toISOString() === candidate["occurredAt"];
 }
 
+export function isIdentityNamespace(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9-]{1,128}:[A-Za-z0-9-]{1,128}$/.test(value);
+}
+
 export function parseStartupStorage(value: unknown, now: number = Date.now()): StartupStorage {
   const stored = record(value);
   if (stored === null) {
-    return { tally: restoreTally(undefined, now), queuedEvents: [], machineSnapshot: undefined, lastTickAt: undefined, collectionId: undefined };
+    return { tally: restoreTally(undefined, now), queuedEvents: [], machineSnapshot: undefined, lastTickAt: undefined, collectionId: undefined, collectionNamespace: undefined };
   }
 
   const queued = stored[OUTBOX_STORAGE_KEY];
   const lastTickAt = stored[LAST_TICK_STORAGE_KEY];
   const collectionId = stored[COLLECTION_ID_STORAGE_KEY];
+  const collectionNamespace = stored[COLLECTION_NAMESPACE_STORAGE_KEY];
   return {
     tally: restoreTally(stored[TALLY_STORAGE_KEY], now),
     queuedEvents: Array.isArray(queued) ? queued.filter(isSpanEvent) : [],
     machineSnapshot: stored[MACHINE_STORAGE_KEY],
     lastTickAt: isTimestamp(lastTickAt) ? lastTickAt : undefined,
     collectionId: typeof collectionId === "string" && collectionId.length > 0 ? collectionId : undefined,
+    collectionNamespace: isIdentityNamespace(collectionNamespace) ? collectionNamespace : undefined,
   };
 }
 

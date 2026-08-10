@@ -169,6 +169,60 @@ describe("background startup", () => {
     expect(spanMessages(harness.port)).toHaveLength(1);
   });
 
+  it("retains a restored lifecycle closure in its original namespace", async () => {
+    vi.useFakeTimers();
+    const now = Date.parse("2026-08-09T12:00:00.000Z");
+    vi.setSystemTime(now);
+    const savedAt = now - 30_000;
+    const harness = backgroundHarness([], undefined, undefined, undefined, undefined, {
+      browserCollectionId: "collection-old",
+      browserCollectionNamespace: "account-old:organization-old",
+      spanOutboxesByNamespace: { "account-old:organization-old": [] },
+      spanMachine: {
+        version: 2,
+        savedAt,
+        active: {
+          ruleId: "rule-old",
+          since: savedAt - 60_000,
+          sessionId: "old-session",
+          lastHeartbeatAt: savedAt,
+          gapSince: null,
+        },
+        suspended: [],
+      },
+    });
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-new",
+      collectionNamespace: "account-new:organization-new",
+      rules: [],
+    } as never);
+    await settle();
+
+    expect(spanMessages(harness.port)).not.toContainEqual(expect.objectContaining({
+      collectionId: "collection-new",
+      event: expect.objectContaining({ externalSessionId: "old-session" }),
+    }));
+
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-old",
+      collectionNamespace: "account-old:organization-old",
+      rules: [],
+    } as never);
+    await settle();
+
+    expect(spanMessages(harness.port)).toContainEqual(expect.objectContaining({
+      collectionId: "collection-old",
+      event: expect.objectContaining({ event: "ended", externalSessionId: "old-session" }),
+    }));
+  });
+
   it("pauses capture until rejected storage can durably retain the saved span", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-09T12:00:00.000Z"));
@@ -202,6 +256,33 @@ describe("background startup", () => {
     finishRetry();
     await settle();
     expect(spanMessages(harness.port)).toHaveLength(1);
+  });
+
+  it("does not send a span that extension storage cannot retain", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-09T12:00:00.000Z"));
+    const harness = backgroundHarness([{ id: 1, url: "https://github.com/acme/project", incognito: false }]);
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      rules: [{ id: "rule-1", pattern: "github.com/acme/*" }],
+    } as never);
+    await settle();
+
+    harness.set.mockImplementation(() => Promise.reject(new Error("storage unavailable")));
+    await vi.advanceTimersByTimeAsync(15_000);
+    harness.alarm.emit({ name: SPAN_ADVANCE_ALARM_NAME } as never);
+    await settle();
+    await vi.advanceTimersByTimeAsync(30_000);
+    harness.alarm.emit({ name: TICK_ALARM_NAME } as never);
+    await settle();
+
+    expect(spanMessages(harness.port)).toEqual([]);
+    expect(lastHostMessage(harness.port, "capture-paused")).toEqual(expect.objectContaining({ collectionId: "collection-one" }));
   });
 
   it("fails closed when the native host omits the identity namespace", async () => {
