@@ -135,6 +135,77 @@ describe("background startup", () => {
     }));
   });
 
+  it("retains a staged legacy closure through an identity migration at capacity", async () => {
+    vi.useFakeTimers();
+    const now = Date.parse("2026-08-09T12:00:00.000Z");
+    vi.setSystemTime(now);
+    const savedAt = now - 30_000;
+    let releaseFirstWrite: () => void = () => undefined;
+    const firstWrite = new Promise<void>((resolve) => { releaseFirstWrite = resolve; });
+    let blockFirstWrite = true;
+    const retainedEmptyNamespaces = Object.fromEntries(Array.from(
+      { length: 7 },
+      (_, index) => [`account-${index}:organization-${index}`, []],
+    ));
+    const harness = backgroundHarness(
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        browserCollectionId: "collection-one",
+        spanOutboxesByNamespace: retainedEmptyNamespaces,
+        spanMachine: {
+          version: 2,
+          savedAt,
+          active: {
+            ruleId: "rule-old",
+            since: savedAt - 60_000,
+            sessionId: "old-session",
+            lastHeartbeatAt: savedAt,
+            gapSince: null,
+          },
+          suspended: [],
+        },
+      },
+      () => {
+        if (blockFirstWrite) {
+          blockFirstWrite = false;
+          return firstWrite;
+        }
+        return Promise.resolve();
+      },
+    );
+
+    await import("./background.js");
+    await settle();
+    harness.portMessages.emit({
+      type: "rules",
+      collectionEnabled: true,
+      collectionId: "collection-one",
+      collectionNamespace: "account-one:organization-one",
+      rules: [],
+    } as never);
+    await settle();
+
+    expect(spanMessages(harness.port)).toEqual([]);
+
+    releaseFirstWrite();
+    await settle();
+
+    const sent = spanMessages(harness.port);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual(expect.objectContaining({
+      collectionId: "collection-one",
+      event: expect.objectContaining({
+        event: "ended",
+        externalSessionId: "old-session",
+        occurredAt: new Date(savedAt).toISOString(),
+      }),
+    }));
+  });
+
   it("does not replay legacy rows already captured by namespaced storage", async () => {
     vi.useFakeTimers();
     const event = {
@@ -223,7 +294,7 @@ describe("background startup", () => {
     }));
   });
 
-  it("pauses capture until rejected storage can durably retain the saved span", async () => {
+  it("persists paused recovery without sending a rejected staged span", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-09T12:00:00.000Z"));
     const harness = backgroundHarness([{ id: 1, url: "https://github.com/acme/project", incognito: false }]);
@@ -250,12 +321,12 @@ describe("background startup", () => {
     expect(lastHostMessage(harness.port, "capture-paused")).toEqual(expect.objectContaining({ collectionId: "collection-one" }));
     expect(harness.set.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
       spanCapturePaused: true,
-      spanOutbox: [expect.objectContaining({ event: "started" })],
+      spanOutbox: [],
     }));
 
     finishRetry();
     await settle();
-    expect(spanMessages(harness.port)).toHaveLength(1);
+    expect(spanMessages(harness.port)).toEqual([]);
   });
 
   it("does not send a span that extension storage cannot retain", async () => {
