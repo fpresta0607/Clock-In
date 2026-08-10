@@ -3,7 +3,7 @@
 //! the local needs-mapping view. Nothing in this module is ever uploaded;
 //! the desktop's copy is a read-only passthrough.
 
-/** Extension-storage shape: the current UTC week and its origin totals. */
+/** Extension-storage shape: the current local week and its origin totals. */
 export interface Tally {
   weekStart: number;
   entries: Record<string, number>;
@@ -14,9 +14,9 @@ export const TALLY_STORAGE_KEY = "unmatchedTally";
 
 export function weekStartAt(now: number): number {
   const date = new Date(now);
-  const daysSinceMonday = (date.getUTCDay() + 6) % 7;
-  date.setUTCDate(date.getUTCDate() - daysSinceMonday);
-  date.setUTCHours(0, 0, 0, 0);
+  const daysSinceMonday = (date.getDay() + 6) % 7;
+  date.setDate(date.getDate() - daysSinceMonday);
+  date.setHours(0, 0, 0, 0);
   return date.getTime();
 }
 

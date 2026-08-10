@@ -94,15 +94,24 @@ describe("tally accumulation", () => {
     expect(tallySnapshot(tally)).toEqual([]);
   });
 
-  it("keeps only the current UTC week's tally", () => {
-    const sunday = Date.UTC(2026, 7, 9, 23, 59, 0);
-    const monday = Date.UTC(2026, 7, 10, 0, 1, 0);
-    const tally = emptyTally(sunday);
-    addFocusSeconds(tally, "quickbooks.com", 75, sunday);
+  it("keeps only the current local week's tally across daylight saving time", () => {
+    const originalTimezone = process.env.TZ;
+    try {
+      process.env.TZ = "America/Chicago";
+      const sunday = Date.parse("2026-03-09T04:59:00.000Z");
+      const monday = Date.parse("2026-03-09T05:01:00.000Z");
+      const tally = emptyTally(sunday);
+      addFocusSeconds(tally, "quickbooks.com", 75, sunday);
 
-    expect(rollTallyIntoCurrentWeek(tally, monday)).toBe(true);
-    expect(tally).toEqual({ weekStart: weekStartAt(monday), entries: {}, remainderMilliseconds: {} });
-    expect(restoreTally({ weekStart: weekStartAt(sunday), entries: { "quickbooks.com": 75 } }, monday))
-      .toEqual({ weekStart: weekStartAt(monday), entries: {}, remainderMilliseconds: {} });
+      expect(weekStartAt(sunday)).toBe(Date.parse("2026-03-02T06:00:00.000Z"));
+      expect(weekStartAt(monday)).toBe(Date.parse("2026-03-09T05:00:00.000Z"));
+      expect(rollTallyIntoCurrentWeek(tally, monday)).toBe(true);
+      expect(tally).toEqual({ weekStart: weekStartAt(monday), entries: {}, remainderMilliseconds: {} });
+      expect(restoreTally({ weekStart: weekStartAt(sunday), entries: { "quickbooks.com": 75 } }, monday))
+        .toEqual({ weekStart: weekStartAt(monday), entries: {}, remainderMilliseconds: {} });
+    } finally {
+      if (originalTimezone === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTimezone;
+    }
   });
 });
