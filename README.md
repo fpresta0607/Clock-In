@@ -35,6 +35,12 @@ Clock-In keeps the manual timer — a human still decides when work starts — b
   tiny binary that spools them locally. A session's working directory resolves to a project,
   so an hour on the leaderboard can name *what* produced it.
 
+Agent-attributed activity also carries a small dial: how much of that tool's plan is left,
+read from the machine's own credentials and never uploaded. The figure describes the account
+signed in to that provider **right now**, not the one that recorded the row beside it, and the
+dial says so when you open it. Anything unreadable — no quota tooling, signed out, a locked
+state file — reads as an explicit unknown rather than an error.
+
 Reports then split every total into **corroborated** and **uncorroborated** seconds. Manual
 time still counts — it just reads differently next to verified time. That's the whole posture:
 padding isn't blocked, it's visible.
@@ -80,7 +86,7 @@ A pnpm workspace. Contracts flow down; nothing flows back up.
 | **`packages/shared`** | Zod contracts shared by every client and the API, invite-code and duration helpers, and the SIQstack brand stylesheet both frontends import. |
 | **`packages/database`** | Drizzle schema, SQL migrations, the connection factory, and the migration runner. |
 | **`apps/api`** | Hono API: env validation, Neon Auth JWT verification, services (sessions, activity, agent sessions, attribution, reports), Drizzle repositories, CSV export. |
-| **`apps/desktop`** | The tray app. React UI over a Tauri 2 Rust host: `monitor.rs` (activity, browser registration, and browser-spool drain), `spool.rs` (shared by both helper binaries), `uploader.rs`, `recovery.rs`, `clock-in-hook`, and `clock-in-browser-host`. |
+| **`apps/desktop`** | The tray app. React UI over a Tauri 2 Rust host: `monitor.rs` (activity, browser registration, and browser-spool drain), `quota.rs` (agent plan headroom), `spool.rs` (shared by both helper binaries), `uploader.rs`, `recovery.rs`, `clock-in-hook`, and `clock-in-browser-host`. |
 | **`apps/browser-extension`** | The Manifest V3 extension for Chrome, Edge, and Firefox variants. It matches URL rules locally and sends verdict-only browser spans through the native host. |
 | **`apps/web`** | The dashboard: sign-up/sign-in, team leaderboard, recent sessions, installer downloads. |
 

@@ -137,6 +137,59 @@ select:disabled { opacity: .55; }
 .session-meta { margin: 9px 0 0; color: var(--text-secondary); font-size: .78rem; font-variant-numeric: tabular-nums; }
 .session-meta.agent-active { color: var(--mint); }
 
+/* The live agent's quota sits beside the line that names it. */
+.agent-active-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; }
+.agent-active-row .session-meta { margin-top: 0; }
+
+/* Quota dial: a radial gauge for how much of an agent's plan is left. The arc
+   is never the only signal — the percentage is drawn inside it and the button
+   carries the whole reading as its label. */
+.quota { display: grid; gap: 6px; min-width: 0; justify-items: start; text-align: left; }
+.quota-trigger {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  border-radius: var(--radius);
+  padding: 2px 4px 2px 2px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: .7rem;
+  letter-spacing: normal;
+  text-align: left;
+}
+.quota-trigger:hover { background: rgba(163, 179, 194, 0.1); }
+.quota-face { flex: none; display: block; }
+.quota-track { stroke: rgba(163, 179, 194, 0.22); }
+.quota-arc { stroke: var(--accent-green); }
+.quota-figure { fill: #ffffff; font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.quota.is-low .quota-arc { stroke: var(--red); }
+.quota.is-low .quota-figure { fill: #ffb4aa; }
+/* Unknown reads as unknown, not as empty: a dashed ring and an em dash. */
+.quota.is-unknown .quota-track { stroke: rgba(163, 179, 194, 0.35); stroke-dasharray: 2 3; }
+.quota.is-unknown .quota-figure { fill: var(--text-secondary); }
+.quota-meta { display: grid; min-width: 0; }
+.quota-plan { overflow: hidden; color: #ffffff; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.quota.is-unknown .quota-plan { color: var(--text-secondary); font-weight: 400; }
+.quota-window { overflow: hidden; color: var(--text-secondary); font-size: .66rem; text-overflow: ellipsis; white-space: nowrap; }
+
+.quota-detail { display: grid; gap: 4px; max-width: 15rem; border: 1px solid var(--glass-border); border-radius: 6px; padding: 7px 9px; background: rgba(3, 5, 10, 0.6); font-size: .7rem; overflow-wrap: anywhere; }
+.quota-detail[hidden] { display: none; }
+.quota-windows { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; }
+.quota-windows li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; color: var(--text-secondary); }
+.quota-windows li.is-binding { color: #ffffff; }
+.quota-windows li.is-binding .quota-window-value { color: var(--mint); }
+.quota-window-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quota-window-value { flex: none; font-variant-numeric: tabular-nums; }
+.quota-window-reset { flex-basis: 100%; color: var(--text-secondary); font-size: .64rem; }
+/* Whose plan this is. First line of the detail, because a dial that moved
+   because the login changed must never read as work that happened. */
+.quota-account { margin: 0 0 1px; padding-bottom: 4px; border-bottom: 1px solid rgba(163, 179, 194, 0.12); color: #ffffff; font-size: .66rem; line-height: 1.45; word-break: break-word; }
+.quota-note, .quota-reason { margin: 0; color: var(--text-secondary); line-height: 1.45; }
+.quota-reason { font-family: var(--brand-mono); font-size: .64rem; word-break: break-word; }
+
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 11px; }
 .panel-head h2 { font-size: .92rem; }
 
@@ -158,6 +211,11 @@ select:disabled { opacity: .55; }
 .app-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .app-icon { display: grid; width: 1.25rem; height: 1.25rem; flex: none; place-items: center; border-radius: .35rem; overflow: hidden; }
 .app-icon svg { display: block; width: 100%; height: 100%; }
+/* Agent rows carry a dial, so they centre rather than sit on a text baseline.
+   At the window's 320px floor the dials drop to their own line instead of
+   pushing the duration off the card. */
+.app-row.is-agent { flex-wrap: wrap; align-items: center; }
+.app-quotas { display: flex; flex: 0 1 auto; flex-wrap: wrap; gap: 8px; min-width: 0; }
 .app-active { color: var(--mint); font-size: .74rem; }
 .app-duration { flex: none; color: var(--mint); font-variant-numeric: tabular-nums; }
 
@@ -218,7 +276,14 @@ select:disabled { opacity: .55; }
   .signal-button:not(:disabled):hover, .stop-button:not(:disabled):hover { filter: brightness(1.1); transform: translateY(-1px); }
 }
 
-@media (forced-colors: active) { input, select, textarea { forced-color-adjust: auto; } .titlebar { border-bottom: 1px solid CanvasText; } }
+@media (forced-colors: active) {
+  input, select, textarea { forced-color-adjust: auto; }
+  .titlebar { border-bottom: 1px solid CanvasText; }
+  /* System colours drop out of SVG strokes, so the dial names its own. */
+  .quota-track { stroke: GrayText; }
+  .quota-arc, .quota.is-low .quota-arc { stroke: Highlight; }
+  .quota-figure, .quota.is-low .quota-figure, .quota.is-unknown .quota-figure { fill: CanvasText; }
+}
 
 .onboarding-panel { width: min(100%, 370px); text-align: center; }
 .onboarding-panel h1 { font-size: 1.12rem; line-height: 1.4; }

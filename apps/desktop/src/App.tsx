@@ -5,16 +5,19 @@ import {
   bridgeError,
   defaultBridge,
   type BrowserHealth,
+  type AgentQuota,
   type MeStats,
   type MeStatsApp,
   type MonitorSettings,
   type MonitorStatus,
   type OrganizationOverview,
   type PathMapping,
+  type QuotaSnapshot,
   type SettingsPatch,
   type TallyEntry,
   type TimerBridge,
 } from "./bridge.js";
+import { QuotaDial } from "./QuotaDial.js";
 import { formatDuration } from "@clock-in/shared";
 import { narrowedPattern, planRule } from "./patterns.js";
 import {
@@ -43,6 +46,21 @@ const CALENDAR_TIME_ZONE_POLL_MS = 60_000;
 /// Browser cards must flip to "connected" on their own while onboarding is on
 /// screen, so that screen polls faster than the steady-state monitor poll.
 const ONBOARDING_POLL_MS = 2_500;
+
+/// Quota polls are this cheap on purpose: the host answers every one of them
+/// from cache and only re-reads a provider once its own TTL lapses, so this
+/// interval decides how fast a fresh reading reaches the dial, not how often
+/// the machine is asked.
+const QUOTA_POLL_MS = 15_000;
+
+/// What the UI holds when the host cannot answer at all — an older desktop
+/// build with no `quota_status` command, or a signed-out session. Every dial
+/// then draws its unknown face instead of waiting forever on a reading.
+const QUOTA_UNREADABLE: QuotaSnapshot = { status: "unavailable", checkedAt: null, detail: null, providers: [] };
+
+/// The reading for one agent source (`claude_code` → the `claude` provider).
+const quotaFor = (snapshot: QuotaSnapshot | undefined, source: string): AgentQuota | undefined =>
+  snapshot?.providers.find((provider) => provider.sources.includes(source));
 
 const AGENT_SOURCE_LABELS: Record<string, string> = {
   claude_code: "Claude Code",
@@ -193,6 +211,9 @@ type AppRow = {
   icon: ActivityAppIconName;
   durationSeconds: number;
   agent: boolean;
+  /// Agent sources the row is attributed to — one dial each. Empty for
+  /// ordinary applications, which have no plan to report.
+  sources: readonly string[];
 };
 
 const TOP_APP_ROWS = 8;
@@ -211,7 +232,7 @@ const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
       agentSources.add(agentSource);
       continue;
     }
-    rows.push({ key: app.processName, label: friendlyAppName(app.processName), icon: activityAppIcon(app.processName), durationSeconds: app.durationSeconds, agent: false });
+    rows.push({ key: app.processName, label: friendlyAppName(app.processName), icon: activityAppIcon(app.processName), durationSeconds: app.durationSeconds, agent: false, sources: [] });
   }
   if (agentSeconds > 0) {
     const sources = [...agentSources];
@@ -221,12 +242,13 @@ const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
       icon: sources.length === 1 ? AGENT_SOURCE_ICONS[sources[0] ?? ""] ?? "agent" : "agent",
       durationSeconds: agentSeconds,
       agent: true,
+      sources,
     });
   }
   rows.sort((a, b) => b.durationSeconds - a.durationSeconds || a.label.localeCompare(b.label));
   if (rows.length <= TOP_APP_ROWS) return rows;
   const rest = rows.slice(TOP_APP_ROWS).reduce((sum, row) => sum + row.durationSeconds, 0);
-  return [...rows.slice(0, TOP_APP_ROWS), { key: "everything-else", label: "Everything else", icon: "generic-app", durationSeconds: rest, agent: false }];
+  return [...rows.slice(0, TOP_APP_ROWS), { key: "everything-else", label: "Everything else", icon: "generic-app", durationSeconds: rest, agent: false, sources: [] }];
 };
 
 export type StatsRange = "today" | "week";
@@ -339,6 +361,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [conflictBusy, setConflictBusy] = useState(false);
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [monitorStatus, setMonitorStatus] = useState<MonitorStatus | undefined>();
+  const [quota, setQuota] = useState<QuotaSnapshot | undefined>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [statsRange, setStatsRange] = useState<StatsRange>("today");
   const [statsCalendarVersion, setStatsCalendarVersion] = useState(0);
@@ -435,6 +458,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setOverview(undefined);
     setOverviewError(undefined);
     setMonitorStatus(undefined);
+    setQuota(undefined);
     setStats(undefined);
     setStatsError(undefined);
     setSettings(undefined);
@@ -826,6 +850,31 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     const timer = window.setInterval(poll, ONBOARDING_POLL_MS);
     return () => { active = false; window.clearInterval(timer); };
   }, [bridge, onboardingActive]);
+
+  // Agent quota is decoration on attributed activity, never a gate on it. The
+  // host answers from its cache and re-reads providers on its own schedule, so
+  // this poll cannot slow a render, and a host that cannot answer at all just
+  // leaves every dial in its unknown state.
+  useEffect(() => {
+    if (state.kind === "booting" || state.kind === "sign-in") return undefined;
+    let active = true;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const epoch = accountEpoch.current;
+    const poll = (): void => {
+      void service.quotaStatus().then(
+        (snapshot) => {
+          if (active && isCurrent(service, generation, epoch)) setQuota(snapshot);
+        },
+        () => {
+          if (active && isCurrent(service, generation, epoch)) setQuota(QUOTA_UNREADABLE);
+        },
+      );
+    };
+    poll();
+    const timer = window.setInterval(poll, QUOTA_POLL_MS);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [bridge, state.kind === "booting" || state.kind === "sign-in"]);
 
   // Settings and path mappings only load while the settings overlay is open.
   useEffect(() => {
@@ -1725,6 +1774,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       ? monitorStatus.running ? "on" : "paused"
       : "off";
   const appRows = stats === undefined ? [] : buildAppRows(stats.apps);
+  const quotaPending = quota === undefined || quota.status === "pending";
 
   return (
     <main className={`app-shell ${state.kind}`}>
@@ -1823,9 +1873,16 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
               <p className="session-meta" data-testid="idle-trimmed">Idle trimmed so far {formatDuration(monitorStatus.sessionIdleSeconds)}</p>
             )}
             {monitorStatus?.enabled && monitorStatus.agentActive && (
-              <p className="session-meta agent-active" data-testid="agent-active">
-                {sourceLabel(monitorStatus.agentActive.source)} active - idle trim paused
-              </p>
+              <div className="agent-active-row">
+                <p className="session-meta agent-active" data-testid="agent-active">
+                  {sourceLabel(monitorStatus.agentActive.source)} active - idle trim paused
+                </p>
+                <QuotaDial
+                  agentLabel={sourceLabel(monitorStatus.agentActive.source)}
+                  quota={quotaFor(quota, monitorStatus.agentActive.source)}
+                  pending={quotaPending}
+                />
+              </div>
             )}
             {state.kind === "running" && state.error && <p className="form-error" role="alert">{state.error}</p>}
             {awayDecision && (
@@ -1884,7 +1941,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
               ) : (
                 <ul className="app-list">
                   {appRows.map((row) => (
-                    <li key={row.key} className="app-row">
+                    <li key={row.key} className={row.agent ? "app-row is-agent" : "app-row"}>
                       <span className="app-name">
                         <ActivityAppIcon icon={row.icon} label={row.label} />
                         <span className="app-label">
@@ -1892,6 +1949,18 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                           {row.agent && monitorStatus?.agentActive && <span className="app-active"> · active now</span>}
                         </span>
                       </span>
+                      {row.sources.length > 0 && (
+                        <div className="app-quotas">
+                          {row.sources.map((source) => (
+                            <QuotaDial
+                              key={source}
+                              agentLabel={sourceLabel(source)}
+                              quota={quotaFor(quota, source)}
+                              pending={quotaPending}
+                            />
+                          ))}
+                        </div>
+                      )}
                       <span className="app-duration">{formatCompact(row.durationSeconds)}</span>
                     </li>
                   ))}

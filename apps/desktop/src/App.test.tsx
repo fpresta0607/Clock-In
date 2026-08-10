@@ -113,6 +113,43 @@ const meStats = {
   sites: [],
 };
 
+/// One provider readable, one signed out — the mix the dials have to survive.
+const quotaSnapshot = {
+  status: "ready" as const,
+  checkedAt: "2026-08-06T15:00:00.000Z",
+  detail: null,
+  providers: [
+    {
+      provider: "claude",
+      label: "Claude",
+      sources: ["claude_code"],
+      status: "known" as const,
+      account: { email: "dev@example.com", organization: null },
+      plan: "max",
+      percentRemaining: 72,
+      bindingWindowId: "seven_day",
+      windows: [{ id: "seven_day", label: "week", kind: "weekly", percentRemaining: 72, resetsAt: "2026-08-13T21:00:00.000Z" }],
+      detail: null,
+      reason: null,
+      stale: false,
+    },
+    {
+      provider: "codex",
+      label: "Codex",
+      sources: ["codex"],
+      status: "unknown" as const,
+      account: null,
+      plan: null,
+      percentRemaining: null,
+      bindingWindowId: null,
+      windows: [],
+      detail: "Sign in to this tool to read its quota.",
+      reason: "codex sign-in required",
+      stale: false,
+    },
+  ],
+};
+
 const mapping = {
   id: "00000000-0000-4000-8000-000000000400",
   kind: "path_prefix" as const,
@@ -146,6 +183,8 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   // The default is "monitoring unsupported": every monitor surface stays
   // hidden, which is what the legacy tests above implicitly rely on.
   monitorStatus: vi.fn().mockRejectedValue({ kind: "unknown", message: "Monitoring unavailable" }),
+  // Likewise "no quota tooling on this machine": every dial reads unknown.
+  quotaStatus: vi.fn().mockRejectedValue({ kind: "unknown", message: "Quota unavailable" }),
   hookRegister: vi.fn().mockResolvedValue({ status: "registered", configPath: "C:/Users/dev/.claude/settings.json" }),
   browserRepair: vi.fn().mockResolvedValue({ browser: "chrome", label: "Chrome", state: "registered", storeUrl: "https://chromewebstore.google.com/" }),
   browserOpenStorePage: vi.fn().mockResolvedValue(undefined),
@@ -1210,6 +1249,39 @@ describe("App", () => {
     expect(await screen.findByTestId("agent-active")).toHaveTextContent("Kimi Code active - idle trim paused");
   });
 
+  it("puts the working agent's remaining quota beside the running timer", async () => {
+    const bridge = runningBridge({
+      monitorStatus: vi.fn().mockResolvedValue({
+        ...awayStatus,
+        away: null,
+        agentActive: { source: "claude_code", since: "2026-08-06T14:40:00.000Z" },
+      }),
+      quotaStatus: vi.fn().mockResolvedValue(quotaSnapshot),
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByTestId("agent-active");
+    expect(await screen.findByRole("button", { name: /Claude Code quota: 72% remaining on the Max plan/ })).toBeInTheDocument();
+  });
+
+  it("never waits on a quota reading to show the running timer", async () => {
+    // A host that never answers: the timer, its elapsed clock, and the agent
+    // line are all on screen anyway, with the dial in its checking state.
+    const bridge = runningBridge({
+      quotaStatus: vi.fn().mockReturnValue(new Promise(() => undefined)),
+      monitorStatus: vi.fn().mockResolvedValue({
+        ...awayStatus,
+        away: null,
+        agentActive: { source: "claude_code", since: "2026-08-06T14:40:00.000Z" },
+      }),
+    });
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByTestId("elapsed-time")).toBeInTheDocument();
+    expect(await screen.findByTestId("agent-active")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Claude Code quota unknown\. Checking this tool's quota…/ })).toBeInTheDocument();
+  });
+
   it("does not raise the away prompt while the user is still away", async () => {
     const bridge = runningBridge({
       monitorStatus: vi.fn().mockResolvedValue({ ...awayStatus, away: { ...awayStatus.away, ongoing: true } }),
@@ -1428,6 +1500,69 @@ describe("App", () => {
     expect(within(panel).queryByText(/claude\.exe/)).not.toBeInTheDocument();
     const chromeRow = within(panel).getByText("Google Chrome").closest("li");
     expect(chromeRow).toHaveTextContent("2h");
+  });
+
+  it("shows a live quota dial beside an agent-attributed row", async () => {
+    const bridge = bridgeFor({
+      quotaStatus: vi.fn().mockResolvedValue(quotaSnapshot),
+      meStats: vi.fn().mockResolvedValue({ ...meStats, apps: [{ processName: "claude.exe", durationSeconds: 3_600 }] }),
+    });
+    render(<App bridge={bridge} />);
+
+    const panel = await screen.findByRole("region", { name: "Today so far" });
+    const dial = await within(panel).findByRole("button", { name: /Claude Code quota: 72% remaining on the Max plan, week window/ });
+    expect(dial).toHaveTextContent("72%");
+    expect(dial).toHaveTextContent("Max");
+    // The row itself still reads as it did; the dial is beside it, not instead.
+    expect(dial.closest("li")).toHaveTextContent("1h");
+  });
+
+  it("says whose sign-in the dial is reporting, not the row's recorder", async () => {
+    const person = userEvent.setup();
+    const bridge = bridgeFor({
+      quotaStatus: vi.fn().mockResolvedValue(quotaSnapshot),
+      meStats: vi.fn().mockResolvedValue({ ...meStats, apps: [{ processName: "claude.exe", durationSeconds: 3_600 }] }),
+    });
+    render(<App bridge={bridge} />);
+
+    const panel = await screen.findByRole("region", { name: "Today so far" });
+    await person.click(await within(panel).findByRole("button", { name: /Claude Code quota: 72%/ }));
+    expect(within(panel).getByText("Signed in as dev@example.com on this machine now.")).toBeVisible();
+  });
+
+  it("gives every folded agent CLI its own dial, readable or not", async () => {
+    const bridge = bridgeFor({
+      quotaStatus: vi.fn().mockResolvedValue(quotaSnapshot),
+      meStats: vi.fn().mockResolvedValue({
+        ...meStats,
+        apps: [
+          { processName: "claude.exe", durationSeconds: 3_600 },
+          { processName: "codex.exe", durationSeconds: 1_800 },
+        ],
+      }),
+    });
+    render(<App bridge={bridge} />);
+
+    const panel = await screen.findByRole("region", { name: "Today so far" });
+    const row = (await within(panel).findByText("Agent CLIs")).closest("li") as HTMLElement;
+    expect(await within(row).findByRole("button", { name: /Claude Code quota: 72% remaining/ })).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: /Codex quota unknown\. Sign in to this tool to read its quota\./ })).toBeInTheDocument();
+  });
+
+  it("leaves the dial unknown, and everything else working, when quota cannot be read", async () => {
+    // The default bridge rejects `quotaStatus`, which is what a host with no
+    // quota tooling does.
+    const bridge = bridgeFor({
+      meStats: vi.fn().mockResolvedValue({ ...meStats, apps: [{ processName: "claude.exe", durationSeconds: 3_600 }] }),
+    });
+    render(<App bridge={bridge} />);
+
+    const panel = await screen.findByRole("region", { name: "Today so far" });
+    const dial = await within(panel).findByRole("button", { name: /Claude Code quota unknown\. No quota reading for this tool yet\./ });
+    expect(dial).toHaveTextContent("—");
+    // No error card, and the row's own numbers are untouched.
+    expect(within(panel).queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(panel).getByText("1h")).toBeInTheDocument();
   });
 
   it("names a single agent CLI row from its source label", async () => {
