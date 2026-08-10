@@ -5,7 +5,6 @@ use std::path::Path;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SigningConfiguration {
-    pub bundle_active: bool,
     pub updater_artifacts_requested: bool,
     pub updater_public_key: Option<String>,
     pub windows_certificate_thumbprint: Option<String>,
@@ -20,10 +19,6 @@ pub fn effective_tauri_config(mut base: Value, override_config: Option<&Value>) 
 
 pub fn signing_configuration(config: &Value) -> SigningConfiguration {
     SigningConfiguration {
-        bundle_active: config
-            .pointer("/bundle/active")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
         updater_artifacts_requested: config
             .pointer("/bundle/createUpdaterArtifacts")
             .and_then(Value::as_bool)
@@ -52,10 +47,6 @@ pub fn validate_build_signing(
                 "A local unsigned build cannot create production updater artifacts.".to_string()
             });
     }
-    if !config.bundle_active {
-        return Ok(());
-    }
-
     validate_updater_key(
         get("TAURI_SIGNING_PRIVATE_KEY"),
         get("TAURI_SIGNING_PRIVATE_KEY_PASSWORD"),

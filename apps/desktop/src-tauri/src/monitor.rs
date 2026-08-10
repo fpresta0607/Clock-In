@@ -1214,6 +1214,7 @@ pub struct Monitor {
     paths: Mutex<MonitorPaths>,
     identity: Mutex<Option<spool::EvidenceIdentity>>,
     recording: Arc<AtomicBool>,
+    capture_paused: Arc<AtomicBool>,
     identity_invalidated: Arc<AtomicBool>,
     invalid_session_handler: Arc<Mutex<Option<InvalidSessionHandler>>>,
     client: ApiClient,
@@ -1249,6 +1250,7 @@ impl Monitor {
             }),
             identity: Mutex::new(None),
             recording: Arc::new(AtomicBool::new(false)),
+            capture_paused: Arc::new(AtomicBool::new(false)),
             identity_invalidated: Arc::new(AtomicBool::new(false)),
             invalid_session_handler: Arc::new(Mutex::new(None)),
             client: config.client,
@@ -1265,7 +1267,7 @@ impl Monitor {
     }
 
     pub async fn is_running(&self) -> bool {
-        self.tasks.lock().await.is_some()
+        !self.capture_paused.load(Ordering::SeqCst) && self.tasks.lock().await.is_some()
     }
 
     /// Starts the poll and upload tasks. Idempotent; a no-op when running.
@@ -1277,6 +1279,8 @@ impl Monitor {
         let Some(identity) = lock(&self.identity).clone() else {
             return;
         };
+        self.capture_paused.store(false, Ordering::SeqCst);
+        self.recording.store(true, Ordering::SeqCst);
         let paths = lock(&self.paths).clone();
 
         #[cfg(windows)]
@@ -1292,6 +1296,7 @@ impl Monitor {
                 lock(&self.recovery_path).clone(),
                 Arc::clone(&self.upload_now),
                 Arc::clone(&self.recording),
+                Arc::clone(&self.capture_paused),
             )))
         };
         #[cfg(not(windows))]
@@ -1330,7 +1335,7 @@ impl Monitor {
         };
         if let Some(segment) = closed {
             if self.recording.load(Ordering::SeqCst) && lock(&self.identity).is_some() {
-                append_segment_line(&lock(&self.paths).segments_path, &segment, &device_id);
+                let _ = append_segment_line(&lock(&self.paths).segments_path, &segment, &device_id);
             }
         }
     }
@@ -1345,6 +1350,7 @@ impl Monitor {
         };
         *lock(&self.recovery_path) = evidence.recovery_path;
         *lock(&self.identity) = Some(identity);
+        self.capture_paused.store(false, Ordering::SeqCst);
         self.recording.store(true, Ordering::SeqCst);
         self.identity_invalidated.store(false, Ordering::SeqCst);
         self.clear_identity_state();
@@ -1352,6 +1358,7 @@ impl Monitor {
 
     pub async fn deactivate_identity(&self) {
         self.stop().await;
+        self.capture_paused.store(false, Ordering::SeqCst);
         self.recording.store(false, Ordering::SeqCst);
         *lock(&self.identity) = None;
         self.clear_identity_state();
@@ -1395,10 +1402,10 @@ impl Monitor {
         if let Err(reason) = next.validate() {
             return Err(BridgeError::new(ErrorKind::Validation, reason));
         }
-        let was_running = self.is_running().await;
+        let was_enabled = self.is_enabled();
         lock(&self.shared).settings = next.clone();
         persist_settings(&self.settings_path, &next)?;
-        match (next.enabled, was_running) {
+        match (next.enabled, was_enabled) {
             (true, false) => self.start().await,
             (false, true) => self.stop().await,
             _ => {}
@@ -1557,16 +1564,18 @@ pub(crate) fn persist_settings(path: &Path, settings: &MonitorSettings) -> ApiRe
 
 /// Appends one closed segment to the segment spool. Spool failures are
 /// logged without the payload (paths and process names stay out of logs).
-fn append_segment_line(path: &Path, segment: &Segment, device_id: &str) {
+fn append_segment_line(path: &Path, segment: &Segment, device_id: &str) -> bool {
     let record = SegmentRecord::from_segment(segment, device_id);
     let mut line = match serde_json::to_vec(&record) {
         Ok(line) => line,
-        Err(_) => return,
+        Err(_) => return false,
     };
     line.push(b'\n');
     if spool::append_line(path, &line, spool::MAX_SPOOL_BYTES).is_err() {
         eprintln!("clock-in: could not persist an activity segment");
+        return false;
     }
+    true
 }
 
 /// The 30-second poll task: detect sleep/clock gaps, drain pushed session
@@ -1581,6 +1590,7 @@ async fn poll_loop(
     recovery_path: PathBuf,
     upload_now: Arc<Notify>,
     recording: Arc<AtomicBool>,
+    capture_paused: Arc<AtomicBool>,
 ) {
     let source = platform::Poller::new();
     let mut previous: Option<TickReading> = None;
@@ -1612,7 +1622,10 @@ async fn poll_loop(
             (closed, shared.settings.device_id.clone())
         };
         for segment in &closed {
-            append_segment_line(&segments_path, segment, &device_id);
+            if !append_segment_line(&segments_path, segment, &device_id) {
+                capture_paused.store(true, Ordering::SeqCst);
+                return;
+            }
         }
 
         enforce_auto_stop(
@@ -2847,6 +2860,41 @@ mod tests {
         assert!(status.pending_suggestion.is_none());
         assert!(status.agent_active.is_none());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn storage_backpressure_pauses_capture_without_stopping_uploads() {
+        let dir = std::env::temp_dir().join(format!(
+            "clock-in-monitor-storage-backpressure-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let client = ApiClient::new(
+            "http://127.0.0.1:9/auth".to_string(),
+            "http://127.0.0.1:9".to_string(),
+        )
+        .expect("client builds");
+        let monitor = Monitor::new(MonitorConfig {
+            client,
+            settings_path: dir.join("settings.json"),
+            segments_path: dir.join("segments-spool.jsonl"),
+            agent_path: dir.join("agent-spool.jsonl"),
+            browser_dir: dir.clone(),
+            recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
+            recovery_path: dir.join("recovery.json"),
+        });
+        monitor.recording.store(true, Ordering::SeqCst);
+        monitor.capture_paused.store(true, Ordering::SeqCst);
+        let upload = tokio::spawn(std::future::pending());
+        *monitor.tasks.lock().await = Some(MonitorTasks { poll: None, upload });
+
+        let status = monitor.status().await;
+        assert!(status.enabled);
+        assert!(!status.running);
+        assert!(monitor.recording.load(Ordering::SeqCst));
+
+        monitor.stop().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
 

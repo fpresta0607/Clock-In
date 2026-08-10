@@ -24,7 +24,6 @@ fn updater_public_key() -> String {
 
 fn production_config() -> SigningConfiguration {
     SigningConfiguration {
-        bundle_active: true,
         updater_artifacts_requested: false,
         updater_public_key: Some(updater_public_key()),
         windows_certificate_thumbprint: None,
@@ -50,10 +49,27 @@ fn helper_overrides_merge_with_the_base_release_configuration() {
     let effective = release_signing::effective_tauri_config(base, Some(&helper_override));
     let config = release_signing::signing_configuration(&effective);
 
-    assert!(!config.bundle_active);
     assert_eq!(config.updater_public_key.as_deref(), Some("configured-key"));
-    release_signing::validate_build_signing(true, "windows", &config, |_| None)
-        .expect("non-bundling helper compilation does not require release credentials");
+    let error = release_signing::validate_build_signing(true, "linux", &config, |_| None)
+        .expect_err("a configuration-only helper override cannot skip release signing");
+    assert!(error.contains("TAURI_SIGNING_PRIVATE_KEY"));
+}
+
+#[test]
+fn direct_release_builds_cannot_disable_signing_with_tauri_config() {
+    let base = serde_json::json!({
+        "bundle": { "active": true },
+        "plugins": { "updater": { "pubkey": updater_public_key() } }
+    });
+    let override_config = serde_json::json!({ "bundle": { "active": false } });
+    let config = release_signing::signing_configuration(&release_signing::effective_tauri_config(
+        base,
+        Some(&override_config),
+    ));
+
+    let error = release_signing::validate_build_signing(true, "linux", &config, |_| None)
+        .expect_err("a direct release cannot disable its signing gate through TAURI_CONFIG");
+    assert!(error.contains("TAURI_SIGNING_PRIVATE_KEY"));
 }
 
 #[test]
