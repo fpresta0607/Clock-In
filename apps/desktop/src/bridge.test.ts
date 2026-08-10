@@ -47,6 +47,7 @@ describe("defaultBridge", () => {
     lastUploadAt: "2026-08-06T15:00:00.000Z",
     segmentBacklog: 3,
     agentBacklog: 1,
+    browserCapturePaused: false,
     hooks: [{ source: "claude_code", detected: true, installed: true, configPath: "C:/Users/dev/.claude/settings.json" }],
     browsers: [
       { browser: "chrome", label: "Chrome", state: "connected", storeUrl: "https://chromewebstore.google.com/" },

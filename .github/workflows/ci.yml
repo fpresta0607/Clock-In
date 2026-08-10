@@ -59,7 +59,7 @@ jobs:
             -o "Dir::State::Lists=$deps/lists" \
             -o "Dir::Cache=$deps/cache" \
             -o "Dir::Cache::Archives=$deps/cache/archives"
-          apt-get --download-only --yes install \
+          sudo apt-get --download-only --yes install \
             -o "Dir::State::Lists=$deps/lists" \
             -o "Dir::Cache=$deps/cache" \
             -o "Dir::Cache::Archives=$deps/cache/archives" \

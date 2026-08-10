@@ -910,16 +910,23 @@ describe("App", () => {
   });
 
   it("joins a teammate's workspace from settings", async () => {
-    const orgJoin = vi.fn().mockResolvedValue({
+    const joinedOverview = {
       organization: { id: "00000000-0000-4000-8000-000000000901", name: "Joined Team", inviteCode: "PQRTU-VWXY3" },
       entries: [{ rank: 1, user: { id: user.id, name: user.name }, durationSeconds: 0, sessionCount: 0 }],
+    };
+    let joined = false;
+    const orgJoin = vi.fn().mockImplementation(async () => {
+      joined = true;
+      return joinedOverview;
     });
     const bridge = bridgeFor({
       orgJoin,
-      orgOverview: vi.fn().mockResolvedValue({
-        organization: { id: "00000000-0000-4000-8000-000000000900", name: "Solo", inviteCode: "ACDEF-GHJKM" },
-        entries: [],
-      }),
+      orgOverview: vi.fn().mockImplementation(async () => joined
+        ? joinedOverview
+        : {
+            organization: { id: "00000000-0000-4000-8000-000000000900", name: "Solo", inviteCode: "ACDEF-GHJKM" },
+            entries: [],
+          }),
     });
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
@@ -929,8 +936,11 @@ describe("App", () => {
     await person.click(within(dialog).getByRole("button", { name: "Join" }));
 
     await waitFor(() => expect(orgJoin).toHaveBeenCalledWith("acdef-ghjkm"));
-    expect(await within(dialog).findByText("Joined Team")).toBeInTheDocument();
-    expect(within(dialog).getByRole("button", { name: "Join" })).toBeEnabled();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Settings" })).not.toBeInTheDocument());
+
+    const joinedDialog = await openSettings(person);
+    expect(await within(joinedDialog).findByText("Joined Team")).toBeInTheDocument();
+    expect(within(joinedDialog).getByRole("button", { name: "Join" })).toBeEnabled();
   });
 
   it("clears the previous workspace when post-move refresh fails", async () => {
