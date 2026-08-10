@@ -205,11 +205,14 @@ struct RulesFile {
 /// The current rule set. A missing or unparseable file fails closed to no
 /// rules: the extension then matches nothing, which is silence, not leakage.
 fn load_rules(path: &Path) -> Vec<Rule> {
-    std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<RulesFile>(&bytes).ok())
-        .map(|file| file.rules)
-        .unwrap_or_default()
+    spool::with_lock(path, || {
+        Ok(std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<RulesFile>(&bytes).ok())
+            .map(|file| file.rules)
+            .unwrap_or_default())
+    })
+    .unwrap_or_default()
 }
 
 /// The verdict payload the extension emits for a rule hit. `event` reuses the
@@ -435,6 +438,65 @@ mod tests {
         assert_eq!(rules[0]["id"], "r1");
         assert_eq!(rules[0]["pattern"], "github.com/acme/*");
         assert_eq!(rules[1]["pattern"], "*.figma.com/files/*");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_rules_waits_for_an_in_progress_rules_replacement() {
+        let dir = temp_dir("rules-replacement");
+        let paths = configured_paths(&dir);
+        std::fs::write(
+            &paths.rules,
+            r#"{"rules":[{"id":"old","pattern":"github.com/acme/*"}]}"#,
+        )
+        .expect("old rules write");
+        let replacement = dir.join("browser-rules.next.json");
+        std::fs::write(
+            &replacement,
+            r#"{"rules":[{"id":"new","pattern":"*.figma.com/files/*"}]}"#,
+        )
+        .expect("new rules write");
+        let rules_path = paths.rules.clone();
+        let (removed_tx, removed_rx) = std::sync::mpsc::sync_channel(0);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+        let writer = std::thread::spawn(move || {
+            spool::with_lock(&rules_path, || {
+                std::fs::remove_file(&rules_path)?;
+                removed_tx
+                    .send(())
+                    .map_err(|_| io::Error::other("test did not await replacement"))?;
+                resume_rx
+                    .recv()
+                    .map_err(|_| io::Error::other("test did not resume replacement"))?;
+                std::fs::rename(&replacement, &rules_path)
+            })
+        });
+        removed_rx.recv().expect("writer removed the old rules");
+
+        let reader_dir = dir.clone();
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+        let reader = std::thread::spawn(move || {
+            let paths = HostPaths::in_dir(&reader_dir);
+            let mut out = Vec::new();
+            let reply = dispatch(br#"{"type":"get-rules"}"#, &paths, &mut out)
+                .map(|()| reply_values(&out));
+            reply_tx.send(reply).expect("test receives the reply");
+        });
+
+        assert!(reply_rx
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+        resume_tx.send(()).expect("writer resumes");
+        writer.join().expect("writer joins").expect("writer succeeds");
+        let replies = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("reader replies")
+            .expect("dispatch succeeds");
+        reader.join().expect("reader joins");
+
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0]["rules"][0]["id"], "new");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
