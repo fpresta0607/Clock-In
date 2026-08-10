@@ -244,6 +244,7 @@ integration(integrationDescription, () => {
       error: { code: "forbidden", message: expect.stringContaining("claim the first admin role") },
     });
 
+    if (databaseUrl === undefined) throw new Error("The smoke database URL is required for this test.");
     const firstClaimant = createDatabase(databaseUrl, { max: 1 });
     const secondClaimant = createDatabase(databaseUrl, { max: 1 });
     try {

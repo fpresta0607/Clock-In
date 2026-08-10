@@ -17,6 +17,14 @@ async function requestBody(context: { req: { json(): Promise<unknown> } }): Prom
   }
 }
 
+function projectUpdateInput(input: z.infer<typeof projectUpdateRequestSchema>): Parameters<typeof updateProject>[3] {
+  return {
+    ...(input.name === undefined ? {} : { name: input.name }),
+    ...(input.isArchived === undefined ? {} : { isArchived: input.isArchived }),
+    ...(input.replacementProjectId === undefined ? {} : { replacementProjectId: input.replacementProjectId }),
+  };
+}
+
 export function createProjectRoutes(repository: ProjectRepository): Hono<ApiEnvironment> {
   const routes = new Hono<ApiEnvironment>();
   routes.get("/", async (context) => context.json(projectListResponseSchema.parse(
@@ -36,7 +44,7 @@ export function createProjectRoutes(repository: ProjectRepository): Hono<ApiEnvi
       repository,
       getAuthenticatedSubject(context),
       projectId.data,
-      input.data,
+      projectUpdateInput(input.data),
     )));
   });
   routes.delete("/:id", async (context) => {
@@ -47,7 +55,7 @@ export function createProjectRoutes(repository: ProjectRepository): Hono<ApiEnvi
       repository,
       getAuthenticatedSubject(context),
       projectId.data,
-      { ...input.data, isArchived: true },
+      { ...projectUpdateInput(input.data), isArchived: true },
     )));
   });
   return routes;

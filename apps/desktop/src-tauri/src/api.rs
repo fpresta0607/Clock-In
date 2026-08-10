@@ -620,7 +620,10 @@ impl ApiClient {
                 is_default: project.is_default,
             })
             .collect();
-        Ok(ProjectSelection { projects, selected_project_id: body.selected_project_id })
+        Ok(ProjectSelection {
+            projects,
+            selected_project_id: body.selected_project_id,
+        })
     }
 
     /// Creates a project for the signed-in member; the API answers 201 with the
@@ -1115,8 +1118,14 @@ mod tests {
         )
         .expect("stats parse");
 
-        assert_eq!(stats.filters.from_at.as_deref(), Some("2026-08-01T05:00:00.000Z"));
-        assert_eq!(stats.filters.to_exclusive_at.as_deref(), Some("2026-08-02T05:00:00.000Z"));
+        assert_eq!(
+            stats.filters.from_at.as_deref(),
+            Some("2026-08-01T05:00:00.000Z")
+        );
+        assert_eq!(
+            stats.filters.to_exclusive_at.as_deref(),
+            Some("2026-08-02T05:00:00.000Z")
+        );
         assert_eq!(stats.projects[0].project.name, "Clock-In");
         assert_eq!(stats.projects[0].corroborated_seconds, 5400);
         assert_eq!(stats.apps[0].process_name, "Code.exe");

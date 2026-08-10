@@ -273,8 +273,13 @@ fn ensure_browser_dir(dir: &Path) -> io::Result<()> {
 }
 
 fn read_collection(dir: &Path) -> Option<BrowserCollection> {
-    let collection = serde_json::from_slice::<BrowserCollection>(&std::fs::read(collection_path(dir)).ok()?).ok()?;
-    (!collection.account_id.trim().is_empty() && !collection.collection_id.trim().is_empty() && !collection.admission_id.trim().is_empty()).then_some(collection)
+    let collection =
+        serde_json::from_slice::<BrowserCollection>(&std::fs::read(collection_path(dir)).ok()?)
+            .ok()?;
+    (!collection.account_id.trim().is_empty()
+        && !collection.collection_id.trim().is_empty()
+        && !collection.admission_id.trim().is_empty())
+    .then_some(collection)
 }
 
 pub fn collection_id(dir: &Path) -> Option<String> {
@@ -286,7 +291,8 @@ fn read_collection_authorization(dir: &Path) -> Option<BrowserCollectionAuthoriz
         &std::fs::read(collection_authorization_path(dir)).ok()?,
     )
     .ok()?;
-    (!authorization.admission_id.trim().is_empty() && authorization.expires_at > 0).then_some(authorization)
+    (!authorization.admission_id.trim().is_empty() && authorization.expires_at > 0)
+        .then_some(authorization)
 }
 
 fn collection_is_revoked(dir: &Path) -> bool {
@@ -301,9 +307,11 @@ pub fn admitted_collection_id(dir: &Path) -> Option<String> {
 }
 
 fn admitted_collection_id_at(dir: &Path, now: u64) -> Option<String> {
-    spool::with_lock(&browser_spool_path(dir), || Ok(admitted_collection_id_at_locked(dir, now)))
-        .ok()
-        .flatten()
+    spool::with_lock(&browser_spool_path(dir), || {
+        Ok(admitted_collection_id_at_locked(dir, now))
+    })
+    .ok()
+    .flatten()
 }
 
 pub fn admitted_collection_id_locked(dir: &Path) -> Option<String> {
@@ -323,7 +331,12 @@ fn admitted_collection_id_at_locked(dir: &Path, now: u64) -> Option<String> {
 fn next_collection_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    format!("{}-{}-{}", crate::monitor::unix_now(), std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed))
+    format!(
+        "{}-{}-{}",
+        crate::monitor::unix_now(),
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 fn remove_if_exists(path: &Path) -> io::Result<()> {
@@ -364,14 +377,19 @@ fn revoke_collection_authorization_locked(dir: &Path) -> io::Result<()> {
 pub fn enable_collection(dir: &Path, account_id: &str) -> ApiResult<()> {
     let account_id = account_id.trim();
     if account_id.is_empty() {
-        return Err(BridgeError::new(crate::api::ErrorKind::Validation, "Could not identify the signed-in account."));
+        return Err(BridgeError::new(
+            crate::api::ErrorKind::Validation,
+            "Could not identify the signed-in account.",
+        ));
     }
     ensure_browser_dir(dir)
         .map_err(|_| BridgeError::unknown("Could not enable browser attribution."))?;
     let spool = browser_spool_path(dir);
     spool::with_lock(&spool, || {
         if !collection_is_revoked(dir) {
-            if let Some(collection) = read_collection(dir).filter(|collection| collection.account_id == account_id) {
+            if let Some(collection) =
+                read_collection(dir).filter(|collection| collection.account_id == account_id)
+            {
                 return authorize_collection_locked(dir, &collection);
             }
         }
@@ -399,7 +417,7 @@ pub fn revoke_collection(dir: &Path) -> ApiResult<()> {
         revoke_collection_authorization_locked(dir)?;
         write_if_changed_locked(&collection_revocation_path(dir), b"{}")
     })
-        .map_err(|_| BridgeError::unknown("Could not disable browser attribution."))
+    .map_err(|_| BridgeError::unknown("Could not disable browser attribution."))
 }
 
 pub fn discard_collection(dir: &Path) -> ApiResult<()> {
@@ -486,7 +504,9 @@ fn health_of(dir: &Path, browser: Browser) -> BrowserHealth {
     match host_binary_path() {
         Ok(binary) if !binary.exists() => health(browser, HealthState::BinaryMissing),
         Err(_) => health(browser, HealthState::BinaryMissing),
-        _ if handshake_is_fresh(dir, browser, crate::monitor::unix_now()) => health(browser, HealthState::Connected),
+        _ if handshake_is_fresh(dir, browser, crate::monitor::unix_now()) => {
+            health(browser, HealthState::Connected)
+        }
         _ => health(browser, HealthState::Registered),
     }
 }
@@ -504,8 +524,10 @@ const HANDSHAKE_STALE_SECONDS: u64 = 24 * 3_600;
 /// staleness is testable.
 fn handshake_is_fresh(dir: &Path, browser: Browser, now: u64) -> bool {
     let marker = handshake_path(dir, browser);
-    spool::with_lock(&marker, || Ok(handshake_is_fresh_locked(&marker, browser, now)))
-        .unwrap_or(false)
+    spool::with_lock(&marker, || {
+        Ok(handshake_is_fresh_locked(&marker, browser, now))
+    })
+    .unwrap_or(false)
 }
 
 fn handshake_is_fresh_locked(marker: &Path, browser: Browser, now: u64) -> bool {
@@ -737,12 +759,18 @@ pub fn read_suggestions(dir: &Path, mappings: &[PathMapping]) -> Vec<TallyEntry>
     let tally = dir.join("unmatched-tally.json");
     let never = dir.join("never-suggest.json");
     spool::with_lock(&tally, || {
-        spool::with_lock(&never, || Ok(read_suggestions_locked(&tally, &never, mappings)))
+        spool::with_lock(&never, || {
+            Ok(read_suggestions_locked(&tally, &never, mappings))
+        })
     })
     .unwrap_or_default()
 }
 
-fn read_suggestions_locked(tally: &Path, never_path: &Path, mappings: &[PathMapping]) -> Vec<TallyEntry> {
+fn read_suggestions_locked(
+    tally: &Path,
+    never_path: &Path,
+    mappings: &[PathMapping],
+) -> Vec<TallyEntry> {
     let never = read_origin_set(never_path);
     let ruled: Vec<String> = mappings
         .iter()
@@ -756,7 +784,9 @@ fn read_suggestions_locked(tally: &Path, never_path: &Path, mappings: &[PathMapp
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return Vec::new();
     };
-    if value.get("weekStart").and_then(|value| value.as_u64()) != Some(tally_week_start(crate::monitor::unix_now())) {
+    if value.get("weekStart").and_then(|value| value.as_u64())
+        != Some(tally_week_start(crate::monitor::unix_now()))
+    {
         return Vec::new();
     }
     value
@@ -806,7 +836,7 @@ pub fn never_suggest(dir: &Path, origin: &str) -> ApiResult<()> {
             .map_err(io::Error::other)?;
         write_if_changed_locked(&never, &bytes)
     })
-        .map_err(|_| BridgeError::unknown("Could not save that answer."))
+    .map_err(|_| BridgeError::unknown("Could not save that answer."))
 }
 
 /// Clears the local suggestion data from settings: the tally copy and the
@@ -831,7 +861,11 @@ pub enum TallyStoreOutcome {
     ClearRequested,
 }
 
-pub fn store_tally_snapshot(dir: &Path, content: &[u8], is_empty: bool) -> io::Result<TallyStoreOutcome> {
+pub fn store_tally_snapshot(
+    dir: &Path,
+    content: &[u8],
+    is_empty: bool,
+) -> io::Result<TallyStoreOutcome> {
     let tally = dir.join("unmatched-tally.json");
     spool::with_lock(&tally, || {
         let clear = tally_clear_path(dir);
@@ -1194,7 +1228,9 @@ mod tests {
             format!(r#"{{"weekStart":{week_start},"entries":[{{"origin":"quickbooks.com","seconds":600}}]}}"#),
         )
         .expect("initial tally writes");
-        let replacement = format!(r#"{{"weekStart":{week_start},"entries":[{{"origin":"figma.com","seconds":900}}]}}"#);
+        let replacement = format!(
+            r#"{{"weekStart":{week_start},"entries":[{{"origin":"figma.com","seconds":900}}]}}"#
+        );
         let (removed_tx, removed_rx) = mpsc::channel();
         let (resume_tx, resume_rx) = mpsc::channel();
         let writer_tally = tally.clone();
@@ -1434,11 +1470,17 @@ mod tests {
             .expect("authorization exists")
             .expires_at;
 
-        assert_eq!(admitted_collection_id_at(&dir, expires_at.saturating_sub(1)), Some(collection_id));
+        assert_eq!(
+            admitted_collection_id_at(&dir, expires_at.saturating_sub(1)),
+            Some(collection_id)
+        );
         assert_eq!(admitted_collection_id_at(&dir, expires_at), None);
         revoke_collection(&dir).expect("collection revokes");
         assert!(read_collection_authorization(&dir).is_none());
-        assert_eq!(admitted_collection_id_at(&dir, expires_at.saturating_sub(1)), None);
+        assert_eq!(
+            admitted_collection_id_at(&dir, expires_at.saturating_sub(1)),
+            None
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1447,7 +1489,8 @@ mod tests {
     fn failed_collection_revocation_leaves_admission_denied() {
         let dir = temp_dir("failed-collection-revocation");
         enable_collection(&dir, "user-one").expect("collection enables");
-        std::fs::create_dir_all(collection_revocation_path(&dir)).expect("revocation path blocks replacement");
+        std::fs::create_dir_all(collection_revocation_path(&dir))
+            .expect("revocation path blocks replacement");
 
         assert!(revoke_collection(&dir).is_err());
         std::fs::remove_dir_all(collection_revocation_path(&dir)).expect("revocation path clears");
@@ -1467,12 +1510,24 @@ mod tests {
 
         record_handshake_for(&dir, Browser::Chrome);
         record_handshake_for(&dir, Browser::Edge);
-        assert!(handshake_is_fresh(&dir, Browser::Chrome, crate::monitor::unix_now()));
-        assert!(handshake_is_fresh(&dir, Browser::Edge, crate::monitor::unix_now()));
+        assert!(handshake_is_fresh(
+            &dir,
+            Browser::Chrome,
+            crate::monitor::unix_now()
+        ));
+        assert!(handshake_is_fresh(
+            &dir,
+            Browser::Edge,
+            crate::monitor::unix_now()
+        ));
 
         std::fs::write(handshake_path(&dir, Browser::Chrome), "junk").expect("marker writes");
         assert!(!handshake_is_fresh(&dir, Browser::Chrome, marked_at));
-        assert!(handshake_is_fresh(&dir, Browser::Edge, crate::monitor::unix_now()));
+        assert!(handshake_is_fresh(
+            &dir,
+            Browser::Edge,
+            crate::monitor::unix_now()
+        ));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1508,7 +1563,11 @@ mod tests {
         let (fresh_tx, fresh_rx) = mpsc::channel();
         let reader = std::thread::spawn(move || {
             fresh_tx
-                .send(handshake_is_fresh(&reader_dir, Browser::Chrome, crate::monitor::unix_now()))
+                .send(handshake_is_fresh(
+                    &reader_dir,
+                    Browser::Chrome,
+                    crate::monitor::unix_now(),
+                ))
                 .expect("reader returns marker health");
         });
         let early = fresh_rx.recv_timeout(StdDuration::from_millis(100));
