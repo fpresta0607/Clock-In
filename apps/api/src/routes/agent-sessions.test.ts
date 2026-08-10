@@ -5,7 +5,6 @@ import { parseEnv } from "../env.js";
 import type {
   AgentSessionRecord,
   AgentSessionRepository,
-  AgentSessionStaleCutoffs,
   InsertEndedAgentSession,
   PathMappingRecord,
   PathMappingRepository,
@@ -77,7 +76,6 @@ class MemoryAgentSessions implements AgentSessionRepository {
       externalSessionId: input.externalSessionId,
       projectId: input.projectId,
       cwd: input.cwd,
-      ruleId: input.ruleId,
       status: "running",
       startedAt: input.occurredAt,
       endedAt: null,
@@ -88,7 +86,7 @@ class MemoryAgentSessions implements AgentSessionRepository {
     return record;
   }
 
-  public async closeRunning(subject: { organizationId: string; userId: string }, source: AgentSessionRecord["source"], externalSessionId: string, endedAt: Date) {
+  public async closeRunning(subject: { organizationId: string; userId: string }, source: AgentSessionRecord["source"], externalSessionId: string, endedAt: Date, _now: Date) {
     const existing = this.find(subject.organizationId, subject.userId, source, externalSessionId);
     if (existing === undefined || existing.status === "ended") return null;
     if (existing.status === "stale" && (source !== "browser" || endedAt < existing.lastEventAt)) return null;
@@ -118,7 +116,7 @@ class MemoryAgentSessions implements AgentSessionRepository {
     });
   }
 
-  public async advanceLastEvent(subject: { organizationId: string; userId: string }, source: AgentSessionRecord["source"], externalSessionId: string, occurredAt: Date) {
+  public async advanceLastEvent(subject: { organizationId: string; userId: string }, source: AgentSessionRecord["source"], externalSessionId: string, occurredAt: Date, _now: Date) {
     const existing = this.find(subject.organizationId, subject.userId, source, externalSessionId);
     if (existing === undefined || existing.status === "ended") return false;
     if (existing.status === "stale") {
@@ -130,11 +128,10 @@ class MemoryAgentSessions implements AgentSessionRepository {
     return true;
   }
 
-  public async reapStale(subject: { organizationId: string; userId: string }, cutoffs: AgentSessionStaleCutoffs) {
+  public async reapStale(subject: { organizationId: string; userId: string }, cutoff: Date, _now: Date) {
     let reaped = 0;
     for (const record of this.records) {
       if (record.organizationId !== subject.organizationId || record.userId !== subject.userId) continue;
-      const cutoff = record.source === "browser" ? cutoffs.browser : cutoffs.default;
       if (record.status === "running" && record.lastEventAt < cutoff) {
         record.status = "stale";
         record.endedAt = record.lastEventAt;
@@ -187,10 +184,10 @@ function runningTimer() {
 function createTestApp(agentSessions = new MemoryAgentSessions(), options: { withMapping?: boolean; withTimer?: boolean; withUrlRule?: boolean } = {}) {
   const mappings: PathMappingRecord[] = [];
   if (options.withMapping === true) {
-    mappings.push({ id: "e1c7e513-b094-4d4c-ae55-21790ae019a4", organizationId: ids.organization, userId: ids.user, kind: "path_prefix", pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project });
+    mappings.push({ id: "e1c7e513-b094-4d4c-ae55-21790ae019a4", organizationId: ids.organization, userId: ids.user, pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project });
   }
   if (options.withUrlRule === true) {
-    mappings.push({ id: "01c7e513-b094-4d4c-ae55-21790ae019a4", organizationId: ids.organization, userId: ids.user, kind: "url_rule", pathPrefix: "github.com/acme/*", repoUrl: null, projectId: ids.project });
+    mappings.push({ id: "01c7e513-b094-4d4c-ae55-21790ae019a4", organizationId: ids.organization, userId: ids.user, pathPrefix: "github.com/acme/*", repoUrl: null, projectId: ids.project });
   }
   return createApp({
     config,

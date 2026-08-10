@@ -40,7 +40,6 @@ export type {
   ActivitySegmentRepository,
   AgentSessionRecord,
   AgentSessionRepository,
-  AgentSessionStaleCutoffs,
   CreatePathMapping,
   CreateRunningSession,
   InsertEndedAgentSession,

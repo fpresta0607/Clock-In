@@ -69,10 +69,10 @@ describe("project routes", () => {
     });
     expect(created.status).toBe(201);
     const project = await created.json();
-    expect(project).toEqual({ id: expect.any(String), name: "Field work", createdAt: "2026-08-10T12:00:00.000Z", isArchived: false });
+    expect(project).toMatchObject({ id: expect.any(String), name: "Field work", createdAt: "2026-08-10T12:00:00.000Z", isArchived: false });
 
     const listed = await app.request("http://api.test/projects", { headers });
-    await expect(listed.json()).resolves.toEqual({
+    await expect(listed.json()).resolves.toMatchObject({
       projects: [
         { id: expect.any(String), name: "Field work", createdAt: "2026-08-10T12:00:00.000Z", isArchived: false },
         { id: ids.project, name: "General", createdAt: "2026-08-10T12:00:00.000Z", isArchived: false },

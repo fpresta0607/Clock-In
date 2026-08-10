@@ -7,7 +7,6 @@ import type { AuthenticatedSubject } from "../auth.js";
 import { parseEnv } from "../env.js";
 import type {
   AgentSessionRepository,
-  AgentSessionStaleCutoffs,
   AppTotalRecord,
   PathMappingRepository,
   ProjectRepository,
@@ -87,12 +86,9 @@ class MemoryReports implements ReportRepository {
 
 
   private filtered(subject: AuthenticatedSubject, query: ReportQuery): StoredSession[] {
-    const range = this.exactRange(query);
     return this.sessions.filter((session) => session.organizationId === subject.organizationId
-      && (range === null
-        ? (query.from === undefined || session.startedAt >= query.from)
-          && (query.toExclusive === undefined || session.startedAt < query.toExclusive)
-        : session.startedAt < range.toExclusive && session.stoppedAt > range.from)
+      && (query.from === undefined || session.startedAt >= query.from)
+      && (query.toExclusive === undefined || session.startedAt < query.toExclusive)
       && (query.userId === undefined || session.userId === query.userId)
       && (query.projectId === undefined || session.project.id === query.projectId));
   }
@@ -200,9 +196,9 @@ class MemoryReports implements ReportRepository {
 
 /** Only the reaper runs on this read path; it records every invocation. */
 class ReapRecorder implements Partial<AgentSessionRepository> {
-  public readonly reapCalls: { subject: AuthenticatedSubject; cutoffs: AgentSessionStaleCutoffs }[] = [];
-  public async reapStale(subject: AuthenticatedSubject, cutoffs: AgentSessionStaleCutoffs) {
-    this.reapCalls.push({ subject, cutoffs });
+  public readonly reapCalls: { subject: AuthenticatedSubject; cutoff: Date; now: Date }[] = [];
+  public async reapStale(subject: AuthenticatedSubject, cutoff: Date, now: Date) {
+    this.reapCalls.push({ subject, cutoff, now });
     return 0;
   }
 }
@@ -464,10 +460,8 @@ describe("me/stats routes", () => {
     expect(response.status).toBe(200);
     expect(agentSessions.reapCalls).toEqual([{
       subject: { organizationId: ids.organization, userId: ids.user, role: "member" },
-      cutoffs: {
-        default: new Date(clockNow.getTime() - 6 * 60 * 60 * 1_000),
-        browser: new Date(clockNow.getTime() - 10 * 60 * 1_000),
-      },
+      cutoff: new Date(clockNow.getTime() - 6 * 60 * 60 * 1_000),
+      now: clockNow,
     }]);
   });
 
