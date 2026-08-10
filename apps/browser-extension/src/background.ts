@@ -410,15 +410,27 @@ function applyTab(tab: chrome.tabs.Tab): void {
   feedMachine({ type: "active-tab", ruleId }, now, false);
 }
 
+function beginTabRead(now: number = Date.now()): number | null {
+  if (!prepareMachineTransition(now)) {
+    return null;
+  }
+  currentTabId = null;
+  unmatchedOrigin = null;
+  tabReadGeneration += 1;
+  feedMachine({ type: "active-tab", ruleId: null }, now, false);
+  return tabReadGeneration;
+}
+
 function canApplyTabRead(tab: chrome.tabs.Tab, windowId: number, generation: number): boolean {
   return tabReadGeneration === generation &&
     focusedWindowId === windowId &&
     tab.windowId === windowId;
 }
 
-function watchActiveTab(windowId: number): void {
-  const generation = tabReadGeneration + 1;
-  tabReadGeneration = generation;
+function watchActiveTab(windowId: number, generation: number | null = beginTabRead()): void {
+  if (generation === null) {
+    return;
+  }
   const query: chrome.tabs.QueryInfo = { active: true, windowId };
   void chrome.tabs.query(query).then((tabs) => {
     const tab = tabs[0];
@@ -497,8 +509,10 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
     if (!shouldApplyTabActivation(activeInfo.windowId, focusedWindowId)) {
       return;
     }
-    const generation = tabReadGeneration + 1;
-    tabReadGeneration = generation;
+    const generation = beginTabRead();
+    if (generation === null) {
+      return;
+    }
     void chrome.tabs
       .get(activeInfo.tabId)
       .then((tab) => {
@@ -528,12 +542,15 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 chrome.windows.onFocusChanged.addListener((windowId) => {
   void initialized.then(() => {
     const focused = windowId !== chrome.windows.WINDOW_ID_NONE;
-    tabReadGeneration += 1;
+    const generation = beginTabRead();
+    if (generation === null) {
+      return;
+    }
     attentionGeneration += 1;
     focusedWindowId = focused ? windowId : null;
-    feedMachine({ type: "window-focus", focused });
+    feedMachine({ type: "window-focus", focused }, Date.now(), false);
     if (focused) {
-      watchActiveTab(windowId);
+      watchActiveTab(windowId, generation);
     }
   });
 });
