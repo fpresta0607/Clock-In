@@ -22,6 +22,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// Rotation threshold for a single spool file.
 pub const MAX_SPOOL_BYTES: u64 = 10 * 1024 * 1024;
@@ -35,6 +36,7 @@ const LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
 const LOCK_WAIT_LIMIT: Duration = Duration::from_secs(5);
 const MAX_RETAINED_NAMESPACES: usize = 8;
 const NAMESPACE_RESERVATION_FILE: &str = ".namespace-reservation.json";
+const WORKSPACE_MOVE_FILE: &str = "workspace-move.json";
 
 pub type SpoolResult<T> = Result<T, io::Error>;
 
@@ -69,7 +71,46 @@ pub struct EvidencePaths {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NamespaceReservation {
-    identity: EvidenceIdentity,
+    record: WorkspaceMoveRecord,
+}
+
+impl NamespaceReservation {
+    pub fn source_identity(&self) -> &EvidenceIdentity {
+        &self.record.source_identity
+    }
+
+    pub fn target_identity(&self) -> &EvidenceIdentity {
+        &self.record.target_identity
+    }
+
+    pub fn extension_reservation_id(&self) -> Option<&str> {
+        self.record.extension_reservation_id.as_deref()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkspaceMoveRecovery {
+    Rollback(NamespaceReservation),
+    Complete(NamespaceReservation),
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceMoveRecord {
+    source_identity: EvidenceIdentity,
+    target_identity: EvidenceIdentity,
+    token: String,
+    state: WorkspaceMoveState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    extension_reservation_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum WorkspaceMoveState {
+    DesktopReserved,
+    ExtensionReserved,
+    ApiCommitted,
 }
 
 pub fn evidence_paths(identity: &EvidenceIdentity) -> EvidencePaths {
@@ -121,10 +162,10 @@ fn activate_identity_at(
         std::fs::create_dir_all(&paths.browser_dir)?;
         let reservation_path = namespace_reservation_path(&paths.browser_dir);
         recover_rewrite_files_locked(&reservation_path)?;
-        if let Some(reservation) = namespace_reservation_identity(&reservation_path)? {
-            if reservation != *identity {
-                return Err(io::Error::other("evidence namespace reservation does not match identity"));
-            }
+        if namespace_reservation_record(&reservation_path)?.is_some() {
+            return Err(io::Error::other(
+                "evidence namespace is reserved for a workspace move",
+            ));
         }
         std::fs::write(paths.browser_dir.join(".last-active"), unix_seconds().to_string())?;
         let body = serde_json::to_vec(identity).map_err(io::Error::other)?;
@@ -134,38 +175,199 @@ fn activate_identity_at(
 }
 
 pub fn reserve_identity_namespace(
-    identity: &EvidenceIdentity,
+    source_identity: &EvidenceIdentity,
+    target_identity: &EvidenceIdentity,
 ) -> SpoolResult<NamespaceReservation> {
-    reserve_identity_namespace_at(&evidence_root(), &active_identity_path(), identity)
+    reserve_identity_namespace_at(
+        &evidence_root(),
+        &active_identity_path(),
+        source_identity,
+        target_identity,
+    )
 }
 
 fn reserve_identity_namespace_at(
     root: &Path,
     active_path: &Path,
-    identity: &EvidenceIdentity,
+    source_identity: &EvidenceIdentity,
+    target_identity: &EvidenceIdentity,
 ) -> SpoolResult<NamespaceReservation> {
     with_lock(root, || {
         recover_rewrite_files_locked(active_path)?;
-        let paths = evidence_paths_at(root, identity);
+        let move_path = workspace_move_path_for_root(root);
+        recover_rewrite_files_locked(&move_path)?;
+        if workspace_move_record(&move_path)?.is_some() {
+            return Err(io::Error::other("a workspace move is already pending"));
+        }
+        let record = WorkspaceMoveRecord {
+            source_identity: source_identity.clone(),
+            target_identity: target_identity.clone(),
+            token: Uuid::new_v4().to_string(),
+            state: WorkspaceMoveState::DesktopReserved,
+            extension_reservation_id: None,
+        };
+        let record_bytes = serde_json::to_vec(&record).map_err(io::Error::other)?;
+        rewrite(&move_path, &record_bytes)?;
+        let reservation = NamespaceReservation { record };
+        let result = (|| {
+            let paths = evidence_paths_at(root, target_identity);
+            let reservation_path = namespace_reservation_path(&paths.browser_dir);
+            recover_rewrite_files_locked(&reservation_path)?;
+            if namespace_reservation_record(&reservation_path)?.is_some() {
+                return Err(io::Error::other("target workspace is already reserved"));
+            }
+            let active_dir = active_identity_at(active_path)
+                .map(|identity| evidence_paths_at(root, &identity).browser_dir);
+            reserve_namespace_slot_at_locked(root, Some(target_identity), active_dir.as_deref())?;
+            std::fs::create_dir_all(&paths.browser_dir)?;
+            let bytes = serde_json::to_vec(&reservation.record).map_err(io::Error::other)?;
+            rewrite(&reservation_path, &bytes)?;
+            Ok(reservation)
+        })();
+        if result.is_err() {
+            let _ = remove_if_exists(&move_path);
+        }
+        result
+    })
+}
+
+pub fn record_workspace_move_extension_reservation(
+    reservation: &NamespaceReservation,
+    extension_reservation_id: &str,
+) -> SpoolResult<()> {
+    let root = evidence_root();
+    record_workspace_move_extension_reservation_at(&root, reservation, extension_reservation_id)
+}
+
+fn record_workspace_move_extension_reservation_at(
+    root: &Path,
+    reservation: &NamespaceReservation,
+    extension_reservation_id: &str,
+) -> SpoolResult<()> {
+    with_lock(root, || {
+        let move_path = workspace_move_path_for_root(root);
+        recover_rewrite_files_locked(&move_path)?;
+        if extension_reservation_id.trim().is_empty() {
+            return Err(io::Error::other(
+                "workspace move extension reservation is unavailable",
+            ));
+        }
+        let mut record = workspace_move_record(&move_path)?
+            .ok_or_else(|| io::Error::other("workspace move reservation is unavailable"))?;
+        ensure_matching_workspace_move(&record, reservation)?;
+        if record.state == WorkspaceMoveState::ApiCommitted {
+            return Err(io::Error::other("workspace move has already committed"));
+        }
+        record.state = WorkspaceMoveState::ExtensionReserved;
+        record.extension_reservation_id = Some(extension_reservation_id.to_string());
+        let bytes = serde_json::to_vec(&record).map_err(io::Error::other)?;
+        rewrite(&move_path, &bytes)
+    })
+}
+
+pub fn mark_workspace_move_committed(reservation: &NamespaceReservation) -> SpoolResult<()> {
+    let root = evidence_root();
+    mark_workspace_move_committed_at(&root, reservation)
+}
+
+fn mark_workspace_move_committed_at(
+    root: &Path,
+    reservation: &NamespaceReservation,
+) -> SpoolResult<()> {
+    with_lock(root, || {
+        let move_path = workspace_move_path_for_root(root);
+        recover_rewrite_files_locked(&move_path)?;
+        let mut record = workspace_move_record(&move_path)?
+            .ok_or_else(|| io::Error::other("workspace move reservation is unavailable"))?;
+        ensure_matching_workspace_move(&record, reservation)?;
+        if record.state != WorkspaceMoveState::ExtensionReserved
+            || record.extension_reservation_id.is_none()
+        {
+            return Err(io::Error::other(
+                "workspace move extension reservation is unavailable",
+            ));
+        }
+        record.state = WorkspaceMoveState::ApiCommitted;
+        let bytes = serde_json::to_vec(&record).map_err(io::Error::other)?;
+        rewrite(&move_path, &bytes)
+    })
+}
+
+pub fn workspace_move_recovery(
+    current_identity: &EvidenceIdentity,
+) -> SpoolResult<Option<WorkspaceMoveRecovery>> {
+    let root = evidence_root();
+    workspace_move_recovery_at(&root, current_identity)
+}
+
+fn workspace_move_recovery_at(
+    root: &Path,
+    current_identity: &EvidenceIdentity,
+) -> SpoolResult<Option<WorkspaceMoveRecovery>> {
+    with_lock(root, || {
+        let move_path = workspace_move_path_for_root(root);
+        recover_rewrite_files_locked(&move_path)?;
+        let Some(record) = workspace_move_record(&move_path)? else {
+            return Ok(None);
+        };
+        let reservation = NamespaceReservation { record };
+        if current_identity == reservation.target_identity()
+            && (current_identity != reservation.source_identity()
+                || reservation.record.state == WorkspaceMoveState::ApiCommitted)
+        {
+            return match reservation.record.state {
+                WorkspaceMoveState::DesktopReserved => Err(io::Error::other(
+                    "workspace move reached an unreserved destination",
+                )),
+                WorkspaceMoveState::ExtensionReserved | WorkspaceMoveState::ApiCommitted => {
+                    Ok(Some(WorkspaceMoveRecovery::Complete(reservation)))
+                }
+            };
+        }
+        if current_identity == reservation.source_identity() {
+            return Ok(Some(WorkspaceMoveRecovery::Rollback(reservation)));
+        }
+        Err(io::Error::other(
+            "workspace move does not match the signed-in account",
+        ))
+    })
+}
+
+pub fn activate_reserved_identity(reservation: &NamespaceReservation) -> SpoolResult<()> {
+    let root = evidence_root();
+    let active_path = active_identity_path();
+    activate_reserved_identity_at(&root, &active_path, reservation)
+}
+
+fn activate_reserved_identity_at(
+    root: &Path,
+    active_path: &Path,
+    reservation: &NamespaceReservation,
+) -> SpoolResult<()> {
+    with_lock(root, || {
+        recover_rewrite_files_locked(active_path)?;
+        let move_path = workspace_move_path_for_root(root);
+        recover_rewrite_files_locked(&move_path)?;
+        let record = workspace_move_record(&move_path)?
+            .ok_or_else(|| io::Error::other("workspace move reservation is unavailable"))?;
+        ensure_matching_workspace_move(&record, reservation)?;
+        let paths = evidence_paths_at(root, reservation.target_identity());
         let reservation_path = namespace_reservation_path(&paths.browser_dir);
         recover_rewrite_files_locked(&reservation_path)?;
-        if let Some(reservation) = namespace_reservation_identity(&reservation_path)? {
-            if reservation == *identity {
-                return Ok(NamespaceReservation {
-                    identity: identity.clone(),
-                });
-            }
-            return Err(io::Error::other("evidence namespace reservation does not match identity"));
+        if let Some(namespace_record) = namespace_reservation_record(&reservation_path)? {
+            ensure_matching_workspace_move(&namespace_record, reservation)?;
+        } else if active_identity_at(active_path).as_ref() != Some(reservation.target_identity()) {
+            return Err(io::Error::other("workspace move reservation is unavailable"));
         }
         let active_dir = active_identity_at(active_path)
             .map(|identity| evidence_paths_at(root, &identity).browser_dir);
-        reserve_namespace_slot_at_locked(root, Some(identity), active_dir.as_deref())?;
+        reserve_namespace_slot_at_locked(root, Some(reservation.target_identity()), active_dir.as_deref())?;
         std::fs::create_dir_all(&paths.browser_dir)?;
-        let body = serde_json::to_vec(identity).map_err(io::Error::other)?;
-        rewrite(&reservation_path, &body)?;
-        Ok(NamespaceReservation {
-            identity: identity.clone(),
-        })
+        std::fs::write(paths.browser_dir.join(".last-active"), unix_seconds().to_string())?;
+        let body = serde_json::to_vec(reservation.target_identity()).map_err(io::Error::other)?;
+        rewrite(active_path, &body)?;
+        remove_if_exists(&reservation_path)?;
+        remove_if_exists(&move_path)
     })
 }
 
@@ -181,17 +383,69 @@ fn release_identity_namespace_reservation_at(
     reservation: &NamespaceReservation,
 ) -> SpoolResult<()> {
     with_lock(root, || {
-        let paths = evidence_paths_at(root, &reservation.identity);
+        let move_path = workspace_move_path_for_root(root);
+        recover_rewrite_files_locked(&move_path)?;
+        let record = workspace_move_record(&move_path)?
+            .ok_or_else(|| io::Error::other("workspace move reservation is unavailable"))?;
+        ensure_matching_workspace_move(&record, reservation)?;
+        let paths = evidence_paths_at(root, reservation.target_identity());
         let reservation_path = namespace_reservation_path(&paths.browser_dir);
         recover_rewrite_files_locked(&reservation_path)?;
-        match namespace_reservation_identity(&reservation_path)? {
-            Some(identity) if identity == reservation.identity => remove_if_exists(&reservation_path),
-            Some(_) => Err(io::Error::other(
-                "evidence namespace reservation does not match identity",
-            )),
-            None => Ok(()),
+        if let Some(namespace_record) = namespace_reservation_record(&reservation_path)? {
+            ensure_matching_workspace_move(&namespace_record, reservation)?;
+            remove_if_exists(&reservation_path)?;
         }
+        remove_if_exists(&move_path)
     })
+}
+
+fn ensure_matching_workspace_move(
+    record: &WorkspaceMoveRecord,
+    reservation: &NamespaceReservation,
+) -> SpoolResult<()> {
+    (record.source_identity == *reservation.source_identity()
+        && record.target_identity == *reservation.target_identity()
+        && record.token == reservation.record.token)
+        .then_some(())
+        .ok_or_else(|| io::Error::other("workspace move reservation is owned by another operation"))
+}
+
+fn workspace_move_path_for_root(root: &Path) -> PathBuf {
+    root.parent()
+        .map(|parent| parent.join(WORKSPACE_MOVE_FILE))
+        .unwrap_or_else(|| PathBuf::from(WORKSPACE_MOVE_FILE))
+}
+
+fn workspace_move_record(path: &Path) -> SpoolResult<Option<WorkspaceMoveRecord>> {
+    match std::fs::read(path) {
+        Ok(bytes) => parse_workspace_move_record(&bytes).map(Some),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn parse_workspace_move_record(bytes: &[u8]) -> SpoolResult<WorkspaceMoveRecord> {
+    let record = serde_json::from_slice::<WorkspaceMoveRecord>(bytes)
+        .map_err(|_| io::Error::other("workspace move reservation is invalid"))?;
+    let source = EvidenceIdentity::new(
+        &record.source_identity.account_id,
+        &record.source_identity.organization_id,
+    );
+    let target = EvidenceIdentity::new(
+        &record.target_identity.account_id,
+        &record.target_identity.organization_id,
+    );
+    if source.as_ref() != Some(&record.source_identity)
+        || target.as_ref() != Some(&record.target_identity)
+        || Uuid::parse_str(&record.token).is_err()
+        || record
+            .extension_reservation_id
+            .as_ref()
+            .is_some_and(|request_id| request_id.trim().is_empty())
+    {
+        return Err(io::Error::other("workspace move reservation is invalid"));
+    }
+    Ok(record)
 }
 
 pub fn ensure_identity_namespace_capacity(identity: &EvidenceIdentity) -> SpoolResult<()> {
@@ -801,15 +1055,11 @@ fn namespace_reservation_path(dir: &Path) -> PathBuf {
     dir.join(NAMESPACE_RESERVATION_FILE)
 }
 
-fn namespace_reservation_identity(path: &Path) -> SpoolResult<Option<EvidenceIdentity>> {
+fn namespace_reservation_record(path: &Path) -> SpoolResult<Option<WorkspaceMoveRecord>> {
     match std::fs::read(path) {
-        Ok(bytes) => {
-            let identity = serde_json::from_slice::<EvidenceIdentity>(&bytes)
-                .map_err(|_| io::Error::other("evidence namespace reservation is invalid"))?;
-            EvidenceIdentity::new(&identity.account_id, &identity.organization_id)
-                .ok_or_else(|| io::Error::other("evidence namespace reservation is invalid"))
-                .map(Some)
-        }
+        Ok(bytes) => parse_workspace_move_record(&bytes)
+            .map(Some)
+            .map_err(|_| io::Error::other("evidence namespace reservation is invalid")),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
@@ -831,7 +1081,7 @@ fn namespace_is_evictable_while_root_locked(dir: &Path) -> SpoolResult<bool> {
 fn namespace_has_pending_evidence_while_leased(dir: &Path) -> SpoolResult<bool> {
     let reservation_path = namespace_reservation_path(dir);
     recover_rewrite_files_locked(&reservation_path)?;
-    if namespace_reservation_identity(&reservation_path)?.is_some() {
+    if namespace_reservation_record(&reservation_path)?.is_some() {
         return Ok(true);
     }
     for name in ["agent-spool.jsonl", "segments-spool.jsonl", "browser-spool.jsonl"] {
@@ -1970,9 +2220,16 @@ mod tests {
         let child_result = std::env::var_os("CLOCK_IN_SPOOL_RESERVATION_TEST_RESULT");
         if let (Some(root), Some(result_path)) = (child_root, child_result) {
             let root = PathBuf::from(root);
-            let competing = EvidenceIdentity::new("account-competing", "organization-competing")
-                .expect("competing identity is valid");
-            let result = activate_identity_at(&root, &active_identity_path_for_root(&root), &competing);
+            let source = EvidenceIdentity::new("account-source", "organization-source")
+                .expect("source identity is valid");
+            let target = EvidenceIdentity::new("account-target", "organization-target")
+                .expect("target identity is valid");
+            let result = reserve_identity_namespace_at(
+                &root,
+                &active_identity_path_for_root(&root),
+                &source,
+                &target,
+            );
             std::fs::write(
                 result_path,
                 if result.is_err() { "blocked" } else { "admitted" },
@@ -1993,9 +2250,11 @@ mod tests {
             append(&pending, &event(&format!("pending-{index}")))
                 .expect("pending evidence writes");
         }
+        let source = EvidenceIdentity::new("account-source", "organization-source")
+            .expect("source identity is valid");
         let target = EvidenceIdentity::new("account-target", "organization-target")
             .expect("target identity is valid");
-        let reservation = reserve_identity_namespace_at(&root, &active_path, &target)
+        let reservation = reserve_identity_namespace_at(&root, &active_path, &source, &target)
             .expect("target namespace reserves");
         let competing = EvidenceIdentity::new("account-competing", "organization-competing")
             .expect("competing identity is valid");
@@ -2017,6 +2276,7 @@ mod tests {
             .join("account-target")
             .join("organization-target")
             .is_dir());
+        assert!(activate_identity_at(&root, &active_path, &competing).is_err());
         release_identity_namespace_reservation_at(&root, &reservation)
             .expect("rollback releases the target capacity");
         activate_identity_at(&root, &active_path, &competing)
@@ -2031,16 +2291,87 @@ mod tests {
         let dir = temp_dir("namespace-reservation-activation");
         let root = dir.join("evidence");
         let active_path = active_identity_path_for_root(&root);
+        let source = EvidenceIdentity::new("account-source", "organization-source")
+            .expect("source identity is valid");
         let target = EvidenceIdentity::new("account-target", "organization-target")
             .expect("target identity is valid");
 
-        let _reservation = reserve_identity_namespace_at(&root, &active_path, &target)
+        let reservation = reserve_identity_namespace_at(&root, &active_path, &source, &target)
             .expect("target namespace reserves");
-        activate_identity_at(&root, &active_path, &target).expect("target namespace activates");
+        record_workspace_move_extension_reservation_at(&root, &reservation, "request-one")
+            .expect("extension reservation records");
+        mark_workspace_move_committed_at(&root, &reservation)
+            .expect("committed move records");
+        let recovery = workspace_move_recovery_at(&root, &target)
+            .expect("target recovery reads")
+            .expect("target recovery exists");
+        let WorkspaceMoveRecovery::Complete(reservation) = recovery else {
+            panic!("target workspace must complete a committed move");
+        };
+        activate_reserved_identity_at(&root, &active_path, &reservation)
+            .expect("target namespace activates");
 
         assert_eq!(active_identity_at(&active_path), Some(target.clone()));
         assert!(!namespace_reservation_path(&evidence_paths_at(&root, &target).browser_dir).exists());
+        assert!(workspace_move_recovery_at(&root, &target)
+            .expect("completed move reads")
+            .is_none());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn destination_recovery_requires_a_persisted_extension_reservation() {
+        let dir = temp_dir("workspace-move-destination-recovery");
+        let root = dir.join("evidence");
+        let active_path = active_identity_path_for_root(&root);
+        let source = EvidenceIdentity::new("account-source", "organization-source")
+            .expect("source identity is valid");
+        let target = EvidenceIdentity::new("account-target", "organization-target")
+            .expect("target identity is valid");
+        let reservation = reserve_identity_namespace_at(&root, &active_path, &source, &target)
+            .expect("target namespace reserves");
+
+        let error = workspace_move_recovery_at(&root, &target)
+            .expect_err("an unreserved destination cannot complete a workspace move");
+        assert!(error.to_string().contains("unreserved destination"));
+
+        record_workspace_move_extension_reservation_at(&root, &reservation, "request-one")
+            .expect("extension reservation records");
+        assert!(matches!(
+            workspace_move_recovery_at(&root, &target).expect("reserved recovery reads"),
+            Some(WorkspaceMoveRecovery::Complete(_))
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_precommit_reservation_releases_capacity_for_a_retry() {
+        let dir = temp_dir("workspace-move-recovery");
+        let root = dir.join("evidence");
+        let active_path = active_identity_path_for_root(&root);
+        let source = EvidenceIdentity::new("account-source", "organization-source")
+            .expect("source identity is valid");
+        let target = EvidenceIdentity::new("account-target", "organization-target")
+            .expect("target identity is valid");
+        let reservation = reserve_identity_namespace_at(&root, &active_path, &source, &target)
+            .expect("target namespace reserves");
+
+        let recovery = workspace_move_recovery_at(&root, &source)
+            .expect("source recovery reads")
+            .expect("source recovery exists");
+        let WorkspaceMoveRecovery::Rollback(recovery) = recovery else {
+            panic!("source workspace must roll back an uncommitted move");
+        };
+        release_identity_namespace_reservation_at(&root, &recovery)
+            .expect("stale reservation releases");
+        let retry = reserve_identity_namespace_at(&root, &active_path, &source, &target)
+            .expect("released target capacity is available for retry");
+
+        release_identity_namespace_reservation_at(&root, &retry)
+            .expect("retry reservation releases");
+        assert_ne!(reservation.record.token, retry.record.token);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

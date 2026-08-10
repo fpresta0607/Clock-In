@@ -194,8 +194,21 @@ impl AppState {
     }
 
     async fn bind_identity(&self, identity: spool::EvidenceIdentity) -> ApiResult<()> {
+        self.bind_identity_with_reservation(identity, None).await
+    }
+
+    async fn bind_identity_with_reservation(
+        &self,
+        identity: spool::EvidenceIdentity,
+        reservation: Option<&spool::NamespaceReservation>,
+    ) -> ApiResult<()> {
         let previous = self.active_identity.lock().await.clone();
         if previous.as_ref() == Some(&identity) {
+            if let Some(reservation) = reservation {
+                complete_workspace_move_extension_reservation(reservation)?;
+                spool::activate_reserved_identity(reservation)
+                    .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
+            }
             return Ok(());
         }
         spool::ensure_identity_namespace_capacity(&identity).map_err(|error| {
@@ -211,8 +224,14 @@ impl AppState {
                 .unwrap_or_else(|| self.monitor.browser_dir());
             browser::deactivate_collection(&browser_dir)?;
         }
-        spool::activate_identity(&identity)
-            .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
+        if let Some(reservation) = reservation {
+            complete_workspace_move_extension_reservation(reservation)?;
+        }
+        match reservation {
+            Some(reservation) => spool::activate_reserved_identity(reservation),
+            None => spool::activate_identity(&identity),
+        }
+        .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
         let paths = spool::evidence_paths(&identity);
         *self.recovery.lock().await = load_recovery_from_disk(&paths.recovery_path);
         *self.recovery_path.lock().await = paths.recovery_path;
@@ -258,7 +277,27 @@ impl AppState {
     /// Builds the snapshot the UI boots from, given a valid access token.
     async fn snapshot(&self, access_token: &str) -> ApiResult<Snapshot> {
         let account = self.load_account(access_token).await?;
-        self.bind_identity(account.identity.clone()).await?;
+        let workspace_move = spool::workspace_move_recovery(&account.identity)
+            .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
+        match workspace_move {
+            Some(spool::WorkspaceMoveRecovery::Rollback(reservation)) => {
+                let paths = spool::evidence_paths(reservation.source_identity());
+                browser::release_extension_namespace_reservation_for_workspace_move(
+                    &paths.browser_dir,
+                    reservation.source_identity(),
+                    reservation.target_identity(),
+                    reservation.extension_reservation_id(),
+                )?;
+                spool::release_identity_namespace_reservation(&reservation)
+                    .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
+                self.bind_identity(account.identity.clone()).await?;
+            }
+            Some(spool::WorkspaceMoveRecovery::Complete(reservation)) => {
+                self.bind_identity_with_reservation(account.identity.clone(), Some(&reservation))
+                    .await?;
+            }
+            None => self.bind_identity(account.identity.clone()).await?,
+        }
         let server_running = self.client.current_session(access_token).await?;
         let state = self.read_recovery().await;
         Ok(Snapshot::account(
@@ -403,6 +442,31 @@ async fn await_extension_namespace_reservation(
     }
 }
 
+fn rollback_workspace_move(browser_dir: &Path, reservation: &spool::NamespaceReservation) {
+    if browser::release_extension_namespace_reservation_for_workspace_move(
+        browser_dir,
+        reservation.source_identity(),
+        reservation.target_identity(),
+        reservation.extension_reservation_id(),
+    )
+    .is_ok()
+    {
+        let _ = spool::release_identity_namespace_reservation(reservation);
+    }
+}
+
+fn complete_workspace_move_extension_reservation(
+    reservation: &spool::NamespaceReservation,
+) -> ApiResult<()> {
+    let paths = spool::evidence_paths(reservation.source_identity());
+    browser::complete_extension_namespace_reservation_for_workspace_move(
+        &paths.browser_dir,
+        reservation.source_identity(),
+        reservation.target_identity(),
+        reservation.extension_reservation_id(),
+    )
+}
+
 #[tauri::command]
 async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<OrganizationOverview> {
     let access_token = state.access_token().await?;
@@ -413,20 +477,26 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
         .await?;
     let target_identity = spool::EvidenceIdentity::new(&current_identity.account_id, &target.id)
         .ok_or_else(|| BridgeError::unknown("Could not identify the destination workspace."))?;
-    let desktop_reservation = spool::reserve_identity_namespace(&target_identity)
+    let desktop_reservation = spool::reserve_identity_namespace(&current_identity, &target_identity)
         .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
     let browser_dir = state.monitor.browser_dir();
     let extension_reservation = match reserve_extension_namespace_capacity(&browser_dir, &target_identity).await {
         Ok(reservation) => reservation,
         Err(error) => {
-            let _ = spool::release_identity_namespace_reservation(&desktop_reservation);
+            rollback_workspace_move(&browser_dir, &desktop_reservation);
             return Err(error);
         }
     };
+    if let Err(error) = spool::record_workspace_move_extension_reservation(
+        &desktop_reservation,
+        &extension_reservation.request_id,
+    ) {
+        rollback_workspace_move(&browser_dir, &desktop_reservation);
+        return Err(BridgeError::new(ErrorKind::Conflict, error.to_string()));
+    }
     let previous = state.active_identity.lock().await.clone();
     if let Err(error) = state.deactivate_identity().await {
-        let _ = browser::release_extension_namespace_reservation(&browser_dir, &extension_reservation);
-        let _ = spool::release_identity_namespace_reservation(&desktop_reservation);
+        rollback_workspace_move(&browser_dir, &desktop_reservation);
         return Err(error);
     }
     if let Err(error) = state
@@ -434,8 +504,7 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
         .join_organization(&access_token, input.invite_code.trim(), &target.id)
         .await
     {
-        let _ = browser::release_extension_namespace_reservation(&browser_dir, &extension_reservation);
-        let _ = spool::release_identity_namespace_reservation(&desktop_reservation);
+        rollback_workspace_move(&browser_dir, &desktop_reservation);
         if let Some(identity) = previous {
             let _ = state.bind_identity(identity).await;
             let _ = state.enable_active_collection().await;
@@ -443,6 +512,8 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
         }
         return Err(error);
     }
+    spool::mark_workspace_move_committed(&desktop_reservation)
+        .map_err(|error| BridgeError::new(ErrorKind::Conflict, error.to_string()))?;
     Ok(OrganizationOverview {
         organization: target,
         entries: Vec::new(),

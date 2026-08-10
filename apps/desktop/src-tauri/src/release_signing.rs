@@ -1,32 +1,87 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use serde_json::Value;
 use std::io::Cursor;
 use std::path::Path;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SigningConfiguration {
+    pub bundle_active: bool,
+    pub updater_artifacts_requested: bool,
+    pub updater_public_key: Option<String>,
+    pub windows_certificate_thumbprint: Option<String>,
+}
+
+pub fn effective_tauri_config(mut base: Value, override_config: Option<&Value>) -> Value {
+    if let Some(override_config) = override_config {
+        merge_tauri_config(&mut base, override_config);
+    }
+    base
+}
+
+pub fn signing_configuration(config: &Value) -> SigningConfiguration {
+    SigningConfiguration {
+        bundle_active: config
+            .pointer("/bundle/active")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        updater_artifacts_requested: config
+            .pointer("/bundle/createUpdaterArtifacts")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        updater_public_key: config
+            .pointer("/plugins/updater/pubkey")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        windows_certificate_thumbprint: config
+            .pointer("/bundle/windows/certificateThumbprint")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    }
+}
 
 pub fn validate_build_signing(
     release: bool,
     target_os: &str,
-    updater_artifacts_requested: bool,
-    updater_public_key: Option<String>,
+    config: &SigningConfiguration,
     get: impl Fn(&str) -> Option<String>,
 ) -> Result<(), String> {
     if !release {
-        return (!updater_artifacts_requested)
+        return (!config.updater_artifacts_requested)
             .then_some(())
             .ok_or_else(|| {
                 "A local unsigned build cannot create production updater artifacts.".to_string()
             });
     }
+    if !config.bundle_active {
+        return Ok(());
+    }
 
     validate_updater_key(
         get("TAURI_SIGNING_PRIVATE_KEY"),
         get("TAURI_SIGNING_PRIVATE_KEY_PASSWORD"),
-        updater_public_key,
+        config.updater_public_key.clone(),
     )?;
 
     match target_os {
-        "windows" => validate_windows_signing(get),
+        "windows" => validate_windows_signing(config.windows_certificate_thumbprint.clone()),
         "macos" => validate_macos_signing(get),
         _ => Ok(()),
+    }
+}
+
+fn merge_tauri_config(base: &mut Value, override_config: &Value) {
+    match (base, override_config) {
+        (Value::Object(base), Value::Object(override_config)) => {
+            for (key, override_value) in override_config {
+                match base.get_mut(key) {
+                    Some(base_value) => merge_tauri_config(base_value, override_value),
+                    None => {
+                        base.insert(key.clone(), override_value.clone());
+                    }
+                }
+            }
+        }
+        (base, override_config) => *base = override_config.clone(),
     }
 }
 
@@ -42,27 +97,20 @@ fn validate_updater_key(
             .map_err(|_| "TAURI_SIGNING_PRIVATE_KEY could not be read.".to_string())?,
         false => value,
     };
-    let decoded = STANDARD
-        .decode(value.trim())
-        .map_err(|_| "TAURI_SIGNING_PRIVATE_KEY must contain a Minisign private key.".to_string())?;
-    let decoded = String::from_utf8(decoded)
-        .map_err(|_| "TAURI_SIGNING_PRIVATE_KEY must contain a Minisign private key.".to_string())?;
-    let secret = minisign::SecretKeyBox::from_string(&decoded)
+    let secret = minisign::SecretKeyBox::from_string(&minisign_key_text(&value, "TAURI_SIGNING_PRIVATE_KEY")?)
         .map_err(|_| "TAURI_SIGNING_PRIVATE_KEY must contain a Minisign private key.".to_string())?
         .into_secret_key(password)
         .map_err(|_| "TAURI_SIGNING_PRIVATE_KEY must contain a usable Minisign private key.".to_string())?;
     let updater_public_key = required(updater_public_key).ok_or_else(|| {
         "The configured updater public key is required for release signing.".to_string()
     })?;
-    let decoded_public_key = STANDARD
-        .decode(updater_public_key.trim())
-        .map_err(|_| "The configured updater public key is invalid.".to_string())?;
-    let decoded_public_key = String::from_utf8(decoded_public_key)
-        .map_err(|_| "The configured updater public key is invalid.".to_string())?;
-    let public = minisign::PublicKeyBox::from_string(&decoded_public_key)
-        .map_err(|_| "The configured updater public key is invalid.".to_string())?
-        .into_public_key()
-        .map_err(|_| "The configured updater public key is invalid.".to_string())?;
+    let public = minisign::PublicKeyBox::from_string(&minisign_key_text(
+        &updater_public_key,
+        "The configured updater public key",
+    )?)
+    .map_err(|_| "The configured updater public key is invalid.".to_string())?
+    .into_public_key()
+    .map_err(|_| "The configured updater public key is invalid.".to_string())?;
     minisign::sign(
         Some(&public),
         &secret,
@@ -74,18 +122,24 @@ fn validate_updater_key(
     Ok(())
 }
 
-fn validate_windows_signing(get: impl Fn(&str) -> Option<String>) -> Result<(), String> {
-    let certificate = required(get("WINDOWS_CERTIFICATE"));
-    let thumbprint = required(get("WINDOWS_CERTIFICATE_THUMBPRINT"));
-    if let Some(certificate) = certificate {
-        let password = get("WINDOWS_CERTIFICATE_PASSWORD").ok_or_else(|| {
-            "WINDOWS_CERTIFICATE_PASSWORD is required with WINDOWS_CERTIFICATE.".to_string()
-        })?;
-        return validate_windows_certificate(&certificate, &password);
+fn minisign_key_text(value: &str, name: &str) -> Result<String, String> {
+    if value.trim_start().starts_with("untrusted comment:") {
+        return Ok(value.to_string());
     }
-    let thumbprint = thumbprint.ok_or_else(|| {
-        "Windows release builds require WINDOWS_CERTIFICATE plus WINDOWS_CERTIFICATE_PASSWORD or WINDOWS_CERTIFICATE_THUMBPRINT.".to_string()
-    })?;
+    let decoded = STANDARD
+        .decode(value.trim())
+        .map_err(|_| format!("{name} must contain a Minisign key."))?;
+    String::from_utf8(decoded).map_err(|_| format!("{name} must contain a Minisign key."))
+}
+
+fn validate_windows_signing(configured_thumbprint: Option<String>) -> Result<(), String> {
+    let thumbprint = configured_thumbprint
+        .as_deref()
+        .and_then(normalized_windows_thumbprint)
+        .ok_or_else(|| {
+            "Windows release builds require bundle.windows.certificateThumbprint in the effective Tauri configuration."
+                .to_string()
+        })?;
     validate_windows_thumbprint(&thumbprint)
 }
 
@@ -127,50 +181,21 @@ fn normalized_windows_thumbprint(value: &str) -> Option<String> {
 }
 
 #[cfg(windows)]
-fn validate_windows_certificate(certificate: &str, password: &str) -> Result<(), String> {
-    let status = std::process::Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "$ErrorActionPreference = 'Stop'; $bytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE); $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($bytes, $env:WINDOWS_CERTIFICATE_PASSWORD, [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet); if (-not $certificate.HasPrivateKey) { exit 1 }",
-        ])
-        .env("WINDOWS_CERTIFICATE", certificate)
-        .env("WINDOWS_CERTIFICATE_PASSWORD", password)
-        .status()
-        .map_err(|_| "Windows release builds require a usable certificate with a private key.".to_string())?;
-    status
-        .success()
-        .then_some(())
-        .ok_or_else(|| "Windows release builds require a usable certificate with a private key.".to_string())
-}
-
-#[cfg(not(windows))]
-fn validate_windows_certificate(_certificate: &str, _password: &str) -> Result<(), String> {
-    Err("Windows signing credentials can only be validated on Windows.".to_string())
-}
-
-#[cfg(windows)]
 fn validate_windows_thumbprint(thumbprint: &str) -> Result<(), String> {
-    let thumbprint = normalized_windows_thumbprint(thumbprint).ok_or_else(|| {
-        "WINDOWS_CERTIFICATE_THUMBPRINT must identify a usable Windows signing certificate."
-            .to_string()
-    })?;
     let command = format!(
         "$ErrorActionPreference = 'Stop'; $certificate = Get-Item -LiteralPath 'Cert:\\CurrentUser\\My\\{thumbprint}'; if (-not $certificate.HasPrivateKey) {{ exit 1 }}"
     );
     let status = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &command])
         .status()
-        .map_err(|_| "WINDOWS_CERTIFICATE_THUMBPRINT must identify a usable Windows signing certificate.".to_string())?;
+        .map_err(|_| "The configured Windows signing certificate is unavailable.".to_string())?;
     status
         .success()
         .then_some(())
-        .ok_or_else(|| "WINDOWS_CERTIFICATE_THUMBPRINT must identify a usable Windows signing certificate.".to_string())
+        .ok_or_else(|| "The configured Windows signing certificate is unavailable.".to_string())
 }
 
 #[cfg(not(windows))]
-fn validate_windows_thumbprint(thumbprint: &str) -> Result<(), String> {
-    let _ = normalized_windows_thumbprint(thumbprint);
-    Err("Windows signing credentials can only be validated on Windows.".to_string())
+fn validate_windows_thumbprint(_thumbprint: &str) -> Result<(), String> {
+    Err("Windows signing configuration can only be validated on Windows.".to_string())
 }
