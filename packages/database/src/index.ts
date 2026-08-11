@@ -6,7 +6,6 @@ export {
   activitySegments,
   agentSessions,
   agentSessionStatus,
-  agentSource,
   organizationAdminClaims,
   organizations,
   projectMemberships,

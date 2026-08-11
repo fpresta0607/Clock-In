@@ -307,8 +307,18 @@ export const activitySegmentBatchResponseSchema = z
   })
   .strict();
 
-export const agentSourceValues = ["claude_code", "codex", "kimi_code", "cursor", "other"] as const;
-export const agentSourceSchema = z.enum(agentSourceValues);
+/**
+ * Which agent runtime produced a session. Deliberately *not* an enum: the
+ * roster in `agent-runtimes.json` decides what Clock-In can say about a
+ * runtime, never whether it may be recorded. A runtime nobody has declared yet
+ * is stored under its own id rather than collapsed into `other` or rejected,
+ * so support for a new CLI is a roster entry, not a schema migration.
+ *
+ * The shape is the contract: lowercase snake_case, which is what every
+ * declared id already is.
+ */
+export const agentSourcePattern = /^[a-z][a-z0-9_]*$/;
+export const agentSourceSchema = z.string().max(40).regex(agentSourcePattern);
 
 export const agentEventKindValues = ["started", "ended", "heartbeat"] as const;
 export const agentEventKindSchema = z.enum(agentEventKindValues);
@@ -317,6 +327,11 @@ export const agentEventKindSchema = z.enum(agentEventKindValues);
  * One lifecycle event drained from an agent-hook or browser spool; keyed server-side by
  * (source, externalSessionId). Browser spans carry the matched `ruleId` instead of a `cwd`:
  * exactly one of the two must be present, `ruleId` iff the source is `browser`.
+ *
+ * `model` is what the runtime was driving, recorded beside the runtime and
+ * never derived from it: `pi` running `deepseek-v4-pro` is still `pi`, and the
+ * model alone never names a runtime. It is optional because plenty of hook
+ * payloads do not carry one, and a guessed model is worse than none.
  */
 export const agentSessionEventSchema = z
   .object({
@@ -325,6 +340,7 @@ export const agentSessionEventSchema = z
     event: agentEventKindSchema,
     occurredAt: timestampSchema,
     cwd: z.string().min(1).max(1_000).optional(),
+    model: z.string().min(1).max(200).optional(),
     ruleId: idSchema.optional(),
   })
   .strict()

@@ -484,28 +484,84 @@ pub fn active_agent_spool_path() -> Option<PathBuf> {
     active_identity().map(|identity| evidence_paths(&identity).agent_path)
 }
 
+/// The agent spool both sides of the handoff use: the hook appends here and the
+/// desktop uploader drains here.
+///
+/// Evidence is namespaced per account and organization once an identity has
+/// been activated, and falls back to the unpartitioned spool when none has —
+/// which is every install that has not opted into namespaced evidence. Both
+/// sides resolve it the same way through this one function, because the two
+/// resolving it differently is exactly how an agent event goes missing: the
+/// hook exits successfully, nothing is written where the uploader looks, and
+/// the whole agent-attribution path reads as "no agents ran".
+pub fn agent_spool_path() -> PathBuf {
+    active_agent_spool_path().unwrap_or_else(default_spool_path)
+}
+
 pub fn active_browser_dir() -> Option<PathBuf> {
     active_identity().map(|identity| evidence_paths(&identity).browser_dir)
 }
 
-/// Agent CLI families. The canonical form is snake_case (what the API's
-/// `agent_source` enum expects); kebab-case aliases are accepted on input
-/// because that is how the hook contract spells them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AgentSource {
-    #[serde(rename = "claude_code", alias = "claude-code")]
-    ClaudeCode,
-    #[serde(rename = "codex")]
-    Codex,
-    #[serde(rename = "kimi_code", alias = "kimi-code")]
-    KimiCode,
-    #[serde(rename = "cursor")]
-    Cursor,
+/// Which agent runtime produced an event.
+///
+/// Deliberately not an enum. The roster in `agent_runtimes` decides what
+/// Clock-In can *say* about a runtime — its name, its hooks, its quota dial —
+/// never whether it may be recorded. Any id of the canonical shape is spooled
+/// and uploaded under its own name, so a runtime nobody has declared yet is
+/// still attributed instead of being dropped or collapsed into `other`.
+///
+/// The canonical form is snake_case, which is what the API stores; kebab-case
+/// is accepted on input because that is how the hook contract spells them, and
+/// `claude-code` and `claude_code` are therefore the same runtime.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct AgentSource(String);
+
+/// The shape both the wire contract and the API's check constraint enforce.
+const MAX_AGENT_SOURCE_LEN: usize = 40;
+
+impl AgentSource {
+    /// Accepts a canonical or kebab-case id; anything outside the shape is
+    /// rejected here rather than being sent on to fail server-side.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        let canonical = value.trim().to_ascii_lowercase().replace('-', "_");
+        if canonical.is_empty() || canonical.len() > MAX_AGENT_SOURCE_LEN {
+            return Err(format!("unrecognized agent source \"{value}\""));
+        }
+        let mut characters = canonical.chars();
+        let starts_with_letter = characters
+            .next()
+            .is_some_and(|first| first.is_ascii_lowercase());
+        let rest_is_shape =
+            characters.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+        if !starts_with_letter || !rest_is_shape {
+            return Err(format!("unrecognized agent source \"{value}\""));
+        }
+        Ok(Self(canonical))
+    }
+
     /// Browser-extension span verdicts, written by `clock-in-browser-host`.
-    #[serde(rename = "browser")]
-    Browser,
-    #[serde(rename = "other")]
-    Other,
+    pub fn browser() -> Self {
+        Self("browser".to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for AgentSource {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<AgentSource> for String {
+    fn from(source: AgentSource) -> Self {
+        source.0
+    }
 }
 
 /// Lifecycle event kinds, with the same canonical/alias split as `AgentSource`.
@@ -523,6 +579,11 @@ pub enum AgentEventKind {
 /// the uploader batches drained lines without re-mapping fields. Agent events
 /// carry `cwd` and no `ruleId`; browser spans carry `ruleId` and no `cwd` —
 /// exactly one of the two is set, matching the source-conditional contract.
+///
+/// `model` rides beside `source` and is never derived from it: `pi` driving
+/// `deepseek-v4-pro` is the `pi` runtime, and a model name identifies no
+/// runtime at all. It is absent whenever the hook did not say, because a
+/// guessed model is worse than none.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpoolEvent {
@@ -532,6 +593,8 @@ pub struct SpoolEvent {
     pub occurred_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<String>,
 }
@@ -547,6 +610,8 @@ pub struct HookInput {
     pub session_id: String,
     pub cwd: String,
     pub occurred_at: String,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl HookInput {
@@ -581,9 +646,19 @@ impl HookInput {
             event: self.event,
             occurred_at: self.occurred_at,
             cwd: Some(self.cwd),
+            model: non_empty(self.model.as_deref()),
             rule_id: None,
         }
     }
+}
+
+/// Trims a payload string down to something worth recording; a blank model is
+/// the same as no model at all.
+fn non_empty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 /// Claude Code's native hook payload: its own snake_case field names, no
@@ -596,6 +671,8 @@ struct ClaudeHookInput {
     session_id: String,
     #[serde(default)]
     cwd: String,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// The outcome of reading hook stdin: either one event to spool, or a payload
@@ -607,9 +684,15 @@ pub enum HookStdin {
 }
 
 /// The event identity a hook command line supplies when the CLI's own payload
-/// does not carry it. Cursor's registration passes only `--source`/`--event`;
-/// the session id and cwd are then extracted from Cursor's stdin payload.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// does not carry it. Registration passes `--source`/`--event`; the session id
+/// and cwd are then extracted from the CLI's own stdin payload.
+///
+/// The source always wins from here, because the command line is the one place
+/// that *knows* which runtime registered the hook. Codex pipes a payload shaped
+/// exactly like Claude Code's, so without this a Codex session would be filed
+/// as Claude Code — a runtime is identified by its registration, never guessed
+/// from the shape of what it sends.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArgvContext {
     pub source: AgentSource,
     pub event: AgentEventKind,
@@ -627,12 +710,12 @@ pub fn parse_stdin(json: &str) -> Result<HookStdin, String> {
 }
 
 /// `parse_stdin` plus a third fallback when the command line supplied the
-/// event identity: a Cursor-native payload (no contract shape, no
-/// `hook_event_name`) is mined best-effort for a session id and cwd. Cursor's
-/// payload field names are not yet verified against a real session, so every
-/// documented candidate spelling is tried. A payload without a usable session
-/// id or cwd is accepted and ignored — never an error, so a hook can never
-/// spam the agent CLI.
+/// event identity: a CLI-native payload (no contract shape, no
+/// `hook_event_name`) is mined best-effort for a session id, cwd, and model.
+/// Field spellings differ between CLIs and are not all verified against a real
+/// session, so every documented candidate is tried. A payload without a usable
+/// session id or cwd is accepted and ignored — never an error, so a hook can
+/// never spam the agent CLI.
 pub fn parse_stdin_with_context(
     json: &str,
     context: Option<ArgvContext>,
@@ -640,18 +723,18 @@ pub fn parse_stdin_with_context(
     match HookInput::parse(json) {
         Ok(input) => Ok(HookStdin::Event(input.into_event())),
         // The contract says what went wrong; keep that message if the input
-        // turns out to be neither a Claude payload nor (with argv context) a
-        // Cursor payload either.
+        // turns out to be neither a Claude-shaped payload nor (with argv
+        // context) a CLI-native payload either.
         Err(contract_error) => {
             if let Ok(claude) = serde_json::from_str::<ClaudeHookInput>(json) {
-                return translate_claude(claude);
+                return translate_claude(claude, context.as_ref());
             }
             if let Some(context) = context {
                 // With the identity on the command line, stdin is a
                 // CLI-native payload: extract what is there and accept the
                 // rest silently, so a hook can never spam the agent CLI.
                 return Ok(match serde_json::from_str::<serde_json::Value>(json) {
-                    Ok(value) if value.is_object() => translate_cursor(&value, context),
+                    Ok(value) if value.is_object() => translate_native(&value, &context),
                     _ => HookStdin::Ignored,
                 });
             }
@@ -660,7 +743,17 @@ pub fn parse_stdin_with_context(
     }
 }
 
-fn translate_claude(input: ClaudeHookInput) -> Result<HookStdin, String> {
+/// Claude Code's payload shape, which Codex's own `hooks.json` also speaks.
+/// The event comes from `hook_event_name` because the payload names it
+/// (`SessionStart` → started, `SessionEnd` → ended, `PostToolUse` → heartbeat;
+/// any other event is accepted and ignored so future hook types never spam
+/// errors). The runtime comes from the registration's argv when there is one,
+/// and only falls back to Claude Code for registrations written before Clock-In
+/// passed `--source`. The payload has no timestamp, so now is stamped here.
+fn translate_claude(
+    input: ClaudeHookInput,
+    context: Option<&ArgvContext>,
+) -> Result<HookStdin, String> {
     let event = match input.hook_event_name.as_str() {
         "SessionStart" => AgentEventKind::Started,
         "SessionEnd" => AgentEventKind::Ended,
@@ -674,25 +767,39 @@ fn translate_claude(input: ClaudeHookInput) -> Result<HookStdin, String> {
         return Err("cwd must not be empty".to_string());
     }
     Ok(HookStdin::Event(SpoolEvent {
-        source: AgentSource::ClaudeCode,
+        source: context.map_or_else(
+            || AgentSource::parse("claude_code").expect("the canonical id is well shaped"),
+            |context| context.source.clone(),
+        ),
         external_session_id: input.session_id,
         event,
         occurred_at: now_iso8601(),
         cwd: Some(input.cwd),
+        model: non_empty(input.model.as_deref()),
         rule_id: None,
     }))
 }
 
-/// Best-effort event building from a Cursor-native payload. The session id
-/// comes from the first present of
-/// `conversation_id`/`session_id`/`sessionId`/`sessionID`, the cwd from `cwd`
-/// or the first element of `workspace_roots`/`workspaceRoots`; the source and
-/// event kind always come from the argv context, so registration does not
-/// depend on Cursor's payload carrying an event name. Like Claude's payload,
-/// Cursor's has no contract timestamp, so the current time is stamped here.
-/// Anything without a usable session id or cwd is accepted and ignored.
-fn translate_cursor(value: &serde_json::Value, context: ArgvContext) -> HookStdin {
-    let session_id = ["conversation_id", "session_id", "sessionId", "sessionID"]
+/// Session-id spellings seen across CLI-native payloads, in priority order.
+const NATIVE_SESSION_ID_KEYS: [&str; 5] = [
+    "conversation_id",
+    "session_id",
+    "sessionId",
+    "sessionID",
+    "id",
+];
+
+/// Model spellings seen across CLI-native payloads. Only an explicit model
+/// field counts: the runtime is never read off a model name, nor the reverse.
+const NATIVE_MODEL_KEYS: [&str; 3] = ["model", "model_id", "modelId"];
+
+/// Best-effort event building from a CLI-native payload. The source and event
+/// kind always come from the argv context, so registration never depends on the
+/// payload carrying an event name. Like Claude's payload, these carry no
+/// contract timestamp, so the current time is stamped here. Anything without a
+/// usable session id or cwd is accepted and ignored.
+fn translate_native(value: &serde_json::Value, context: &ArgvContext) -> HookStdin {
+    let session_id = NATIVE_SESSION_ID_KEYS
         .iter()
         .find_map(|key| value.get(key).and_then(|field| field.as_str()))
         .map(str::trim)
@@ -721,12 +828,17 @@ fn translate_cursor(value: &serde_json::Value, context: ArgvContext) -> HookStdi
         return HookStdin::Ignored;
     };
 
+    let model = NATIVE_MODEL_KEYS
+        .iter()
+        .find_map(|key| value.get(key).and_then(|field| field.as_str()));
+
     HookStdin::Event(SpoolEvent {
-        source: context.source,
+        source: context.source.clone(),
         external_session_id: session_id.to_string(),
         event: context.event,
         occurred_at: now_iso8601(),
         cwd: Some(cwd.to_string()),
+        model: non_empty(model),
         rule_id: None,
     })
 }
@@ -1651,6 +1763,12 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};
 
+    /// A canonical runtime id, since the tests name runtimes the same way
+    /// the hook contract does.
+    fn source(id: &str) -> AgentSource {
+        AgentSource::parse(id).expect("the test names a well-shaped runtime")
+    }
+
     fn temp_dir(tag: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("clock-in-spool-test-{}-{tag}", std::process::id()));
@@ -1661,11 +1779,12 @@ mod tests {
 
     fn event(session: &str) -> SpoolEvent {
         SpoolEvent {
-            source: AgentSource::ClaudeCode,
+            source: source("claude_code"),
             external_session_id: session.to_string(),
             event: AgentEventKind::Started,
             occurred_at: "2026-08-07T12:00:00Z".to_string(),
             cwd: Some("C:/dev/Clock-In".to_string()),
+            model: None,
             rule_id: None,
         }
     }
@@ -1700,7 +1819,7 @@ mod tests {
         let started = claude_event(
             r#"{"session_id":"s1","transcript_path":"/tmp/t.jsonl","cwd":"C:/dev/Clock-In","hook_event_name":"SessionStart","source":"startup"}"#,
         );
-        assert_eq!(started.source, AgentSource::ClaudeCode);
+        assert_eq!(started.source, source("claude_code"));
         assert_eq!(started.event, AgentEventKind::Started);
         assert_eq!(started.external_session_id, "s1");
         assert_eq!(started.cwd.as_deref(), Some("C:/dev/Clock-In"));
@@ -1711,7 +1830,7 @@ mod tests {
             r#"{"session_id":"s1","transcript_path":"/tmp/t.jsonl","cwd":"C:/dev/Clock-In","hook_event_name":"SessionEnd","reason":"clear"}"#,
         );
         assert_eq!(ended.event, AgentEventKind::Ended);
-        assert_eq!(ended.source, AgentSource::ClaudeCode);
+        assert_eq!(ended.source, source("claude_code"));
     }
 
     #[test]
@@ -1721,7 +1840,7 @@ mod tests {
         );
 
         assert_eq!(heartbeat.event, AgentEventKind::Heartbeat);
-        assert_eq!(heartbeat.source, AgentSource::ClaudeCode);
+        assert_eq!(heartbeat.source, source("claude_code"));
     }
 
     #[test]
@@ -1754,7 +1873,7 @@ mod tests {
 
         match outcome {
             HookStdin::Event(event) => {
-                assert_eq!(event.source, AgentSource::KimiCode);
+                assert_eq!(event.source, source("kimi_code"));
                 assert_eq!(event.occurred_at, "2026-08-07T12:00:00Z");
             }
             HookStdin::Ignored => panic!("contract payloads are never ignored"),
@@ -1773,7 +1892,7 @@ mod tests {
 
     fn cursor_context() -> ArgvContext {
         ArgvContext {
-            source: AgentSource::Cursor,
+            source: source("cursor"),
             event: AgentEventKind::Started,
         }
     }
@@ -1791,7 +1910,7 @@ mod tests {
     fn a_cursor_payload_extracts_session_id_and_cwd_under_the_argv_identity() {
         let event = cursor_event(r#"{"conversation_id":"c1","cwd":"/repo"}"#);
 
-        assert_eq!(event.source, AgentSource::Cursor);
+        assert_eq!(event.source, source("cursor"));
         assert_eq!(event.event, AgentEventKind::Started);
         assert_eq!(event.external_session_id, "c1");
         assert_eq!(event.cwd.as_deref(), Some("/repo"));
@@ -1856,7 +1975,7 @@ mod tests {
     #[test]
     fn cursor_serializes_as_the_canonical_source() {
         let line = serde_json::to_string(&SpoolEvent {
-            source: AgentSource::Cursor,
+            source: source("cursor"),
             ..event("s1")
         })
         .expect("event serializes");
@@ -1865,8 +1984,113 @@ mod tests {
         // And the flag spelling round-trips.
         assert_eq!(
             serde_json::from_str::<AgentSource>("\"cursor\"").expect("source parses"),
-            AgentSource::Cursor
+            source("cursor")
         );
+    }
+
+    #[test]
+    fn a_runtime_the_roster_never_heard_of_is_recorded_under_its_own_name() {
+        // The roster is not an allowlist. Support for a new CLI must never wait
+        // on a schema change, so an undeclared id round-trips untouched instead
+        // of being rejected or quietly rewritten to `other`.
+        let parsed = HookInput::parse(
+            r#"{"version":1,"source":"muse","event":"started","sessionId":"s1","cwd":"/x","occurredAt":"2026-08-10T12:00:00Z"}"#,
+        )
+        .expect("an undeclared runtime is accepted");
+        assert_eq!(parsed.source.as_str(), "muse");
+
+        let brand_new = HookInput::parse(
+            r#"{"version":1,"source":"agent_9","event":"started","sessionId":"s1","cwd":"/x","occurredAt":"2026-08-10T12:00:00Z"}"#,
+        )
+        .expect("a runtime nobody has declared is accepted");
+        assert_eq!(brand_new.source.as_str(), "agent_9");
+    }
+
+    #[test]
+    fn an_ill_shaped_source_is_rejected_here_rather_than_server_side() {
+        for bad in [
+            "",
+            "  ",
+            "9lives",
+            "Claude Code",
+            "pi;rm -rf /",
+            &"x".repeat(41),
+        ] {
+            assert!(
+                AgentSource::parse(bad).is_err(),
+                "{bad:?} should not be a runtime id",
+            );
+        }
+    }
+
+    #[test]
+    fn a_model_rides_beside_the_runtime_without_either_naming_the_other() {
+        let parsed = HookInput::parse(
+            r#"{"version":1,"source":"pi","event":"started","sessionId":"s1","cwd":"/x","occurredAt":"2026-08-10T12:00:00Z","model":"deepseek-v4-pro"}"#,
+        )
+        .expect("a model is accepted")
+        .into_event();
+        // pi driving deepseek-v4-pro is still the pi runtime.
+        assert_eq!(parsed.source.as_str(), "pi");
+        assert_eq!(parsed.model.as_deref(), Some("deepseek-v4-pro"));
+
+        // And a runtime that names no model records none rather than a guess.
+        let bare = HookInput::parse(
+            r#"{"version":1,"source":"pi","event":"started","sessionId":"s2","cwd":"/x","occurredAt":"2026-08-10T12:00:00Z"}"#,
+        )
+        .expect("an absent model is fine")
+        .into_event();
+        assert_eq!(bare.model, None);
+    }
+
+    #[test]
+    fn a_claude_shaped_payload_is_filed_under_the_runtime_that_registered_it() {
+        // Codex pipes Claude Code's payload shape. Without the argv identity a
+        // Codex session would be filed as Claude Code, so the registration —
+        // not the shape — decides the runtime.
+        let payload = r#"{"hook_event_name":"SessionStart","session_id":"c1","cwd":"/repo","model":"gpt-5.3-codex"}"#;
+        let context = ArgvContext {
+            source: source("codex"),
+            event: AgentEventKind::Started,
+        };
+        let HookStdin::Event(event) = parse_stdin_with_context(payload, Some(context))
+            .expect("a Claude-shaped payload parses")
+        else {
+            panic!("the payload names an event Clock-In tracks");
+        };
+        assert_eq!(event.source.as_str(), "codex");
+        assert_eq!(event.event, AgentEventKind::Started);
+        assert_eq!(event.model.as_deref(), Some("gpt-5.3-codex"));
+
+        // A registration written before Clock-In passed --source still means
+        // Claude Code, which is the only CLI that ever registered that way.
+        let HookStdin::Event(legacy) =
+            parse_stdin(payload).expect("a Claude-shaped payload parses")
+        else {
+            panic!("the payload names an event Clock-In tracks");
+        };
+        assert_eq!(legacy.source.as_str(), "claude_code");
+    }
+
+    #[test]
+    fn a_native_payload_gives_up_its_model_under_every_documented_spelling() {
+        for json in [
+            r#"{"session_id":"s1","cwd":"/repo","model":"deepseek-v4-pro"}"#,
+            r#"{"session_id":"s1","cwd":"/repo","model_id":"deepseek-v4-pro"}"#,
+            r#"{"session_id":"s1","cwd":"/repo","modelId":"deepseek-v4-pro"}"#,
+        ] {
+            let context = ArgvContext {
+                source: source("pi"),
+                event: AgentEventKind::Started,
+            };
+            let HookStdin::Event(event) = parse_stdin_with_context(json, Some(context))
+                .expect("native payloads are never errors")
+            else {
+                panic!("the payload carries a session id and cwd");
+            };
+            assert_eq!(event.source.as_str(), "pi");
+            assert_eq!(event.model.as_deref(), Some("deepseek-v4-pro"));
+        }
     }
 
     #[test]
@@ -1876,7 +2100,7 @@ mod tests {
         )
         .expect("snake case parses");
 
-        assert_eq!(parsed.source, AgentSource::KimiCode);
+        assert_eq!(parsed.source, source("kimi_code"));
         assert_eq!(parsed.event, AgentEventKind::Ended);
     }
 
@@ -1917,11 +2141,12 @@ mod tests {
     #[test]
     fn a_browser_line_carries_a_rule_id_and_no_cwd() {
         let line = SpoolEvent {
-            source: AgentSource::Browser,
+            source: AgentSource::browser(),
             external_session_id: "span-1".to_string(),
             event: AgentEventKind::Started,
             occurred_at: "2026-08-09T12:00:00Z".to_string(),
             cwd: None,
+            model: None,
             rule_id: Some("r1".to_string()),
         };
         let encoded = serde_json::to_string(&line).expect("event serializes");

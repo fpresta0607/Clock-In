@@ -4,6 +4,7 @@
 //! lives in the OS credential store, recovery state lives on disk without any
 //! token in it, and stops that fail offline are queued for retry.
 
+mod agent_runtimes;
 mod api;
 mod monitor;
 mod recovery;
@@ -574,7 +575,7 @@ pub fn run() {
                 settings_path: data_dir.join("settings.json"),
                 segments_path: data_dir.join("segments-spool.jsonl"),
                 sessions_path: data_dir.join("sessions-spool.jsonl"),
-                agent_path: spool::default_spool_path(),
+                agent_path: spool::agent_spool_path(),
                 recovery_path: recovery_path.clone(),
                 recovery: Arc::clone(&recovery),
             });

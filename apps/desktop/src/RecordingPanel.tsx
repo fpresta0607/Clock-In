@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 
+import { AgentRuntimeIcon } from "./agent-icons.js";
 import { sourceLabel } from "./agent-sources.js";
 import type { MonitorStatus } from "./bridge.js";
 
@@ -160,7 +161,10 @@ export const RecordingPanel = ({
               </li>
               {status.hooks.map((hook) => (
                 <li key={hook.source} className="source-row">
-                  <span className="source-name">{sourceLabel(hook.source)}</span>
+                  <span className="source-name">
+                    <AgentRuntimeIcon source={hook.source} />
+                    {sourceLabel(hook.source)}
+                  </span>
                   {hook.detected ? (
                     <span className="source-state is-on">Connected</span>
                   ) : (

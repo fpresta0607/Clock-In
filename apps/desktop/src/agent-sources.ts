@@ -1,11 +1,7 @@
-/// Display names for the agent CLI families the hook contract knows about.
-/// Shared by the timer screen and the "what's recorded" panel so one tool is
-/// never called two different things.
-const AGENT_SOURCE_LABELS: Record<string, string> = {
-  claude_code: "Claude Code",
-  codex: "Codex",
-  kimi_code: "Kimi Code",
-  cursor: "Cursor",
-};
+import { agentRuntimeLabel } from "@clock-in/shared";
 
-export const sourceLabel = (source: string): string => AGENT_SOURCE_LABELS[source] ?? source;
+/// Display names for the agent runtimes the hook contract knows about, straight
+/// from the shared roster, so one tool is never called two different things and
+/// adding a runtime never means editing this file. A runtime the roster has not
+/// heard of keeps its own id rather than being relabelled into a neighbour.
+export const sourceLabel = (source: string): string => agentRuntimeLabel(source);

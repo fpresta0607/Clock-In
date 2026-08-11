@@ -18,6 +18,21 @@ verified and unverified. A session is attributed whole or not at all, by
 `time_sessions.attribution`. The README's "How session tracking works" section is
 the authoritative prose; keep it true when you change the model.
 
+## The agent-runtime roster is data, not code
+
+`packages/shared/src/agent-runtimes.json` is the single declaration of every runtime
+Clock-In knows by name. The TypeScript side imports it; the Rust host embeds the same
+file (`apps/desktop/src-tauri/src/agent_runtimes.rs`), so the two cannot drift. Add a
+runtime there, not in six places.
+
+It is a roster, **not an allowlist**: `agent_sessions.source` is text with a shape
+check, so an undeclared runtime is still recorded under its own id. Never reintroduce
+an enum for it, and never map an unknown runtime onto `other`.
+
+A runtime is identified by the registration that fired, never by the payload's shape:
+Codex pipes Claude Code's exact hook payload, so registrations pass `--source`. And
+runtime and model are independent — neither is ever derived from the other.
+
 ## Sharp edges
 
 - The Rust toolchain lives at `~/.cargo/bin` and may not be on `PATH`. Rust gate:
@@ -27,7 +42,14 @@ the authoritative prose; keep it true when you change the model.
   for existing installs, but *adding* one needs a sensible default or old files
   parse into something surprising.
 - Migrations are generated, never hand-written: change `packages/database/src/schema.ts`,
-  then `pnpm exec drizzle-kit generate --name <slug>` from `packages/database`.
+  then `pnpm exec drizzle-kit generate --name <slug>` from `packages/database`. The
+  drizzle snapshots under `migrations/meta` have drifted ahead of the SQL files, so a
+  database built only from `migrations/*.sql` does not match `schema.ts`; a generated
+  migration therefore picks up leftovers from earlier features. Check what a fresh
+  `drizzle-kit generate` emits before assuming it is only your change.
+- `clock-in-hook` and the desktop uploader must resolve the spool through the same
+  `spool::agent_spool_path()`. When they disagreed, the hook exited 0, wrote nothing
+  the uploader could see, and every agent event vanished silently.
 - Both frontends share `packages/shared/styles/brand.css` and ship a single dark
   theme; there is no light theme to match, so use the tokens rather than literals.
 

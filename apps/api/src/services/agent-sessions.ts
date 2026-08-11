@@ -13,6 +13,13 @@ const defaultStaleThresholdMs = 6 * 60 * 60 * 1_000;
 
 export interface AgentSessionEventInput {
   source: AgentSource;
+  /**
+   * The model the runtime was driving, when the hook named one. Kept strictly
+   * beside `source`: neither is ever derived from the other, because `pi`
+   * running `deepseek-v4-pro` is the `pi` runtime and a model name identifies
+   * no runtime at all.
+   */
+  model: string | null;
   externalSessionId: string;
   event: "started" | "ended" | "heartbeat";
   occurredAt: Date;
@@ -97,6 +104,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
             organizationId: subject.organizationId,
             userId: subject.userId,
             source: event.source,
+            model: event.model,
             externalSessionId: event.externalSessionId,
             cwd: event.cwd,
             projectId,
@@ -113,6 +121,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
               organizationId: subject.organizationId,
               userId: subject.userId,
               source: event.source,
+              model: event.model,
               externalSessionId: event.externalSessionId,
               cwd: event.cwd,
               projectId,

@@ -54,6 +54,103 @@ fn run_hook(root: &Path, args: &[&str], stdin: Option<&str>) -> std::process::Ou
 }
 
 #[test]
+fn an_event_lands_in_the_default_spool_when_no_identity_is_active() {
+    // The state every real install is in: nothing activates a namespaced
+    // evidence identity, so the hook must write the spool the desktop uploader
+    // drains. Getting this wrong is silent — the hook exits 0 and the whole
+    // agent-attribution path simply reports that no agents ever ran.
+    let dir = temp_dir("no-identity");
+    let spool = dir.join("agent-spool.jsonl");
+
+    let output = run_hook(
+        &dir,
+        &[
+            "--source",
+            "pi",
+            "--event",
+            "session-start",
+            "--session-id",
+            "s1",
+            "--cwd",
+            "/home/dev/Clock-In",
+            "--model",
+            "deepseek-v4-pro",
+        ],
+        None,
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let content = std::fs::read_to_string(&spool).expect("the default spool reads");
+    let value: serde_json::Value =
+        serde_json::from_str(content.lines().next().expect("one line")).expect("line parses");
+    assert_eq!(value["source"], "pi");
+    assert_eq!(value["model"], "deepseek-v4-pro");
+    assert_eq!(value["cwd"], "/home/dev/Clock-In");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn concurrent_runtimes_each_land_as_their_own_line() {
+    // Several agent CLIs run at once on one machine. Two runtimes in the same
+    // folder must stay two events, told apart by source and session id.
+    let dir = temp_dir("concurrent-runtimes");
+    let spool = dir.join("agent-spool.jsonl");
+
+    for (source, session, model) in [
+        ("claude_code", "claude-1", "claude-opus-5"),
+        ("pi", "pi-1", "deepseek-v4-pro"),
+    ] {
+        let output = run_hook(
+            &dir,
+            &[
+                "--source",
+                source,
+                "--event",
+                "session-start",
+                "--session-id",
+                session,
+                "--cwd",
+                "/home/dev/Clock-In",
+                "--model",
+                model,
+            ],
+            None,
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let content = std::fs::read_to_string(&spool).expect("the default spool reads");
+    let recorded: Vec<(String, String)> = content
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("line parses"))
+        .map(|value| {
+            (
+                value["source"].as_str().expect("a source").to_string(),
+                value["model"].as_str().expect("a model").to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        recorded,
+        vec![
+            ("claude_code".to_string(), "claude-opus-5".to_string()),
+            ("pi".to_string(), "deepseek-v4-pro".to_string()),
+        ],
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_valid_stdin_event_lands_as_one_canonical_line() {
     let dir = temp_dir("stdin");
     let spool = active_agent_spool(&dir);

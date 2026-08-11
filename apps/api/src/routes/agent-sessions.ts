@@ -20,6 +20,7 @@ export function createAgentSessionRoutes(service: AgentSessionService): Hono<Api
     if (!input.success) throw new AppError("validation_error", "Invalid request body.");
     const result = await service.ingest(getAuthenticatedSubject(context), input.data.events.map((event) => ({
       source: event.source,
+      model: event.model ?? null,
       externalSessionId: event.externalSessionId,
       event: event.event,
       occurredAt: new Date(event.occurredAt),

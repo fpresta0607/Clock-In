@@ -15,7 +15,7 @@ import {
   type SettingsPatch,
   type TimerBridge,
 } from "./bridge.js";
-import { formatDuration } from "@clock-in/shared";
+import { agentRuntimeForBinary, formatDuration } from "@clock-in/shared";
 import { RecordingPanel } from "./RecordingPanel.js";
 import { WebGLShader } from "./WebGLShader.js";
 
@@ -26,14 +26,6 @@ type AppProps = {
 /// Status polls stay well above the host's own 30-second activity tick; the
 /// latency this buys is fine for a tray utility.
 const MONITOR_POLL_MS = 15_000;
-
-/// Agent CLI executables surface in the foreground-process stats under their
-/// binary name; they fold into a single row labelled via the shared names.
-const AGENT_PROCESS_SOURCES: Record<string, string> = {
-  claude: "claude_code",
-  codex: "codex",
-  kimi: "kimi_code",
-};
 
 const FRIENDLY_APP_NAMES: Record<string, string> = {
   chrome: "Google Chrome",
@@ -94,14 +86,15 @@ type AppRow = {
 const TOP_APP_ROWS = 8;
 
 /// Heaviest-first app rows for the Today card: agent CLIs fold into one row,
-/// and everything past the top rows folds into "Everything else".
+/// and everything past the top rows folds into "Everything else". Which
+/// executables count as an agent comes from the shared runtime roster, so a
+/// newly declared CLI folds in without a second list to remember.
 const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
   let agentSeconds = 0;
   const agentSources = new Set<string>();
   const rows: AppRow[] = [];
   for (const app of apps) {
-    const base = app.processName.replace(/\.exe$/i, "").toLowerCase();
-    const agentSource = AGENT_PROCESS_SOURCES[base];
+    const agentSource = agentRuntimeForBinary(app.processName);
     if (agentSource !== undefined) {
       agentSeconds += app.durationSeconds;
       agentSources.add(agentSource);

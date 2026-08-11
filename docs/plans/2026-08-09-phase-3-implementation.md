@@ -17,7 +17,7 @@
 - Test: `packages/shared/src/contracts.test.ts`
 
 **Steps:**
-1. Tests first: `agentSourceValues` gains `"browser"`; `agentSessionEventSchema` gains optional `ruleId: uuid` with a refinement requiring exactly one of `cwd`/`ruleId` (`ruleId` iff source is `browser`); mapping schemas gain `kind: "path_prefix" | "url_rule"` (create defaults to `path_prefix`) and URL-rule pattern validation (scheme-less, lowercase host, single trailing glob, ≤500 chars); `meStatsResponseSchema` gains `sites: array({ mapping: { id, pattern, projectId nullable }, durationSeconds })`.
+1. Tests first: add `"browser"` to the runtime roster in `agent-runtimes.json`; `agentSessionEventSchema` gains optional `ruleId: uuid` with a refinement requiring exactly one of `cwd`/`ruleId` (`ruleId` iff source is `browser`); mapping schemas gain `kind: "path_prefix" | "url_rule"` (create defaults to `path_prefix`) and URL-rule pattern validation (scheme-less, lowercase host, single trailing glob, ≤500 chars); `meStatsResponseSchema` gains `sites: array({ mapping: { id, pattern, projectId nullable }, durationSeconds })`.
 2. Implement, run shared tests and typecheck.
 
 ### Task 2: Database
@@ -28,8 +28,8 @@
 - Test: `packages/database/src/schema.test.ts`, `packages/database/src/migrations.integration.test.ts`
 
 **Steps:**
-1. Tests for: `agent_source` enum containing `browser`; `project_path_mappings.kind` (`path_prefix` default, not null) with the existing `(org, user, pathPrefix)` uniqueness now spanning both kinds.
-2. Migration: `ALTER TYPE agent_source ADD VALUE 'browser'` (Neon is PG15+; fine in-transaction as long as the value is not used in the same migration) and the `kind` column. No new tables.
+1. Tests for: `agent_sessions.source` accepting `'browser'` (text with a shape check, no migration needed); `project_path_mappings.kind` (`path_prefix` default, not null) with the existing `(org, user, pathPrefix)` uniqueness now spanning both kinds.
+2. Migration: the `kind` column only. No ALTER TYPE and no new tables.
 3. Package tests; integration suite against a disposable Neon branch.
 
 ### Task 3: API — ruleId attribution, per-source reaping, sites

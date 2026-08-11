@@ -742,12 +742,16 @@ export class DrizzleActivitySegmentRepository implements ActivitySegmentReposito
   }
 }
 
+// Raw sql`` interpolation bypasses drizzle's Date mapping and postgres-js cannot
+// serialize a bare Date, so every `greatest` bound below is bound as an ISO string
+// and cast, exactly as the report ranges above are.
 function asAgentSessionRecord(row: typeof agentSessions.$inferSelect): AgentSessionRecord {
   return {
     id: row.id,
     organizationId: row.organizationId,
     userId: row.userId,
     source: row.source,
+    model: row.model,
     externalSessionId: row.externalSessionId,
     projectId: row.projectId,
     cwd: row.cwd ?? "",
@@ -786,6 +790,7 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         organizationId: input.organizationId,
         userId: input.userId,
         source: input.source,
+        model: input.model,
         externalSessionId: input.externalSessionId,
         cwd: input.cwd,
         projectId: input.projectId,
@@ -799,8 +804,11 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
       .onConflictDoUpdate({
         target: agentSessionKey,
         // A replayed start refreshes lastEventAt only; an ended row stays ended.
+        // A later start that names a model fills one in — a session can be
+        // resumed on a different model — but never blanks one already recorded.
         set: {
-          lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${input.occurredAt})`,
+          ...(input.model === null ? {} : { model: input.model }),
+          lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${input.occurredAt.toISOString()}::timestamptz)`,
           updatedAt: input.receivedAt,
         },
       })
@@ -814,7 +822,7 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
       .set({
         status: "ended",
         endedAt,
-        lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${endedAt})`,
+        lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${endedAt.toISOString()}::timestamptz)`,
         updatedAt: now,
       })
       .where(and(
@@ -835,6 +843,7 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         organizationId: input.organizationId,
         userId: input.userId,
         source: input.source,
+        model: input.model,
         externalSessionId: input.externalSessionId,
         cwd: input.cwd,
         projectId: input.projectId,
@@ -851,7 +860,7 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
     const rows = await this.db
       .update(agentSessions)
       .set({
-        lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${occurredAt})`,
+        lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${occurredAt.toISOString()}::timestamptz)`,
         updatedAt: now,
       })
       .where(and(

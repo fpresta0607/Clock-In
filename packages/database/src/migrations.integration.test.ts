@@ -234,7 +234,7 @@ integration(integrationDescription, () => {
       insert into projects (id, organization_id, name) values (${projectId}, ${organizationId}, 'Browser Project')
     `;
 
-    // The agent_source enum accepts browser spans.
+    // agent_sessions.source is text with a shape check; 'browser' is a valid source.
     await expect(database.client`
       insert into agent_sessions (organization_id, user_id, source, external_session_id, cwd, started_at, last_event_at)
       values (${organizationId}, ${userId}, 'browser', 'span-1', '', now(), now())
