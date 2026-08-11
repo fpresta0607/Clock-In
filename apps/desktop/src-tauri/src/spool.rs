@@ -795,16 +795,6 @@ pub fn seal_pending_spool_paths(path: &Path) -> SpoolResult<Vec<PathBuf>> {
     })
 }
 
-pub(crate) fn discard_locked(path: &Path) -> SpoolResult<()> {
-    for candidate in all_spool_paths_locked(path)? {
-        remove_if_exists(&candidate)?;
-        remove_if_exists(&sibling(&candidate, ".partial"))?;
-        remove_if_exists(&sibling(&candidate, ".corrupt"))?;
-        remove_if_exists(&sibling(&candidate, ".tmp"))?;
-        remove_if_exists(&sibling(&candidate, ".bak"))?;
-    }
-    Ok(())
-}
 
 /// The line-typed core of `read_pending`, shared with the segment spool the
 /// activity monitor drains (same durability discipline, different row type).
