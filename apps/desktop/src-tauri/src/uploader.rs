@@ -19,7 +19,7 @@ use crate::monitor::{
     advance_sessions, iso8601, lock, parse_iso8601, unix_now, ActiveAgent, AgentTracking,
     MonitorShared, ObservedSession, SeenAgentEvent, SegmentRecord,
 };
-use crate::spool::{self, AgentEventKind, AgentSource, SpoolEvent};
+use crate::spool::{self, AgentEventKind, SpoolEvent};
 
 /// The server's batch bound for both upload routes.
 const UPLOAD_BATCH_SIZE: usize = 500;
@@ -187,13 +187,13 @@ pub fn replay_agent_events(
     ordered.sort_by(|(left_at, left), (right_at, right)| {
         (
             left_at,
-            source_name(left.source),
+            left.source.as_str(),
             &left.external_session_id,
             event_rank(left.event),
         )
             .cmp(&(
                 right_at,
-                source_name(right.source),
+                right.source.as_str(),
                 &right.external_session_id,
                 event_rank(right.event),
             ))
@@ -236,13 +236,13 @@ pub fn track_agent_events(
     ordered.sort_by(|(left_at, left), (right_at, right)| {
         (
             left_at,
-            source_name(left.source),
+            left.source.as_str(),
             &left.external_session_id,
             event_rank(left.event),
         )
             .cmp(&(
                 right_at,
-                source_name(right.source),
+                right.source.as_str(),
                 &right.external_session_id,
                 event_rank(right.event),
             ))
@@ -255,7 +255,7 @@ pub fn track_agent_events(
 
 fn agent_key(event: &SpoolEvent) -> (String, String) {
     (
-        source_name(event.source).to_string(),
+        event.source.as_str().to_string(),
         event.external_session_id.clone(),
     )
 }
@@ -285,7 +285,7 @@ fn track_agent_event(
         return;
     }
     let key = agent_key(event);
-    let source = source_name(event.source).to_string();
+    let source = event.source.as_str().to_string();
     tracking.last_event_at = tracking.last_event_at.max(at);
     match event.event {
         AgentEventKind::Started => {
@@ -334,17 +334,6 @@ fn track_agent_event(
             kind: event.event,
         },
     );
-}
-
-pub fn source_name(source: AgentSource) -> &'static str {
-    match source {
-        AgentSource::ClaudeCode => "claude_code",
-        AgentSource::Codex => "codex",
-        AgentSource::KimiCode => "kimi_code",
-        AgentSource::Cursor => "cursor",
-        AgentSource::Browser => "browser",
-        AgentSource::Other => "other",
-    }
 }
 
 /// Lowercases, unifies separators to `/`, and strips trailing separators —
@@ -406,6 +395,10 @@ pub fn resolve_project(cwd: &str, mappings: &[PathMapping]) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn source(id: &str) -> spool::AgentSource {
+        spool::AgentSource::parse(id).expect("the test names a well-shaped runtime")
+    }
+
     fn mapping(id: &str, prefix: &str, project: &str) -> PathMapping {
         PathMapping {
             id: id.to_string(),
@@ -416,11 +409,11 @@ mod tests {
     }
 
     fn event(kind: AgentEventKind, cwd: &str, occurred_at: &str) -> SpoolEvent {
-        event_for(AgentSource::ClaudeCode, "s1", kind, cwd, occurred_at)
+        event_for(source("claude_code"), "s1", kind, cwd, occurred_at)
     }
 
     fn event_for(
-        source: AgentSource,
+        source: spool::AgentSource,
         external_session_id: &str,
         kind: AgentEventKind,
         cwd: &str,
@@ -432,6 +425,7 @@ mod tests {
             event: kind,
             occurred_at: occurred_at.to_string(),
             cwd: Some(cwd.to_string()),
+            model: None,
             rule_id: None,
         }
     }
@@ -607,21 +601,21 @@ mod tests {
         track_agent_events(
             &[
                 event_for(
-                    AgentSource::ClaudeCode,
+                    source("claude_code"),
                     "one",
                     AgentEventKind::Started,
                     "C:/one",
                     "2026-08-07T10:00:00Z",
                 ),
                 event_for(
-                    AgentSource::Cursor,
+                    source("cursor"),
                     "two",
                     AgentEventKind::Started,
                     "C:/two",
                     "2026-08-07T10:01:00Z",
                 ),
                 event_for(
-                    AgentSource::ClaudeCode,
+                    source("claude_code"),
                     "one",
                     AgentEventKind::Ended,
                     "C:/one",

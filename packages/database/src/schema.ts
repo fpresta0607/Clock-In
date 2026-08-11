@@ -16,7 +16,6 @@ import {
 
 export const sessionStatus = pgEnum("session_status", ["running", "stopped", "needs_review"]);
 export const activitySegmentKind = pgEnum("activity_segment_kind", ["active", "idle", "locked", "suspended"]);
-export const agentSource = pgEnum("agent_source", ["claude_code", "codex", "kimi_code", "cursor", "other"]);
 export const agentSessionStatus = pgEnum("agent_session_status", ["running", "ended"]);
 // How a session learned its project. Rows written by the retired manual timer
 // keep the default, "manual", which is also what the column backfills to.
@@ -252,8 +251,16 @@ export const agentSessions = pgTable(
     id: uuid("id").defaultRandom().primaryKey(),
     organizationId: uuid("organization_id").notNull(),
     userId: uuid("user_id").notNull(),
-    source: agentSource("source").notNull(),
+    // Text rather than an enum, and checked only for shape: the runtime roster
+    // in packages/shared/src/agent-runtimes.json decides what Clock-In can say
+    // about a runtime, never whether it may be recorded. A runtime nobody has
+    // declared yet lands here under its own id instead of being rejected or
+    // collapsed into 'other', so supporting a new CLI needs no migration.
+    source: text("source").notNull(),
     externalSessionId: text("external_session_id").notNull(),
+    // What the runtime was driving, when its hook says so. Recorded beside the
+    // runtime and never derived from it: pi on deepseek-v4-pro is still pi.
+    model: text("model"),
     // Nullable until the attribution service resolves cwd to a project. The composite
     // FK uses MATCH SIMPLE, so a null projectId skips the tenant check entirely.
     projectId: uuid("project_id"),
@@ -299,6 +306,8 @@ export const agentSessions = pgTable(
       sql`char_length(${table.externalSessionId}) between 1 and 200`,
     ),
     check("agent_sessions_cwd_length_valid", sql`${table.cwd} is null or char_length(${table.cwd}) between 1 and 1000`),
+    check("agent_sessions_source_valid", sql`${table.source} ~ '^[a-z][a-z0-9_]*$' and char_length(${table.source}) <= 40`),
+    check("agent_sessions_model_length_valid", sql`${table.model} is null or char_length(${table.model}) between 1 and 200`),
     index("agent_sessions_organization_user_started_at_idx").on(table.organizationId, table.userId, table.startedAt),
   ],
 );

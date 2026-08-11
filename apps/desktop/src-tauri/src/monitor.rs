@@ -34,6 +34,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
+use crate::agent_runtimes;
 use crate::api::{ApiClient, ApiResult, BridgeError, ErrorKind, PathMapping};
 use crate::recovery::RecoveryState;
 use crate::spool;
@@ -786,11 +787,15 @@ pub struct HookRegistration {
 pub struct HookProbe {
     pub source: &'static str,
     pub config_path: PathBuf,
+    pub registration: agent_runtimes::Registration,
 }
 
 const HOOK_BINARY_NAME: &str = "clock-in-hook";
 
-/// Where each CLI keeps the config a hook registration lands in.
+/// Where each CLI keeps the config a hook registration lands in, straight from
+/// the runtime roster. Every declared runtime is probed whether or not it is
+/// installed: a missing config simply reads as "not connected", so a machine
+/// that later grows a new CLI needs no code change to see it.
 pub fn default_hook_probes() -> Vec<HookProbe> {
     let Some(home) = std::env::var_os("USERPROFILE")
         .filter(|value| !value.is_empty())
@@ -799,24 +804,17 @@ pub fn default_hook_probes() -> Vec<HookProbe> {
     else {
         return Vec::new();
     };
-    vec![
-        HookProbe {
-            source: "claude_code",
-            config_path: home.join(".claude").join("settings.json"),
-        },
-        HookProbe {
-            source: "codex",
-            config_path: home.join(".codex").join("config.toml"),
-        },
-        HookProbe {
-            source: "kimi_code",
-            config_path: home.join(".kimi").join("config.toml"),
-        },
-        HookProbe {
-            source: "cursor",
-            config_path: home.join(".cursor").join("hooks.json"),
-        },
-    ]
+    agent_runtimes::runtimes()
+        .iter()
+        .map(|runtime| HookProbe {
+            source: runtime.id.as_str(),
+            config_path: runtime
+                .config_path
+                .split('/')
+                .fold(home.clone(), |path, segment| path.join(segment)),
+            registration: runtime.registration,
+        })
+        .collect()
 }
 
 pub fn detect_hooks(probes: &[HookProbe]) -> Vec<HookRegistration> {
@@ -858,9 +856,14 @@ pub enum HookRegisterResult {
     },
 }
 
-/// The two Claude Code lifecycle events the hook reports on; the arrays these
-/// name are what registration merges into.
-const CLAUDE_HOOK_EVENTS: [&str; 2] = ["SessionStart", "SessionEnd"];
+/// The two Claude-shaped lifecycle events the hook reports on, paired with the
+/// `--event` flag each registered command passes. The arrays these name are
+/// what registration merges into, in Claude Code's `settings.json` and in
+/// Codex's `hooks.json` alike.
+const CLAUDE_HOOK_EVENTS: [(&str, &str); 2] = [
+    ("SessionStart", "session-start"),
+    ("SessionEnd", "session-end"),
+];
 
 /// Cursor's sessionStart/sessionEnd hooks (IDE-only; cloud agents never fire
 /// them), paired with the `--event` flag each registered command passes, so
@@ -902,43 +905,45 @@ pub fn register_hook(source: &str) -> ApiResult<HookRegisterResult> {
         .find(|probe| probe.source == source)
         .ok_or_else(|| BridgeError::new(ErrorKind::Validation, "Unknown agent CLI."))?;
     let command = hook_binary_command()?;
-    match source {
-        "claude_code" => register_claude_code(&probe.config_path, &command),
-        "cursor" => register_cursor(&probe.config_path, &command),
-        // Codex fires only a turn-completion `notify`, and Kimi Code's hook
-        // coverage is unconfirmed against the installed version: both get an
-        // honest paste-it-yourself snippet rather than a guessed TOML rewrite.
-        _ => Ok(HookRegisterResult::Manual {
+    match probe.registration {
+        agent_runtimes::Registration::ClaudeJson => {
+            register_claude_shaped(&probe.config_path, &command, source)
+        }
+        agent_runtimes::Registration::CursorJson => register_cursor(&probe.config_path, &command),
+        // A CLI whose hook mechanism is not a JSON array of commands — Pi's and
+        // opencode's are JavaScript, and the rest are unconfirmed against any
+        // installed version — gets the honest paste-it-yourself text from the
+        // roster rather than a guessed rewrite of a file Clock-In does not own.
+        agent_runtimes::Registration::Manual => Ok(HookRegisterResult::Manual {
             config_path: probe.config_path.to_string_lossy().into_owned(),
-            snippet: manual_snippet(source, &command),
+            snippet: agent_runtimes::manual_snippet(source, command.trim_matches('"'))
+                .unwrap_or_else(|| unregistered_snippet(source, command.trim_matches('"'))),
         }),
     }
 }
 
-/// The paste-it-yourself text for CLIs the host will not rewrite. Only what
-/// the design confirms appears here: Codex's documented `notify` argv key,
-/// and for Kimi Code the hook command line to wire wherever its hooks land.
-fn manual_snippet(source: &str, command: &str) -> String {
-    let path = command.trim_matches('"');
-    match source {
-        "codex" => format!(
-            "# Codex fires `notify` on each completed turn; Clock-In records these\n\
-             # as heartbeats and infers session boundaries from the gaps.\n\
-             notify = [\"{path}\", \"--source\", \"codex\", \"--event\", \"heartbeat\", \"--session-id\", \"codex\", \"--cwd\", \".\"]"
-        ),
-        _ => format!(
-            "# Kimi Code hooks live in config.toml, but their event coverage is\n\
-             # unconfirmed. Wire its session events to the hook binary, e.g.:\n\
-             #   \"{path}\" --source kimi-code --event session-start --session-id <session> --cwd <dir>"
-        ),
-    }
+/// The last-resort snippet for a roster entry that declares no text of its own.
+fn unregistered_snippet(source: &str, path: &str) -> String {
+    format!(
+        "# Clock-In has no confirmed hook mechanism for this CLI. Wire its\n\
+         # session events to the hook binary, e.g.:\n\
+         #   \"{path}\" --source {source} --event session-start --session-id <session> --cwd <dir>"
+    )
 }
 
-/// Merges the hook into Claude Code's SessionStart/SessionEnd arrays. Strictly
-/// parse-then-merge: an unparseable file or an unexpected shape fails loudly
-/// and leaves the file untouched, the untouched original is backed up once
-/// beside it (`.bak`), and the write is a temp file plus rename.
-fn register_claude_code(config_path: &Path, command: &str) -> ApiResult<HookRegisterResult> {
+/// Merges the hook into the SessionStart/SessionEnd arrays of a Claude-shaped
+/// config, which is Claude Code's `settings.json` and Codex's `hooks.json`.
+/// Each entry carries `--source`, so the runtime comes from the registration
+/// that fired rather than from the payload's shape — the two CLIs pipe the same
+/// shape, and a Codex session filed as Claude Code would be worse than none.
+/// Strictly parse-then-merge: an unparseable file or an unexpected shape fails
+/// loudly and leaves the file untouched, the untouched original is backed up
+/// once beside it (`.bak`), and the write is a temp file plus rename.
+fn register_claude_shaped(
+    config_path: &Path,
+    command: &str,
+    source: &str,
+) -> ApiResult<HookRegisterResult> {
     let mut settings = read_json_object(config_path)?;
     if claude_hook_present(&settings) {
         return Ok(HookRegisterResult::AlreadyRegistered {
@@ -947,9 +952,12 @@ fn register_claude_code(config_path: &Path, command: &str) -> ApiResult<HookRegi
     }
 
     let hooks = json_object_entry(&mut settings, "hooks")?;
-    for event in CLAUDE_HOOK_EVENTS {
-        json_array_entry(hooks, event)?.push(serde_json::json!({
-            "hooks": [{ "type": "command", "command": command }]
+    for (key, event) in CLAUDE_HOOK_EVENTS {
+        json_array_entry(hooks, key)?.push(serde_json::json!({
+            "hooks": [{
+                "type": "command",
+                "command": format!("{command} --source {source} --event {event}"),
+            }]
         }));
     }
 
@@ -1046,7 +1054,8 @@ fn unexpected_settings_shape() -> BridgeError {
 /// binary — the same substring heuristic detection uses, so a registration
 /// detection would later find reads as already registered here.
 fn claude_hook_present(settings: &serde_json::Map<String, serde_json::Value>) -> bool {
-    hook_arrays_mention_hook(settings, &CLAUDE_HOOK_EVENTS)
+    let keys: Vec<&str> = CLAUDE_HOOK_EVENTS.iter().map(|(key, _)| *key).collect();
+    hook_arrays_mention_hook(settings, &keys)
 }
 
 /// True when any sessionStart/sessionEnd entry already mentions the hook
@@ -2741,14 +2750,17 @@ mod tests {
             HookProbe {
                 source: "claude_code",
                 config_path: registered,
+                registration: agent_runtimes::Registration::ClaudeJson,
             },
             HookProbe {
                 source: "codex",
                 config_path: plain,
+                registration: agent_runtimes::Registration::ClaudeJson,
             },
             HookProbe {
                 source: "kimi_code",
                 config_path: dir.join("missing.toml"),
+                registration: agent_runtimes::Registration::Manual,
             },
         ];
         let hooks = detect_hooks(&probes);
@@ -2912,7 +2924,7 @@ mod tests {
         let original = r#"{"model":"opus","hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"echo hi"}]}]}}"#;
         std::fs::write(&config, original).expect("config writes");
 
-        let result = register_claude_code(&config, "\"C:/bin/clock-in-hook.exe\"")
+        let result = register_claude_shaped(&config, "\"C:/bin/clock-in-hook.exe\"", "claude_code")
             .expect("registration succeeds");
         assert!(
             matches!(result, HookRegisterResult::Registered { .. }),
@@ -2929,7 +2941,7 @@ mod tests {
         assert_eq!(starts.len(), 2, "the existing entry is kept, ours appended");
         assert_eq!(
             starts[1]["hooks"][0]["command"],
-            "\"C:/bin/clock-in-hook.exe\""
+            "\"C:/bin/clock-in-hook.exe\" --source claude_code --event session-start"
         );
         assert_eq!(
             merged["hooks"]["SessionEnd"].as_array().map(Vec::len),
@@ -2946,7 +2958,7 @@ mod tests {
 
         // A second run detects the hook and changes nothing, backup included.
         let before = std::fs::read_to_string(&config).expect("config reads");
-        let result = register_claude_code(&config, "\"C:/bin/clock-in-hook.exe\"")
+        let result = register_claude_shaped(&config, "\"C:/bin/clock-in-hook.exe\"", "claude_code")
             .expect("re-registration succeeds");
         assert!(
             matches!(result, HookRegisterResult::AlreadyRegistered { .. }),
@@ -2971,15 +2983,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let config = dir.join("nested").join("settings.json");
 
-        let result = register_claude_code(&config, "\"C:/bin/clock-in-hook.exe\"")
+        let result = register_claude_shaped(&config, "\"C:/bin/clock-in-hook.exe\"", "claude_code")
             .expect("registration succeeds");
         assert!(matches!(result, HookRegisterResult::Registered { .. }));
 
         let created: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&config).expect("config reads"))
                 .expect("created config parses");
-        for event in CLAUDE_HOOK_EVENTS {
-            assert_eq!(created["hooks"][event][0]["hooks"][0]["type"], "command");
+        for (key, event) in CLAUDE_HOOK_EVENTS {
+            assert_eq!(created["hooks"][key][0]["hooks"][0]["type"], "command");
+            let command = created["hooks"][key][0]["hooks"][0]["command"]
+                .as_str()
+                .expect("the merged command is a string");
+            assert!(
+                command.ends_with(&format!("--source claude_code --event {event}")),
+                "the registration, not the payload shape, names the runtime: {command}",
+            );
         }
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2994,7 +3013,7 @@ mod tests {
         let config = dir.join("settings.json");
         std::fs::write(&config, "not json at all").expect("config writes");
 
-        let error = register_claude_code(&config, "\"C:/bin/clock-in-hook.exe\"")
+        let error = register_claude_shaped(&config, "\"C:/bin/clock-in-hook.exe\"", "claude_code")
             .expect_err("an unparseable file fails loudly");
         assert_eq!(error.kind, ErrorKind::Unknown);
         assert_eq!(
@@ -3142,14 +3161,39 @@ mod tests {
     }
 
     #[test]
-    fn unknown_sources_are_rejected_and_toml_clis_get_a_pasteable_snippet() {
+    fn unknown_sources_are_rejected_and_unmergeable_clis_get_a_pasteable_snippet() {
         let error = register_hook("bogus").expect_err("an unknown source is rejected");
         assert_eq!(error.kind, ErrorKind::Validation);
 
-        let codex = manual_snippet("codex", "\"C:/bin/clock-in-hook.exe\"");
-        assert!(codex.contains("notify = [\"C:/bin/clock-in-hook.exe\""));
-        let kimi = manual_snippet("kimi_code", "\"C:/bin/clock-in-hook.exe\"");
-        assert!(kimi.contains("--source kimi-code"));
+        let kimi = agent_runtimes::manual_snippet("kimi_code", "C:/bin/clock-in-hook.exe")
+            .expect("a manual runtime explains itself");
+        assert!(kimi.contains("--source kimi_code"));
+        assert!(kimi.contains("C:/bin/clock-in-hook.exe"));
+
+        // Pi's hooks are JavaScript, so the snippet is an extension rather than
+        // a command line — the roster carries whatever each CLI actually needs.
+        let pi = agent_runtimes::manual_snippet("pi", "C:/bin/clock-in-hook.exe")
+            .expect("a manual runtime explains itself");
+        assert!(pi.contains("session_start"));
+        assert!(pi.contains("--source"));
+    }
+
+    #[test]
+    fn every_declared_runtime_is_probed_even_when_nothing_is_installed() {
+        let probes = default_hook_probes();
+        let probed: Vec<&str> = probes.iter().map(|probe| probe.source).collect();
+        for declared in agent_runtimes::runtimes() {
+            assert!(
+                probed.contains(&declared.id.as_str()),
+                "{} is declared but never probed",
+                declared.id,
+            );
+        }
+        // Absence is never hard-coded: a runtime installed on no machine here
+        // still gets a probe, so it lights up the moment its config appears.
+        assert!(probed.contains(&"pi"));
+        assert!(probed.contains(&"opencode"));
+        assert!(probed.contains(&"muse"));
     }
 
     #[test]

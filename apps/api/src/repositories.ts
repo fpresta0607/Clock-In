@@ -204,6 +204,8 @@ export interface AgentSessionRecord {
   organizationId: string;
   userId: string;
   source: AgentSource;
+  /** What the runtime was driving, when its hook said so; never inferred from the runtime. */
+  model: string | null;
   externalSessionId: string;
   projectId: string | null;
   cwd: string;
@@ -218,6 +220,7 @@ export interface UpsertStartedAgentSession {
   organizationId: string;
   userId: string;
   source: AgentSource;
+  model: string | null;
   externalSessionId: string;
   cwd: string;
   projectId: string | null;
@@ -230,6 +233,7 @@ export interface InsertEndedAgentSession {
   organizationId: string;
   userId: string;
   source: AgentSource;
+  model: string | null;
   externalSessionId: string;
   cwd: string;
   projectId: string | null;

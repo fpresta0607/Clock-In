@@ -193,7 +193,12 @@ describe("database schema", () => {
     expect(agentSessions.organizationId.notNull).toBe(true);
     expect(agentSessions.userId.notNull).toBe(true);
     expect(agentSessions.source.notNull).toBe(true);
-    expect(agentSessions.source.enumValues).toEqual(["claude_code", "codex", "kimi_code", "cursor", "other"]);
+    // Text, not an enum: the runtime roster names runtimes, it does not gate
+    // them, so a CLI nobody has declared yet stores under its own id and
+    // supporting a new one never needs a migration.
+    expect(agentSessions.source.columnType).toBe("PgText");
+    expect(agentSessions.model.notNull).toBe(false);
+    expect(agentSessions.model.columnType).toBe("PgText");
     expect(agentSessions.externalSessionId.notNull).toBe(true);
     expect(agentSessions.externalSessionId.columnType).toBe("PgText");
     expect(agentSessions.projectId.notNull).toBe(false);
@@ -222,6 +227,8 @@ describe("database schema", () => {
         "agent_sessions_status_fields_valid",
         "agent_sessions_external_session_id_length_valid",
         "agent_sessions_cwd_length_valid",
+        "agent_sessions_source_valid",
+        "agent_sessions_model_length_valid",
       ]),
     );
     const userTimelineIndex = config.indexes.find(

@@ -71,6 +71,7 @@ class MemoryAgentSessions implements AgentSessionRepository {
       organizationId: input.organizationId,
       userId: input.userId,
       source: input.source,
+      model: input.model,
       externalSessionId: input.externalSessionId,
       projectId: input.projectId,
       cwd: input.cwd,
@@ -101,6 +102,7 @@ class MemoryAgentSessions implements AgentSessionRepository {
       organizationId: input.organizationId,
       userId: input.userId,
       source: input.source,
+      model: input.model,
       externalSessionId: input.externalSessionId,
       projectId: input.projectId,
       cwd: input.cwd,
@@ -222,6 +224,81 @@ describe("agent-session routes", () => {
 
     const empty = await app.request("http://api.test/agent-sessions", { method: "POST", headers, body: JSON.stringify({ events: [] }) });
     expect(empty.status).toBe(400);
+  });
+
+  it("records concurrent sessions from different runtimes without confusing them", async () => {
+    const headers = { authorization: bearerHeader, "content-type": "application/json" };
+    const agentSessions = new MemoryAgentSessions();
+    const app = createTestApp(agentSessions, { withMapping: true });
+
+    // Several runtimes run at once on one machine, which is the normal case,
+    // not the exotic one. Two open sessions in the same folder must stay two
+    // rows: the (source, externalSessionId) key is what tells them apart.
+    const response = await app.request("http://api.test/agent-sessions", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        events: [
+          event({ source: "claude_code", externalSessionId: "claude-1" }),
+          event({ source: "pi", externalSessionId: "pi-1", model: "deepseek-v4-pro" }),
+        ],
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(agentSessions.records.map((record) => [record.source, record.model, record.projectId])).toEqual([
+      ["claude_code", null, ids.project],
+      ["pi", "deepseek-v4-pro", ids.project],
+    ]);
+
+    // Ending one leaves the other running.
+    await app.request("http://api.test/agent-sessions", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ events: [event({ source: "pi", externalSessionId: "pi-1", event: "ended", occurredAt: "2026-08-06T13:55:00.000Z" })] }),
+    });
+    expect(agentSessions.records.map((record) => [record.source, record.status])).toEqual([
+      ["claude_code", "running"],
+      ["pi", "ended"],
+    ]);
+  });
+
+  it("records a runtime the roster has never heard of under its own name", async () => {
+    const headers = { authorization: bearerHeader, "content-type": "application/json" };
+    const agentSessions = new MemoryAgentSessions();
+    const app = createTestApp(agentSessions, { withMapping: true });
+
+    const response = await app.request("http://api.test/agent-sessions", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ events: [event({ source: "agent_9", externalSessionId: "new-1" })] }),
+    });
+    expect(response.status).toBe(200);
+    expect(agentSessions.records[0]).toMatchObject({ source: "agent_9", projectId: ids.project });
+  });
+
+  it("keeps the model beside the runtime and never derives one from the other", async () => {
+    const headers = { authorization: bearerHeader, "content-type": "application/json" };
+    const agentSessions = new MemoryAgentSessions();
+    const app = createTestApp(agentSessions, { withMapping: true });
+
+    await app.request("http://api.test/agent-sessions", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        events: [
+          // The same model driven by two runtimes stays two runtimes...
+          event({ source: "pi", externalSessionId: "pi-1", model: "deepseek-v4-pro" }),
+          event({ source: "opencode", externalSessionId: "oc-1", model: "deepseek-v4-pro" }),
+          // ...and a runtime that names no model records none rather than a guess.
+          event({ source: "claude_code", externalSessionId: "claude-1" }),
+        ],
+      }),
+    });
+    expect(agentSessions.records.map((record) => [record.source, record.model])).toEqual([
+      ["pi", "deepseek-v4-pro"],
+      ["opencode", "deepseek-v4-pro"],
+      ["claude_code", null],
+    ]);
   });
 
   it("attributes and links a started session, then closes it on end", async () => {

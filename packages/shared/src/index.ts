@@ -9,8 +9,8 @@ export {
   agentSessionEventBatchRequestSchema,
   agentSessionEventBatchResponseSchema,
   agentSessionEventSchema,
+  agentSourcePattern,
   agentSourceSchema,
-  agentSourceValues,
   apiErrorCodeSchema,
   apiErrorCodeValues,
   apiErrorSchema,
@@ -101,6 +101,16 @@ export type {
   SessionStopRequest,
   SessionStopResponse,
 } from "./contracts.js";
+export {
+  agentRuntimeForBinary,
+  agentRuntimeIds,
+  agentRuntimeLabel,
+  agentRuntimeManualSnippet,
+  agentRuntimeRegistrationValues,
+  agentRuntimes,
+  findAgentRuntime,
+} from "./agent-runtimes.js";
+export type { AgentRuntime, AgentRuntimeRegistration } from "./agent-runtimes.js";
 export {
   generateInviteCode,
   inviteCodeLength,

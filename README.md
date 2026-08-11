@@ -29,10 +29,12 @@ decides the hours:
 - **OS activity.** A slow, read-only monitor folds the machine's state into coarse segments
   (`active`, `idle`, `locked`, `suspended`). No hooks, no injection, no keystrokes. Those
   boundaries are the sessions.
-- **Agent sessions.** Claude Code and Cursor fire true lifecycle hooks into a tiny local spool.
-  Codex sends a completion heartbeat, so Clock-In infers its boundaries from the gaps. Kimi
-  Code's event coverage is unconfirmed pending verification. A session's working directory
-  resolves to a project, so an hour on the leaderboard can name *what* produced it.
+- **Agent sessions.** Claude Code, Codex, and Cursor fire true lifecycle hooks into a tiny local
+  spool; Pi and opencode fire theirs from a small extension. A session's working directory
+  resolves to a project, so an hour on the leaderboard can name *what* produced it, and the
+  runtime is recorded beside the model it was driving without either being read off the other.
+  Which runtimes Clock-In knows by name is a roster, not a schema: see
+  [**Agent hooks**](#agent-hooks).
 
 Reports then split every total into **attributed** and **unattributed** seconds: hours
 something named a project for, and hours that fell to the account's default project because
@@ -49,7 +51,7 @@ tracking you can't is surveillance.
 ```mermaid
 flowchart LR
     subgraph WS["Your workstation"]
-        CLI["Agent CLIs<br/>Claude Code · Cursor<br/>Codex · Kimi Code"] -->|"JSON on stdin"| HOOK["clock-in-hook"]
+        CLI["Agent CLIs<br/>Claude Code · Codex · Cursor<br/>Pi · opencode · Kimi Code · …"] -->|"JSON on stdin"| HOOK["clock-in-hook"]
         OS["OS signals<br/>idle · foreground process<br/>lock · suspend"] --> MON["Activity monitor<br/>30s poll"]
         HOOK --> SPOOL[("Local spool<br/>append-only")]
         MON --> SPOOL
@@ -324,13 +326,34 @@ Registration is explicit and opt-in from the desktop app's settings; Clock-In ne
 another tool's config silently. Where a config can be merged safely it is, with a backup and
 an atomic write; where it can't, you get a snippet to paste.
 
+### The roster is not an allowlist
+
+`packages/shared/src/agent-runtimes.json` is the one place a runtime is declared, and both the
+TypeScript side and the Rust host read that same file. It decides what Clock-In can *say* about
+a runtime — its display name, its executables, where its hooks live, the snippet to paste — and
+never whether a runtime may be recorded. `agent_sessions.source` is text with a shape check
+rather than an enum, so a CLI nobody has declared yet is stored under its own id instead of
+being rejected or collapsed into `other`. Supporting a new runtime properly is a roster entry;
+recording one at all needs nothing.
+
+A runtime is also never inferred from its model, nor a model from its runtime: `pi` driving
+`deepseek-v4-pro` is the `pi` runtime, `agent_sessions.model` says what it was driving, and a
+hook that names no model records none rather than a guess.
+
 | CLI | Config | Signal quality | Registration |
 |---|---|---|---|
 | **Claude Code** | `~/.claude/settings.json` | true session boundaries (`SessionStart`/`SessionEnd`); `PostToolUse` heartbeats available with manual config | merged automatically |
+| **Codex** | `~/.codex/hooks.json` | true boundaries; same hook shape as Claude Code, told apart by the `--source` its registration passes | merged automatically |
 | **Cursor** | `~/.cursor/hooks.json` | true boundaries, IDE only — cloud agents never fire them | merged automatically |
-| **Codex** | `~/.codex/config.toml` | `notify` fires on turn completion: heartbeats only, boundaries synthesized from gaps | snippet to paste |
-| **Kimi Code** | `~/.kimi/config.toml` | event coverage unconfirmed pending verification | snippet to paste |
-| anything else | — | call `clock-in-hook --source other` yourself | manual |
+| **Pi** / **pi-signed** | `~/.pi/agent/extensions/` | true boundaries (`session_start`/`session_shutdown`); reports its model | extension to paste |
+| **opencode** | `~/.config/opencode/plugins/` | start is a true boundary; no end event, so `session.idle` heartbeats and gaps close it | plugin to paste |
+| **Kimi Code**, **Grok**, **Muse**, **GitHub Copilot** | per the roster | hook mechanism unconfirmed against any installed version | snippet to paste |
+| anything else | — | call `clock-in-hook --source <runtime> --event …` yourself | manual |
+
+Runtimes are listed whether or not they are installed, so a machine that later grows one lights
+it up without a code change. Only opencode ships with its own mark in the UI: its logo is
+published in its MIT-licensed repository. No official, redistributable asset could be sourced
+for the others, so they use the generic agent badge rather than a lookalike.
 
 Because `session-end` is never guaranteed (a crash, a `kill -9`), the server reaps agent
 sessions with no event for 6 hours and closes them at their last-seen timestamp. An `end` that

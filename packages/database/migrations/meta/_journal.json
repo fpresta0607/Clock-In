@@ -57,6 +57,13 @@
       "when": 1786378562326,
       "tag": "0007_phase4_observed_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786420380388,
+      "tag": "0008_agent_runtime_roster",
+      "breakpoints": true
     }
   ]
 }

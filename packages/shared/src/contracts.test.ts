@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { agentRuntimeIds } from "./agent-runtimes.js";
 import {
   activitySegmentBatchRequestSchema,
   activitySegmentBatchResponseSchema,
@@ -9,7 +10,6 @@ import {
   agentSessionEventBatchRequestSchema,
   agentSessionEventBatchResponseSchema,
   agentSessionEventSchema,
-  agentSourceValues,
   apiErrorSchema,
   currentSessionResponseSchema,
   leaderboardResponseSchema,
@@ -453,9 +453,23 @@ describe("agent session contracts", () => {
     cwd: "C:/dev/Clock-In",
   };
 
-  it("covers every supported agent source and event kind", () => {
-    expect(agentSourceValues).toEqual(["claude_code", "codex", "kimi_code", "cursor", "other"]);
+  it("covers every event kind and takes any canonically shaped runtime", () => {
     expect(agentEventKindValues).toEqual(["started", "ended", "heartbeat"]);
+    // The roster names runtimes; it does not gate them. A CLI nobody has
+    // declared yet is recorded under its own id, so adding one never waits on
+    // a contract change.
+    for (const source of [...agentRuntimeIds, "agent_9", "muse"]) {
+      expect(agentSessionEventSchema.parse({ ...event, source }).source).toBe(source);
+    }
+  });
+
+  it("records the model beside the runtime, and neither implies the other", () => {
+    const withModel = { ...event, source: "pi", model: "deepseek-v4-pro" };
+    expect(agentSessionEventSchema.parse(withModel)).toEqual(withModel);
+    // A runtime that names no model records none rather than a guess.
+    expect(agentSessionEventSchema.parse({ ...event, source: "pi" }).model).toBeUndefined();
+    expect(() => agentSessionEventSchema.parse({ ...event, model: "" })).toThrow();
+    expect(() => agentSessionEventSchema.parse({ ...event, model: "x".repeat(201) })).toThrow();
   });
 
   it("accepts a bounded batch of agent session events", () => {
@@ -473,6 +487,9 @@ describe("agent session contracts", () => {
 
   it("rejects malformed events and out-of-bounds batches", () => {
     expect(() => agentSessionEventSchema.parse({ ...event, source: "claude-code" })).toThrow();
+    expect(() => agentSessionEventSchema.parse({ ...event, source: "Claude Code" })).toThrow();
+    expect(() => agentSessionEventSchema.parse({ ...event, source: "9lives" })).toThrow();
+    expect(() => agentSessionEventSchema.parse({ ...event, source: "x".repeat(41) })).toThrow();
     expect(() => agentSessionEventSchema.parse({ ...event, event: "resumed" })).toThrow();
     expect(() => agentSessionEventSchema.parse({ ...event, externalSessionId: "" })).toThrow();
     expect(() => agentSessionEventSchema.parse({ ...event, externalSessionId: "x".repeat(201) })).toThrow();

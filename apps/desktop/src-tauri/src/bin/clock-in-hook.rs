@@ -38,9 +38,7 @@ fn run() -> Result<(), String> {
             HookStdin::Ignored => return Ok(()),
         },
     };
-    let Some(path) = spool::active_agent_spool_path() else {
-        return Ok(());
-    };
+    let path = spool::agent_spool_path();
     spool::append(&path, &event).map_err(|error| format!("could not write the spool: {error}"))
 }
 
@@ -76,6 +74,7 @@ fn input_from_args(args: &[String]) -> Result<ArgvInput, String> {
     let mut session_id = None;
     let mut cwd = None;
     let mut occurred_at = None;
+    let mut model = None;
 
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
@@ -86,16 +85,19 @@ fn input_from_args(args: &[String]) -> Result<ArgvInput, String> {
             "--session-id" => session_id = Some(value.clone()),
             "--cwd" => cwd = Some(value.clone()),
             "--occurred-at" => occurred_at = Some(value.clone()),
+            // A runtime that cannot name its model passes an empty string
+            // rather than branching its own hook wiring; that reads as absent.
+            "--model" => model = Some(value.clone()).filter(|value| !value.trim().is_empty()),
             _ => {
                 return Err(format!(
-                    "unknown flag {flag}; usage: clock-in-hook --source SOURCE --event EVENT [--session-id ID --cwd DIR [--occurred-at ISO8601]]"
+                    "unknown flag {flag}; usage: clock-in-hook --source SOURCE --event EVENT [--session-id ID --cwd DIR [--model MODEL] [--occurred-at ISO8601]]"
                 ))
             }
         }
     }
 
     match (source, event, session_id, cwd, occurred_at) {
-        // Identity only: stdin carries a CLI-native payload (Cursor).
+        // Identity only: stdin carries a CLI-native payload (Cursor, Codex).
         (Some(source), Some(event), None, None, None) => {
             Ok(ArgvInput::Stdin(Some(ArgvContext { source, event })))
         }
@@ -108,6 +110,7 @@ fn input_from_args(args: &[String]) -> Result<ArgvInput, String> {
                     session_id,
                     cwd,
                     occurred_at: occurred_at.unwrap_or_else(spool::now_iso8601),
+                    model,
                 }
                 .validate()?,
             ))
