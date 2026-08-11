@@ -4,41 +4,49 @@
     {
       "id": "claude_code",
       "label": "Claude Code",
-      "binaries": ["claude"],
+      "binaries": [
+        "claude"
+      ],
       "quotaProvider": "claude",
       "configPath": ".claude/settings.json",
       "registration": "claude_json",
-      "icon": null,
+      "icon": "claude_code",
       "manualSnippet": []
     },
     {
       "id": "codex",
       "label": "Codex",
-      "binaries": ["codex"],
+      "binaries": [
+        "codex"
+      ],
       "quotaProvider": "codex",
       "configPath": ".codex/hooks.json",
       "registration": "claude_json",
-      "icon": null,
+      "icon": "codex",
       "manualSnippet": []
     },
     {
       "id": "cursor",
       "label": "Cursor",
-      "binaries": ["cursor-agent"],
+      "binaries": [
+        "cursor-agent"
+      ],
       "quotaProvider": "cursor",
       "configPath": ".cursor/hooks.json",
       "registration": "cursor_json",
-      "icon": null,
+      "icon": "cursor",
       "manualSnippet": []
     },
     {
       "id": "kimi_code",
       "label": "Kimi Code",
-      "binaries": ["kimi"],
+      "binaries": [
+        "kimi"
+      ],
       "quotaProvider": "kimi",
       "configPath": ".kimi/config.toml",
       "registration": "manual",
-      "icon": null,
+      "icon": "kimi_code",
       "manualSnippet": [
         "# Kimi Code hooks live in config.toml, but their event coverage is",
         "# unconfirmed against the installed version. Wire its session events to",
@@ -49,11 +57,13 @@
     {
       "id": "pi",
       "label": "Pi",
-      "binaries": ["pi"],
+      "binaries": [
+        "pi"
+      ],
       "quotaProvider": null,
       "configPath": ".pi/agent/settings.json",
       "registration": "manual",
-      "icon": null,
+      "icon": "pi",
       "manualSnippet": [
         "// Pi has no hook-command config: it fires session_start/session_shutdown",
         "// at JS extensions. Save this as ~/.pi/agent/extensions/clock-in.js, which",
@@ -78,11 +88,13 @@
     {
       "id": "pi_signed",
       "label": "Pi (signed)",
-      "binaries": ["pi-signed"],
+      "binaries": [
+        "pi-signed"
+      ],
       "quotaProvider": null,
       "configPath": ".pi/agent/settings.json",
       "registration": "manual",
-      "icon": null,
+      "icon": "pi_signed",
       "manualSnippet": [
         "// pi-signed shares Pi's extension mechanism and its config directory, so",
         "// it needs its own --source to stay told apart from plain Pi. Save this",
@@ -106,7 +118,9 @@
     {
       "id": "opencode",
       "label": "opencode",
-      "binaries": ["opencode"],
+      "binaries": [
+        "opencode"
+      ],
       "quotaProvider": null,
       "configPath": ".config/opencode/opencode.json",
       "registration": "manual",
@@ -138,11 +152,13 @@
     {
       "id": "grok",
       "label": "Grok",
-      "binaries": ["grok"],
+      "binaries": [
+        "grok"
+      ],
       "quotaProvider": "grok",
       "configPath": ".grok/settings.json",
       "registration": "manual",
-      "icon": null,
+      "icon": "grok",
       "manualSnippet": [
         "# Grok's hook mechanism is unconfirmed against any installed version.",
         "# Wire its session events to the hook binary, e.g.:",
@@ -152,11 +168,13 @@
     {
       "id": "muse",
       "label": "Muse",
-      "binaries": ["muse"],
+      "binaries": [
+        "muse"
+      ],
       "quotaProvider": null,
       "configPath": ".muse/settings.json",
       "registration": "manual",
-      "icon": null,
+      "icon": "muse",
       "manualSnippet": [
         "# Muse's hook mechanism is unconfirmed against any installed version.",
         "# Wire its session events to the hook binary, e.g.:",
@@ -166,11 +184,13 @@
     {
       "id": "copilot",
       "label": "GitHub Copilot",
-      "binaries": ["copilot"],
+      "binaries": [
+        "copilot"
+      ],
       "quotaProvider": "copilot",
       "configPath": ".copilot/config.json",
       "registration": "manual",
-      "icon": null,
+      "icon": "copilot",
       "manualSnippet": [
         "# GitHub Copilot's CLI hook mechanism is unconfirmed against any installed",
         "# version. Wire its session events to the hook binary, e.g.:",

@@ -24,6 +24,7 @@ const status: MonitorStatus = {
     attribution: "agent",
     since: "2026-08-09T14:00:00.000Z",
     idleSeconds: 0,
+    apps: [],
   },
   selectedProjectId: null,
 };

@@ -64,6 +64,7 @@ describe("defaultBridge", () => {
       attribution: "agent",
       since: "2026-08-06T14:30:00.000Z",
       idleSeconds: 120,
+    apps: [],
     },
     selectedProjectId: null,
   };

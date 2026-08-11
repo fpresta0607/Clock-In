@@ -205,6 +205,63 @@ select:disabled { opacity: .55; }
 .today-total { margin: 2px 0 10px; font-size: .95rem; }
 .today-total strong { font-variant-numeric: tabular-nums; }
 
+/* The live session surface: the main page's whole point below the record
+   card. One row per app, a bar showing its share, and the duration. */
+.session-stats-total { flex: none; color: var(--accent-green); font-size: .95rem; font-variant-numeric: tabular-nums; }
+.session-app-list { display: grid; gap: 2px; max-height: 17rem; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.session-app-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 7px 2px;
+  border-bottom: 1px solid rgba(163, 179, 194, 0.08);
+  font-size: .84rem;
+}
+.session-app-row:last-child { border-bottom: 0; }
+.session-app-name { display: flex; min-width: 0; align-items: center; gap: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-app-duration { flex: none; color: #ffffff; font-variant-numeric: tabular-nums; }
+/* The bar spans both columns on its own line, so a long app name never
+   squeezes it to nothing. */
+.session-app-bar { grid-column: 1 / -1; height: 3px; border-radius: 999px; background: rgba(163, 179, 194, 0.14); }
+.session-app-bar::before { display: block; width: var(--share, 0%); height: 100%; border-radius: inherit; background: var(--accent-green); opacity: .55; content: ""; }
+/* Keeps a plain app's name aligned with a runtime's, which carries a mark. */
+.app-mark.is-plain { display: inline-block; flex: none; width: 18px; height: 18px; }
+
+/* Everything historical sits behind one button at the bottom, so the record
+   surface has nothing competing with it. */
+.all-stats-trigger {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--glass-border);
+  border-radius: 9px;
+  background: rgba(3, 5, 10, 0.45);
+  color: var(--text-secondary);
+  font-size: .8rem;
+  letter-spacing: .04em;
+}
+.all-stats-trigger:hover { border-color: var(--glass-border-hover); color: #ffffff; }
+
+/* Two things that both involve a code, so each states what it does and
+   carries exactly one control. */
+.team-card { display: grid; gap: 14px; }
+.team-card h3 { margin: 0 0 2px; font-size: .84rem; }
+.team-action { display: grid; gap: 6px; }
+.team-code-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.team-code {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--glass-border);
+  border-radius: 7px;
+  background: rgba(3, 5, 10, 0.5);
+  color: #ffffff;
+  font-size: .9rem;
+  letter-spacing: .06em;
+  overflow-wrap: anywhere;
+}
+.team-join-label { display: grid; gap: 4px; flex: 1 1 12rem; min-width: 0; font-size: .78rem; color: var(--text-secondary); }
+
 /* Long activity lists scroll inside the card instead of pushing the
    leaderboard and everything below it off the window. */
 .app-list { display: grid; gap: 2px; max-height: 15rem; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
@@ -227,9 +284,9 @@ select:disabled { opacity: .55; }
 .board-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
 .board-head h2 { margin: 0; font-size: .92rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .board-head .invite-code { flex: none; padding: 3px 8px; font-size: .76rem; }
-.join-form { display: flex; gap: 6px; margin: 0 0 11px; }
-.join-form label { flex: 1; }
-.join-form input { font-family: var(--brand-mono); letter-spacing: .08em; text-transform: uppercase; }
+.join-form { display: flex; align-items: flex-end; gap: 8px; margin: 0; flex-wrap: wrap; }
+.join-form label { flex: 1 1 12rem; min-width: 0; }
+.join-form input { letter-spacing: .06em; text-transform: uppercase; }
 .join-form button { flex: none; min-height: 33px; border: 1px solid var(--glass-border); padding: 0 11px; background: rgba(3, 5, 10, 0.5); color: #ffffff; font-size: .76rem; text-transform: uppercase; }
 .join-form button:hover { border-color: var(--glass-border-hover); }
 .board-list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
@@ -283,6 +340,15 @@ select:disabled { opacity: .55; }
 .source-name { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A runtime's official mark where Clock-In has one, and a plain monogram where
    it does not — never a lookalike drawn to fill the gap. */
+/* The proof surface for the recording chain: folded away by default, because
+   it is only interesting when something is wrong. */
+.recording-diagnostics { margin-top: 10px; font-size: .76rem; color: var(--text-secondary); }
+.recording-diagnostics summary { cursor: pointer; }
+.diagnostic-list { display: grid; gap: 6px; margin: 9px 0 0; }
+.diagnostic-list > div { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.diagnostic-list dt { min-width: 0; }
+.diagnostic-list dd { margin: 0; color: #ffffff; font-variant-numeric: tabular-nums; text-align: right; }
+
 .agent-mark { display: inline-grid; place-items: center; flex: none; width: 18px; height: 18px; border-radius: 5px; overflow: hidden; }
 .agent-mark svg { width: 100%; height: 100%; }
 .agent-mark.is-generic { border: 1px solid var(--glass-border); background: rgba(3, 5, 10, .5); color: var(--text-secondary); font-size: .62rem; letter-spacing: 0; }

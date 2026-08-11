@@ -53,6 +53,13 @@ export type AgentActive = {
 /// `default` means something named the project on purpose.
 export type Attribution = "selected" | "agent" | "default";
 
+/// One app's share of the open session, as the host counts it locally.
+export type SessionApp = {
+  /// The executable name only, exactly as segments record it.
+  processName: string;
+  durationSeconds: number;
+};
+
 /// The session recording right now. It exists whenever the machine is in use
 /// and recording is on; nobody starts or stops it.
 export type CurrentSession = {
@@ -60,6 +67,10 @@ export type CurrentSession = {
   attribution: Attribution;
   since: string;
   idleSeconds: number;
+  /// Where this session's time has gone, heaviest first. Local and live: the
+  /// host counts the span still open, so these tick with the work rather than
+  /// waiting for an upload.
+  apps: readonly SessionApp[];
 };
 
 export type MonitorStatus = {
@@ -299,13 +310,24 @@ const decodeAttribution = (value: unknown): Attribution => {
   return value as Attribution;
 };
 
+const decodeSessionApp = (value: unknown): SessionApp => {
+  const candidate = record(value);
+  return {
+    processName: string(candidate.processName),
+    durationSeconds: nonnegativeInteger(candidate.durationSeconds),
+  };
+};
+
 const decodeCurrentSession = (value: unknown): CurrentSession => {
   const candidate = record(value);
+  const apps = candidate.apps;
+  if (!Array.isArray(apps)) invalidResponse();
   return {
     projectId: uuid(candidate.projectId),
     attribution: decodeAttribution(candidate.attribution),
     since: timestamp(candidate.since),
     idleSeconds: nonnegativeInteger(candidate.idleSeconds),
+    apps: (apps as unknown[]).map(decodeSessionApp),
   };
 };
 

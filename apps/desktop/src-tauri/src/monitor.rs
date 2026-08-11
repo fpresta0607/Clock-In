@@ -269,6 +269,44 @@ impl SegmentBuilder {
         self.open.as_ref().map(|open| (open.kind, open.started_at))
     }
 
+    /// Active seconds per app between `since` and `now`, heaviest first.
+    ///
+    /// This is what the main page's live stats read, and it is answered from
+    /// the fold's own memory rather than from the server: the numbers have to
+    /// tick while the work is happening, and the server only ever learns about
+    /// a span once it has closed and been uploaded. Spans are clipped to the
+    /// window, so a span straddling the start of the session contributes only
+    /// the part that belongs to it. The still-open span counts up to `now`,
+    /// which is what makes the reading live.
+    pub fn app_totals(&self, since: u64, now: u64) -> Vec<(String, u64)> {
+        let mut totals: BTreeMap<String, u64> = BTreeMap::new();
+        let mut add = |process_name: &Option<String>, started_at: u64, ended_at: u64| {
+            let Some(name) = process_name else { return };
+            let start = started_at.max(since);
+            let end = ended_at.min(now);
+            if end > start {
+                *totals.entry(name.clone()).or_default() += end - start;
+            }
+        };
+
+        for segment in &self.closed {
+            if segment.kind == SegmentKind::Active {
+                add(&segment.process_name, segment.started_at, segment.ended_at);
+            }
+        }
+        if let Some(open) = &self.open {
+            if open.kind == SegmentKind::Active {
+                add(&open.process_name, open.started_at, now);
+            }
+        }
+
+        let mut rows: Vec<(String, u64)> = totals.into_iter().collect();
+        // Heaviest first; ties by name so the list never reshuffles under a
+        // reader who is watching it tick.
+        rows.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        rows
+    }
+
     /// Everything recorded so far, with the open span closed at `now`. The
     /// fold's own view, used by tests to assert on spans the caller never
     /// sees individually.
@@ -1242,6 +1280,18 @@ pub struct CurrentSession {
     /// Quiet time already sitting inside this session, which the server
     /// subtracts from its duration.
     pub idle_seconds: u32,
+    /// Where this session's time has gone, per app, heaviest first. Local and
+    /// live: it counts the span still open, so it ticks with the work.
+    pub apps: Vec<SessionApp>,
+}
+
+/// One app's share of the open session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionApp {
+    /// The executable name only, exactly as segments record it.
+    pub process_name: String,
+    pub duration_seconds: u32,
 }
 
 /// Lines (≈ pending rows) in a spool file, for the backlog counters.
@@ -1470,6 +1520,15 @@ impl Monitor {
                 attribution: open.project.attribution,
                 since: iso8601(open.started_at),
                 idle_seconds: open.idle_seconds as u32,
+                apps: shared
+                    .builder
+                    .app_totals(open.started_at, now)
+                    .into_iter()
+                    .map(|(process_name, seconds)| SessionApp {
+                        process_name,
+                        duration_seconds: u32::try_from(seconds).unwrap_or(u32::MAX),
+                    })
+                    .collect(),
             }),
             selected_project_id: shared.selected_project.clone(),
         }
@@ -2069,6 +2128,71 @@ mod tests {
         assert!(
             recorded >= 8 * 3_600 - MAX_OPEN_ACTIVE_SECONDS,
             "the spooled spans account for the whole stretch, less the span still open"
+        );
+    }
+
+    /// The main page's live stats: per-app time for the open session, counted
+    /// locally so it ticks with the work instead of waiting for an upload.
+    #[test]
+    fn app_totals_split_the_session_between_the_apps_that_earned_it() {
+        let mut builder = SegmentBuilder::new();
+        builder.apply(1_000, &active("code.exe"));
+        builder.apply(1_060, &active("chrome.exe")); // code 1000..1060
+        builder.apply(1_150, &active("code.exe")); // chrome 1060..1150
+        builder.apply(1_200, &active("code.exe"));
+
+        // The open span counts up to `now`, which is what makes it live.
+        assert_eq!(
+            builder.app_totals(1_000, 1_200),
+            vec![
+                ("code.exe".to_string(), 110),
+                ("chrome.exe".to_string(), 90)
+            ],
+            "heaviest first, and the open span counts to now"
+        );
+        assert_eq!(
+            builder.app_totals(1_000, 1_400),
+            vec![
+                ("code.exe".to_string(), 310),
+                ("chrome.exe".to_string(), 90)
+            ],
+            "the open span keeps counting as time passes"
+        );
+    }
+
+    /// A session starting mid-span must not inherit the part of that span that
+    /// belonged to the session before it.
+    #[test]
+    fn app_totals_clip_to_the_session_window() {
+        let mut builder = SegmentBuilder::new();
+        builder.apply(1_000, &active("code.exe"));
+        builder.apply(1_200, &active("chrome.exe"));
+
+        // Equal totals tie-break by name, so a reader watching the list tick
+        // never sees two equal rows swap places.
+        assert_eq!(
+            builder.app_totals(1_100, 1_300),
+            vec![
+                ("chrome.exe".to_string(), 100),
+                ("code.exe".to_string(), 100)
+            ],
+            "only the part of each span inside the window counts"
+        );
+    }
+
+    /// Quiet time is not work, and a span nobody could name is not an app.
+    #[test]
+    fn app_totals_ignore_quiet_time_and_unnamed_spans() {
+        let mut builder = SegmentBuilder::new();
+        builder.apply(1_000, &active("code.exe"));
+        builder.apply(1_060, &idle(60));
+        builder.apply(1_200, &ActivitySignal::Active { process_name: None });
+        builder.apply(1_260, &active("code.exe"));
+
+        let totals = builder.app_totals(1_000, 1_300);
+        assert!(
+            totals.iter().all(|(name, _)| name == "code.exe"),
+            "idle spans and unnamed spans contribute no app row: {totals:?}"
         );
     }
 
