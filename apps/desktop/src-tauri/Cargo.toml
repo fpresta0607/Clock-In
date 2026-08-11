@@ -29,6 +29,9 @@ minisign = "0.9"
 [dev-dependencies]
 base64 = "0.22"
 minisign = "0.9"
+# The upload tests stand a loopback HTTP stub in front of `ApiClient`, which is
+# the only way to exercise spool -> wire -> truncate without a live API.
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread"] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
