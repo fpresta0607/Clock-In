@@ -537,6 +537,14 @@ impl SessionTracker {
                 } else {
                     idle_started_at
                 };
+                // Idle before the first agent evidence is not covered.
+                if let Some(open) = self.open.as_mut() {
+                    if self.agent_first_in_idle > idle_started_at {
+                        let uncovered =
+                            self.agent_first_in_idle.saturating_sub(idle_started_at);
+                        open.idle_seconds += uncovered;
+                    }
+                }
                 closed.extend(self.close_at(close_boundary));
             } else if let Some(open) = self.open.as_mut() {
                 // Exclude any portion of the idle gap that was covered by an
