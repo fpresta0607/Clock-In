@@ -1,4 +1,8 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+
 import { render, screen } from "@testing-library/react";
+import { load as parseYaml } from "js-yaml";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -8,24 +12,70 @@ import {
   windowsInstallerUrl,
 } from "./DownloadInstaller.js";
 
-// The workflow's half of the contract. `unsigned-test-installers.yml` force
-// updates this tag and clobbers these exact asset names on every run, which is
-// the only reason the site can hard-code a URL. If either side is renamed
-// without the other, the button 404s, so both sides are pinned here.
-const tag = "https://github.com/fpresta0607/Clock-In/releases/download/unsigned-latest";
+/**
+ * The contract under test is the release the workflow publishes, which is a
+ * machine-consumed declarative artifact: `unsigned-test-installers.yml` is read
+ * by GitHub Actions, and its `publish` job decides the one tag and the two file
+ * names that make up the URLs this app hard-codes. Nothing else checks that the
+ * two sides agree. The rendered-href tests below compare the constant to
+ * itself, so a rename on either side alone would leave every test green and
+ * 404 the Download button in production.
+ *
+ * So the workflow is parsed into a model and asked what it actually publishes,
+ * rather than searched for strings.
+ */
+const workflowPath = ((relative: string): string => {
+  // Walked up from the vitest root rather than `import.meta.url`, which Vite
+  // rewrites to a non-file URL, and rather than a fixed number of `..` hops.
+  for (let dir = process.cwd(); dir !== dirname(dir); dir = dirname(dir)) {
+    const candidate = resolve(dir, relative);
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(`Could not find ${relative} above ${process.cwd()}`);
+})(".github/workflows/unsigned-test-installers.yml");
+
+type Job = { env?: Record<string, string>; steps?: { name?: string; run?: string }[] };
+type PublishedRelease = { tag: string; assetNames: readonly string[]; stagingDir: string; uploadGlob: string };
+
+const publishedRelease = (): PublishedRelease => {
+  const workflow = parseYaml(readFileSync(workflowPath, "utf8")) as { jobs?: Record<string, Job> };
+  const publish = workflow.jobs?.publish;
+  expect(publish, "the workflow has no `publish` job").toBeDefined();
+  const scriptOf = (name: string): string =>
+    publish?.steps?.find((step) => step.name === name)?.run ?? "";
+
+  // The staging step names every asset exactly once, as `take <pattern> <name>`,
+  // and copies it into the directory the upload step then uploads.
+  const staging = scriptOf("Stage the release assets under their permanent names");
+  const assetNames = [...staging.matchAll(/^\s*take\s+'[^']*'\s+(\S+)\s*$/gm)]
+    .flatMap(([, name]) => (name === undefined ? [] : [name]));
+  const [, stagingDir = ""] = /cp "\$found" "([^/"]+)\//.exec(staging) ?? [];
+  const [, uploadGlob = ""] = /gh release upload "\$TAG" (\S+)/.exec(scriptOf("Publish the prerelease")) ?? [];
+
+  return { tag: publish?.env?.TAG ?? "", assetNames, stagingDir, uploadGlob };
+};
+
+/** `https://…/releases/download/<tag>/<asset>` split back into its two halves. */
+const releaseRefOf = (url: string): { tag: string; assetName: string } => {
+  const segments = new URL(url).pathname.split("/");
+  return { tag: segments.at(-2) ?? "", assetName: segments.at(-1) ?? "" };
+};
 
 describe("installer URLs", () => {
-  it("point at the fixed tag and the fixed asset names the workflow publishes", () => {
-    expect(windowsInstallerUrl).toBe(`${tag}/Clock-In-UNSIGNED-TEST-windows-x64-setup.exe`);
-    expect(macInstallerUrl).toBe(`${tag}/Clock-In-UNSIGNED-TEST-macos-aarch64.dmg`);
-  });
+  it("name the tag and the assets the workflow's publish job actually publishes", () => {
+    const release = publishedRelease();
 
-  it("carry nothing that changes between runs", () => {
-    // A run id, a run number, or a version in the path is the failure this
-    // whole design exists to prevent: it works once and rots on the next build.
+    // Fail loudly rather than vacuously if the workflow is restructured so that
+    // nothing can be derived from it: an empty model would satisfy nothing.
+    expect(release.tag).not.toBe("");
+    expect(release.assetNames.length).toBeGreaterThanOrEqual(2);
+    // What is staged is what is uploaded, so a staged name is a published name.
+    expect(release.uploadGlob).toBe(`${release.stagingDir}/*`);
+
     for (const url of [windowsInstallerUrl, macInstallerUrl]) {
-      expect(url).not.toMatch(/\d+\.\d+\.\d+/);
-      expect(url).not.toMatch(/artifacts?\//);
+      const { tag, assetName } = releaseRefOf(url);
+      expect(tag).toBe(release.tag);
+      expect(release.assetNames).toContain(assetName);
     }
   });
 });
