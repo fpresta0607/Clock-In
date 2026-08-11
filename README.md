@@ -433,9 +433,11 @@ yet:
 - **One project at a time.** Concurrent agent sessions in different projects do not split a
   session; the last one to report wins, and the boundary between them is a session close.
 - **No signing credentials yet** — paid certificates are needed for a real release (see
-  DEPLOY.md). Until they arrive, the **Unsigned test installers** workflow builds unsigned
-  installers you can download and run; Windows SmartScreen warns, macOS needs `xattr`,
-  and these debug builds cannot auto-update (all covered in DEPLOY.md).
+  DEPLOY.md). Until they arrive, the **Unsigned test installers** workflow is the
+  distributable: it republishes the `unsigned-latest` prerelease under fixed asset names,
+  which is what the dashboard's **Download for Windows** button links. Windows SmartScreen
+  warns, macOS needs `xattr`, and these debug builds cannot auto-update (all covered in
+  DEPLOY.md).
 - Evidence can be forged by a determined user. Automatic recording raises the cost and the
   visibility of padding; it does not attempt cryptographic proof.
 

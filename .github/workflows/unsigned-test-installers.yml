@@ -1,7 +1,16 @@
 name: Unsigned test installers
 
-# Builds desktop installers with NO signing and publishes NO release. The
-# installers are uploaded as workflow-run artifacts for manual download.
+# Builds desktop installers with NO signing, uploads them as workflow-run
+# artifacts, and (on a deliberate `workflow_dispatch` only) republishes the
+# `unsigned-latest` **prerelease** so the website has something anonymous
+# visitors can actually download.
+#
+# Why a prerelease and not the run artifact: GitHub requires authentication to
+# download a workflow artifact, so a raw artifact URL is useless to a signed-out
+# visitor. Release assets are public on a public repo. The tag is fixed and the
+# asset names are fixed, so `releases/download/unsigned-latest/<asset>` is a
+# permanent URL that always serves the newest run's output. The web dashboard
+# hard-codes exactly that URL; see `apps/web/src/DownloadInstaller.tsx`.
 #
 # This is deliberately NOT a relaxation of `release.yml`. That workflow still
 # refuses to publish anything unsigned, and nothing here touches it. The two
@@ -29,7 +38,9 @@ on:
   push:
     branches: ["unsigned-test/**"]
 
-# Read-only on purpose: this job cannot create a release even by mistake.
+# Read-only by default, so the build job cannot publish anything even by
+# mistake. Only the small `publish` job below widens this, and it builds
+# nothing.
 permissions:
   contents: read
 
@@ -138,8 +149,8 @@ jobs:
             * It is a debug build, so it is larger and slower than a release
               build, and on Windows it opens a console window beside the app.
 
-          Do not distribute these. Signed installers come from the tagged
-          release workflow only.
+          Until code signing exists, this is what clock.siqstack.com hands out.
+          Signed installers will come from the tagged release workflow only.
           EOF
           ls -l "$out"
 
@@ -148,3 +159,98 @@ jobs:
           name: UNSIGNED-TEST-BUILD-${{ matrix.target }}-${{ github.run_number }}
           path: unsigned-artifacts/*
           if-no-files-found: error
+
+  publish:
+    # A `unsigned-test/**` push is someone exercising a change to this file, so
+    # it must not overwrite what the website hands out. Only a deliberate
+    # "Run workflow" republishes the public download.
+    if: github.event_name == 'workflow_dispatch'
+    needs: installers
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The only place in this workflow that can write to the repository, and it
+    # compiles nothing: it renames what `installers` already produced and
+    # uploads it. The signing gate lives in `release.yml` and is untouched.
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: unsigned-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloaded
+
+      # Fixed names are the whole point: the website links
+      # releases/download/unsigned-latest/<these names> as a constant, with no
+      # GitHub API lookup and nothing to update when the version changes. The
+      # version travels in the release title, the notes, and the app itself.
+      - name: Stage the release assets under their permanent names
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          take() {
+            local pattern="$1" name="$2"
+            local found
+            found="$(find downloaded -type f -name "$pattern" -print -quit)"
+            if [ -z "$found" ]; then
+              echo "No artifact matched $pattern" >&2
+              find downloaded -type f >&2
+              exit 1
+            fi
+            cp "$found" "release-assets/$name"
+          }
+          take '*.exe' Clock-In-UNSIGNED-TEST-windows-x64-setup.exe
+          take '*.dmg' Clock-In-UNSIGNED-TEST-macos-aarch64.dmg
+          # Both matrix legs write an identical one, so either will do.
+          take 'UNSIGNED-TEST-BUILD.txt' UNSIGNED-TEST-BUILD.txt
+          ls -l release-assets
+
+      - name: Write the release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          cat > release-notes.md <<EOF
+          Unsigned test build of Clock-In **$version**, from commit
+          \`${{ github.sha }}\` (run [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})).
+
+          These installers are **not code signed**. Windows SmartScreen will warn
+          about an unknown publisher: choose **More info**, then **Run anyway**.
+          macOS is un-notarized and needs
+          \`xattr -dr com.apple.quarantine "/Applications/Clock-In.app"\`.
+
+          They are debug builds, so they are larger and slower than a release
+          build and open a console window beside the app on Windows. There is no
+          auto-updater: uninstall before installing a signed release later.
+
+          This tag and these file names never change. Every run of the *Unsigned
+          test installers* workflow replaces the assets in place, so the links
+          below always point at the newest build, and so does the **Download for
+          Windows** button on clock.siqstack.com.
+          EOF
+
+      # Force the tag onto this commit so the release stops claiming to be
+      # whatever commit first created it.
+      - name: Move the unsigned-latest tag to this commit
+        run: git push --force origin "HEAD:refs/tags/$TAG"
+
+      # Edit-or-create, never delete-and-recreate: deleting would leave the
+      # published download URL 404ing for the length of the upload.
+      - name: Publish the prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="Unsigned test build $VERSION"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$title" --notes-file release-notes.md \
+              --prerelease --target "${{ github.sha }}"
+          else
+            gh release create "$TAG" --title "$title" --notes-file release-notes.md \
+              --prerelease --target "${{ github.sha }}"
+          fi
+          gh release upload "$TAG" release-assets/* --clobber

@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 
-import { DownloadApp } from "./DownloadApp.js";
+import { InstallerLink } from "./DownloadInstaller.js";
 
 type HelpModalProps = { open: boolean; onClose: () => void };
 
@@ -54,7 +54,7 @@ export const HelpModal = ({ open, onClose }: HelpModalProps) => {
         <ol className="help-steps">
           <li>
             <strong>Install the desktop app.</strong> This dashboard only shows hours; the app
-            records them. <DownloadApp />
+            records them. <InstallerLink />
           </li>
           <li>
             <strong>Sign in there with this same account.</strong> Same email and password; your

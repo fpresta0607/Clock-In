@@ -48,6 +48,43 @@ a.primary { display: inline-block; text-decoration: none; }
 }
 .range-picker span { position: absolute; }
 
+/* The installer hand-out (DownloadInstaller.tsx). Top-right on every surface:
+   the dashboard already has a top-right corner in its masthead, so there it
+   rides along; the centred sign-in and welcome layouts own no corner, so the
+   floating variant pins to the viewport instead. */
+.download-corner { display: grid; justify-items: end; gap: 5px; text-align: right; }
+.download-corner.is-floating { position: fixed; top: 16px; right: 16px; z-index: 5; }
+.download-corner.is-hero { justify-items: center; text-align: center; }
+
+a.download-button {
+  display: inline-block;
+  border: 1px solid var(--accent-green);
+  border-radius: 9999px;
+  padding: 12px 24px;
+  background: var(--accent-green);
+  color: #03130c;
+  font-size: .87rem;
+  font-weight: 750;
+  letter-spacing: .07em;
+  text-decoration: none;
+  text-transform: uppercase;
+  box-shadow: 0 0 20px rgba(0, 229, 155, .28);
+  transition: background .15s ease, border-color .15s ease;
+}
+a.download-button:hover { background: var(--accent-green-deep); border-color: var(--accent-green-deep); }
+.is-hero a.download-button { padding: 16px 38px; font-size: 1rem; letter-spacing: .08em; }
+
+/* The SmartScreen warning is stated on screen rather than hidden in a tooltip:
+   a visitor who meets that dialog unwarned reads it as malware. */
+.download-note { margin: 0; max-width: 32ch; color: var(--text-secondary); font-size: .72rem; line-height: 1.4; }
+a.download-secondary { color: var(--text-secondary); font-size: .72rem; text-decoration: underline; text-underline-offset: 3px; }
+a.download-secondary:hover { color: #ffffff; }
+
+/* Small screens: the floating button would sit on top of the sign-in card. */
+@media (max-width: 640px) {
+  .download-corner.is-floating { position: static; justify-items: center; text-align: center; margin: 0 auto 8px; }
+}
+
 /* Round "?" trigger in the masthead and the dialog it opens */
 .help-button { width: 32px; height: 32px; padding: 0; font-weight: 700; }
 

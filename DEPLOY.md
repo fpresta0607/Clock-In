@@ -9,7 +9,7 @@ Neon Auth, so neither needs deploying. DNS lives in **Azure DNS** for
 |---|---|---|
 | API | `api.clock.siqstack.com` | Railway, from `apps/api/Dockerfile` |
 | Web dashboard | `clock.siqstack.com` | Vercel, from `apps/web` |
-| Desktop installers | GitHub Releases | `.github/workflows/release.yml`, on a tag |
+| Desktop installers | GitHub Releases | Signed: `.github/workflows/release.yml`, on a tag. Unsigned, and what the site links today: `.github/workflows/unsigned-test-installers.yml`, on **Run workflow** |
 
 Do these in order. The API has to exist before the other two can point at it.
 
@@ -216,9 +216,10 @@ Neon → Clock-In → Auth → Configuration:
 
 ## 4. Desktop installers
 
-The repo is public, so release assets are downloadable by anyone — the web
-dashboard's **Download** button pulls the latest installer for the visitor's
-platform straight from GitHub Releases.
+The repo is public, so release assets are downloadable by anyone. Until code
+signing exists, the site's **Download for Windows** button does not point here:
+it points at the `unsigned-latest` prerelease described under *Unsigned test
+installers* below.
 
 Set these **repository variables** (Settings → Secrets and variables → Actions →
 Variables). They are baked into a public binary, so do not use secrets:
@@ -302,10 +303,10 @@ durable: losing it means existing installs can never verify an update again.
 ### Unsigned test installers
 
 Before the signing certificates exist, `.github/workflows/unsigned-test-installers.yml`
-builds installers you can actually download and install. It publishes **no**
-release and uploads nothing to GitHub Releases: the installers are workflow-run
-artifacts, and the job runs with read-only `contents` permission so it could not
-publish one if it tried.
+builds the installers people actually download, and **it is what the website
+hands out**. The build job still runs with read-only `contents` permission and
+cannot publish anything; a separate `publish` job, which compiles nothing,
+uploads what that job produced.
 
 This is not a way around the signing gate. `release.yml` still refuses to
 publish anything unsigned, and this workflow does not touch it or the signing
@@ -319,15 +320,45 @@ changes `release.yml` only.
 Because GitHub only offers *Run workflow* for workflows already on the default
 branch, the workflow also runs on any push to a branch named
 `unsigned-test/<anything>`, which is how you exercise a change to it before it
-merges.
+merges. A branch push **builds but does not publish**: only a deliberate *Run
+workflow* replaces the public download, so exercising the workflow cannot
+change what the website serves.
 
-**To download:** open the run and grab the artifact named
-`UNSIGNED-TEST-BUILD-windows-<run number>` (or `-macos-`). Inside are the
-installers, each prefixed `UNSIGNED-TEST-`, plus an `UNSIGNED-TEST-BUILD.txt`
-recording the commit they came from. Windows ships the NSIS
-`...-setup.exe` only: WiX's `light.exe` cannot bundle the unoptimized debug
-binary into an MSI, so that target is skipped here. The tagged release still
-builds both.
+Windows ships the NSIS `...-setup.exe` only: WiX's `light.exe` cannot bundle
+the unoptimized debug binary into an MSI, so that target is skipped here. The
+tagged release still builds both.
+
+#### The permanent download URL
+
+A `workflow_dispatch` run force-updates the **`unsigned-latest` prerelease** and
+clobbers its assets, so these two URLs always serve the newest build and never
+need touching:
+
+```
+https://github.com/fpresta0607/Clock-In/releases/download/unsigned-latest/Clock-In-UNSIGNED-TEST-windows-x64-setup.exe
+https://github.com/fpresta0607/Clock-In/releases/download/unsigned-latest/Clock-In-UNSIGNED-TEST-macos-aarch64.dmg
+```
+
+`apps/web/src/DownloadInstaller.tsx` hard-codes exactly those strings, and
+`DownloadInstaller.test.tsx` pins them, because renaming an asset on one side
+alone silently 404s the button. This is why the assets carry fixed names rather
+than the versioned ones inside the run artifact: the version travels in the
+release title, the release notes, and the installed app, not in the URL.
+
+**Do not** link a workflow-run artifact from anywhere public. GitHub requires
+authentication to download one, so an artifact URL is a dead link for a
+signed-out visitor. That is the whole reason for the prerelease.
+
+The run artifacts (`UNSIGNED-TEST-BUILD-windows-<run number>` and `-macos-`)
+still exist for branch pushes and for grabbing a build that was never
+published. Inside are the installers under their versioned names, each prefixed
+`UNSIGNED-TEST-`, plus an `UNSIGNED-TEST-BUILD.txt` recording the commit.
+
+**Bump the version when the build changes.** `apps/desktop/src-tauri/tauri.conf.json`
+holds the single `version`, and the installer, Add/Remove Programs, and the
+release title all read from it. Leave it stale and a fresh build introduces
+itself as the old one, which is how a same-day build got mistaken for four-day-old
+software.
 
 **Installing on Windows.** The installer is not signed, so SmartScreen shows a
 blue *"Windows protected your PC / Windows Defender SmartScreen prevented an

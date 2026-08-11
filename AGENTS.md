@@ -63,6 +63,14 @@ runtime and model are independent — neither is ever derived from the other.
 - `clock-in-hook` and the desktop uploader must resolve the spool through the same
   `spool::agent_spool_path()`. When they disagreed, the hook exited 0, wrote nothing
   the uploader could see, and every agent event vanished silently.
+- The site's **Download for Windows** button is a hard-coded
+  `releases/download/unsigned-latest/<fixed asset name>` URL, kept true by the `publish`
+  job in `unsigned-test-installers.yml`. That job runs on `workflow_dispatch` only, so a
+  `unsigned-test/**` push builds without touching what the public downloads. Rename an
+  asset on one side alone and the button 404s silently; `DownloadInstaller.test.tsx` pins
+  both names. Never link a workflow-run artifact publicly: downloading one needs auth.
+  The app version lives only in `apps/desktop/src-tauri/tauri.conf.json` and nothing bumps
+  it for you, so a fresh build will introduce itself as the last version you shipped.
 - Both frontends share `packages/shared/styles/brand.css` and ship a single dark
   theme; there is no light theme to match, so use the tokens rather than literals.
 - Nothing deploys on merge. The API (Railway) and the web dashboard (Vercel) are
