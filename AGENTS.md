@@ -57,6 +57,12 @@ runtime and model are independent — neither is ever derived from the other.
   the uploader could see, and every agent event vanished silently.
 - Both frontends share `packages/shared/styles/brand.css` and ship a single dark
   theme; there is no light theme to match, so use the tokens rather than literals.
+- Nothing deploys on merge. The API (Railway) and the web dashboard (Vercel) are
+  separate manual pushes, so production can run two different commits of
+  `packages/shared`. Because the report filters are `.strict()`, a newer web
+  bundle sending a parameter an older API does not declare gets a bare `400`.
+  Check what is deployed before debugging a live report failure; see
+  "Deploy the API and the web dashboard together" in `DEPLOY.md`.
 
 ## Maintaining this file
 
