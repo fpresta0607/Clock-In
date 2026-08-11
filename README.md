@@ -323,7 +323,7 @@ the batch still lands.
 ## Agent hooks
 
 At startup, Clock-In auto-discovers which agent CLIs are installed (by checking for their
-config directories) and silently wires up every one whose hook shape it knows how to merge —
+config directories) and silently wires up every one whose hook shape it knows how to merge:
 today Claude Code, Codex, and Cursor. Where a config can be merged safely it is, with a
 backup and an atomic write; where it can't (Kimi Code, Pi, opencode, Grok, Muse, GitHub
 Copilot), the "what's switched on" panel carries the exact snippet to paste. A runtime that

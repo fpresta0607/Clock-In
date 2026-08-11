@@ -73,7 +73,7 @@ const MAX_BUFFERED_SEGMENTS: usize = 10_000;
 ///
 /// Without this, an active span only ever closed on a *state* change, so a
 /// machine in continuous use held one span in memory indefinitely and spooled
-/// nothing — the failure that left `activity_segments` empty. A ceiling means
+/// nothing - the failure that left `activity_segments` empty. A ceiling means
 /// evidence reaches disk on a schedule no matter how long one app stays in
 /// front. Five minutes matches the uploader's pass, so a closed span waits at
 /// most one pass to leave the machine.
@@ -183,7 +183,7 @@ impl SegmentBuilder {
     ///
     /// Three things close an active span: a change of state, a change of the
     /// app in front, and `MAX_OPEN_ACTIVE_SECONDS` of the same app. The last
-    /// two matter as much as the first — while only state changes closed
+    /// two matter as much as the first - while only state changes closed
     /// spans, per-app time was "whichever app happened to be in front when the
     /// machine went idle", and a machine in continuous use spooled nothing at
     /// all.
@@ -899,7 +899,7 @@ pub struct HookRegistration {
     /// not there.
     pub installed: bool,
     /// Installed, not connected, and not something Clock-In can wire up on its
-    /// own — the only rows that should ask a person for anything.
+    /// own - the only rows that should ask a person for anything.
     pub needs_you: bool,
     pub config_path: String,
 }
@@ -979,8 +979,8 @@ pub fn detect_hooks(probes: &[HookProbe]) -> Vec<HookRegistration> {
 /// clicks. It is deliberately narrow: a runtime is touched only when its own
 /// config directory already exists, so Clock-In never creates configuration
 /// for a tool that is not installed, and only when its hook mechanism is a
-/// config shape the host knows how to merge. Anything else — Kimi, Pi,
-/// opencode, Grok, Muse, Copilot — stays a `needs_you` row carrying the exact
+/// config shape the host knows how to merge. Anything else - Kimi, Pi,
+/// opencode, Grok, Muse, Copilot - stays a `needs_you` row carrying the exact
 /// text to paste, because guessing a rewrite of a file Clock-In does not own
 /// is worse than asking.
 pub fn auto_connect_hooks(probes: &[HookProbe]) -> Vec<String> {

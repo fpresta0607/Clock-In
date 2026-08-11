@@ -263,7 +263,7 @@ export const RecordingPanel = ({
                 <dt>Last look at this computer</dt>
                 <dd data-testid="diagnostic-poll">
                   {status.lastPollAgeSeconds === null
-                    ? "Never — this computer has not been sampled yet"
+                    ? "Never - this computer has not been sampled yet"
                     : `${status.lastPollAgeSeconds}s ago`}
                 </dd>
               </div>

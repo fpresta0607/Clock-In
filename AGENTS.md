@@ -41,7 +41,7 @@ active span: a change of state, a change of the app in front, and
 `activity_segments` was empty in production for the app's whole life: a machine
 in continuous use never changes state, so one span sat in memory and the spool
 file was never created. If you touch the fold, keep all three, and keep idle
-spans **whole** — `SessionTracker` measures quiet time from the open idle span's
+spans **whole** - `SessionTracker` measures quiet time from the open idle span's
 start, so splitting one stops sessions ever closing.
 
 `running` means "the tasks were started"; `observing` means "polls are still
@@ -58,12 +58,13 @@ timer once said RECORDING above a card reading "Turn on recording in settings".
   all with `--manifest-path apps/desktop/src-tauri/Cargo.toml`.
 - `build.rs` treats *any* build with `debug_assertions` off as a production artifact
   and demands the updater key plus platform signing credentials. So an unsigned
-  installer is a `tauri build --debug` bundle. Because the shipped installer is a
-  *debug* build, never gate user-facing behaviour on `debug_assertions` — that
-  condition is true in the artifact people download. `windows_subsystem` was gated
-  that way and every install opened a console window behind the app.
+  installer is a `tauri build --debug` bundle
   (`.github/workflows/unsigned-test-installers.yml`), never a relaxed release build;
-  `release.yml` and `src/release_signing.rs` stay fail-closed.
+  `release.yml` and `src/release_signing.rs` stay fail-closed. Because the shipped
+  installer is a *debug* build, never gate user-facing behaviour on
+  `debug_assertions`: that condition is true in the artifact people download.
+  `windows_subsystem` was gated that way and every install opened a console window
+  behind the app.
 - Desktop settings are read with `#[serde(default)]`, so removing a field is safe
   for existing installs, but *adding* one needs a sensible default or old files
   parse into something surprising.
