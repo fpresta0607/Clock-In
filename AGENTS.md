@@ -52,6 +52,14 @@ runtime and model are independent — neither is ever derived from the other.
   database built only from `migrations/*.sql` does not match `schema.ts`; a generated
   migration therefore picks up leftovers from earlier features. Check what a fresh
   `drizzle-kit generate` emits before assuming it is only your change.
+- The migration folder is not a description of production. Production's
+  `drizzle.__drizzle_migrations` holds entries whose hashes match no file on `main`,
+  because phase 3 applied migrations that were later rewritten here. Drizzle selects
+  work by `created_at` alone and never verifies a hash, so the chain replays onto a
+  schema it was not generated against and stops on the first collision. Dry-run against
+  a replica built from production's journal before migrating it; see "Production's
+  migration journal has entries this repo no longer carries" in `DEPLOY.md`. Nothing
+  migrates on deploy, so this is always a deliberate, separate step.
 - `clock-in-hook` and the desktop uploader must resolve the spool through the same
   `spool::agent_spool_path()`. When they disagreed, the hook exited 0, wrote nothing
   the uploader could see, and every agent event vanished silently.
