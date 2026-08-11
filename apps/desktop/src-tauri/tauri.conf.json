@@ -29,7 +29,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/clock-in-hook", "binaries/clock-in-browser-host"],
+    "externalBin": ["binaries/clock-in-hook"],
     "icon": ["icons/icon.ico", "icons/icon.png"]
   },
   "plugins": {

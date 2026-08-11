@@ -5,6 +5,7 @@ import { and, asc, count, desc, eq, gt, gte, isNotNull, lt, or, sql, sum } from 
 import {
   activitySegments,
   agentSessions,
+  organizationAdminClaims,
   organizations,
   projectMemberships,
   projectPathMappings,
@@ -19,6 +20,7 @@ import type {
   AuthenticatedSubject,
   AuthenticatedUser,
   AuthIdentity,
+  FirstAdminClaimResult,
   OrganizationRecord,
 } from "./auth.js";
 import { AppError } from "./errors.js";
@@ -304,6 +306,56 @@ export class DrizzleAccountStore implements AccountStore {
       }
 
       return moved;
+    });
+  }
+
+  public async claimFirstAdmin(subject: AuthenticatedSubject): Promise<FirstAdminClaimResult> {
+    return this.db.transaction(async (tx) => {
+      const lockedUser = await tx.execute(sql`
+        select ${users.id}
+        from ${users}
+        where ${users.id} = ${subject.userId}
+        for update
+      `);
+      if (lockedUser.length === 0) return { kind: "not_member" };
+      const [member] = await tx
+        .select({ role: users.role })
+        .from(users)
+        .where(and(eq(users.id, subject.userId), eq(users.organizationId, subject.organizationId)))
+        .limit(1);
+      if (member === undefined) return { kind: "not_member" };
+      if (member.role === "admin") return { kind: "already_claimed" };
+
+      const lockedOrganization = await tx.execute(sql`
+        select ${organizations.id}
+        from ${organizations}
+        where ${organizations.id} = ${subject.organizationId}
+        for update
+      `);
+      if (lockedOrganization.length === 0) return { kind: "not_member" };
+
+      const [claim] = await tx
+        .insert(organizationAdminClaims)
+        .values({
+          organizationId: subject.organizationId,
+          userId: subject.userId,
+          kind: "legacy_first_admin",
+        })
+        .onConflictDoNothing()
+        .returning({ organizationId: organizationAdminClaims.organizationId });
+      if (claim === undefined) return { kind: "already_claimed" };
+
+      const [user] = await tx
+        .update(users)
+        .set({ role: "admin", updatedAt: new Date() })
+        .where(and(
+          eq(users.id, subject.userId),
+          eq(users.organizationId, subject.organizationId),
+          eq(users.role, "member"),
+        ))
+        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role });
+      if (user === undefined) throw new Error("The first-admin claimant was no longer an active member.");
+      return { kind: "claimed", user };
     });
   }
 
