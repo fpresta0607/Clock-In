@@ -248,6 +248,39 @@ describe("dashboard", () => {
     expect(screen.getByRole("heading", { name: "Sign in" })).toBeInTheDocument();
   });
 
+  it("keeps the workspace on screen when the API refuses the report calls", async () => {
+    // The live failure: a deployed API that predates the instant-bound filters
+    // 400s both report calls. Promise.all threw the successful /organization
+    // away with them, so a server-side refusal read as an empty account.
+    const refused = () => new ClientError("validation", "The server would not accept that request.");
+    await signIn(clientFor({
+      leaderboard: vi.fn().mockRejectedValue(refused()),
+      report: vi.fn().mockRejectedValue(refused()),
+    }));
+
+    expect(await screen.findByRole("heading", { name: "SIQstack" })).toBeInTheDocument();
+    expect(screen.getByText("ACDEF-GHJKM")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("would not accept");
+  });
+
+  it("distinguishes a card that failed to load from a range with nothing in it", async () => {
+    const refused = () => new ClientError("validation", "The server would not accept that request.");
+    await signIn(clientFor({
+      leaderboard: vi.fn().mockRejectedValue(refused()),
+      report: vi.fn().mockRejectedValue(refused()),
+    }));
+
+    const board = within(await screen.findByRole("region", { name: "Leaderboard" }));
+    expect(board.getByText("Could not load hours for this range.")).toBeInTheDocument();
+    // A zero total is a claim about the data; nothing was loaded to claim it from.
+    expect(board.queryByText("No recorded time in this range yet.")).not.toBeInTheDocument();
+    expect(board.queryByText("00:00:00 total")).not.toBeInTheDocument();
+
+    const sessions = within(screen.getByRole("region", { name: "Recent sessions" }));
+    expect(sessions.getByText("Could not load sessions for this range.")).toBeInTheDocument();
+    expect(sessions.queryByText("Nothing recorded in this range.")).not.toBeInTheDocument();
+  });
+
   it("says so plainly when a range has no recorded time", async () => {
     await signIn(clientFor({
       leaderboard: vi.fn().mockResolvedValue({ entries: [], totalDurationSeconds: 0, filters: {} }),

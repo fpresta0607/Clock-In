@@ -13,6 +13,31 @@ Neon Auth, so neither needs deploying. DNS lives in **Azure DNS** for
 
 Do these in order. The API has to exist before the other two can point at it.
 
+## Deploy the API and the web dashboard together
+
+Nothing deploys on merge. Both are manual CLI pushes, so `main` being green says
+only that the code builds, never that it is running. Whenever a change touches
+`packages/shared`, redeploy **both** in the same sitting.
+
+The two drift silently and the dashboard pays for it. The request filters are
+`.strict()`, so a web bundle that sends a query parameter the running API has
+never heard of gets a flat `400`, and the dashboard shows a red banner with no
+hours. That is exactly how `fromAt`/`toExclusiveAt` broke the live workspace: the
+web was redeployed, the API was not. A stale API also silently swallows the
+desktop app's evidence, because `/sessions/observed` and `/activity/segments`
+simply do not exist on it, so nobody's time is recorded either.
+
+Check what is actually running before blaming the code:
+
+```bash
+curl -s https://api.clock.siqstack.com/health                 # is it up
+curl -s -H "authorization: Bearer <jwt>" \
+  'https://api.clock.siqstack.com/reports/leaderboard?fromAt=2026-01-01T00:00:00.000Z&toExclusiveAt=2026-01-02T00:00:00.000Z'
+```
+
+A `validation_error` from that second call means the API predates instant
+bounds and needs `railway up`.
+
 ---
 
 ## 1. API on Railway

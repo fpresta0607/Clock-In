@@ -62,6 +62,10 @@ export const App = ({ client }: AppProps) => {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [dataError, setDataError] = useState<string | undefined>();
+  // Tracked per card, because "we could not load this" and "there is nothing
+  // here" are different facts and a zero total is a lie about the first.
+  const [boardFailed, setBoardFailed] = useState(false);
+  const [rowsFailed, setRowsFailed] = useState(false);
   const [copied, setCopied] = useState(false);
   const [joinCode, setJoinCode] = useState("");
   const [joinBusy, setJoinBusy] = useState(false);
@@ -71,27 +75,36 @@ export const App = ({ client }: AppProps) => {
   const load = useCallback(async (selected: Range) => {
     setLoading(true);
     setDataError(undefined);
-    try {
-      const query = rangeQuery(selected);
-      const [organizationResult, board, report] = await Promise.all([
-        client.organization(),
-        client.leaderboard(query),
-        client.report(`${query}&pageSize=25`),
-      ]);
-      setOrganization(organizationResult.organization);
-      setEntries(board.entries);
-      setTotal(board.totalDurationSeconds);
-      setRows(report.rows);
-    } catch (error: unknown) {
-      if (error instanceof ClientError && error.kind === "auth") {
-        setSignedIn(false);
-        setAuthError("Your session expired. Sign in again.");
-        return;
-      }
-      setDataError(messageFor(error));
-    } finally {
+    const query = rangeQuery(selected);
+    // Settled rather than all: these three calls fail independently, and one
+    // refused report must not throw away the workspace that loaded beside it.
+    // While it did, a rejected /reports blanked the masthead and the invite
+    // code too, so a server-side failure read as an empty account.
+    const [organizationResult, board, report] = await Promise.allSettled([
+      client.organization(),
+      client.leaderboard(query),
+      client.report(`${query}&pageSize=25`),
+    ]);
+    const failures = [organizationResult, board, report]
+      .flatMap((result) => (result.status === "rejected" ? [result.reason as unknown] : []));
+
+    if (failures.some((reason) => reason instanceof ClientError && reason.kind === "auth")) {
+      setSignedIn(false);
+      setAuthError("Your session expired. Sign in again.");
       setLoading(false);
+      return;
     }
+
+    if (organizationResult.status === "fulfilled") setOrganization(organizationResult.value.organization);
+    setBoardFailed(board.status === "rejected");
+    setEntries(board.status === "fulfilled" ? board.value.entries : []);
+    setTotal(board.status === "fulfilled" ? board.value.totalDurationSeconds : 0);
+    setRowsFailed(report.status === "rejected");
+    setRows(report.status === "fulfilled" ? report.value.rows : []);
+
+    const [firstFailure] = failures;
+    if (firstFailure !== undefined) setDataError(messageFor(firstFailure));
+    setLoading(false);
   }, [client]);
 
   // On page load, trade a persisted auth cookie for a JWT before choosing
@@ -151,6 +164,8 @@ export const App = ({ client }: AppProps) => {
     setOrganization(undefined);
     setEntries([]);
     setRows([]);
+    setBoardFailed(false);
+    setRowsFailed(false);
     setAuthError(undefined);
   };
 
@@ -326,9 +341,11 @@ export const App = ({ client }: AppProps) => {
       <section className="card" aria-labelledby="board-title">
         <div className="card-head">
           <h2 id="board-title">Leaderboard</h2>
-          <span className="total">{formatDuration(total)} total</span>
+          <span className="total">{boardFailed ? "Not loaded" : `${formatDuration(total)} total`}</span>
         </div>
-        {loading && entries.length === 0 ? (
+        {boardFailed ? (
+          <p className="subtle">Could not load hours for this range.</p>
+        ) : loading && entries.length === 0 ? (
           <p className="subtle" role="status">Loading hours…</p>
         ) : entries.length === 0 ? (
           <p className="subtle">No recorded time in this range yet.</p>
@@ -362,7 +379,9 @@ export const App = ({ client }: AppProps) => {
 
       <section className="card" aria-labelledby="sessions-title">
         <div className="card-head"><h2 id="sessions-title">Recent sessions</h2></div>
-        {rows.length === 0 ? (
+        {rowsFailed ? (
+          <p className="subtle">Could not load sessions for this range.</p>
+        ) : rows.length === 0 ? (
           <p className="subtle">Nothing recorded in this range.</p>
         ) : (
           <table>

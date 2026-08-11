@@ -44,7 +44,15 @@ function classify(status: number): ClientError {
       "This account already recorded time here, so it cannot move. Ask an admin, or use a fresh account.",
     );
   }
-  if (status === 400 || status === 422) return new ClientError("validation", "The server rejected that request.");
+  // Nobody composes these requests by hand, so a refused one is never something
+  // the reader mistyped: it is this page and the API disagreeing about the
+  // request shape. Say that, and name the one thing a reader can actually do.
+  if (status === 400 || status === 422) {
+    return new ClientError(
+      "validation",
+      "The server would not accept that request. This page and the server may be running different versions. Reload, and tell an admin if it keeps happening.",
+    );
+  }
   if (status >= 500) return new ClientError("transient", "The server is unavailable. Try again shortly.");
   return new ClientError("unknown", "That request did not complete.");
 }
@@ -183,7 +191,14 @@ export function createClient(config: ClientConfig) {
 
     async signOut(): Promise<void> {
       accessToken = undefined;
-      await authRequest("/sign-out", { method: "POST" }).catch(() => undefined);
+      // Neon Auth refuses any content type but JSON with a 415, and this call is
+      // swallowed below, so omitting it signed the tab out while leaving the
+      // session cookie alive: the next reload silently signed the person back in.
+      await authRequest("/sign-out", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      }).catch(() => undefined);
     },
 
     organization: () => json<OrganizationResponse>("/organization"),

@@ -154,6 +154,29 @@ describe("web client", () => {
     expect(String(fetchMock.mock.calls[0]?.[0])).toBe(`${authBaseUrl}/sign-in/email`);
   });
 
+  it("ends the auth session with the content type the auth host demands", async () => {
+    // Neon Auth answers 415 for anything but JSON, and this call is swallowed,
+    // so a missing content type left the cookie alive and signed the person
+    // back in on the next reload.
+    const { client, fetchMock } = clientWith(async () => jsonResponse({}));
+
+    await client.signOut();
+
+    const signOutCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/sign-out"));
+    expect((signOutCall?.[1]?.headers as Record<string, string> | undefined)?.["content-type"])
+      .toBe("application/json");
+  });
+
+  it("says a refused request is a version mismatch, because no reader composed it", async () => {
+    const { client } = clientWith(async (url) => {
+      if (url.endsWith("/token")) return jsonResponse({ token: "jwt" });
+      return jsonResponse({ error: { code: "validation_error", message: "Invalid leaderboard filters." } }, 400);
+    });
+
+    await expect(client.leaderboard("?fromAt=2026-07-13T05:00:00.000Z&toExclusiveAt=2026-08-12T05:00:00.000Z"))
+      .rejects.toMatchObject({ kind: "validation", message: expect.stringContaining("different versions") });
+  });
+
   it("is a ClientError so callers can branch on kind without parsing messages", async () => {
     const { client } = clientWith(async () => jsonResponse({}, 503));
 
