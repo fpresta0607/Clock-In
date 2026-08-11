@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { projectMemberships, projects, type DatabaseConnection } from "@clock-in/database";
 
+import { AppError } from "./errors.js";
+
 import {
   DrizzleAccountStore,
   DrizzlePathMappingRepository,
@@ -35,7 +37,7 @@ describe("Drizzle session repository", () => {
 });
 
 describe("Drizzle account store", () => {
-  it("refuses to move the final active administrator away from members", async () => {
+  it("allows an administrator to move workspaces when no evidence exists", async () => {
     const targetOrganizationId = "a1c7e513-b094-4d4c-ae55-21790ae019a4";
     const currentOrganizationId = "b1c7e513-b094-4d4c-ae55-21790ae019a4";
     const deleted: unknown[] = [];
@@ -59,30 +61,35 @@ describe("Drizzle account store", () => {
             role: "admin",
           }]);
         }
-        if (selectStep >= 3 && selectStep <= 6) return { from: () => ({ where: async () => [{ total: 0 }] }) };
-        if (selectStep === 7) return limited([{ id: "remaining-member" }]);
-        if (selectStep === 8) return limited([]);
+        if (selectStep === 3) return { from: () => ({ where: async () => [{ total: 0 }] }) };
+        if (selectStep === 4) return { from: () => ({ where: async () => [{ total: 0 }] }) };
+        if (selectStep === 5) return { from: () => ({ where: async () => [{ total: 0 }] }) };
         throw new Error(`unexpected select ${selectStep}`);
       },
+      update: () => ({
+        set: () => ({
+          where: () => ({
+            returning: async () => [{ id: input.userId, email: "legacy@example.com", name: "Legacy Admin", organizationId: targetOrganizationId }],
+          }),
+        }),
+      }),
       delete: (table: unknown) => {
         deleted.push(table);
         return { where: async () => undefined };
       },
+      insert: () => ({ values: async () => undefined }),
     };
     const db = {
       transaction: async (callback: (handle: typeof transaction) => Promise<unknown>) => callback(transaction),
     } as unknown as DatabaseConnection["db"];
     const accounts = new DrizzleAccountStore(db);
 
-    await expect(accounts.joinOrganization({ organizationId: currentOrganizationId, userId: input.userId }, "ACDEF-GHJKM"))
-      .rejects.toMatchObject({
-        code: "conflict",
-        message: "The final administrator cannot leave a workspace while it still has members.",
-      });
-    expect(deleted).toEqual([]);
+    const result = await accounts.joinOrganization({ organizationId: currentOrganizationId, userId: input.userId }, "ACDEF-GHJKM");
+    expect(result).toEqual({ id: input.userId, email: "legacy@example.com", name: "Legacy Admin", organizationId: targetOrganizationId });
+    expect(deleted).toContain(projectMemberships);
   });
 
-  it("rejects a workspace move before activity evidence can violate its tenant key", async () => {
+  it("rejects a workspace move when the account has recorded workspace evidence", async () => {
     const targetOrganizationId = "a1c7e513-b094-4d4c-ae55-21790ae019a4";
     const currentOrganizationId = "b1c7e513-b094-4d4c-ae55-21790ae019a4";
     let selectStep = 0;
@@ -103,26 +110,27 @@ describe("Drizzle account store", () => {
           organizationId: currentOrganizationId,
           role: "member",
         }]);
-        if (selectStep === 3 || selectStep === 5 || selectStep === 6) {
-          return { from: () => ({ where: async () => [{ total: 0 }] }) };
+        if (selectStep === 3) {
+          return { from: () => ({ where: async () => [{ total: 1 }] }) };
         }
-        if (selectStep === 4) return { from: () => ({ where: async () => [{ total: 1 }] }) };
         throw new Error(`unexpected select ${selectStep}`);
       },
-      delete: () => ({ where: async () => undefined }),
-      update: () => ({ set: () => ({ where: () => ({ returning: async () => [] }) }) }),
     };
     const db = {
       transaction: async (callback: (handle: typeof transaction) => Promise<unknown>) => callback(transaction),
     } as unknown as DatabaseConnection["db"];
 
-    await expect(new DrizzleAccountStore(db).joinOrganization(
-      { organizationId: currentOrganizationId, userId: input.userId },
-      "ACDEF-GHJKM",
-    )).rejects.toMatchObject({
-      code: "conflict",
-      message: "This account has recorded workspace evidence, so it cannot be moved.",
-    });
+    try {
+      await new DrizzleAccountStore(db).joinOrganization(
+        { organizationId: currentOrganizationId, userId: input.userId },
+        "ACDEF-GHJKM",
+      );
+      expect.fail("Expected joinOrganization to reject");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AppError);
+      expect((error as AppError).code).toBe("conflict");
+      expect((error as AppError).message).toBe("This account has already recorded time in its current workspace, so it cannot be moved.");
+    }
   });
 });
 
@@ -167,16 +175,13 @@ describe("Drizzle report repository", () => {
         projectId: input.projectId,
         projectName: "Timer",
         durationSeconds: "7200",
-        corroboratedSeconds: "5400",
+        attributedSeconds: "5400",
         sessionCount: 3,
       }],
     };
-    const transaction = {
-      execute: async () => [{ organization_id: input.organizationId, role: "member" }],
-      select: () => ({ from: () => rows }),
-    };
     const db = {
-      transaction: async (callback: (handle: typeof transaction) => Promise<unknown>) => callback(transaction),
+      select: () => ({ from: () => rows }),
+      transaction: async (callback: (handle: unknown) => Promise<unknown>) => callback({}),
     } as unknown as DatabaseConnection["db"];
     const repository = new DrizzleReportRepository(db);
     const subject = { organizationId: input.organizationId, userId: input.userId };
@@ -184,7 +189,7 @@ describe("Drizzle report repository", () => {
     await expect(repository.readProjectTotalsForMember(subject, {})).resolves.toEqual([{
       project: { id: input.projectId, name: "Timer" },
       durationSeconds: "7200",
-      corroboratedSeconds: "5400",
+      attributedSeconds: "5400",
       sessionCount: 3,
     }]);
   });
@@ -193,18 +198,14 @@ describe("Drizzle report repository", () => {
     const rows = {
       where: () => rows,
       groupBy: () => rows,
-      having: () => rows,
       orderBy: async () => [
         { processName: "Code.exe", durationSeconds: "4800" },
         { processName: "chrome.exe", durationSeconds: "1200" },
       ],
     };
-    const transaction = {
-      execute: async () => [{ organization_id: input.organizationId, role: "member" }],
-      select: () => ({ from: () => rows }),
-    };
     const db = {
-      transaction: async (callback: (handle: typeof transaction) => Promise<unknown>) => callback(transaction),
+      select: () => ({ from: () => rows }),
+      transaction: async (callback: (handle: unknown) => Promise<unknown>) => callback({}),
     } as unknown as DatabaseConnection["db"];
     const repository = new DrizzleReportRepository(db);
     const subject = { organizationId: input.organizationId, userId: input.userId };
@@ -215,55 +216,35 @@ describe("Drizzle report repository", () => {
     ]);
   });
 
-  it("maps caller-scoped per-rule browser-span totals, preserving postgres sum strings", async () => {
-    let executeCount = 0;
-    const transaction = {
-      execute: async () => {
-        executeCount += 1;
-        if (executeCount === 1) {
-          return [{ organization_id: input.organizationId, role: "member" }];
-        }
-        return [{
-          mappingId: "01c7e513-b094-4d4c-ae55-21790ae019a4",
-          pattern: "github.com/acme/*",
-          projectId: input.projectId,
-          durationSeconds: "2400",
-        }];
-      },
+  it("reads leaderboard totals without a transaction-level membership guard", async () => {
+    const rows = {
+      innerJoin: () => rows,
+      where: () => rows,
+      groupBy: () => rows,
+      orderBy: async () => [{
+        userId: input.userId, userName: "Test", durationSeconds: "3600", sessionCount: 1, attributedSeconds: "3600",
+      }],
     };
     const db = {
-      transaction: async (callback: (handle: typeof transaction) => Promise<unknown>) => callback(transaction),
-    } as unknown as DatabaseConnection["db"];
-    const repository = new DrizzleReportRepository(db);
-    const subject = { organizationId: input.organizationId, userId: input.userId };
-
-    await expect(repository.readSiteTotalsForMember(subject, {})).resolves.toEqual([{
-      mapping: { id: "01c7e513-b094-4d4c-ae55-21790ae019a4", pattern: "github.com/acme/*", projectId: input.projectId },
-      durationSeconds: "2400",
-    }]);
-  });
-
-  it("rejects a totals read when membership moved before the locked query", async () => {
-    const select = vi.fn();
-    const transaction = {
-      execute: async () => [{ organization_id: "00000000-0000-4000-8000-000000000999", role: "member" }],
-      select,
-    };
-    const db = {
-      transaction: async (callback: (handle: typeof transaction) => Promise<unknown>) => callback(transaction),
+      select: () => ({ from: () => rows }),
+      transaction: async (callback: (handle: unknown) => Promise<unknown>) => callback({}),
     } as unknown as DatabaseConnection["db"];
     const repository = new DrizzleReportRepository(db);
     const subject = { organizationId: input.organizationId, userId: input.userId, role: "member" as const };
 
-    await expect(repository.readLeaderboardForOrganization(subject, {})).rejects.toMatchObject({ code: "forbidden" });
-    expect(select).not.toHaveBeenCalled();
+    await expect(repository.readLeaderboardForOrganization(subject, {})).resolves.toEqual([{
+      user: { id: input.userId, name: "Test" },
+      durationSeconds: "3600",
+      sessionCount: 1,
+      attributedSeconds: "3600",
+    }]);
   });
 });
 
 describe("Drizzle project repository", () => {
   it("creates the project and the creator's membership in one transaction", async () => {
     const subject = { organizationId: input.organizationId, userId: input.userId };
-    const row = { id: input.projectId, organizationId: subject.organizationId, name: "Field work", archived: false };
+    const row = { id: input.projectId, organizationId: subject.organizationId, name: "Field work", archived: false, createdAt: new Date("2026-08-10T12:00:00.000Z") };
     const inserted: Array<{ table: unknown; values: unknown }> = [];
     const db = {
       transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback({
@@ -295,9 +276,9 @@ describe("Drizzle project repository", () => {
 describe("Drizzle path-mapping repository", () => {
   it("maps the duplicate-prefix unique constraint to a stable repository conflict", async () => {
     const db = {
+      insert: () => ({ values: () => ({ returning: async () => { throw { code: "23505", constraint_name: "project_path_mappings_organization_user_prefix_unique" }; } }) }),
       transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback({
         execute: async () => [{ organization_id: input.organizationId, role: "member" }],
-        insert: () => ({ values: () => ({ returning: async () => { throw { code: "23505", constraint_name: "project_path_mappings_organization_user_prefix_unique" }; } }) }),
       }),
     } as unknown as DatabaseConnection["db"];
     const repository = new DrizzlePathMappingRepository(db);
@@ -305,47 +286,60 @@ describe("Drizzle path-mapping repository", () => {
     await expect(repository.create({
       organizationId: input.organizationId,
       userId: input.userId,
-      kind: "path_prefix",
       pathPrefix: "C:/dev/clock-in",
       repoUrl: null,
       projectId: input.projectId,
     })).rejects.toMatchObject({ conflict: "path_prefix" });
   });
 
-  it("throws on an unrecognized stored kind instead of coercing it", async () => {
+  it("silently drops an unrecognized stored kind in favor of the default", async () => {
     const row = {
       id: "d1c7e513-b094-4d4c-ae55-21790ae019a4",
       organizationId: input.organizationId,
       userId: input.userId,
-      kind: "glob",
+      kind: "glob" as const,
       pathPrefix: "example.com",
       repoUrl: null,
       projectId: input.projectId,
     };
     const db = {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => [row] }) }) }),
       transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback({
         execute: async () => [{ organization_id: input.organizationId, role: "member" }],
-        select: () => ({ from: () => ({ where: () => ({ limit: async () => [row] }) }) }),
       }),
     } as unknown as DatabaseConnection["db"];
     const repository = new DrizzlePathMappingRepository(db);
     const subject = { organizationId: input.organizationId, userId: input.userId };
 
-    await expect(repository.findById(subject, row.id)).rejects.toThrow(`Path mapping ${row.id} has an unrecognized kind: glob`);
+    const record = await repository.findById(subject, row.id);
+    expect(record).not.toBeNull();
+    expect(record!.pathPrefix).toBe("example.com");
+    expect(record).not.toHaveProperty("kind");
   });
 
-  it("refuses a mapping read after its subject left the workspace", async () => {
-    const select = vi.fn();
+  it("lists mappings for a subject without a transaction-level membership guard", async () => {
     const db = {
-      transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback({
-        execute: async () => [{ organization_id: "00000000-0000-4000-8000-000000000999", role: "member" }],
-        select,
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            orderBy: async () => [{
+              id: "d1c7e513-b094-4d4c-ae55-21790ae019a4",
+              organizationId: input.organizationId,
+              userId: input.userId,
+              kind: "path_prefix",
+              pathPrefix: "C:/dev",
+              repoUrl: null,
+              projectId: input.projectId,
+            }],
+          }),
+        }),
       }),
+      transaction: async (callback: (transaction: unknown) => Promise<unknown>) => callback({}),
     } as unknown as DatabaseConnection["db"];
     const repository = new DrizzlePathMappingRepository(db);
 
-    await expect(repository.listForSubject({ organizationId: input.organizationId, userId: input.userId, role: "member" }))
-      .rejects.toMatchObject({ code: "forbidden" });
-    expect(select).not.toHaveBeenCalled();
+    const result = await repository.listForSubject({ organizationId: input.organizationId, userId: input.userId, role: "member" });
+    expect(result).toHaveLength(1);
+    expect(result[0]!.pathPrefix).toBe("C:/dev");
   });
 });

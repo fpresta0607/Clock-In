@@ -1,4 +1,4 @@
-import { projectPathMappingSchema, type PathMappingKind } from "@clock-in/shared";
+import { projectPathMappingSchema } from "@clock-in/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import { AppError } from "../errors.js";
@@ -10,14 +10,12 @@ import {
 } from "../repositories.js";
 
 export interface CreatePathMappingInput {
-  kind?: PathMappingKind;
   pathPrefix: string;
   repoUrl?: string | null;
   projectId: string;
 }
 
 export interface UpdatePathMappingInput {
-  kind?: PathMappingKind;
   pathPrefix?: string;
   repoUrl?: string | null;
   projectId?: string;
@@ -63,7 +61,6 @@ export function createPathMappingService(dependencies: PathMappingServiceDepende
         return await dependencies.pathMappings.create({
           organizationId: subject.organizationId,
           userId: subject.userId,
-          kind: input.kind ?? "path_prefix",
           pathPrefix: input.pathPrefix,
           repoUrl: input.repoUrl ?? null,
           projectId: input.projectId,
@@ -88,7 +85,7 @@ export function createPathMappingService(dependencies: PathMappingServiceDepende
       // with a filesystem pattern (silently breaking cwd attribution).
       const merged = projectPathMappingSchema.safeParse({
         id: existing.id,
-        kind: input.kind ?? existing.kind,
+        kind: "path_prefix",
         pathPrefix: input.pathPrefix ?? existing.pathPrefix,
         repoUrl: input.repoUrl === undefined ? existing.repoUrl : input.repoUrl,
         projectId: input.projectId ?? existing.projectId,

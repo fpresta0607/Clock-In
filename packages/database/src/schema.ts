@@ -16,8 +16,11 @@ import {
 
 export const sessionStatus = pgEnum("session_status", ["running", "stopped", "needs_review"]);
 export const activitySegmentKind = pgEnum("activity_segment_kind", ["active", "idle", "locked", "suspended"]);
-export const agentSource = pgEnum("agent_source", ["claude_code", "codex", "kimi_code", "cursor", "browser", "other"]);
-export const agentSessionStatus = pgEnum("agent_session_status", ["running", "ended", "stale"]);
+export const agentSource = pgEnum("agent_source", ["claude_code", "codex", "kimi_code", "cursor", "other"]);
+export const agentSessionStatus = pgEnum("agent_session_status", ["running", "ended"]);
+// How a session learned its project. Rows written by the retired manual timer
+// keep the default, "manual", which is also what the column backfills to.
+export const sessionAttribution = pgEnum("session_attribution", ["manual", "selected", "agent", "default"]);
 
 const auditColumns = {
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),
@@ -169,6 +172,7 @@ export const timeSessions = pgTable(
     stoppedAt: timestamp("stopped_at", { mode: "date", withTimezone: true }),
     idleSeconds: integer("idle_seconds").default(0).notNull(),
     durationSeconds: integer("duration_seconds"),
+    attribution: sessionAttribution("attribution").default("manual").notNull(),
     ...auditColumns,
   },
   (table) => [
@@ -287,7 +291,7 @@ export const agentSessions = pgTable(
       sql`(
         (${table.status} = 'running' and ${table.endedAt} is null)
         or
-        (${table.status} in ('ended', 'stale') and ${table.endedAt} is not null)
+        (${table.status} = 'ended' and ${table.endedAt} is not null)
       )`,
     ),
     check(

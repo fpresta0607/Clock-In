@@ -1,4 +1,4 @@
-import type { BootstrapSnapshot, RunningTimer, StartIntent, TimerProject, TimerUser } from "./timer-machine.js";
+import type { AccountSnapshot, TimerProject, TimerUser } from "./account.js";
 
 export type BridgeErrorKind = "auth" | "transient" | "conflict" | "validation" | "unknown";
 
@@ -29,45 +29,10 @@ export type OrganizationOverview = {
   entries: readonly LeaderboardEntry[];
 };
 
-export type StopInput = {
-  sessionId: string;
-  stoppedAt: string;
-  /// `null` lets the host measure idle from its own segments; any number —
-  /// including 0 — is the UI's authoritative away-prompt decision and wins
-  /// over measurement.
-  idleSeconds: number | null;
-};
-
-export type PendingRetryResult = {
-  remaining: number;
-};
-
 export type HookRegistration = {
   source: string;
   detected: boolean;
-  /// The CLI's config file exists: the CLI is on the machine, so the hook
-  /// opt-in is offered. Hooks for absent CLIs are never rendered.
-  installed: boolean;
   configPath: string;
-};
-
-/// Per-browser extension health, in the order a setup flows through them.
-/// "registered" means the plumbing is done and only the store install is
-/// left; "disabled" means no released extension ID was configured.
-export type BrowserHealthState = "disabled" | "never-registered" | "binary-missing" | "registered" | "connected";
-
-export type BrowserHealth = {
-  browser: string;
-  label: string;
-  state: BrowserHealthState;
-  storeUrl: string;
-};
-
-/// One suggestion the local tally earns: an unmatched origin and its focused
-/// seconds. Local-only; never uploaded.
-export type TallyEntry = {
-  origin: string;
-  seconds: number;
 };
 
 /// The outcome of an opt-in `hookRegister` call: the CLI's config was merged,
@@ -78,24 +43,23 @@ export type HookRegisterResult =
   | { status: "already-registered"; configPath: string }
   | { status: "manual"; configPath: string; snippet: string };
 
-/// The agent session currently holding the away override open — explains why
-/// `sessionIdleSeconds` is frozen.
+/// The agent session holding the open session through quiet time.
 export type AgentActive = {
   source: string;
   since: string;
 };
 
-export type PendingSuggestion = {
-  projectId: string;
-  source: string;
-  since: string;
-};
+/// How a session learned which project it belongs to. Everything but
+/// `default` means something named the project on purpose.
+export type Attribution = "selected" | "agent" | "default";
 
-export type AwayInfo = {
-  startedAt: string;
-  seconds: number;
-  ongoing: boolean;
-  exceedsHardLimit: boolean;
+/// The session recording right now. It exists whenever the machine is in use
+/// and recording is on; nobody starts or stops it.
+export type CurrentSession = {
+  projectId: string;
+  attribution: Attribution;
+  since: string;
+  idleSeconds: number;
 };
 
 export type MonitorStatus = {
@@ -104,94 +68,29 @@ export type MonitorStatus = {
   lastUploadAt: string | null;
   segmentBacklog: number;
   agentBacklog: number;
-  browserCapturePaused: boolean;
+  sessionBacklog: number;
   hooks: readonly HookRegistration[];
-  browsers: readonly BrowserHealth[];
-  pendingSuggestion: PendingSuggestion | null;
   agentActive: AgentActive | null;
-  sessionIdleSeconds: number | null;
-  away: AwayInfo | null;
-};
-
-/// One limit a coding-agent provider reports — a rolling session window, a
-/// weekly window, or a per-model bound. Several apply at once; the smallest is
-/// what the dial shows.
-export type QuotaWindow = {
-  id: string;
-  label: string;
-  kind: string;
-  percentRemaining: number;
-  resetsAt: string | null;
-};
-
-/// The provider login a reading belongs to. Read from the machine's own
-/// credentials for display only; it never leaves the device.
-export type QuotaAccount = {
-  email: string | null;
-  organization: string | null;
-};
-
-/// What one provider has left, for the account signed in to it on this machine
-/// right now — not for whoever recorded a past session. `unknown` covers every
-/// way a reading can fail (no tooling installed, signed out, unreadable state)
-/// and always carries a `detail` sentence saying which.
-export type AgentQuota = {
-  provider: string;
-  label: string;
-  /// Agent-session sources this provider backs (`claude_code` → `claude`), so
-  /// an attributed row finds its dial without a second lookup table.
-  sources: readonly string[];
-  status: "known" | "unknown";
-  account: QuotaAccount | null;
-  plan: string | null;
-  percentRemaining: number | null;
-  bindingWindowId: string | null;
-  windows: readonly QuotaWindow[];
-  detail: string | null;
-  /// The provider's own error code, for the expandable detail.
-  reason: string | null;
-  stale: boolean;
-};
-
-/// `pending` is the host still reading; `unavailable` means no source answered
-/// at all. Both leave every dial in its unknown state.
-export type QuotaSnapshot = {
-  status: "pending" | "ready" | "unavailable";
-  checkedAt: string | null;
-  detail: string | null;
-  providers: readonly AgentQuota[];
+  currentSession: CurrentSession | null;
+  selectedProjectId: string | null;
 };
 
 export type MonitorSettings = {
   enabled: boolean;
   awayThresholdMinutes: number;
-  hardAwayLimitMinutes: number;
-  autoStopOnLock: boolean;
   agentOverrideEnabled: boolean;
-  /// The first-run flow (monitoring question + browser cards) completed.
-  onboarded: boolean;
   deviceId: string;
 };
 
 export type SettingsPatch = Partial<Omit<MonitorSettings, "deviceId">>;
 
 export type MeStats = {
-  filters: {
-    from?: string | undefined;
-    to?: string | undefined;
-    fromAt?: string | undefined;
-    toExclusiveAt?: string | undefined;
-  };
+  filters: { from?: string | undefined; to?: string | undefined };
   totalDurationSeconds: number;
-  corroboratedSeconds: number;
+  attributedSeconds: number;
+  unattributedSeconds: number;
   projects: readonly MeStatsProject[];
   apps: readonly MeStatsApp[];
-  sites: readonly MeStatsSite[];
-};
-
-export type MeStatsSite = {
-  mapping: { id: string; pattern: string; projectId: string | null };
-  durationSeconds: number;
 };
 
 export type MeStatsApp = {
@@ -202,22 +101,19 @@ export type MeStatsApp = {
 export type MeStatsProject = {
   project: { id: string; name: string };
   durationSeconds: number;
-  corroboratedSeconds: number;
+  attributedSeconds: number;
+  unattributedSeconds: number;
   sessionCount: number;
 };
 
-export type PathMappingKind = "path_prefix" | "url_rule";
-
 export type PathMapping = {
   id: string;
-  kind: PathMappingKind;
   pathPrefix: string;
   repoUrl?: string | null | undefined;
   projectId: string;
 };
 
 export type PathMappingCreateInput = {
-  kind?: PathMappingKind | undefined;
   pathPrefix: string;
   repoUrl?: string | undefined;
   projectId: string;
@@ -234,32 +130,20 @@ export type PathMappingUpdateInput = {
 };
 
 export interface TimerBridge {
-  bootstrap(): Promise<BootstrapSnapshot>;
-  login(input: LoginInput): Promise<BootstrapSnapshot>;
-  signup(input: SignupInput): Promise<BootstrapSnapshot>;
+  bootstrap(): Promise<AccountSnapshot>;
+  login(input: LoginInput): Promise<AccountSnapshot>;
+  signup(input: SignupInput): Promise<AccountSnapshot>;
   logout(): Promise<void>;
-  start(input: StartIntent): Promise<RunningTimer>;
-  stop(input: StopInput): Promise<void>;
-  retryPending(): Promise<PendingRetryResult>;
-  offlineSyncRetry?(): Promise<void>;
-  browserCaptureResume?(): Promise<void>;
-  useServerTimer(): Promise<BootstrapSnapshot>;
-  retryLocalStart(input: StartIntent): Promise<BootstrapSnapshot>;
   orgOverview(): Promise<OrganizationOverview>;
   orgJoin(inviteCode: string): Promise<OrganizationOverview>;
   monitorStatus(): Promise<MonitorStatus>;
-  quotaStatus(): Promise<QuotaSnapshot>;
+  /// Pins recording to one project, or clears the pin with `null`.
+  sessionSelectProject(projectId: string | null): Promise<MonitorStatus>;
   hookRegister(source: string): Promise<HookRegisterResult>;
-  browserRepair(browser: string): Promise<BrowserHealth>;
-  browserOpenStorePage(browser: string): Promise<void>;
-  suggestionsList(): Promise<readonly TallyEntry[]>;
-  suggestionNeverSuggest(origin: string): Promise<void>;
-  suggestionsClear(): Promise<void>;
   monitorSetEnabled(enabled: boolean): Promise<MonitorSettings>;
-  monitorDismissSuggestion(): Promise<void>;
   settingsGet(): Promise<MonitorSettings>;
   settingsUpdate(input: SettingsPatch): Promise<MonitorSettings>;
-  meStats(fromAt?: string, toExclusiveAt?: string): Promise<MeStats>;
+  meStats(from?: string, to?: string): Promise<MeStats>;
   projectCreate(input: ProjectCreateInput): Promise<TimerProject>;
   pathMappingsList(): Promise<readonly PathMapping[]>;
   pathMappingsCreate(input: PathMappingCreateInput): Promise<PathMapping>;
@@ -301,21 +185,6 @@ const nonnegativeInteger = (value: unknown): number => {
   return value as number;
 };
 
-export const decodeStartIntent = (value: unknown): StartIntent => {
-  const candidate = record(value);
-  return {
-    clientId: uuid(candidate.clientId),
-    projectId: uuid(candidate.projectId),
-    description: string(candidate.description),
-    startedAt: timestamp(candidate.startedAt),
-  };
-};
-
-export const decodeRunningTimer = (value: unknown): RunningTimer => {
-  const candidate = record(value);
-  return { ...decodeStartIntent(candidate), sessionId: uuid(candidate.sessionId) };
-};
-
 const decodeUser = (value: unknown): TimerUser => {
   const candidate = record(value);
   return { id: uuid(candidate.id), email: string(candidate.email), name: string(candidate.name) };
@@ -324,53 +193,24 @@ const decodeUser = (value: unknown): TimerUser => {
 const decodeProject = (value: unknown): TimerProject => {
   const candidate = record(value);
   if (candidate.color !== null && typeof candidate.color !== "string") invalidResponse();
-  return {
-    id: uuid(candidate.id),
-    name: string(candidate.name),
-    color: candidate.color as string | null,
-    isDefault: candidate.isDefault === undefined ? false : boolean(candidate.isDefault),
-  };
+  return { id: uuid(candidate.id), name: string(candidate.name), color: candidate.color as string | null };
 };
 
-type DecodedAccount = { user: TimerUser; projects: readonly TimerProject[]; selectedProjectId: string | null };
+const uuidOrNull = (value: unknown): string | null => (value === null || value === undefined ? null : uuid(value));
 
-const decodeAccount = (candidate: Record<string, unknown>): DecodedAccount => {
+export const decodeAccountSnapshot = (value: unknown): AccountSnapshot => {
+  const candidate = record(value);
+  if (candidate.kind === "signed-out") return { kind: "signed-out" };
+  if (candidate.kind !== "ready") return invalidResponse();
   const projects = candidate.projects;
   if (!Array.isArray(projects)) invalidResponse();
-  const selectedProjectId = candidate.selectedProjectId;
   return {
+    kind: "ready",
     user: decodeUser(candidate.user),
     projects: (projects as unknown[]).map(decodeProject),
-    selectedProjectId: selectedProjectId === undefined || selectedProjectId === null ? null : uuid(selectedProjectId),
+    defaultProjectId: uuidOrNull(candidate.defaultProjectId),
+    selectedProjectId: uuidOrNull(candidate.selectedProjectId),
   };
-};
-
-export const decodeBootstrapSnapshot = (value: unknown): BootstrapSnapshot => {
-  const candidate = record(value);
-  switch (candidate.kind) {
-    case "signed-out":
-      return { kind: "signed-out" };
-    case "idle":
-      return { kind: "idle", ...decodeAccount(candidate) };
-    case "running": {
-      const source = candidate.source;
-      if (source !== "local-server-match" && source !== "server-only") invalidResponse();
-      return { kind: "running", ...decodeAccount(candidate), running: decodeRunningTimer(candidate.running), source: source as "local-server-match" | "server-only" };
-    }
-    case "retry-local-start":
-      return { kind: "retry-local-start", ...decodeAccount(candidate), start: decodeStartIntent(candidate.start) };
-    case "pending-sync":
-      return { kind: "pending-sync", ...decodeAccount(candidate), pendingCount: nonnegativeInteger(candidate.pendingCount) };
-    case "conflict":
-      return {
-        kind: "conflict",
-        ...decodeAccount(candidate),
-        localStart: decodeStartIntent(candidate.localStart),
-        serverRunning: decodeRunningTimer(candidate.serverRunning),
-      };
-    default:
-      return invalidResponse();
-  }
 };
 
 const decodeLeaderboardEntry = (value: unknown): LeaderboardEntry => {
@@ -399,11 +239,6 @@ export const decodeOrganizationOverview = (value: unknown): OrganizationOverview
   };
 };
 
-export const decodePendingRetryResult = (value: unknown): PendingRetryResult => {
-  const candidate = record(value);
-  return { remaining: nonnegativeInteger(candidate.remaining) };
-};
-
 const boolean = (value: unknown): boolean => {
   if (typeof value !== "boolean") invalidResponse();
   return value as boolean;
@@ -429,7 +264,6 @@ const decodeHookRegistration = (value: unknown): HookRegistration => {
   return {
     source: string(candidate.source),
     detected: boolean(candidate.detected),
-    installed: boolean(candidate.installed),
     configPath: string(candidate.configPath),
   };
 };
@@ -454,141 +288,36 @@ const decodeAgentActive = (value: unknown): AgentActive => {
   return { source: string(candidate.source), since: timestamp(candidate.since) };
 };
 
-const decodePendingSuggestion = (value: unknown): PendingSuggestion => {
+const decodeAttribution = (value: unknown): Attribution => {
+  if (value !== "selected" && value !== "agent" && value !== "default") invalidResponse();
+  return value as Attribution;
+};
+
+const decodeCurrentSession = (value: unknown): CurrentSession => {
   const candidate = record(value);
   return {
     projectId: uuid(candidate.projectId),
-    source: string(candidate.source),
+    attribution: decodeAttribution(candidate.attribution),
     since: timestamp(candidate.since),
+    idleSeconds: nonnegativeInteger(candidate.idleSeconds),
   };
-};
-
-const decodeAwayInfo = (value: unknown): AwayInfo => {
-  const candidate = record(value);
-  return {
-    startedAt: timestamp(candidate.startedAt),
-    seconds: nonnegativeInteger(candidate.seconds),
-    ongoing: boolean(candidate.ongoing),
-    exceedsHardLimit: boolean(candidate.exceedsHardLimit),
-  };
-};
-
-const decodeBrowserHealth = (value: unknown): BrowserHealth => {
-  const candidate = record(value);
-  const state = candidate.state;
-  if (state !== "disabled" && state !== "never-registered" && state !== "binary-missing" && state !== "registered" && state !== "connected") {
-    invalidResponse();
-  }
-  return {
-    browser: string(candidate.browser),
-    label: string(candidate.label),
-    state: state as BrowserHealthState,
-    storeUrl: string(candidate.storeUrl),
-  };
-};
-
-const decodeTallyEntry = (value: unknown): TallyEntry => {
-  const candidate = record(value);
-  return {
-    origin: string(candidate.origin),
-    seconds: nonnegativeInteger(candidate.seconds),
-  };
-};
-
-export const decodeTallyEntries = (value: unknown): readonly TallyEntry[] => {
-  if (!Array.isArray(value)) invalidResponse();
-  return (value as unknown[]).map(decodeTallyEntry);
 };
 
 export const decodeMonitorStatus = (value: unknown): MonitorStatus => {
   const candidate = record(value);
   const hooks = candidate.hooks;
   if (!Array.isArray(hooks)) invalidResponse();
-  const browsers = candidate.browsers;
-  if (!Array.isArray(browsers)) invalidResponse();
   return {
     enabled: boolean(candidate.enabled),
     running: boolean(candidate.running),
     lastUploadAt: timestampOrNull(candidate.lastUploadAt),
     segmentBacklog: nonnegativeInteger(candidate.segmentBacklog),
     agentBacklog: nonnegativeInteger(candidate.agentBacklog),
-    browserCapturePaused: candidate.browserCapturePaused === undefined ? false : boolean(candidate.browserCapturePaused),
+    sessionBacklog: nonnegativeInteger(candidate.sessionBacklog),
     hooks: (hooks as unknown[]).map(decodeHookRegistration),
-    browsers: (browsers as unknown[]).map(decodeBrowserHealth),
-    pendingSuggestion: candidate.pendingSuggestion === null ? null : decodePendingSuggestion(candidate.pendingSuggestion),
     agentActive: candidate.agentActive === null ? null : decodeAgentActive(candidate.agentActive),
-    sessionIdleSeconds: candidate.sessionIdleSeconds === null ? null : nonnegativeInteger(candidate.sessionIdleSeconds),
-    away: candidate.away === null ? null : decodeAwayInfo(candidate.away),
-  };
-};
-
-const percentage = (value: unknown): number => {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100) invalidResponse();
-  return value as number;
-};
-
-const decodeQuotaWindow = (value: unknown): QuotaWindow => {
-  const candidate = record(value);
-  return {
-    id: string(candidate.id),
-    label: string(candidate.label),
-    kind: string(candidate.kind),
-    percentRemaining: percentage(candidate.percentRemaining),
-    // Left as the provider wrote it rather than validated as a timestamp: the
-    // dial only ever prints it, and a formatting quirk from another tool is no
-    // reason to throw a whole reading away.
-    resetsAt: stringOrNull(candidate.resetsAt ?? null),
-  };
-};
-
-const decodeQuotaAccount = (value: unknown): QuotaAccount | null => {
-  if (value === null || value === undefined) return null;
-  const candidate = record(value);
-  return {
-    email: stringOrNull(candidate.email ?? null),
-    organization: stringOrNull(candidate.organization ?? null),
-  };
-};
-
-const decodeAgentQuota = (value: unknown): AgentQuota => {
-  const candidate = record(value);
-  const sources = candidate.sources;
-  const windows = candidate.windows;
-  if (!Array.isArray(sources) || !Array.isArray(windows)) invalidResponse();
-  const status = candidate.status;
-  if (status !== "known" && status !== "unknown") invalidResponse();
-  const percentRemaining = candidate.percentRemaining === null || candidate.percentRemaining === undefined
-    ? null
-    : percentage(candidate.percentRemaining);
-  // A "known" reading without a number would draw an arc over nothing.
-  if (status === "known" && percentRemaining === null) invalidResponse();
-  return {
-    provider: string(candidate.provider),
-    label: string(candidate.label),
-    sources: (sources as unknown[]).map(string),
-    status: status as "known" | "unknown",
-    account: decodeQuotaAccount(candidate.account),
-    plan: stringOrNull(candidate.plan ?? null),
-    percentRemaining,
-    bindingWindowId: stringOrNull(candidate.bindingWindowId ?? null),
-    windows: (windows as unknown[]).map(decodeQuotaWindow),
-    detail: stringOrNull(candidate.detail ?? null),
-    reason: stringOrNull(candidate.reason ?? null),
-    stale: boolean(candidate.stale),
-  };
-};
-
-export const decodeQuotaSnapshot = (value: unknown): QuotaSnapshot => {
-  const candidate = record(value);
-  const providers = candidate.providers;
-  if (!Array.isArray(providers)) invalidResponse();
-  const status = candidate.status;
-  if (status !== "pending" && status !== "ready" && status !== "unavailable") invalidResponse();
-  return {
-    status: status as "pending" | "ready" | "unavailable",
-    checkedAt: stringOrNull(candidate.checkedAt ?? null),
-    detail: stringOrNull(candidate.detail ?? null),
-    providers: (providers as unknown[]).map(decodeAgentQuota),
+    currentSession: candidate.currentSession === null ? null : decodeCurrentSession(candidate.currentSession),
+    selectedProjectId: uuidOrNull(candidate.selectedProjectId),
   };
 };
 
@@ -597,10 +326,7 @@ export const decodeMonitorSettings = (value: unknown): MonitorSettings => {
   return {
     enabled: boolean(candidate.enabled),
     awayThresholdMinutes: nonnegativeInteger(candidate.awayThresholdMinutes),
-    hardAwayLimitMinutes: nonnegativeInteger(candidate.hardAwayLimitMinutes),
-    autoStopOnLock: boolean(candidate.autoStopOnLock),
     agentOverrideEnabled: boolean(candidate.agentOverrideEnabled),
-    onboarded: boolean(candidate.onboarded),
     deviceId: string(candidate.deviceId),
   };
 };
@@ -611,7 +337,8 @@ const decodeMeStatsProject = (value: unknown): MeStatsProject => {
   return {
     project: { id: uuid(project.id), name: string(project.name) },
     durationSeconds: nonnegativeInteger(candidate.durationSeconds),
-    corroboratedSeconds: nonnegativeInteger(candidate.corroboratedSeconds),
+    attributedSeconds: nonnegativeInteger(candidate.attributedSeconds),
+    unattributedSeconds: nonnegativeInteger(candidate.unattributedSeconds),
     sessionCount: nonnegativeInteger(candidate.sessionCount),
   };
 };
@@ -624,51 +351,29 @@ const decodeMeStatsApp = (value: unknown): MeStatsApp => {
   };
 };
 
-const decodeMeStatsSite = (value: unknown): MeStatsSite => {
-  const candidate = record(value);
-  const mapping = record(candidate.mapping);
-  return {
-    mapping: {
-      id: uuid(mapping.id),
-      pattern: string(mapping.pattern),
-      projectId: mapping.projectId === null ? null : uuid(mapping.projectId),
-    },
-    durationSeconds: nonnegativeInteger(candidate.durationSeconds),
-  };
-};
-
 export const decodeMeStats = (value: unknown): MeStats => {
   const candidate = record(value);
   const filters = record(candidate.filters);
   const projects = candidate.projects;
   const apps = candidate.apps;
-  const sites = candidate.sites;
-  if (!Array.isArray(projects) || !Array.isArray(apps) || !Array.isArray(sites)) invalidResponse();
+  if (!Array.isArray(projects) || !Array.isArray(apps)) invalidResponse();
   const totalDurationSeconds = nonnegativeInteger(candidate.totalDurationSeconds);
-  const corroboratedSeconds = nonnegativeInteger(candidate.corroboratedSeconds);
-  if (corroboratedSeconds > totalDurationSeconds) invalidResponse();
+  const attributedSeconds = nonnegativeInteger(candidate.attributedSeconds);
+  if (attributedSeconds > totalDurationSeconds) invalidResponse();
   return {
-    filters: {
-      from: optionalString(filters.from),
-      to: optionalString(filters.to),
-      fromAt: optionalString(filters.fromAt),
-      toExclusiveAt: optionalString(filters.toExclusiveAt),
-    },
+    filters: { from: optionalString(filters.from), to: optionalString(filters.to) },
     totalDurationSeconds,
-    corroboratedSeconds,
+    attributedSeconds,
+    unattributedSeconds: nonnegativeInteger(candidate.unattributedSeconds),
     projects: (projects as unknown[]).map(decodeMeStatsProject),
     apps: (apps as unknown[]).map(decodeMeStatsApp),
-    sites: (sites as unknown[]).map(decodeMeStatsSite),
   };
 };
 
 export const decodePathMapping = (value: unknown): PathMapping => {
   const candidate = record(value);
-  const kind = candidate.kind;
-  if (kind !== "path_prefix" && kind !== "url_rule") invalidResponse();
   return {
     id: uuid(candidate.id),
-    kind: kind as PathMappingKind,
     pathPrefix: string(candidate.pathPrefix),
     repoUrl: candidate.repoUrl === undefined ? undefined : stringOrNull(candidate.repoUrl),
     projectId: uuid(candidate.projectId),
@@ -696,35 +401,22 @@ const invokeDecoded = <Result>(command: string, decoder: Decoder<Result>, args?:
   invoke<unknown>(command, args).then(decoder);
 
 export const defaultBridge: TimerBridge = {
-  bootstrap: () => invokeDecoded("timer_bootstrap", decodeBootstrapSnapshot),
-  login: (input) => invokeDecoded("auth_login", decodeBootstrapSnapshot, { input }),
-  signup: (input) => invokeDecoded("auth_signup", decodeBootstrapSnapshot, { input }),
+  bootstrap: () => invokeDecoded("timer_bootstrap", decodeAccountSnapshot),
+  login: (input) => invokeDecoded("auth_login", decodeAccountSnapshot, { input }),
+  signup: (input) => invokeDecoded("auth_signup", decodeAccountSnapshot, { input }),
   logout: () => invokeDecoded("auth_logout", decodeVoid),
-  start: (input) => invokeDecoded("timer_start", decodeRunningTimer, { input }),
-  stop: (input) => invokeDecoded("timer_stop", decodeVoid, { input }),
-  retryPending: () => invokeDecoded("timer_retry_pending", decodePendingRetryResult),
-  offlineSyncRetry: () => invokeDecoded("offline_sync_retry", decodeVoid),
-  browserCaptureResume: () => invokeDecoded("browser_capture_resume", decodeVoid),
-  useServerTimer: () => invokeDecoded("timer_use_server", decodeBootstrapSnapshot),
-  retryLocalStart: (input) => invokeDecoded("timer_retry_local_start", decodeBootstrapSnapshot, { input }),
   orgOverview: () => invokeDecoded("org_overview", decodeOrganizationOverview),
   orgJoin: (inviteCode) => invokeDecoded("org_join", decodeOrganizationOverview, { input: { inviteCode } }),
   monitorStatus: () => invokeDecoded("monitor_status", decodeMonitorStatus),
-  quotaStatus: () => invokeDecoded("quota_status", decodeQuotaSnapshot),
+  sessionSelectProject: (projectId) => invokeDecoded("session_select_project", decodeMonitorStatus, { projectId }),
   hookRegister: (source) => invokeDecoded("hook_register", decodeHookRegisterResult, { source }),
-  browserRepair: (browser) => invokeDecoded("browser_repair", decodeBrowserHealth, { browser }),
-  browserOpenStorePage: (browser) => invokeDecoded("browser_open_store_page", decodeVoid, { browser }),
-  suggestionsList: () => invokeDecoded("suggestions_list", decodeTallyEntries),
-  suggestionNeverSuggest: (origin) => invokeDecoded("suggestion_never_suggest", decodeVoid, { origin }),
-  suggestionsClear: () => invokeDecoded("suggestions_clear", decodeVoid),
   monitorSetEnabled: (enabled) => invokeDecoded("monitor_set_enabled", decodeMonitorSettings, { enabled }),
-  monitorDismissSuggestion: () => invokeDecoded("monitor_dismiss_suggestion", decodeVoid),
   settingsGet: () => invokeDecoded("settings_get", decodeMonitorSettings),
   settingsUpdate: (input) => invokeDecoded("settings_update", decodeMonitorSettings, { input }),
-  meStats: (fromAt, toExclusiveAt) =>
+  meStats: (from, to) =>
     invokeDecoded("me_stats", decodeMeStats, {
-      ...(fromAt === undefined ? {} : { fromAt }),
-      ...(toExclusiveAt === undefined ? {} : { toExclusiveAt }),
+      ...(from === undefined ? {} : { from }),
+      ...(to === undefined ? {} : { to }),
     }),
   projectCreate: (input) => invokeDecoded("project_create", decodeProject, { input }),
   pathMappingsList: () => invokeDecoded("path_mappings_list", decodePathMappings),

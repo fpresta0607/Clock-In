@@ -684,291 +684,7 @@ integration(integrationDescription, () => {
     expect((await (await trackedApp.request("/me", { headers })).json()).user.organizationId).not.toBe(organization.id);
   }, 90_000);
 
-  it("attributes browser spans, links running timer evidence, and keeps corroboration to wall-clock time", async () => {
-    // A fixed ten-minute window ending now keeps every overlap below exact.
-    const t0 = Date.now() - 600_000;
-    const at = (offsetMs: number) => new Date(t0 + offsetMs).toISOString();
 
-    const created = await app.request("/projects", {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({ name: "Smoke Browser Project" }),
-    });
-    expect(created.status).toBe(201);
-    const projectId = (await created.json()).id;
-
-    const rule = await app.request("/path-mappings", {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({ kind: "url_rule", pathPrefix: "github.com/acme/*", projectId }),
-    });
-    expect(rule.status).toBe(200);
-    const ruleId = (await rule.json()).id;
-
-    const timerDeviceId = randomUUID();
-    const started = await app.request("/sessions", {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({ clientId: randomUUID(), projectId, deviceId: timerDeviceId, description: "Browser-backed work", startedAt: at(0) }),
-    });
-    expect(started.status).toBe(200);
-    const timerId = (await started.json()).session.id;
-
-    // The span opens one minute into the timer and closes at minute four.
-    const spanStart = await app.request("/agent-sessions", {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({
-        events: [{ source: "browser", externalSessionId: "smoke-span-1", event: "started", occurredAt: at(60_000), ruleId }],
-      }),
-    });
-    expect(spanStart.status).toBe(200);
-    expect((await spanStart.json()).results).toEqual([{ externalSessionId: "smoke-span-1", accepted: true }]);
-
-    // Attribution is server-side: the stored row names the rule's project,
-    // links the running timer, and carries no cwd.
-    const rows = await database.client<{
-      project_id: string | null;
-      linked_session_id: string | null;
-      cwd: string | null;
-      rule_id: string | null;
-      status: string;
-    }[]>`select project_id::text, linked_session_id::text, cwd, rule_id::text, status from agent_sessions where source = 'browser'`;
-    expect(rows).toEqual([{
-      project_id: projectId,
-      linked_session_id: timerId,
-      cwd: null,
-      rule_id: ruleId,
-      status: "running",
-    }]);
-
-    const spanEnd = await app.request("/agent-sessions", {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({
-        events: [{ source: "browser", externalSessionId: "smoke-span-1", event: "ended", occurredAt: at(240_000), ruleId }],
-      }),
-    });
-    expect(spanEnd.status).toBe(200);
-
-    // Two devices were active over the same five-minute wall-clock window.
-    // Their overlap must be unioned before clipping the browser span.
-    const activity = await app.request("/activity/segments", {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({
-        segments: [
-          {
-            clientId: randomUUID(),
-            deviceId: timerDeviceId,
-            kind: "active",
-            processName: "chrome.exe",
-            startedAt: at(0),
-            endedAt: at(210_000),
-          },
-          {
-            clientId: randomUUID(),
-            deviceId: randomUUID(),
-            kind: "active",
-            processName: "chrome.exe",
-            startedAt: at(120_000),
-            endedAt: at(300_000),
-          },
-        ],
-      }),
-    });
-    expect(activity.status).toBe(200);
-
-    const agentMapping = await app.request("/path-mappings", {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({ kind: "path_prefix", pathPrefix: "C:/smoke-overlap", projectId }),
-    });
-    expect(agentMapping.status).toBe(200);
-    const agentEvidence = await app.request("/agent-sessions", {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({
-        events: [
-          { source: "codex", externalSessionId: "smoke-agent-overlap", event: "started", occurredAt: at(90_000), cwd: "C:/smoke-overlap" },
-          { source: "codex", externalSessionId: "smoke-agent-overlap", event: "ended", occurredAt: at(330_000), cwd: "C:/smoke-overlap" },
-        ],
-      }),
-    });
-    expect(agentEvidence.status).toBe(200);
-
-    const stop = await app.request(`/sessions/${timerId}/stop`, {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({ stoppedAt: at(600_000), idleSeconds: 0 }),
-    });
-    expect(stop.status).toBe(200);
-
-    const stats = await app.request(
-      `/me/stats?fromAt=${encodeURIComponent(at(0))}&toExclusiveAt=${encodeURIComponent(at(600_000))}`,
-      { headers: authorized },
-    );
-    expect(stats.status).toBe(200);
-    const body = await stats.json();
-
-    // The span counts under its rule, clipped to the active segment: minutes 1-4.
-    expect(body.sites).toEqual([
-      { mapping: { id: ruleId, pattern: "github.com/acme/*", projectId }, durationSeconds: 180 },
-    ]);
-
-    const rangedStats = await app.request(
-      `/me/stats?fromAt=${encodeURIComponent(at(90_000))}&toExclusiveAt=${encodeURIComponent(at(150_000))}`,
-      { headers: authorized },
-    );
-    expect(rangedStats.status).toBe(200);
-    expect((await rangedStats.json()).sites).toEqual([
-      { mapping: { id: ruleId, pattern: "github.com/acme/*", projectId }, durationSeconds: 60 },
-    ]);
-
-    const project = body.projects.find((entry: { project: { id: string } }) => entry.project.id === projectId);
-    expect(project).toMatchObject({ durationSeconds: 600, corroboratedSeconds: 330, sessionCount: 1 });
-
-    const idleTimerDeviceId = randomUUID();
-    const idleTimer = await app.request("/sessions", {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({ clientId: randomUUID(), projectId, deviceId: idleTimerDeviceId, description: "Idle-boundary work", startedAt: at(0) }),
-    });
-    expect(idleTimer.status).toBe(200);
-    const idleTimerId = (await idleTimer.json()).session.id;
-    const idleEvidence = await app.request("/activity/segments", {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({
-        segments: [{
-          clientId: randomUUID(),
-          deviceId: idleTimerDeviceId,
-          kind: "idle",
-          startedAt: at(0),
-          endedAt: at(300_000),
-        }, {
-          clientId: randomUUID(),
-          deviceId: randomUUID(),
-          kind: "idle",
-          startedAt: at(300_000),
-          endedAt: at(600_000),
-        }],
-      }),
-    });
-    expect(idleEvidence.status).toBe(200);
-    const idleStop = await app.request(`/sessions/${idleTimerId}/stop`, {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({ stoppedAt: at(600_000), idleSeconds: 300 }),
-    });
-    expect(idleStop.status).toBe(200);
-    const idleRange = await app.request(
-      `/reports?fromAt=${encodeURIComponent(at(0))}&toExclusiveAt=${encodeURIComponent(at(300_000))}`,
-      { headers: authorized },
-    );
-    expect(idleRange.status).toBe(200);
-    expect((await idleRange.json()).rows).toContainEqual(expect.objectContaining({
-      id: idleTimerId,
-      durationSeconds: 0,
-    }));
-
-    // A span can cross a requested range while its only active overlap lies
-    // before that range. The SQL repository must omit the resulting zero row.
-    const zeroDay = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
-    const zeroBoundary = Date.parse(`${zeroDay}T00:00:00.000Z`);
-    const zeroAt = (offsetMs: number) => new Date(zeroBoundary + offsetMs).toISOString();
-    const zeroRule = await app.request("/path-mappings", {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({ kind: "url_rule", pathPrefix: "example.com/*", projectId }),
-    });
-    const zeroRuleId = (await zeroRule.json()).id;
-    const zeroSpan = await app.request("/agent-sessions", {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({
-        events: [
-          { source: "browser", externalSessionId: "smoke-span-zero", event: "started", occurredAt: zeroAt(-3_600_000), ruleId: zeroRuleId },
-          { source: "browser", externalSessionId: "smoke-span-zero", event: "ended", occurredAt: zeroAt(3_600_000), ruleId: zeroRuleId },
-        ],
-      }),
-    });
-    expect(zeroSpan.status).toBe(200);
-    const zeroActivity = await app.request("/activity/segments", {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({
-        segments: [{
-          clientId: randomUUID(),
-          deviceId: randomUUID(),
-          kind: "active",
-          processName: "chrome.exe",
-          startedAt: zeroAt(-1_800_000),
-          endedAt: zeroAt(-900_000),
-        }],
-      }),
-    });
-    expect(zeroActivity.status).toBe(200);
-    const zeroStats = await app.request(`/me/stats?from=${zeroDay}&to=${zeroDay}`, { headers: authorized });
-    expect(zeroStats.status).toBe(200);
-    expect((await zeroStats.json()).sites).toEqual([]);
-  }, 60_000);
-
-  it("excludes a 500 ms browser intersection from SQL site totals", async () => {
-    const start = new Date(Date.now() - 60_000);
-    const end = new Date(start.getTime() + 500);
-    const externalSessionId = randomUUID();
-    const created = await app.request("/projects", {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({ name: "Subsecond Browser Project" }),
-    });
-    expect(created.status).toBe(201);
-    const projectId = (await created.json()).id;
-
-    const rule = await app.request("/path-mappings", {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({ kind: "url_rule", pathPrefix: "subsecond.example/*", projectId }),
-    });
-    expect(rule.status).toBe(200);
-    const ruleId = (await rule.json()).id;
-
-    const span = await app.request("/agent-sessions", {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({
-        events: [
-          { source: "browser", externalSessionId, event: "started", occurredAt: start.toISOString(), ruleId },
-          { source: "browser", externalSessionId, event: "ended", occurredAt: end.toISOString(), ruleId },
-        ],
-      }),
-    });
-    expect(span.status).toBe(200);
-
-    const activity = await app.request("/activity/segments", {
-      method: "POST",
-      headers: authorized,
-      body: JSON.stringify({
-        segments: [{
-          clientId: randomUUID(),
-          deviceId: randomUUID(),
-          kind: "active",
-          processName: "chrome.exe",
-          startedAt: start.toISOString(),
-          endedAt: end.toISOString(),
-        }],
-      }),
-    });
-    expect(activity.status).toBe(200);
-
-    const day = start.toISOString().slice(0, 10);
-    const stats = await app.request(`/me/stats?from=${day}&to=${day}`, { headers: authorized });
-    expect(stats.status).toBe(200);
-    expect((await stats.json()).sites).not.toContainEqual(expect.objectContaining({
-      mapping: expect.objectContaining({ id: ruleId }),
-    }));
-  }, 60_000);
 
   it("clips completed totals at a local DST calendar boundary in SQL", async () => {
     const me = await app.request("/me", { headers: authorized });
@@ -1013,7 +729,7 @@ integration(integrationDescription, () => {
     expect(body.projects).toContainEqual({
       project: { id: projectId, name: "DST Boundary Project" },
       durationSeconds: 1_800,
-      corroboratedSeconds: 1_800,
+      attributedSeconds: 1_800,
       sessionCount: 1,
     });
 
@@ -1027,7 +743,7 @@ integration(integrationDescription, () => {
     expect(reportBody.rows).toContainEqual(expect.objectContaining({
       project: { id: projectId, name: "DST Boundary Project" },
       durationSeconds: 1_800,
-      corroboratedSeconds: 1_800,
+      attributedSeconds: 1_800,
     }));
 
     const leaderboard = await app.request(
@@ -1040,7 +756,7 @@ integration(integrationDescription, () => {
     expect(leaderboardBody.entries).toContainEqual(expect.objectContaining({
       user: { id: user.id, name: user.name },
       durationSeconds: 1_800,
-      corroboratedSeconds: 1_800,
+      attributedSeconds: 1_800,
       sessionCount: 1,
     }));
   }, 60_000);

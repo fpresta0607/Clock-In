@@ -1,5 +1,7 @@
 import {
   currentSessionResponseSchema,
+  observedSessionBatchRequestSchema,
+  observedSessionBatchResponseSchema,
   sessionSchema,
   sessionStartRequestSchema,
   sessionStartResponseSchema,
@@ -28,6 +30,7 @@ function asSession(record: SessionRecord): Session {
     stoppedAt: record.stoppedAt?.toISOString() ?? null,
     idleSeconds: record.idleSeconds,
     durationSeconds: record.durationSeconds,
+    attribution: record.attribution,
   });
 }
 
@@ -41,6 +44,27 @@ async function requestBody(context: { req: { json(): Promise<unknown> } }): Prom
 
 export function createSessionRoutes(service: SessionService): Hono<ApiEnvironment> {
   const routes = new Hono<ApiEnvironment>();
+
+  // The desktop's only write path: finished sessions the monitor observed.
+  routes.post("/observed", async (context) => {
+    const input = observedSessionBatchRequestSchema.safeParse(await requestBody(context));
+    if (!input.success) throw new AppError("validation_error", "Invalid request body.");
+    const result = await service.recordObserved(
+      getAuthenticatedSubject(context),
+      input.data.sessions.map((session) => ({
+        clientId: session.clientId,
+        projectId: session.projectId,
+        attribution: session.attribution,
+        startedAt: new Date(session.startedAt),
+        stoppedAt: new Date(session.stoppedAt),
+        idleSeconds: session.idleSeconds,
+      })),
+    );
+    return context.json(observedSessionBatchResponseSchema.parse(result));
+  });
+
+  // Deprecated: the manual timer is retired and no shipped client calls these.
+  // They stay so an older installed build can still finish and upload its work.
   routes.post("/", async (context) => {
     const input = sessionStartRequestSchema.safeParse(await requestBody(context));
     if (!input.success) throw new AppError("validation_error", "Invalid request body.");

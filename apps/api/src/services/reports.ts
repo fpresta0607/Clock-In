@@ -1,11 +1,12 @@
-import type {
-  LeaderboardFilters,
-  LeaderboardResponse,
-  MeStatsFilters,
-  MeStatsResponse,
-  ReportFilters,
-  ReportResponse,
-  ReportRow,
+import {
+  isAttributed,
+  type LeaderboardFilters,
+  type LeaderboardResponse,
+  type MeStatsFilters,
+  type MeStatsResponse,
+  type ReportFilters,
+  type ReportResponse,
+  type ReportRow,
 } from "@clock-in/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
@@ -36,7 +37,7 @@ export interface ReportExport {
 
 export interface ReportServiceDependencies {
   reports: ReportRepository;
-  /** Stale running agent sessions close at lastEventAt before any corroboration read. */
+  /** Stale running agent sessions close at lastEventAt before report aggregation. */
   reaper: AgentSessionReaper;
 }
 
@@ -71,7 +72,6 @@ function normalizedQuery(filters: ReportRangeFilters & Partial<Pick<ReportFilter
     return {
       from,
       toExclusive,
-      clipToRange: true,
       ...(filters.projectId === undefined ? {} : { projectId: filters.projectId }),
       ...(filters.userId === undefined ? {} : { userId: filters.userId }),
     };
@@ -87,7 +87,6 @@ function normalizedQuery(filters: ReportRangeFilters & Partial<Pick<ReportFilter
   return {
     ...(from === undefined ? {} : { from }),
     ...(inclusiveTo === undefined ? {} : { toExclusive: new Date(inclusiveTo.getTime() + millisecondsPerDay) }),
-    ...(from === undefined && inclusiveTo === undefined ? {} : { clipToRange: true }),
     ...(filters.projectId === undefined ? {} : { projectId: filters.projectId }),
     ...(filters.userId === undefined ? {} : { userId: filters.userId }),
   };
@@ -109,9 +108,11 @@ function asReportRow(record: ReportRowRecord): ReportRow {
     stoppedAt: record.stoppedAt.toISOString(),
     idleSeconds: record.idleSeconds,
     durationSeconds,
-    // Overlapping evidence intervals are summed, so the cap keeps corroborated
-    // time from ever exceeding the session it backs.
-    corroboratedSeconds: Math.min(durationSeconds, safeInteger(record.corroboratedSeconds, "corroborated seconds")),
+    attribution: record.attribution,
+    // A session is attributed whole or not at all: its project came from a
+    // naming signal, or it fell back to the default project.
+    attributedSeconds: isAttributed(record.attribution) ? durationSeconds : 0,
+    unattributedSeconds: isAttributed(record.attribution) ? 0 : durationSeconds,
   };
 }
 
@@ -124,9 +125,14 @@ function asLeaderboardEntry(record: LeaderboardRowRecord, index: number, all: Le
   user: { id: string; name: string };
   durationSeconds: number;
   sessionCount: number;
-  corroboratedSeconds: number;
+  attributedSeconds: number;
+  unattributedSeconds: number;
 } {
   const durationSeconds = safeInteger(record.durationSeconds, "leaderboard duration");
+  const attributedSeconds = Math.min(
+    durationSeconds,
+    safeInteger(record.attributedSeconds, "leaderboard attributed seconds"),
+  );
   const previous = index === 0 ? undefined : all[index - 1];
   const isTiedWithPrevious = previous !== undefined
     && safeInteger(previous.durationSeconds, "leaderboard duration") === durationSeconds;
@@ -135,7 +141,8 @@ function asLeaderboardEntry(record: LeaderboardRowRecord, index: number, all: Le
     user: record.user,
     durationSeconds,
     sessionCount: safeInteger(record.sessionCount, "leaderboard session count"),
-    corroboratedSeconds: safeInteger(record.corroboratedSeconds, "leaderboard corroborated seconds"),
+    attributedSeconds,
+    unattributedSeconds: Math.max(0, durationSeconds - attributedSeconds),
   };
 }
 
@@ -180,10 +187,16 @@ async function authorizeFilters(repository: ReportRepository, subject: Authentic
 }
 
 function asProjectTotal(record: ProjectTotalRecord): MeStatsResponse["projects"][number] {
+  const durationSeconds = safeInteger(record.durationSeconds, "project duration");
+  const attributedSeconds = Math.min(
+    durationSeconds,
+    safeInteger(record.attributedSeconds, "project attributed seconds"),
+  );
   return {
     project: record.project,
-    durationSeconds: safeInteger(record.durationSeconds, "project duration"),
-    corroboratedSeconds: safeInteger(record.corroboratedSeconds, "project corroborated seconds"),
+    durationSeconds,
+    attributedSeconds,
+    unattributedSeconds: Math.max(0, durationSeconds - attributedSeconds),
     sessionCount: safeInteger(record.sessionCount, "project session count"),
   };
 }
@@ -265,7 +278,8 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       return {
         filters,
         totalDurationSeconds: projects.reduce((total, project) => total + project.durationSeconds, 0),
-        corroboratedSeconds: projects.reduce((total, project) => total + project.corroboratedSeconds, 0),
+        attributedSeconds: projects.reduce((total, project) => total + project.attributedSeconds, 0),
+        unattributedSeconds: projects.reduce((total, project) => total + project.unattributedSeconds, 0),
         projects,
         apps,
         sites,

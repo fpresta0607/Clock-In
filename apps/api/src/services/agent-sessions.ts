@@ -3,25 +3,20 @@ import type { AgentSessionEventBatchResponse, AgentSource } from "@clock-in/shar
 import type { AuthenticatedSubject } from "../auth.js";
 import type {
   AgentSessionRepository,
-  PathMappingRecord,
   PathMappingRepository,
   SessionRepository,
 } from "../repositories.js";
-import { resolveProjectForCwd, resolveProjectForRuleId } from "./attribution.js";
+import { resolveProjectForCwd, type PathMappingCandidate } from "./attribution.js";
 
 const futureEventToleranceMs = 30_000;
 const defaultStaleThresholdMs = 6 * 60 * 60 * 1_000;
-// Browser spans heart beat every 60 seconds, so ten minutes of silence means the tab is gone.
-const defaultBrowserStaleThresholdMs = 10 * 60 * 1_000;
 
 export interface AgentSessionEventInput {
   source: AgentSource;
   externalSessionId: string;
   event: "started" | "ended" | "heartbeat";
   occurredAt: Date;
-  /** Agent sources carry a cwd; browser spans carry a ruleId instead. */
-  cwd?: string;
-  ruleId?: string;
+  cwd: string;
 }
 
 export interface AgentSessionServiceDependencies {
@@ -29,75 +24,54 @@ export interface AgentSessionServiceDependencies {
   pathMappings: PathMappingRepository;
   sessions: SessionRepository;
   clock?: () => Date;
-  /** Staleness window for non-browser sources. */
   staleThresholdMs?: number;
-  /** Staleness window for browser spans, much shorter than the agent window. */
-  browserStaleThresholdMs?: number;
 }
 
 export interface AgentSessionReaper {
-  /** Marks sessions stale at lastEventAt after their source's staleness window. */
+  /** Closes running sessions with no event for the staleness window, ending them at lastEventAt. */
   reapStale(subject: AuthenticatedSubject): Promise<number>;
 }
 
-function createReapStale(
-  dependencies: Pick<AgentSessionServiceDependencies, "agentSessions" | "clock" | "staleThresholdMs" | "browserStaleThresholdMs">,
-): (subject: AuthenticatedSubject) => Promise<number> {
-  const clock = dependencies.clock ?? (() => new Date());
-  const staleThresholdMs = dependencies.staleThresholdMs ?? defaultStaleThresholdMs;
-  const browserStaleThresholdMs = dependencies.browserStaleThresholdMs ?? defaultBrowserStaleThresholdMs;
-  return (subject) => {
-    const now = clock();
-    return dependencies.agentSessions.reapStale(subject, {
-      default: new Date(now.getTime() - staleThresholdMs),
-      browser: new Date(now.getTime() - browserStaleThresholdMs),
-    }, now);
-  };
-}
-
 /**
- * Just the staleness reaper for report and stats read paths without the full
- * ingestion service.
+ * Just the staleness reaper, for read paths (reports, stats) that close stale
+ * agent sessions before report aggregation without the full ingestion service.
  */
 export function createAgentSessionReaper(
-  dependencies: Pick<AgentSessionServiceDependencies, "agentSessions" | "clock" | "staleThresholdMs" | "browserStaleThresholdMs">,
+  dependencies: Pick<AgentSessionServiceDependencies, "agentSessions" | "clock" | "staleThresholdMs">,
 ): AgentSessionReaper {
-  const reapStale = createReapStale(dependencies);
+  const clock = dependencies.clock ?? (() => new Date());
+  const staleThresholdMs = dependencies.staleThresholdMs ?? defaultStaleThresholdMs;
   return {
-    reapStale: (subject) => reapStale(subject),
+    reapStale(subject: AuthenticatedSubject): Promise<number> {
+      const now = clock();
+      return dependencies.agentSessions.reapStale(subject, new Date(now.getTime() - staleThresholdMs), now);
+    },
   };
 }
 
 export interface AgentSessionService {
   ingest(subject: AuthenticatedSubject, events: AgentSessionEventInput[]): Promise<AgentSessionEventBatchResponse>;
-  /** Marks sessions stale after the staleness window; also runs after every batch. */
+  /** Closes running sessions with no event for the staleness window; also runs before every batch. */
   reapStale(subject: AuthenticatedSubject): Promise<number>;
 }
 
 export function createAgentSessionService(dependencies: AgentSessionServiceDependencies): AgentSessionService {
   const clock = dependencies.clock ?? (() => new Date());
-  const reapStale = createReapStale(dependencies);
+  const staleThresholdMs = dependencies.staleThresholdMs ?? defaultStaleThresholdMs;
+  const reaper = createAgentSessionReaper(dependencies);
 
   return {
-    reapStale: (subject) => reapStale(subject),
+    reapStale: (subject) => reaper.reapStale(subject),
 
     async ingest(subject: AuthenticatedSubject, events: AgentSessionEventInput[]): Promise<AgentSessionEventBatchResponse> {
       const now = clock();
+      await dependencies.agentSessions.reapStale(subject, new Date(now.getTime() - staleThresholdMs), now);
+
       // Mappings rarely change; one lookup per batch attributes every event in it.
-      let mappings: Promise<PathMappingRecord[]> | null = null;
-      const loadMappings = (): Promise<PathMappingRecord[]> => {
+      let mappings: Promise<PathMappingCandidate[]> | null = null;
+      const loadMappings = (): Promise<PathMappingCandidate[]> => {
         mappings ??= dependencies.pathMappings.listForSubject(subject);
         return mappings;
-      };
-      // The extension proposes a rule id; the stored mapping row decides. A deleted
-      // or foreign rule leaves the span unattributed rather than erroring.
-      const resolveProject = async (event: AgentSessionEventInput): Promise<string | null> => {
-        const candidates = await loadMappings();
-        if (event.source === "browser") {
-          return event.ruleId === undefined ? null : resolveProjectForRuleId(event.ruleId, candidates);
-        }
-        const prefixes = candidates.filter((mapping) => mapping.kind === "path_prefix");
-        return event.cwd === undefined ? null : resolveProjectForCwd(event.cwd, prefixes);
       };
 
       const results: AgentSessionEventBatchResponse["results"] = [];
@@ -113,7 +87,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
         }
 
         if (event.event === "started") {
-          const projectId = await resolveProject(event);
+          const projectId = resolveProjectForCwd(event.cwd, await loadMappings());
           let linkedSessionId: string | null = null;
           if (projectId !== null) {
             const running = await dependencies.sessions.findRunning(subject);
@@ -124,8 +98,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
             userId: subject.userId,
             source: event.source,
             externalSessionId: event.externalSessionId,
-            cwd: event.cwd ?? null,
-            ruleId: event.ruleId ?? null,
+            cwd: event.cwd,
             projectId,
             linkedSessionId,
             occurredAt: event.occurredAt,
@@ -135,27 +108,28 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
           const existing = await dependencies.agentSessions.findByExternalKey(subject, event.source, event.externalSessionId);
           if (existing === null) {
             // End-before-start is tolerated: the row is stored directly as ended.
+            const projectId = resolveProjectForCwd(event.cwd, await loadMappings());
             await dependencies.agentSessions.insertEnded({
               organizationId: subject.organizationId,
               userId: subject.userId,
               source: event.source,
               externalSessionId: event.externalSessionId,
-              cwd: event.cwd ?? null,
-              ruleId: event.ruleId ?? null,
-              projectId: await resolveProject(event),
+              cwd: event.cwd,
+              projectId,
               occurredAt: event.occurredAt,
               receivedAt: now,
             });
-          } else {
+          } else if (existing.status === "running") {
             await dependencies.agentSessions.closeRunning(subject, event.source, event.externalSessionId, event.occurredAt, now);
           }
           // An end for an already-ended session is a no-op replay.
         } else {
+          // Heartbeats only advance lastEventAt; an unknown or ended session is
+          // accepted as a no-op — a heartbeat must never create or resurrect one.
           await dependencies.agentSessions.advanceLastEvent(subject, event.source, event.externalSessionId, event.occurredAt, now);
         }
         results.push({ externalSessionId: event.externalSessionId, accepted: true });
       }
-      await reapStale(subject);
       return { results };
     },
   };

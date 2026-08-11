@@ -68,7 +68,6 @@ class MemoryPathMappings implements PathMappingRepository {
     if (existing === null) return null;
     const updated: PathMappingRecord = {
       ...existing,
-      kind: input.kind ?? existing.kind,
       pathPrefix: input.pathPrefix ?? existing.pathPrefix,
       repoUrl: input.repoUrl === undefined ? existing.repoUrl : input.repoUrl,
       projectId: input.projectId ?? existing.projectId,
@@ -86,8 +85,8 @@ class MemoryPathMappings implements PathMappingRepository {
 }
 
 const projects: ProjectRecord[] = [
-  { id: ids.project, organizationId: ids.organization, name: "Alpha", archived: false },
-  { id: ids.archivedProject, organizationId: ids.organization, name: "Old", archived: true },
+  { id: ids.project, organizationId: ids.organization, name: "Alpha", archived: false, createdAt: new Date("2026-08-10T12:00:00.000Z") },
+  { id: ids.archivedProject, organizationId: ids.organization, name: "Old", archived: true, createdAt: new Date("2026-08-10T12:00:00.000Z") },
 ];
 
 function existingMapping(overrides: Partial<PathMappingRecord> = {}): PathMappingRecord {
@@ -95,7 +94,6 @@ function existingMapping(overrides: Partial<PathMappingRecord> = {}): PathMappin
     id: ids.mapping,
     organizationId: ids.organization,
     userId: ids.user,
-    kind: "path_prefix",
     pathPrefix: "C:/dev/clock-in",
     repoUrl: null,
     projectId: ids.project,
@@ -117,26 +115,23 @@ describe("path-mapping service", () => {
 
     const created = await service.create(subject, { pathPrefix: "C:/dev/clock-in", projectId: ids.project });
 
-    expect(created).toMatchObject({ kind: "path_prefix", pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project, userId: ids.user });
+    expect(created).toMatchObject({ pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project, userId: ids.user });
     expect(pathMappings.records).toHaveLength(1);
   });
 
-  it("creates a url-rule mapping with the same membership checks", async () => {
+  it("creates a mapping with url-rule compatible pattern", async () => {
     const { service } = createService();
 
-    const created = await service.create(subject, { kind: "url_rule", pathPrefix: "github.com/acme/*", projectId: ids.project });
+    const created = await service.create(subject, { pathPrefix: "github.com/acme/*", projectId: ids.project });
 
-    expect(created).toMatchObject({ kind: "url_rule", pathPrefix: "github.com/acme/*", projectId: ids.project });
+    expect(created).toMatchObject({ pathPrefix: "github.com/acme/*", projectId: ids.project });
   });
 
-  it("rejects a duplicate pattern across both kinds, exactly like duplicate prefixes", async () => {
+  it("rejects a duplicate pattern, exactly like duplicate prefixes", async () => {
     const { service } = createService([
-      existingMapping({ kind: "url_rule", pathPrefix: "github.com/acme/*" }),
+      existingMapping({ pathPrefix: "github.com/acme/*" }),
     ]);
 
-    await expect(service.create(subject, { kind: "url_rule", pathPrefix: "github.com/acme/*", projectId: ids.project }))
-      .rejects.toMatchObject({ code: "conflict", status: 409 });
-    // The uniqueness spans both kinds: a path prefix equal to a rule's pattern conflicts too.
     await expect(service.create(subject, { pathPrefix: "github.com/acme/*", projectId: ids.project }))
       .rejects.toMatchObject({ code: "conflict", status: 409 });
   });
@@ -189,21 +184,16 @@ describe("path-mapping service", () => {
     expect(pathMappings.records[0]).toMatchObject({ pathPrefix: "C:/dev/clock-in" });
   });
 
-  it("validates the merged record when flipping kinds, exactly like the create path", async () => {
+  it("validates the merged record on updates, exactly like the create path", async () => {
     const { pathMappings, service } = createService([existingMapping()]);
 
-    // Flipping a filesystem prefix to a url rule without fixing the pattern is rejected.
-    await expect(service.update(subject, ids.mapping, { kind: "url_rule" }))
-      .rejects.toMatchObject({ code: "validation_error" });
-    expect(pathMappings.records[0]).toMatchObject({ kind: "path_prefix", pathPrefix: "C:/dev/clock-in" });
+    const updated = await service.update(subject, ids.mapping, { pathPrefix: "github.com/acme/*" });
+    expect(updated).toMatchObject({ pathPrefix: "github.com/acme/*" });
 
-    // Flipping kind and pattern together works, and the record round-trips.
-    const flipped = await service.update(subject, ids.mapping, { kind: "url_rule", pathPrefix: "github.com/acme/*" });
-    expect(flipped).toMatchObject({ kind: "url_rule", pathPrefix: "github.com/acme/*" });
-
-    // An invalid pattern for the existing url-rule kind is rejected the same way.
-    await expect(service.update(subject, ids.mapping, { pathPrefix: "C:/dev/clock-in" }))
+    // An invalid pattern is rejected the same way as during create.
+    await expect(service.update(subject, ids.mapping, { pathPrefix: "" }))
       .rejects.toMatchObject({ code: "validation_error" });
+    expect(pathMappings.records[0]).toMatchObject({ pathPrefix: "github.com/acme/*" });
   });
 
   it("deletes only the caller's own mappings", async () => {

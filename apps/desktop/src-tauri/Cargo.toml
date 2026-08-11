@@ -19,12 +19,6 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "clock-in-hook"
 path = "src/bin/clock-in-hook.rs"
 
-# The browser extension's native-messaging host; the same deliberate separation
-# as the hook — the browser launches it, it starts fast, and it holds no
-# credentials and opens no sockets.
-[[bin]]
-name = "clock-in-browser-host"
-path = "src/bin/clock-in-browser-host.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

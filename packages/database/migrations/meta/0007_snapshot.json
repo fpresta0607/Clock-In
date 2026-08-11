@@ -1,5 +1,5 @@
 {
-  "id": "6556583c-69ff-40d0-9ab9-c3cac4b3ff37",
+  "id": "12e7097b-dcff-4aae-ade1-0f11114b4c60",
   "prevId": "1c6b493f-16c2-46ea-ac27-01b4dd76c135",
   "version": "7",
   "dialect": "postgresql",
@@ -647,6 +647,10 @@
         "project_path_mappings_path_prefix_length_valid": {
           "name": "project_path_mappings_path_prefix_length_valid",
           "value": "char_length(\"project_path_mappings\".\"path_prefix\") between 1 and 500"
+        },
+        "project_path_mappings_kind_valid": {
+          "name": "project_path_mappings_kind_valid",
+          "value": "\"project_path_mappings\".\"kind\" in ('path_prefix', 'url_rule')"
         }
       },
       "isRLSEnabled": false
@@ -823,6 +827,14 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": false
+        },
+        "attribution": {
+          "name": "attribution",
+          "type": "session_attribution",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'manual'"
         },
         "created_at": {
           "name": "created_at",
@@ -1117,8 +1129,17 @@
         "codex",
         "kimi_code",
         "cursor",
-        "browser",
         "other"
+      ]
+    },
+    "public.session_attribution": {
+      "name": "session_attribution",
+      "schema": "public",
+      "values": [
+        "manual",
+        "selected",
+        "agent",
+        "default"
       ]
     },
     "public.session_status": {

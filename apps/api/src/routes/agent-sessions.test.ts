@@ -5,7 +5,6 @@ import { parseEnv } from "../env.js";
 import type {
   AgentSessionRecord,
   AgentSessionRepository,
-  AgentSessionStaleCutoffs,
   InsertEndedAgentSession,
   PathMappingRecord,
   PathMappingRepository,
@@ -62,11 +61,9 @@ class MemoryAgentSessions implements AgentSessionRepository {
   public async upsertStarted(input: UpsertStartedAgentSession) {
     const existing = this.find(input.organizationId, input.userId, input.source, input.externalSessionId);
     if (existing !== undefined) {
-      if (existing.status === "stale" && input.source === "browser" && input.occurredAt > existing.lastEventAt) {
-        existing.status = "running";
-        existing.endedAt = null;
+      if (existing.status === "running" && input.occurredAt > existing.lastEventAt) {
+        existing.lastEventAt = input.occurredAt;
       }
-      if (input.occurredAt > existing.lastEventAt) existing.lastEventAt = input.occurredAt;
       return existing;
     }
     const record: AgentSessionRecord = {
@@ -77,7 +74,6 @@ class MemoryAgentSessions implements AgentSessionRepository {
       externalSessionId: input.externalSessionId,
       projectId: input.projectId,
       cwd: input.cwd,
-      ruleId: input.ruleId,
       status: "running",
       startedAt: input.occurredAt,
       endedAt: null,
@@ -88,10 +84,9 @@ class MemoryAgentSessions implements AgentSessionRepository {
     return record;
   }
 
-  public async closeRunning(subject: { organizationId: string; userId: string }, source: AgentSessionRecord["source"], externalSessionId: string, endedAt: Date) {
+  public async closeRunning(subject: { organizationId: string; userId: string }, source: AgentSessionRecord["source"], externalSessionId: string, endedAt: Date, _now: Date) {
     const existing = this.find(subject.organizationId, subject.userId, source, externalSessionId);
     if (existing === undefined || existing.status === "ended") return null;
-    if (existing.status === "stale" && (source !== "browser" || endedAt < existing.lastEventAt)) return null;
     existing.status = "ended";
     const terminalAt = endedAt > existing.lastEventAt ? endedAt : existing.lastEventAt;
     existing.endedAt = terminalAt;
@@ -109,7 +104,6 @@ class MemoryAgentSessions implements AgentSessionRepository {
       externalSessionId: input.externalSessionId,
       projectId: input.projectId,
       cwd: input.cwd,
-      ruleId: input.ruleId,
       status: "ended",
       startedAt: input.occurredAt,
       endedAt: input.occurredAt,
@@ -118,25 +112,19 @@ class MemoryAgentSessions implements AgentSessionRepository {
     });
   }
 
-  public async advanceLastEvent(subject: { organizationId: string; userId: string }, source: AgentSessionRecord["source"], externalSessionId: string, occurredAt: Date) {
+  public async advanceLastEvent(subject: { organizationId: string; userId: string }, source: AgentSessionRecord["source"], externalSessionId: string, occurredAt: Date, _now: Date) {
     const existing = this.find(subject.organizationId, subject.userId, source, externalSessionId);
     if (existing === undefined || existing.status === "ended") return false;
-    if (existing.status === "stale") {
-      if (source !== "browser" || occurredAt <= existing.lastEventAt) return false;
-      existing.status = "running";
-      existing.endedAt = null;
-    }
     if (occurredAt > existing.lastEventAt) existing.lastEventAt = occurredAt;
     return true;
   }
 
-  public async reapStale(subject: { organizationId: string; userId: string }, cutoffs: AgentSessionStaleCutoffs) {
+  public async reapStale(subject: { organizationId: string; userId: string }, cutoff: Date, _now: Date) {
     let reaped = 0;
     for (const record of this.records) {
       if (record.organizationId !== subject.organizationId || record.userId !== subject.userId) continue;
-      const cutoff = record.source === "browser" ? cutoffs.browser : cutoffs.default;
       if (record.status === "running" && record.lastEventAt < cutoff) {
-        record.status = "stale";
+        record.status = "ended";
         record.endedAt = record.lastEventAt;
         reaped += 1;
       }
@@ -187,10 +175,10 @@ function runningTimer() {
 function createTestApp(agentSessions = new MemoryAgentSessions(), options: { withMapping?: boolean; withTimer?: boolean; withUrlRule?: boolean } = {}) {
   const mappings: PathMappingRecord[] = [];
   if (options.withMapping === true) {
-    mappings.push({ id: "e1c7e513-b094-4d4c-ae55-21790ae019a4", organizationId: ids.organization, userId: ids.user, kind: "path_prefix", pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project });
+    mappings.push({ id: "e1c7e513-b094-4d4c-ae55-21790ae019a4", organizationId: ids.organization, userId: ids.user, pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project });
   }
   if (options.withUrlRule === true) {
-    mappings.push({ id: "01c7e513-b094-4d4c-ae55-21790ae019a4", organizationId: ids.organization, userId: ids.user, kind: "url_rule", pathPrefix: "github.com/acme/*", repoUrl: null, projectId: ids.project });
+    mappings.push({ id: "01c7e513-b094-4d4c-ae55-21790ae019a4", organizationId: ids.organization, userId: ids.user, pathPrefix: "github.com/acme/*", repoUrl: null, projectId: ids.project });
   }
   return createApp({
     config,
@@ -316,84 +304,9 @@ describe("agent-session routes", () => {
       method: "POST", headers, body: JSON.stringify({ events: [event({ externalSessionId: "fresh" })] }),
     });
 
-    expect(agentSessions.records[0]).toMatchObject({ status: "stale", endedAt: new Date("2026-08-06T07:00:00.000Z") });
+    expect(agentSessions.records[0]).toMatchObject({ status: "ended", endedAt: new Date("2026-08-06T07:00:00.000Z") });
     expect(agentSessions.records[1]).toMatchObject({ externalSessionId: "fresh", status: "running" });
   });
 
-  it("attributes a browser span through its url rule and enforces the source-conditional contract", async () => {
-    const headers = { authorization: bearerHeader, "content-type": "application/json" };
-    const agentSessions = new MemoryAgentSessions();
-    const app = createTestApp(agentSessions, { withUrlRule: true, withTimer: true });
-    const span = {
-      source: "browser",
-      externalSessionId: "span-1",
-      event: "started",
-      occurredAt: "2026-08-06T13:30:00.000Z",
-      ruleId: "01c7e513-b094-4d4c-ae55-21790ae019a4",
-    };
 
-    const started = await app.request("http://api.test/agent-sessions", { method: "POST", headers, body: JSON.stringify({ events: [span] }) });
-    expect(started.status).toBe(200);
-    await expect(started.json()).resolves.toEqual({ results: [{ externalSessionId: "span-1", accepted: true }] });
-    expect(agentSessions.records[0]).toMatchObject({
-      source: "browser",
-      cwd: null,
-      ruleId: "01c7e513-b094-4d4c-ae55-21790ae019a4",
-      projectId: ids.project,
-      linkedSessionId: ids.timer,
-    });
-
-    // A browser event with a cwd, or an agent event with a ruleId, fails the contract.
-    const browserWithCwd = await app.request("http://api.test/agent-sessions", {
-      method: "POST", headers, body: JSON.stringify({ events: [{ ...span, externalSessionId: "span-2", cwd: "C:/dev/x" }] }),
-    });
-    expect(browserWithCwd.status).toBe(400);
-    const agentWithRule = await app.request("http://api.test/agent-sessions", {
-      method: "POST", headers, body: JSON.stringify({ events: [event({ ruleId: "01c7e513-b094-4d4c-ae55-21790ae019a4" })] }),
-    });
-    expect(agentWithRule.status).toBe(400);
-  });
-
-  it("accepts a browser span whose rule no longer resolves as unattributed, never an error", async () => {
-    const headers = { authorization: bearerHeader, "content-type": "application/json" };
-    const agentSessions = new MemoryAgentSessions();
-    const app = createTestApp(agentSessions);
-    const span = {
-      source: "browser",
-      externalSessionId: "span-1",
-      event: "started",
-      occurredAt: "2026-08-06T13:30:00.000Z",
-      ruleId: "01c7e513-b094-4d4c-ae55-21790ae019a4",
-    };
-
-    const response = await app.request("http://api.test/agent-sessions", { method: "POST", headers, body: JSON.stringify({ events: [span] }) });
-
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ results: [{ externalSessionId: "span-1", accepted: true }] });
-    expect(agentSessions.records[0]).toMatchObject({ projectId: null, linkedSessionId: null });
-  });
-
-  it("reaps a browser span after ten minutes of silence, not six hours", async () => {
-    const headers = { authorization: bearerHeader, "content-type": "application/json" };
-    const agentSessions = new MemoryAgentSessions();
-    const app = createTestApp(agentSessions);
-    const span = {
-      source: "browser",
-      externalSessionId: "span-1",
-      event: "started",
-      occurredAt: "2026-08-06T13:40:00.000Z",
-      ruleId: "01c7e513-b094-4d4c-ae55-21790ae019a4",
-    };
-
-    await app.request("http://api.test/agent-sessions", { method: "POST", headers, body: JSON.stringify({ events: [span] }) });
-    // Twenty minutes later the next batch reaps the span at its last event.
-    await app.request("http://api.test/agent-sessions", { method: "POST", headers, body: JSON.stringify({ events: [event()] }) });
-
-    expect(agentSessions.records[0]).toMatchObject({
-      externalSessionId: "span-1",
-      status: "stale",
-      endedAt: new Date("2026-08-06T13:40:00.000Z"),
-    });
-    expect(agentSessions.records[1]).toMatchObject({ externalSessionId: "session-1", status: "running" });
-  });
 });

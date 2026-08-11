@@ -72,9 +72,9 @@ Two deliberate divergences from agent-source behavior:
 - **Staleness.** Browser spans reap at **10 minutes** of silence (heartbeats are every 60 seconds), not 6 hours. The reaper window becomes per-source.
 - **The agent-active override does not apply.** An open agent session legitimately suppresses away auto-stop — an overnight agent run is unattended work. An open browser span means a tab is focused, which says nothing once the human leaves; browser spans never suppress idle trimming or auto-stop.
 
-### Attribution, not corroboration
+### Attribution boundaries
 
-Browser spans do not join the corroboration union. Machine-active segments already corroborate the time; the browser span's job is to say **which project** the active time belongs to. Concretely: linking to a running timer, attribution-mismatch surfacing, and suggested start all treat browser spans like agent sessions, but corroborated-seconds math is untouched. This keeps the semantics honest — a focused tab on an idle machine attributes nothing and corroborates nothing — and means the reporting contract does not change shape.
+Browser spans do not add session duration. Machine-active segments already establish active time; the browser span's job is to say **which project** the active time belongs to. Concretely: linking to a running timer, attribution-mismatch surfacing, and suggested start all treat browser spans like agent sessions, but session-duration math is untouched. This keeps the semantics honest — a focused tab on an idle machine attributes nothing and adds no time — and means the reporting contract does not change shape.
 
 `GET /me/stats` gains a `sites` array beside `apps`: per-rule focus totals, computed from browser spans clipped to the caller's `active` segments. The label shown is the rule pattern — text the user wrote — so the stats view introduces no new data class.
 
@@ -91,7 +91,7 @@ Prompt copy across the product is held to the grandmother test: a question, a hi
 3. **Shipping URLs to the desktop and matching there** was rejected even though it is simpler: it moves the entire browsing stream across a process boundary to answer a question the extension can answer in place. Verdict-only crossing is the difference between "tracks my work sites" and "reads my history", and Chrome's permission warning will already say the latter — the architecture should make the honest answer "but only rule verdicts ever leave".
 4. **A localhost port instead of native messaging** was rejected for the same reason as in Phase 2: an open port is attack surface and fails silently; native messaging is browser-launched, extension-pinned, and lifecycle-managed.
 5. **A new evidence stream and tables for browser spans** was rejected: the agent-session model (upsert, reaping, linking, freshness) fits exactly, and one divergent enum value plus a per-source reaper window is cheaper than a parallel pipeline.
-6. **Corroborating from browser spans** was rejected: it would double-count what active segments already prove and would make a focused-but-abandoned tab look like verified work.
+6. **Adding duration from browser spans** was rejected: it would double-count what active segments already prove and would make a focused-but-abandoned tab look like verified work.
 
 ## Package architecture
 
@@ -104,7 +104,7 @@ Prompt copy across the product is held to the grandmother test: a question, a hi
 
 ## Data and request flow
 
-Rules flow outward: desktop settings → `project_path_mappings` (server) → rules file (desktop) → host → extension. Verdicts flow inward: extension → host → browser spool → desktop drain → agent-session batch upload → upsert, `ruleId` resolution, timer linking. The desktop raises suggested-start locally from the drain, as it does for agent events. Reports and `/me/stats` read stored rows; browser spans contribute linking, mismatch review, and `sites` totals, never corroborated seconds.
+Rules flow outward: desktop settings → `project_path_mappings` (server) → rules file (desktop) → host → extension. Verdicts flow inward: extension → host → browser spool → desktop drain → agent-session batch upload → upsert, `ruleId` resolution, timer linking. The desktop raises suggested-start locally from the drain, as it does for agent events. Reports and `/me/stats` read stored rows; browser spans contribute linking, mismatch review, and `sites` totals, never session duration.
 
 ## Security and privacy
 
@@ -122,7 +122,7 @@ Extension-side reconnect, durable identity isolation, and backpressure are defin
 
 ## Testing and verification
 
-Extension logic ships as pure functions — rule matching (longest-wins, case-insensitive host, glob bounds), the debounce/coalesce state machine, span lifecycle over injected clock and event streams — tested in Vitest with no browser. Pattern generation is pure and tested the same way: origin in, rule out, including the path-narrowing hosts. Host tests cover stdio framing, rules serving, and locked spool appends under concurrent writers. Monitor tests cover segment-close-on-foreground-change, UWP PID resolution shape, clock-gap synthesis (joint jump → `Suspended`, wall-only jump → split + flag), and disconnect mapping, all with injected sources. API tests cover the source-conditional event contract, `ruleId` resolution including deleted-rule fallback, per-source reaping, override exclusion, `sites` clipping, and that corroboration math is byte-for-byte unchanged for non-browser evidence. React tests cover the onboarding flow, browser cards flipping on handshake, the suggestion question creating a rule and the never-suggest path, and **[Fix]** performing its repair.
+Extension logic ships as pure functions — rule matching (longest-wins, case-insensitive host, glob bounds), the debounce/coalesce state machine, span lifecycle over injected clock and event streams — tested in Vitest with no browser. Pattern generation is pure and tested the same way: origin in, rule out, including the path-narrowing hosts. Host tests cover stdio framing, rules serving, and locked spool appends under concurrent writers. Monitor tests cover segment-close-on-foreground-change, UWP PID resolution shape, clock-gap synthesis (joint jump → `Suspended`, wall-only jump → split + flag), and disconnect mapping, all with injected sources. API tests cover the source-conditional event contract, `ruleId` resolution including deleted-rule fallback, per-source reaping, override exclusion, `sites` clipping, and that session-duration math is byte-for-byte unchanged for non-browser evidence. React tests cover the onboarding flow, browser cards flipping on handshake, the suggestion question creating a rule and the never-suggest path, and **[Fix]** performing its repair.
 
 The manual checklist adds: register in Chrome and Edge, answer a suggestion, verify glance-vs-dwell (14s no span, 20s span), tab-flip merging, idle ends the span, suggested start at 60s, incognito silence, the needs-mapping tally staying local (network inspector shows no origin upload) — and a **usability pass run as the test's namesake**: someone non-technical performs setup from the dashboard download with no coaching, and every place they stall or ask a question is a bug against this design, not against them.
 
@@ -134,12 +134,12 @@ The manual checklist adds: register in Chrome and Edge, answer a suggestion, ver
 - **Signing logistics**: an OV/EV certificate and Apple Developer enrollment have lead time and identity-verification steps; they gate distribution to non-engineers, so they start before implementation does.
 - **Multi-profile browsers**: registration is per-user but extension install is per-profile; an unregistered profile is invisible, and the health badge cannot see profiles. Accepted; the monitor still records the browser as active.
 - **Path-bearing SPAs** that rewrite URLs without navigation events are covered by `tabs.onUpdated`, but sites that keep state out of the URL entirely (some editors) can only be matched at origin granularity.
-- **Watching a mapped site's video** with hands off the keyboard is attributed browser time on an idle machine: attributed, uncorroborated, and correctly so. The false-idle rescue signals (mic-in-use, presentation mode, media session) remain a later phase, as does input-density sampling.
+- **Watching a mapped site's video** with hands off the keyboard is attributed browser time on an idle machine: attributed but excluded from session duration, and correctly so. The false-idle rescue signals (mic-in-use, presentation mode, media session) remain a later phase, as does input-density sampling.
 - **Rule quality is user labor**: attribution is only as good as the rules, same as path mappings. The needs-mapping tally is the mitigation.
 
 ## Deliberate limitations
 
 - Verdict-only reporting is a ceiling as well as a floor: the server can never retroactively ask "what site was that really?" — the evidence does not exist off the machine, by construction.
-- Browser spans attribute; they never corroborate and never suppress idle handling.
+- Browser spans attribute; they never add duration and never suppress idle handling.
 - One running timer per user is unchanged; concurrent mapped tabs in different projects surface as review flags, not split timers.
 - A determined user can fabricate spool lines here as everywhere; Phase 3 keeps raising the visibility of padding, not attempting proof.

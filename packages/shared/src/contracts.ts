@@ -16,6 +16,24 @@ const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
 export const sessionStatusValues = ["running", "stopped", "needs_review"] as const;
 export const sessionStatusSchema = z.enum(sessionStatusValues);
 
+/**
+ * How a session learned which project it belongs to, which is exactly what
+ * makes its seconds attributed or not.
+ *
+ * - `manual`: a legacy row from the retired start/stop timer. A human named the
+ *   project when they pressed start.
+ * - `selected`: the person picked a project to track into, and this session ran
+ *   while that choice stood.
+ * - `agent`: an agent session's working directory resolved to the project.
+ * - `default`: nothing named a project, so the session fell back to the user's
+ *   default project. These are the unattributed seconds.
+ */
+export const sessionAttributionValues = ["manual", "selected", "agent", "default"] as const;
+export const sessionAttributionSchema = z.enum(sessionAttributionValues);
+
+/** Every source except `default` names the project on purpose. */
+export const isAttributed = (attribution: SessionAttribution): boolean => attribution !== "default";
+
 export const userSchema = z
   .object({
     id: idSchema,
@@ -82,7 +100,8 @@ export const leaderboardEntrySchema = z
     user: z.object({ id: idSchema, name: z.string().min(1) }).strict(),
     durationSeconds: z.number().int().nonnegative().safe(),
     sessionCount: z.number().int().nonnegative().safe(),
-    corroboratedSeconds: z.number().int().nonnegative().safe(),
+    attributedSeconds: z.number().int().nonnegative().safe(),
+    unattributedSeconds: z.number().int().nonnegative().safe(),
   })
   .strict();
 
@@ -99,6 +118,7 @@ export const projectListItemSchema = z
     id: idSchema,
     name: z.string().min(1),
     color: z.string().regex(/^#[0-9a-fA-F]{6}$/).nullable().optional(),
+    createdAt: z.string().datetime(),
     isArchived: z.boolean(),
     isDefault: z.boolean().default(false),
   })
@@ -133,6 +153,7 @@ const sessionBaseSchema = z
     description: z.string().max(1_000).nullable(),
     startedAt: timestampSchema,
     idleSeconds: z.number().int().nonnegative(),
+    attribution: sessionAttributionSchema,
   })
   .strict();
 
@@ -182,6 +203,35 @@ export const sessionStopRequestSchema = z
 export const sessionStopResponseSchema = z.object({ session: z.union([stoppedSessionSchema, needsReviewSessionSchema]) }).strict();
 export const currentSessionResponseSchema = z.object({ session: runningSessionSchema.nullable() }).strict();
 
+/**
+ * One finished session observed by the desktop monitor. The desktop decides the
+ * boundaries and the project; the server validates and stores. `clientId` makes
+ * a replayed batch idempotent, exactly as it does for activity segments.
+ */
+export const observedSessionUploadSchema = z
+  .object({
+    clientId: idSchema,
+    projectId: idSchema,
+    attribution: sessionAttributionSchema.exclude(["manual"]),
+    startedAt: timestampSchema,
+    stoppedAt: timestampSchema,
+    idleSeconds: z.number().int().nonnegative().default(0),
+  })
+  .strict();
+
+export const observedSessionBatchRequestSchema = z
+  .object({
+    sessions: z.array(observedSessionUploadSchema).min(1).max(500),
+  })
+  .strict();
+
+export const observedSessionBatchResponseSchema = z
+  .object({
+    accepted: z.number().int().nonnegative(),
+    rejected: z.array(z.object({ clientId: idSchema, reason: z.string().min(1) }).strict()),
+  })
+  .strict();
+
 export const reportFiltersSchema = z
   .object({
     from: dateSchema.optional(),
@@ -209,7 +259,9 @@ export const reportRowSchema = z
     stoppedAt: timestampSchema,
     idleSeconds: z.number().int().nonnegative().safe(),
     durationSeconds: z.number().int().nonnegative().safe(),
-    corroboratedSeconds: z.number().int().nonnegative().safe(),
+    attribution: sessionAttributionSchema,
+    attributedSeconds: z.number().int().nonnegative().safe(),
+    unattributedSeconds: z.number().int().nonnegative().safe(),
   })
   .strict();
 
@@ -255,7 +307,7 @@ export const activitySegmentBatchResponseSchema = z
   })
   .strict();
 
-export const agentSourceValues = ["claude_code", "codex", "kimi_code", "cursor", "browser", "other"] as const;
+export const agentSourceValues = ["claude_code", "codex", "kimi_code", "cursor", "other"] as const;
 export const agentSourceSchema = z.enum(agentSourceValues);
 
 export const agentEventKindValues = ["started", "ended", "heartbeat"] as const;
@@ -277,13 +329,16 @@ export const agentSessionEventSchema = z
   })
   .strict()
   .superRefine((event, ctx) => {
-    const expectsRule = event.source === "browser";
-    if ((event.ruleId !== undefined) !== expectsRule || (event.cwd !== undefined) === expectsRule) {
+    if (event.ruleId !== undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: expectsRule
-          ? "Browser events carry a ruleId and no cwd."
-          : "Agent events carry a cwd and no ruleId.",
+        message: "Agent events carry a cwd and no ruleId.",
+      });
+    }
+    if (event.cwd === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Agent events carry a cwd and no ruleId.",
       });
     }
   });
@@ -389,7 +444,8 @@ export const meStatsProjectSchema = z
   .object({
     project: z.object({ id: idSchema, name: z.string().min(1) }).strict(),
     durationSeconds: z.number().int().nonnegative().safe(),
-    corroboratedSeconds: z.number().int().nonnegative().safe(),
+    attributedSeconds: z.number().int().nonnegative().safe(),
+    unattributedSeconds: z.number().int().nonnegative().safe(),
     sessionCount: z.number().int().nonnegative().safe(),
   })
   .strict();
@@ -419,7 +475,8 @@ export const meStatsResponseSchema = z
   .object({
     filters: meStatsFiltersSchema,
     totalDurationSeconds: z.number().int().nonnegative().safe(),
-    corroboratedSeconds: z.number().int().nonnegative().safe(),
+    attributedSeconds: z.number().int().nonnegative().safe(),
+    unattributedSeconds: z.number().int().nonnegative().safe(),
     projects: z.array(meStatsProjectSchema),
     /** Per-foreground-process totals, heaviest first; the producer sorts, the schema only validates. */
     apps: z.array(meStatsAppSchema),
@@ -476,7 +533,9 @@ export type MeStatsApp = z.infer<typeof meStatsAppSchema>;
 export type MeStatsFilters = z.infer<typeof meStatsFiltersSchema>;
 export type MeStatsProject = z.infer<typeof meStatsProjectSchema>;
 export type MeStatsResponse = z.infer<typeof meStatsResponseSchema>;
-export type MeStatsSite = z.infer<typeof meStatsSiteSchema>;
+export type ObservedSessionBatchRequest = z.infer<typeof observedSessionBatchRequestSchema>;
+export type ObservedSessionBatchResponse = z.infer<typeof observedSessionBatchResponseSchema>;
+export type ObservedSessionUpload = z.infer<typeof observedSessionUploadSchema>;
 export type Organization = z.infer<typeof organizationSchema>;
 export type OrganizationResponse = z.infer<typeof organizationResponseSchema>;
 export type PathMappingCreateRequest = z.infer<typeof pathMappingCreateRequestSchema>;
@@ -495,6 +554,7 @@ export type ReportResponse = z.infer<typeof reportResponseSchema>;
 export type Session = z.infer<typeof sessionSchema>;
 export type SessionStartRequest = z.infer<typeof sessionStartRequestSchema>;
 export type SessionStartResponse = z.infer<typeof sessionStartResponseSchema>;
+export type SessionAttribution = z.infer<typeof sessionAttributionSchema>;
 export type SessionStatus = z.infer<typeof sessionStatusSchema>;
 export type SessionStopRequest = z.infer<typeof sessionStopRequestSchema>;
 export type SessionStopResponse = z.infer<typeof sessionStopResponseSchema>;

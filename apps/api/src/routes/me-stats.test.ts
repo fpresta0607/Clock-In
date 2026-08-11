@@ -1,11 +1,12 @@
 import { beforeAll, describe, expect, it } from "vitest";
 
+import type { SessionAttribution } from "@clock-in/shared";
+
 import { createApp } from "../app.js";
 import type { AuthenticatedSubject } from "../auth.js";
 import { parseEnv } from "../env.js";
 import type {
   AgentSessionRepository,
-  AgentSessionStaleCutoffs,
   AppTotalRecord,
   PathMappingRepository,
   ProjectRepository,
@@ -57,6 +58,7 @@ interface StoredSession {
   stoppedAt: Date;
   idleSeconds: number;
   durationSeconds: number;
+  attribution: SessionAttribution;
 }
 
 interface StoredSegment {
@@ -72,9 +74,9 @@ interface StoredSegment {
 interface StoredAgent {
   organizationId: string;
   userId: string;
-  source: "claude_code" | "codex" | "kimi_code" | "cursor" | "browser" | "other";
-  linkedSessionId: string | null;
+  source: string;
   ruleId: string | null;
+  linkedSessionId: string;
   startedAt: Date;
   endedAt: Date | null;
   lastEventAt: Date;
@@ -85,37 +87,35 @@ interface StoredMapping {
   id: string;
   organizationId: string;
   userId: string;
-  kind: "path_prefix" | "url_rule";
+  kind: "url_rule" | "path_prefix";
   pattern: string;
-  projectId: string;
+  projectId: string | null;
 }
 
-const freshnessWindowMs = 7 * 24 * 60 * 60 * 1_000;
-
-function overlapSeconds(aStart: Date, aEnd: Date, bStart: Date, bEnd: Date): number {
-  return Math.max(0, Math.min(aEnd.getTime(), bEnd.getTime()) - Math.max(aStart.getTime(), bStart.getTime())) / 1_000;
-}
-
+/** Merge overlapping intervals into non-overlapping spans. */
 function mergeIntervals(intervals: { start: number; end: number }[]): { start: number; end: number }[] {
-  const sorted = intervals
-    .filter((interval) => interval.end > interval.start)
-    .sort((a, b) => a.start - b.start || a.end - b.end);
-  const merged: { start: number; end: number }[] = [];
-  for (const interval of sorted) {
-    const last = merged[merged.length - 1];
-    if (last !== undefined && interval.start <= last.end) {
-      last.end = Math.max(last.end, interval.end);
+  if (intervals.length === 0) return [];
+  const sorted = [...intervals].sort((a, b) => a.start - b.start);
+  const merged = [sorted[0]!];
+  for (let i = 1; i < sorted.length; i++) {
+    const last = merged[merged.length - 1]!;
+    if (sorted[i]!.start <= last.end) {
+      last.end = Math.max(last.end, sorted[i]!.end);
     } else {
-      merged.push({ ...interval });
+      merged.push(sorted[i]!);
     }
   }
   return merged;
 }
 
+const freshnessWindowMs = 7 * 24 * 60 * 60 * 1_000;
+
+
 /**
- * Mirrors the repository's corroboration semantics — the same completed-session
- * filters, freshness window, and duration cap as the SQL — so the route tests
- * exercise scoping and freshness through the real service and route stack.
+ * Mirrors the repository's attribution semantics: the same completed-session
+ * filters as the SQL, a session counted attributed whole or not at all, and the
+ * segment freshness window the app breakdown still applies. The route tests
+ * then exercise scoping through the real service and route stack.
  */
 class MemoryReports implements ReportRepository {
   public readonly sessions: StoredSession[] = [];
@@ -123,64 +123,35 @@ class MemoryReports implements ReportRepository {
   public readonly agents: StoredAgent[] = [];
   public readonly mappings: StoredMapping[] = [];
 
-  private exactRange(query: ReportQuery): { from: Date; toExclusive: Date } | null {
-    if (!query.clipToRange || query.from === undefined || query.toExclusive === undefined) return null;
-    return { from: query.from, toExclusive: query.toExclusive };
-  }
-
-  private sessionDuration(session: StoredSession, query: ReportQuery): number {
-    const range = this.exactRange(query);
-    if (range === null) return session.durationSeconds;
-    return Math.min(session.durationSeconds, Math.floor(overlapSeconds(session.startedAt, session.stoppedAt, range.from, range.toExclusive)));
-  }
-
-  private corroborated(session: StoredSession, query: ReportQuery): number {
-    const range = this.exactRange(query);
-    const sessionStart = range === null
-      ? session.startedAt
-      : new Date(Math.max(session.startedAt.getTime(), range.from.getTime()));
-    const sessionEnd = range === null
-      ? session.stoppedAt
-      : new Date(Math.min(session.stoppedAt.getTime(), range.toExclusive.getTime()));
-    let total = mergeIntervals(this.segments
-      .filter((segment) => segment.organizationId === session.organizationId
-        && segment.userId === session.userId
-        && segment.kind === "active"
-        && segment.receivedAt.getTime() <= segment.endedAt.getTime() + freshnessWindowMs)
-      .map((segment) => ({
-        start: Math.max(segment.startedAt.getTime(), sessionStart.getTime()),
-        end: Math.min(segment.endedAt.getTime(), sessionEnd.getTime()),
-      })))
-      .reduce((seconds, interval) => seconds + (interval.end - interval.start) / 1_000, 0);
-    for (const agent of this.agents) {
-      // Browser spans attribute; they never corroborate.
-      if (agent.source === "browser") continue;
-      if (agent.organizationId !== session.organizationId || agent.linkedSessionId !== session.id) continue;
-      const occurredAt = agent.endedAt ?? agent.lastEventAt;
-      if (agent.receivedAt.getTime() > occurredAt.getTime() + freshnessWindowMs) continue;
-      total += overlapSeconds(agent.startedAt, occurredAt, sessionStart, sessionEnd);
-    }
-    return Math.min(this.sessionDuration(session, query), Math.floor(total));
-  }
 
   private filtered(subject: AuthenticatedSubject, query: ReportQuery): StoredSession[] {
-    const range = this.exactRange(query);
     return this.sessions.filter((session) => session.organizationId === subject.organizationId
-      && (range === null
-        ? (query.from === undefined || session.startedAt >= query.from)
-          && (query.toExclusive === undefined || session.startedAt < query.toExclusive)
-        : session.startedAt < range.toExclusive && session.stoppedAt > range.from)
+      && (query.from === undefined || session.stoppedAt >= query.from)
+      && (query.toExclusive === undefined || session.startedAt < query.toExclusive)
       && (query.userId === undefined || session.userId === query.userId)
       && (query.projectId === undefined || session.project.id === query.projectId));
+  }
+
+  /** Clip a session's contribution to the query range, in seconds. */
+  private clippedSeconds(session: StoredSession, query: ReportQuery): number {
+    if (query.from === undefined && query.toExclusive === undefined) return session.durationSeconds;
+    const rangeStart = query.from?.getTime() ?? session.startedAt.getTime();
+    const rangeEnd = query.toExclusive?.getTime() ?? session.stoppedAt.getTime();
+    const overlapStart = Math.max(session.startedAt.getTime(), rangeStart);
+    const overlapEnd = Math.min(session.stoppedAt.getTime(), rangeEnd);
+    return Math.max(0, Math.floor((overlapEnd - overlapStart) / 1_000));
   }
 
   public async readProjectTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<ProjectTotalRecord[]> {
     const byProject = new Map<string, ProjectTotalRecord>();
     for (const session of this.filtered(subject, query)) {
+      const clipped = this.clippedSeconds(session, query);
+      if (clipped === 0) continue;
       const existing = byProject.get(session.project.id)
-        ?? { project: session.project, durationSeconds: 0, corroboratedSeconds: 0, sessionCount: 0 };
-      existing.durationSeconds = (existing.durationSeconds as number) + this.sessionDuration(session, query);
-      existing.corroboratedSeconds = (existing.corroboratedSeconds as number) + this.corroborated(session, query);
+        ?? { project: session.project, durationSeconds: 0, attributedSeconds: 0, sessionCount: 0 };
+      existing.durationSeconds = (existing.durationSeconds as number) + clipped;
+      existing.attributedSeconds = (existing.attributedSeconds as number)
+        + (session.attribution === "default" ? 0 : clipped);
       existing.sessionCount = (existing.sessionCount as number) + 1;
       byProject.set(session.project.id, existing);
     }
@@ -276,9 +247,9 @@ class MemoryReports implements ReportRepository {
 
 /** Only the reaper runs on this read path; it records every invocation. */
 class ReapRecorder implements Partial<AgentSessionRepository> {
-  public readonly reapCalls: { subject: AuthenticatedSubject; cutoffs: AgentSessionStaleCutoffs }[] = [];
-  public async reapStale(subject: AuthenticatedSubject, cutoffs: AgentSessionStaleCutoffs) {
-    this.reapCalls.push({ subject, cutoffs });
+  public readonly reapCalls: { subject: AuthenticatedSubject; cutoff: Date; now: Date }[] = [];
+  public async reapStale(subject: AuthenticatedSubject, cutoff: Date, now: Date) {
+    this.reapCalls.push({ subject, cutoff, now });
     return 0;
   }
 }
@@ -309,6 +280,7 @@ function session(overrides: Partial<StoredSession> = {}): StoredSession {
     stoppedAt: new Date("2026-08-05T15:00:00.000Z"),
     idleSeconds: 0,
     durationSeconds: 3_600,
+    attribution: "agent",
     ...overrides,
   };
 }
@@ -393,53 +365,30 @@ describe("me/stats routes", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
       totalDurationSeconds: 1_800,
-      corroboratedSeconds: 1_800,
-      projects: [{ project: { id: ids.project }, durationSeconds: 1_800, corroboratedSeconds: 1_800, sessionCount: 1 }],
+      attributedSeconds: 1_800,
+      projects: [{ project: { id: ids.project }, durationSeconds: 1_800, attributedSeconds: 1_800, sessionCount: 1 }],
     });
   });
 
-  it("splits corroborated from uncorroborated time per project for the caller only", async () => {
+  it("splits attributed from unattributed time per project for the caller only", async () => {
     const reports = new MemoryReports();
-    // Fully corroborated by an active segment.
-    const full = session();
-    reports.sessions.push(full);
-    reports.segments.push({
-      organizationId: ids.organization, userId: ids.user, kind: "active",
-      startedAt: full.startedAt, endedAt: full.stoppedAt, receivedAt: new Date("2026-08-05T15:05:00.000Z"),
-    });
-    // Half corroborated; the second half of the window has no evidence.
-    const half = session({ startedAt: new Date("2026-08-05T16:00:00.000Z"), stoppedAt: new Date("2026-08-05T17:00:00.000Z") });
-    reports.sessions.push(half);
-    reports.segments.push({
-      organizationId: ids.organization, userId: ids.user, kind: "active",
-      startedAt: new Date("2026-08-05T16:00:00.000Z"), endedAt: new Date("2026-08-05T16:30:00.000Z"), receivedAt: new Date("2026-08-05T16:35:00.000Z"),
-    });
-    // Corroborated by a linked agent session, not by OS activity.
-    const agentBacked = session({
+    // An agent session named the project: attributed.
+    reports.sessions.push(session());
+    // Nothing named a project, so it landed in the default one: unattributed.
+    reports.sessions.push(session({
+      attribution: "default",
+      startedAt: new Date("2026-08-05T16:00:00.000Z"),
+      stoppedAt: new Date("2026-08-05T17:00:00.000Z"),
+    }));
+    // The person picked this project themselves: attributed.
+    reports.sessions.push(session({
       project: { id: ids.otherProject, name: "Side" },
-      startedAt: new Date("2026-08-06T11:00:00.000Z"), stoppedAt: new Date("2026-08-06T12:00:00.000Z"),
-    });
-    reports.sessions.push(agentBacked);
-    reports.agents.push({
-      organizationId: ids.organization, userId: ids.user, source: "kimi_code", ruleId: null, linkedSessionId: agentBacked.id,
-      startedAt: new Date("2026-08-06T11:15:00.000Z"), endedAt: new Date("2026-08-06T11:45:00.000Z"),
-      lastEventAt: new Date("2026-08-06T11:45:00.000Z"), receivedAt: new Date("2026-08-06T11:50:00.000Z"),
-    });
-    // A linked browser span covers the rest of the window, but browser spans
-    // attribute — they never corroborate — so the totals stay byte-identical.
-    reports.agents.push({
-      organizationId: ids.organization, userId: ids.user, source: "browser", ruleId: "01c7e513-b094-4d4c-ae55-21790ae019a4",
-      linkedSessionId: agentBacked.id,
-      startedAt: new Date("2026-08-06T11:00:00.000Z"), endedAt: new Date("2026-08-06T12:00:00.000Z"),
-      lastEventAt: new Date("2026-08-06T12:00:00.000Z"), receivedAt: new Date("2026-08-06T12:05:00.000Z"),
-    });
-    // A teammate's fully corroborated session must never surface here.
-    const teammates = session({ userId: ids.teammate });
-    reports.sessions.push(teammates);
-    reports.segments.push({
-      organizationId: ids.organization, userId: ids.teammate, kind: "active",
-      startedAt: teammates.startedAt, endedAt: teammates.stoppedAt, receivedAt: new Date("2026-08-05T15:05:00.000Z"),
-    });
+      attribution: "selected",
+      startedAt: new Date("2026-08-06T11:00:00.000Z"),
+      stoppedAt: new Date("2026-08-06T12:00:00.000Z"),
+    }));
+    // A teammate's session must never surface here.
+    reports.sessions.push(session({ userId: ids.teammate }));
 
     const response = await createTestApp(reports).request("http://api.test/me/stats", { headers: { authorization: bearerHeader } });
 
@@ -447,10 +396,11 @@ describe("me/stats routes", () => {
     await expect(response.json()).resolves.toEqual({
       filters: {},
       totalDurationSeconds: 10_800,
-      corroboratedSeconds: 7_200,
+      attributedSeconds: 7_200,
+      unattributedSeconds: 3_600,
       projects: [
-        { project: { id: ids.project, name: "Timer" }, durationSeconds: 7_200, corroboratedSeconds: 5_400, sessionCount: 2 },
-        { project: { id: ids.otherProject, name: "Side" }, durationSeconds: 3_600, corroboratedSeconds: 1_800, sessionCount: 1 },
+        { project: { id: ids.project, name: "Timer" }, durationSeconds: 7_200, attributedSeconds: 3_600, unattributedSeconds: 3_600, sessionCount: 2 },
+        { project: { id: ids.otherProject, name: "Side" }, durationSeconds: 3_600, attributedSeconds: 3_600, unattributedSeconds: 0, sessionCount: 1 },
       ],
       // None of the segments in this test carry a process name, and the
       // browser span's rule is not one of the caller's mappings.
@@ -489,40 +439,40 @@ describe("me/stats routes", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
       totalDurationSeconds: 600,
-      corroboratedSeconds: 300,
-      projects: [{ project: { id: ids.project }, durationSeconds: 600, corroboratedSeconds: 300, sessionCount: 1 }],
+      attributedSeconds: 600,
+      projects: [{ project: { id: ids.project }, durationSeconds: 600, attributedSeconds: 600, sessionCount: 1 }],
     });
   });
 
-  it("excludes evidence received more than seven days after it occurred", async () => {
+  it("counts legacy manual sessions as attributed, because a person named the project", async () => {
+    const reports = new MemoryReports();
+    reports.sessions.push(session({ attribution: "manual" }));
+
+    const response = await createTestApp(reports).request("http://api.test/me/stats", { headers: { authorization: bearerHeader } });
+
+    await expect(response.json()).resolves.toMatchObject({
+      totalDurationSeconds: 3_600,
+      attributedSeconds: 3_600,
+      unattributedSeconds: 0,
+    });
+  });
+
+  it("excludes app evidence received more than seven days after it occurred", async () => {
     const reports = new MemoryReports();
     const late = session();
     reports.sessions.push(late);
     reports.segments.push({
-      organizationId: ids.organization, userId: ids.user, kind: "active",
+      organizationId: ids.organization, userId: ids.user, kind: "active", processName: "Code.exe",
       startedAt: late.startedAt, endedAt: late.stoppedAt,
-      // Uploaded eight days after the segment ended: stored, but not corroborating.
+      // Uploaded eight days after the segment ended: stored, but out of the window.
       receivedAt: new Date(late.stoppedAt.getTime() + 8 * 24 * 60 * 60 * 1_000),
     });
-    const agentLate = session({ project: { id: ids.otherProject, name: "Side" } });
-    reports.sessions.push(agentLate);
-    reports.agents.push({
-      organizationId: ids.organization, userId: ids.user, source: "kimi_code", ruleId: null, linkedSessionId: agentLate.id,
-      startedAt: agentLate.startedAt, endedAt: agentLate.stoppedAt, lastEventAt: agentLate.stoppedAt,
-      receivedAt: new Date(agentLate.stoppedAt.getTime() + 8 * 24 * 60 * 60 * 1_000),
-    });
+
 
     const response = await createTestApp(reports).request("http://api.test/me/stats", { headers: { authorization: bearerHeader } });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({
-      totalDurationSeconds: 7_200,
-      corroboratedSeconds: 0,
-      projects: [
-        { project: { id: ids.project }, corroboratedSeconds: 0 },
-        { project: { id: ids.otherProject }, corroboratedSeconds: 0 },
-      ],
-    });
+    await expect(response.json()).resolves.toMatchObject({ totalDurationSeconds: 3_600, apps: [] });
   });
 
   it("applies inclusive calendar date bounds like the org reports", async () => {
@@ -551,7 +501,7 @@ describe("me/stats routes", () => {
     });
 
     const empty = await app.request("http://api.test/me/stats?from=2026-08-01&to=2026-08-02", { headers });
-    await expect(empty.json()).resolves.toEqual({ filters: { from: "2026-08-01", to: "2026-08-02" }, totalDurationSeconds: 0, corroboratedSeconds: 0, projects: [], apps: [], sites: [] });
+    await expect(empty.json()).resolves.toEqual({ filters: { from: "2026-08-01", to: "2026-08-02" }, totalDurationSeconds: 0, attributedSeconds: 0, unattributedSeconds: 0, projects: [], apps: [], sites: [] });
   });
 
   it("closes stale agent sessions on the read path before computing stats", async () => {
@@ -561,36 +511,40 @@ describe("me/stats routes", () => {
     expect(response.status).toBe(200);
     expect(agentSessions.reapCalls).toEqual([{
       subject: { organizationId: ids.organization, userId: ids.user, role: "member" },
-      cutoffs: {
-        default: new Date(clockNow.getTime() - 6 * 60 * 60 * 1_000),
-        browser: new Date(clockNow.getTime() - 10 * 60 * 1_000),
-      },
+      cutoff: new Date(clockNow.getTime() - 6 * 60 * 60 * 1_000),
+      now: clockNow,
     }]);
   });
 
   it("never includes another member's sessions or evidence in the caller's stats", async () => {
     const reports = new MemoryReports();
-    const own = session({ durationSeconds: 1_200, startedAt: new Date("2026-08-05T14:00:00.000Z"), stoppedAt: new Date("2026-08-05T14:20:00.000Z") });
+    const own = session({
+      durationSeconds: 1_200,
+      attribution: "default",
+      startedAt: new Date("2026-08-05T14:00:00.000Z"),
+      stoppedAt: new Date("2026-08-05T14:20:00.000Z"),
+    });
     const teammates = session({ userId: ids.teammate });
     reports.sessions.push(own, teammates);
-    // The teammate's evidence overlaps the caller's session window; it still must not count.
+    // The teammate's evidence overlaps the caller's window; it still must not count.
     reports.segments.push({
-      organizationId: ids.organization, userId: ids.teammate, kind: "active",
+      organizationId: ids.organization, userId: ids.teammate, kind: "active", processName: "Code.exe",
       startedAt: own.startedAt, endedAt: own.stoppedAt, receivedAt: new Date("2026-08-05T14:25:00.000Z"),
     });
-    reports.agents.push({
-      organizationId: ids.organization, userId: ids.teammate, source: "kimi_code", ruleId: null, linkedSessionId: teammates.id,
-      startedAt: teammates.startedAt, endedAt: teammates.stoppedAt, lastEventAt: teammates.stoppedAt,
-      receivedAt: new Date("2026-08-05T15:05:00.000Z"),
-    });
+
 
     const response = await createTestApp(reports).request("http://api.test/me/stats", { headers: { authorization: bearerHeader } });
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ totalDurationSeconds: 1_200, corroboratedSeconds: 0 });
+    await expect(response.json()).resolves.toMatchObject({
+      totalDurationSeconds: 1_200,
+      attributedSeconds: 0,
+      unattributedSeconds: 1_200,
+      apps: [],
+    });
 
-    // The teammate, in the same organization, sees their own corroborated session instead.
+    // The teammate, in the same organization, sees their own attributed session instead.
     const teammateResponse = await createTestApp(reports).request("http://api.test/me/stats", { headers: { authorization: teammateBearerHeader } });
-    await expect(teammateResponse.json()).resolves.toMatchObject({ totalDurationSeconds: 3_600, corroboratedSeconds: 3_600 });
+    await expect(teammateResponse.json()).resolves.toMatchObject({ totalDurationSeconds: 3_600, attributedSeconds: 3_600 });
   });
 
   it("breaks down active time per foreground process for the caller only", async () => {

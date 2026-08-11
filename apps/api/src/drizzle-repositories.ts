@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import { generateInviteCode, type AgentSource } from "@clock-in/shared";
-import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lt, ne, or, sql, sum, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, isNotNull, lt, or, sql, sum } from "drizzle-orm";
 import {
   activitySegments,
   agentSessions,
@@ -11,7 +11,6 @@ import {
   projectPathMappings,
   projects,
   timeSessions,
-  userProjectSelections,
   users,
   type DatabaseConnection,
 } from "@clock-in/database";
@@ -32,17 +31,18 @@ import {
   type ActivitySegmentRepository,
   type AgentSessionRecord,
   type AgentSessionRepository,
-  type AgentSessionStaleCutoffs,
   type AppTotalRecord,
   type CreatePathMapping,
   type CreateRunningSession,
   type InsertEndedAgentSession,
   type LeaderboardRowRecord,
+  type ObservedSessionInsert,
   type PathMappingRecord,
   type PathMappingRepository,
   type ProjectRecord,
   type ProjectRepository,
   type ProjectTotalRecord,
+  type SiteTotalRecord,
   type ReportExportRead,
   type ReportLookupRecord,
   type ReportPageOptions,
@@ -53,7 +53,6 @@ import {
   type ReportSummaryRecord,
   type SessionRecord,
   type SessionRepository,
-  type SiteTotalRecord,
   type StopRunningSession,
   type UpdatePathMapping,
   type UpsertStartedAgentSession,
@@ -66,13 +65,13 @@ function asSessionRecord(row: typeof timeSessions.$inferSelect): SessionRecord {
     userId: row.userId,
     clientId: row.clientId,
     projectId: row.projectId,
-    ...(row.deviceId === null ? {} : { deviceId: row.deviceId }),
     description: row.description,
     status: row.status,
     startedAt: row.startedAt,
     stoppedAt: row.stoppedAt,
     idleSeconds: row.idleSeconds,
     durationSeconds: row.durationSeconds,
+    attribution: row.attribution,
   };
 }
 
@@ -89,95 +88,12 @@ function mapCreateError(error: unknown): SessionRepositoryError | null {
   return null;
 }
 
-type TenantDatabase = Pick<DatabaseConnection["db"], "select" | "insert" | "update" | "delete" | "execute">;
-
-async function withLiveSubject<T>(
-  db: DatabaseConnection["db"],
-  subject: AuthenticatedSubject,
-  callback: (transaction: TenantDatabase) => Promise<T>,
-): Promise<T> {
-  return db.transaction(
-    async (transaction) => {
-      const members = await transaction.execute(sql`
-        select ${users.organizationId} as organization_id, ${users.role} as role
-        from ${users}
-        where ${users.id} = ${subject.userId}
-        for update
-      `) as unknown as Array<{ organization_id: string; role: "admin" | "member" }>;
-      if (
-        members[0]?.organization_id !== subject.organizationId
-        || (subject.role !== undefined && members[0]?.role !== subject.role)
-      ) {
-        throw new AppError("forbidden", "Workspace access has changed.");
-      }
-      return callback(transaction);
-    },
-    { isolationLevel: "repeatable read" },
-  );
-}
-
 export class DrizzleProjectRepository implements ProjectRepository {
   public constructor(private readonly db: DatabaseConnection["db"]) {}
 
-  private async ensureDefaultForMember(db: TenantDatabase, subject: AuthenticatedSubject): Promise<ProjectRecord> {
-      const organization = await db.execute(sql`
-        select ${organizations.id}
-        from ${organizations}
-        where ${organizations.id} = ${subject.organizationId}
-        for update
-      `);
-      if (organization.length === 0) {
-        throw new AppError("not_found", "Organization not found.");
-      }
-      await db
-        .insert(projects)
-        .values({ organizationId: subject.organizationId, name: "General Work", isDefault: true })
-        .onConflictDoNothing();
-      const rows = await db
-        .select({
-          id: projects.id,
-          organizationId: projects.organizationId,
-          name: projects.name,
-          archived: projects.archived,
-          isDefault: projects.isDefault,
-        })
-        .from(projects)
-        .where(and(
-          eq(projects.organizationId, subject.organizationId),
-          eq(projects.isDefault, true),
-          eq(projects.archived, false),
-        ))
-        .limit(1);
-      const project = rows[0];
-      if (project === undefined) throw new Error("The organization has no usable default project.");
-      const members = await db
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.organizationId, subject.organizationId));
-      if (members.length > 0) {
-        await db
-          .insert(projectMemberships)
-          .values(members.map((member) => ({
-            organizationId: subject.organizationId,
-            projectId: project.id,
-            userId: member.id,
-          })))
-          .onConflictDoNothing();
-      }
-      return project;
-  }
-
   public async listForMember(subject: AuthenticatedSubject): Promise<ProjectRecord[]> {
-    return withLiveSubject(this.db, subject, async (db) => {
-      await this.ensureDefaultForMember(db, subject);
-      return db
-      .select({
-        id: projects.id,
-        organizationId: projects.organizationId,
-        name: projects.name,
-        archived: projects.archived,
-        isDefault: projects.isDefault,
-      })
+    return this.db
+      .select({ id: projects.id, organizationId: projects.organizationId, name: projects.name, archived: projects.archived, createdAt: projects.createdAt })
       .from(projects)
       .innerJoin(projectMemberships, and(
         eq(projectMemberships.organizationId, projects.organizationId),
@@ -190,20 +106,11 @@ export class DrizzleProjectRepository implements ProjectRepository {
         eq(projects.archived, false),
       ))
       .orderBy(asc(projects.name), asc(projects.id));
-    });
   }
 
   public async findForMember(subject: AuthenticatedSubject, projectId: string): Promise<ProjectRecord | null> {
-    return withLiveSubject(this.db, subject, async (db) => {
-      await this.ensureDefaultForMember(db, subject);
-      const rows = await db
-      .select({
-        id: projects.id,
-        organizationId: projects.organizationId,
-        name: projects.name,
-        archived: projects.archived,
-        isDefault: projects.isDefault,
-      })
+    const rows = await this.db
+      .select({ id: projects.id, organizationId: projects.organizationId, name: projects.name, archived: projects.archived, createdAt: projects.createdAt })
       .from(projects)
       .innerJoin(projectMemberships, and(
         eq(projectMemberships.organizationId, projects.organizationId),
@@ -216,175 +123,20 @@ export class DrizzleProjectRepository implements ProjectRepository {
         eq(projectMemberships.userId, subject.userId),
       ))
       .limit(1);
-      return rows[0] ?? null;
-    });
+    return rows[0] ?? null;
   }
 
   public async createForMember(subject: AuthenticatedSubject, name: string): Promise<ProjectRecord> {
-    return withLiveSubject(this.db, subject, async (db) => {
-      const [project] = await db
+    return this.db.transaction(async (tx) => {
+      const [project] = await tx
         .insert(projects)
         .values({ organizationId: subject.organizationId, name })
-        .returning({
-          id: projects.id,
-          organizationId: projects.organizationId,
-          name: projects.name,
-          archived: projects.archived,
-          isDefault: projects.isDefault,
-        });
+        .returning({ id: projects.id, organizationId: projects.organizationId, name: projects.name, archived: projects.archived, createdAt: projects.createdAt });
       if (project === undefined) throw new Error("Failed to create the project.");
-      await db
+      await tx
         .insert(projectMemberships)
         .values({ organizationId: subject.organizationId, projectId: project.id, userId: subject.userId });
       return project;
-    });
-  }
-
-  public async preferredForMember(subject: AuthenticatedSubject): Promise<ProjectRecord | null> {
-    return withLiveSubject(this.db, subject, async (db) => {
-    const fallback = await this.ensureDefaultForMember(db, subject);
-    const selected = await db
-      .select({
-        id: projects.id,
-        organizationId: projects.organizationId,
-        name: projects.name,
-        archived: projects.archived,
-        isDefault: projects.isDefault,
-      })
-      .from(userProjectSelections)
-      .innerJoin(projects, and(
-        eq(projects.organizationId, userProjectSelections.organizationId),
-        eq(projects.id, userProjectSelections.projectId),
-      ))
-      .where(and(
-        eq(userProjectSelections.organizationId, subject.organizationId),
-        eq(userProjectSelections.userId, subject.userId),
-        eq(projects.archived, false),
-      ))
-      .limit(1);
-    return selected[0] ?? fallback;
-    });
-  }
-
-  public async rememberSelection(subject: AuthenticatedSubject, projectId: string): Promise<void> {
-    await withLiveSubject(this.db, subject, async (db) => {
-    await this.ensureDefaultForMember(db, subject);
-    const rows = await db
-      .select({ id: projects.id, archived: projects.archived })
-      .from(projects)
-      .innerJoin(projectMemberships, and(
-        eq(projectMemberships.organizationId, projects.organizationId),
-        eq(projectMemberships.projectId, projects.id),
-      ))
-      .where(and(
-        eq(projects.id, projectId),
-        eq(projects.organizationId, subject.organizationId),
-        eq(projectMemberships.organizationId, subject.organizationId),
-        eq(projectMemberships.userId, subject.userId),
-      ))
-      .limit(1);
-    const project = rows[0];
-    if (project === undefined || project.archived) return;
-    await db
-      .insert(userProjectSelections)
-      .values({ organizationId: subject.organizationId, userId: subject.userId, projectId: project.id })
-      .onConflictDoUpdate({
-        target: [userProjectSelections.organizationId, userProjectSelections.userId],
-        set: { projectId: project.id, updatedAt: new Date() },
-      });
-    });
-  }
-
-  public async updateForAdmin(
-    subject: AuthenticatedSubject,
-    projectId: string,
-    input: { name?: string; archived?: boolean; replacementProjectId?: string },
-  ): Promise<ProjectRecord | null> {
-    if (subject.role !== "admin") {
-      throw new AppError("forbidden", "Only workspace admins can change projects.");
-    }
-    return withLiveSubject(this.db, subject, async (tx) => {
-      const targetRows = await tx
-        .select({
-          id: projects.id,
-          organizationId: projects.organizationId,
-          name: projects.name,
-          archived: projects.archived,
-          isDefault: projects.isDefault,
-        })
-        .from(projects)
-        .where(and(eq(projects.id, projectId), eq(projects.organizationId, subject.organizationId)))
-        .limit(1);
-      const target = targetRows[0];
-      if (target === undefined) return null;
-
-      const replacingDefault = target.isDefault && (input.archived === true || input.replacementProjectId !== undefined);
-      if (input.replacementProjectId !== undefined && !replacingDefault) {
-        throw new AppError("validation_error", "Only the default project can be replaced.");
-      }
-      if (target.isDefault && input.archived === true && input.replacementProjectId === undefined) {
-        throw new AppError("validation_error", "Choose a replacement before archiving the default project.");
-      }
-
-      if (replacingDefault) {
-        const replacementRows = await tx
-          .select({ id: projects.id, archived: projects.archived })
-          .from(projects)
-          .innerJoin(projectMemberships, and(
-            eq(projectMemberships.organizationId, projects.organizationId),
-            eq(projectMemberships.projectId, projects.id),
-          ))
-          .where(and(
-            eq(projects.id, input.replacementProjectId!),
-            eq(projects.organizationId, subject.organizationId),
-            eq(projects.archived, false),
-            eq(projectMemberships.userId, subject.userId),
-          ))
-          .limit(1);
-        const replacement = replacementRows[0];
-        if (replacement === undefined || replacement.id === target.id) {
-          throw new AppError("validation_error", "Choose another active project as the replacement.");
-        }
-        await tx
-          .update(projects)
-          .set({ isDefault: false, updatedAt: new Date() })
-          .where(eq(projects.id, target.id));
-        await tx
-          .update(projects)
-          .set({ isDefault: true, updatedAt: new Date() })
-          .where(eq(projects.id, replacement.id));
-        const members = await tx
-          .select({ id: users.id })
-          .from(users)
-          .where(eq(users.organizationId, subject.organizationId));
-        if (members.length > 0) {
-          await tx
-            .insert(projectMemberships)
-            .values(members.map((member) => ({
-              organizationId: subject.organizationId,
-              projectId: replacement.id,
-              userId: member.id,
-            })))
-            .onConflictDoNothing();
-        }
-      }
-
-      const rows = await tx
-        .update(projects)
-        .set({
-          ...(input.name === undefined ? {} : { name: input.name }),
-          ...(input.archived === undefined ? {} : { archived: input.archived }),
-          updatedAt: new Date(),
-        })
-        .where(and(eq(projects.id, target.id), eq(projects.organizationId, subject.organizationId)))
-        .returning({
-          id: projects.id,
-          organizationId: projects.organizationId,
-          name: projects.name,
-          archived: projects.archived,
-          isDefault: projects.isDefault,
-        });
-      return rows[0] ?? null;
     });
   }
 }
@@ -393,46 +145,37 @@ export class DrizzleSessionRepository implements SessionRepository {
   public constructor(private readonly db: DatabaseConnection["db"]) {}
 
   public async findByClientId(subject: AuthenticatedSubject, clientId: string): Promise<SessionRecord | null> {
-    return withLiveSubject(this.db, subject, async (db) => {
-    const rows = await db.select().from(timeSessions).where(and(
+    const rows = await this.db.select().from(timeSessions).where(and(
       eq(timeSessions.organizationId, subject.organizationId),
       eq(timeSessions.userId, subject.userId),
       eq(timeSessions.clientId, clientId),
     )).limit(1);
     return rows[0] === undefined ? null : asSessionRecord(rows[0]);
-    });
   }
 
   public async findRunning(subject: AuthenticatedSubject): Promise<SessionRecord | null> {
-    return withLiveSubject(this.db, subject, async (db) => {
-    const rows = await db.select().from(timeSessions).where(and(
+    const rows = await this.db.select().from(timeSessions).where(and(
       eq(timeSessions.organizationId, subject.organizationId),
       eq(timeSessions.userId, subject.userId),
       eq(timeSessions.status, "running"),
     )).limit(1);
     return rows[0] === undefined ? null : asSessionRecord(rows[0]);
-    });
   }
 
   public async findById(subject: AuthenticatedSubject, sessionId: string): Promise<SessionRecord | null> {
-    return withLiveSubject(this.db, subject, async (db) => {
-    const rows = await db.select().from(timeSessions).where(and(
+    const rows = await this.db.select().from(timeSessions).where(and(
       eq(timeSessions.id, sessionId),
       eq(timeSessions.organizationId, subject.organizationId),
       eq(timeSessions.userId, subject.userId),
     )).limit(1);
     return rows[0] === undefined ? null : asSessionRecord(rows[0]);
-    });
   }
 
   public async createRunning(input: CreateRunningSession): Promise<SessionRecord> {
     try {
-      const rows = await withLiveSubject(this.db, {
-        organizationId: input.organizationId,
-        userId: input.userId,
-      }, async (transaction) => transaction
+      const rows = await this.db.transaction(async (transaction) => transaction
         .insert(timeSessions)
-        .values({ ...input, status: "running", stoppedAt: null, idleSeconds: 0, durationSeconds: null })
+        .values({ ...input, status: "running", stoppedAt: null, idleSeconds: 0, durationSeconds: null, attribution: "manual" })
         .returning());
       return asSessionRecord(rows[0]!);
     } catch (error) {
@@ -443,7 +186,7 @@ export class DrizzleSessionRepository implements SessionRepository {
   }
 
   public async stopRunning(subject: AuthenticatedSubject, sessionId: string, input: StopRunningSession): Promise<SessionRecord | null> {
-    const rows = await withLiveSubject(this.db, subject, async (transaction) => transaction
+    const rows = await this.db.transaction(async (transaction) => transaction
       .update(timeSessions)
       .set({
         status: input.status,
@@ -460,6 +203,16 @@ export class DrizzleSessionRepository implements SessionRepository {
       ))
       .returning());
     return rows[0] === undefined ? null : asSessionRecord(rows[0]);
+  }
+
+  public async insertObservedBatch(sessions: ObservedSessionInsert[]): Promise<void> {
+    if (sessions.length === 0) return;
+    await this.db
+      .insert(timeSessions)
+      .values(sessions.map((session) => ({ ...session, description: null })))
+      .onConflictDoNothing({
+        target: [timeSessions.organizationId, timeSessions.userId, timeSessions.clientId],
+      });
   }
 }
 
@@ -489,9 +242,8 @@ export class DrizzleAccountStore implements AccountStore {
   public async joinOrganization(
     subject: AuthenticatedSubject,
     inviteCode: string,
-    expectedOrganizationId?: string,
   ): Promise<AuthenticatedUser> {
-    return withLiveSubject(this.db, subject, async (tx) => {
+    return this.db.transaction(async (tx) => {
       const [target] = await tx
         .select({ id: organizations.id })
         .from(organizations)
@@ -500,19 +252,9 @@ export class DrizzleAccountStore implements AccountStore {
       if (target === undefined) {
         throw new AppError("not_found", "That invite code does not match an organization.");
       }
-      if (expectedOrganizationId !== undefined && target.id !== expectedOrganizationId) {
-        throw new AppError("conflict", "That workspace invitation changed. Review it and try again.");
-      }
 
-      const lockedUser = await tx.execute(sql`
-        select ${users.id}
-        from ${users}
-        where ${users.id} = ${subject.userId}
-        for update
-      `);
-      if (lockedUser.length === 0) throw new AppError("not_found", "Account not found.");
       const [current] = await tx
-        .select({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role })
+        .select({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId })
         .from(users)
         .where(eq(users.id, subject.userId))
         .limit(1);
@@ -520,75 +262,27 @@ export class DrizzleAccountStore implements AccountStore {
       // Re-entering the same workspace is a no-op rather than an error.
       if (current.organizationId === target.id) return current;
 
-      for (const organizationId of [current.organizationId, target.id].sort()) {
-        const lockedOrganization = await tx.execute(sql`
-          select ${organizations.id}
-          from ${organizations}
-          where ${organizations.id} = ${organizationId}
-          for update
-        `);
-        if (lockedOrganization.length === 0) {
-          throw new AppError("not_found", "That invite code does not match an organization.");
-        }
-      }
-
-      const [recorded, activity, agent, mappings] = await Promise.all([
-        tx
-          .select({ total: count(timeSessions.id) })
-          .from(timeSessions)
-          .where(and(eq(timeSessions.organizationId, current.organizationId), eq(timeSessions.userId, subject.userId))),
-        tx
-          .select({ total: count(activitySegments.id) })
-          .from(activitySegments)
-          .where(and(eq(activitySegments.organizationId, current.organizationId), eq(activitySegments.userId, subject.userId))),
-        tx
-          .select({ total: count(agentSessions.id) })
-          .from(agentSessions)
-          .where(and(eq(agentSessions.organizationId, current.organizationId), eq(agentSessions.userId, subject.userId))),
-        tx
-          .select({ total: count(projectPathMappings.id) })
-          .from(projectPathMappings)
-          .where(and(eq(projectPathMappings.organizationId, current.organizationId), eq(projectPathMappings.userId, subject.userId))),
-      ]);
-      if ([recorded, activity, agent, mappings].some((rows) => Number(rows[0]?.total ?? 0) > 0)) {
+      // A recorded session points at a project in the workspace being left, and
+      // that project does not exist in the new one. Rather than invent a mapping
+      // or silently drop the time, refuse and say why.
+      const [recorded] = await tx
+        .select({ total: count(timeSessions.id) })
+        .from(timeSessions)
+        .where(eq(timeSessions.userId, subject.userId));
+      if (Number(recorded?.total ?? 0) > 0) {
         throw new AppError(
           "conflict",
-          "This account has recorded workspace evidence, so it cannot be moved.",
+          "This account has already recorded time in its current workspace, so it cannot be moved.",
         );
       }
 
       const previousOrganizationId = current.organizationId;
-      if (current.role === "admin") {
-        const [remainingMember] = await tx
-          .select({ id: users.id })
-          .from(users)
-          .where(and(
-            eq(users.organizationId, previousOrganizationId),
-            ne(users.id, subject.userId),
-          ))
-          .limit(1);
-        const [remainingAdministrator] = await tx
-          .select({ id: users.id })
-          .from(users)
-          .where(and(
-            eq(users.organizationId, previousOrganizationId),
-            ne(users.id, subject.userId),
-            eq(users.role, "admin"),
-          ))
-          .limit(1);
-        if (remainingMember !== undefined && remainingAdministrator === undefined) {
-          throw new AppError(
-            "conflict",
-            "The final administrator cannot leave a workspace while it still has members.",
-          );
-        }
-      }
       await tx.delete(projectMemberships).where(eq(projectMemberships.userId, subject.userId));
       const [moved] = await tx
         .update(users)
-        .set({ organizationId: target.id, role: "member", updatedAt: new Date() })
+        .set({ organizationId: target.id, updatedAt: new Date() })
         .where(eq(users.id, subject.userId))
-        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role });
+        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
       if (moved === undefined) throw new Error("Failed to move the account into its new organization.");
 
       const active = await tx
@@ -612,23 +306,6 @@ export class DrizzleAccountStore implements AccountStore {
       }
 
       return moved;
-    });
-  }
-
-  public async previewOrganizationJoin(
-    subject: AuthenticatedSubject,
-    inviteCode: string,
-  ): Promise<OrganizationRecord> {
-    return withLiveSubject(this.db, subject, async (tx) => {
-      const [organization] = await tx
-        .select({ id: organizations.id, name: organizations.name, inviteCode: organizations.inviteCode })
-        .from(organizations)
-        .where(eq(organizations.inviteCode, inviteCode))
-        .limit(1);
-      if (organization === undefined) {
-        throw new AppError("not_found", "That invite code does not match an organization.");
-      }
-      return organization;
     });
   }
 
@@ -682,19 +359,13 @@ export class DrizzleAccountStore implements AccountStore {
     });
   }
 
-  public async findOrganization(
-    organizationId: string,
-    subject?: AuthenticatedSubject,
-  ): Promise<OrganizationRecord | null> {
-    const read = async (db: Pick<DatabaseConnection["db"], "select">): Promise<OrganizationRecord | null> => {
-    const rows = await db
+  public async findOrganization(organizationId: string): Promise<OrganizationRecord | null> {
+    const rows = await this.db
       .select({ id: organizations.id, name: organizations.name, inviteCode: organizations.inviteCode })
       .from(organizations)
       .where(eq(organizations.id, organizationId))
       .limit(1);
     return rows[0] ?? null;
-    };
-    return subject === undefined ? read(this.db) : withLiveSubject(this.db, subject, read);
   }
 
   /**
@@ -712,16 +383,6 @@ export class DrizzleAccountStore implements AccountStore {
         throw new AppError("not_found", "That invite code does not match an organization.");
       }
 
-      const lockedOrganization = await tx.execute(sql`
-        select ${organizations.id}
-        from ${organizations}
-        where ${organizations.id} = ${organization.id}
-        for update
-      `);
-      if (lockedOrganization.length === 0) {
-        throw new AppError("not_found", "That invite code does not match an organization.");
-      }
-
       const [user] = await tx
         .insert(users)
         .values({
@@ -729,9 +390,8 @@ export class DrizzleAccountStore implements AccountStore {
           organizationId: organization.id,
           email: identity.email,
           name: identity.name,
-          role: "member",
         })
-        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role });
+        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
       if (user === undefined) throw new Error("Failed to create a user for a joining account.");
 
       const active = await tx
@@ -754,7 +414,7 @@ export class DrizzleAccountStore implements AccountStore {
 
   private async find(authUserId: string): Promise<AuthenticatedUser | null> {
     const rows = await this.db
-      .select({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role })
+      .select({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId })
       .from(users)
       .where(eq(users.id, authUserId))
       .limit(1);
@@ -766,7 +426,7 @@ export class DrizzleAccountStore implements AccountStore {
       .update(users)
       .set({ email: identity.email, name: identity.name, updatedAt: new Date() })
       .where(eq(users.id, identity.authUserId))
-      .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role });
+      .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
     const row = rows[0];
     if (row === undefined) throw new Error("The signed-in account disappeared during profile sync.");
     return row;
@@ -790,18 +450,13 @@ export class DrizzleAccountStore implements AccountStore {
           organizationId: organization.id,
           email: identity.email,
           name: identity.name,
-          role: "admin",
         })
-        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role });
+        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
       if (user === undefined) throw new Error("Failed to create a user for a new account.");
-
-      await tx
-        .insert(organizationAdminClaims)
-        .values({ organizationId: organization.id, userId: user.id, kind: "creator" });
 
       const [project] = await tx
         .insert(projects)
-        .values({ organizationId: organization.id, name: "General Work", isDefault: true })
+        .values({ organizationId: organization.id, name: "General" })
         .returning({ id: projects.id });
       if (project === undefined) throw new Error("Failed to create a starter project for a new account.");
 
@@ -815,175 +470,38 @@ export class DrizzleAccountStore implements AccountStore {
 }
 
 /**
- * Corroborated seconds for one time session: the overlap of [startedAt, stoppedAt]
- * with the union of the member's fresh "active" activity segments and agent sessions linked
- * to the session, floored and capped at durationSeconds. Browser spans are excluded:
- * they attribute active time to a project but never corroborate it. Evidence received
- * more than seven days after it occurred is stored but never corroborates. Overlapping
- * evidence intervals are unioned, so simultaneous devices never inflate corroborated
- * wall-clock time.
+ * Attributed seconds for one time session: its whole duration when something
+ * named the project (a legacy manual start, an explicit selection, or an agent
+ * session's working directory), and zero when it fell back to the user's
+ * default project. Attribution is a property of the session, not an overlap, so
+ * attributed time can never exceed the session it describes.
  */
-interface ClippedRange {
-  from?: Date;
-  toExclusive?: Date;
-}
-
-function clippedRange(query: ReportQuery): ClippedRange | null {
-  if (!query.clipToRange || (query.from === undefined && query.toExclusive === undefined)) return null;
-  return {
-    ...(query.from === undefined ? {} : { from: query.from }),
-    ...(query.toExclusive === undefined ? {} : { toExclusive: query.toExclusive }),
-  };
-}
-
-function inactiveDurationSecondsSql(sessionStart: SQL, sessionEnd: SQL) {
-  return sql<number>`floor(coalesce((
-    select sum(extract(epoch from (merged_end - merged_start)))
-    from (
-      select min(segment_start) as merged_start, max(segment_end) as merged_end
-      from (
-        select segment_start, segment_end,
-          sum(case when previous_end is null or segment_start > previous_end then 1 else 0 end)
-            over (order by segment_start, segment_end rows unbounded preceding) as interval_group
-        from (
-          select segment_start, segment_end,
-            max(segment_end) over (
-              order by segment_start, segment_end
-              rows between unbounded preceding and 1 preceding
-            ) as previous_end
-          from (
-            select
-              greatest(${activitySegments.startedAt}, ${sessionStart}) as segment_start,
-              least(${activitySegments.endedAt}, ${sessionEnd}) as segment_end
-            from ${activitySegments}
-            where ${activitySegments.organizationId} = ${timeSessions.organizationId}
-              and ${activitySegments.userId} = ${timeSessions.userId}
-              and ${timeSessions.deviceId} is not null
-              and ${activitySegments.deviceId} = ${timeSessions.deviceId}
-              and ${activitySegments.kind} <> 'active'
-              and ${activitySegments.startedAt} < ${sessionEnd}
-              and ${activitySegments.endedAt} > ${sessionStart}
-          ) as clipped_segments
-        ) as ordered_segments
-      ) as grouped_segments
-      group by interval_group
-    ) as merged_segments
-  ), 0))::integer`;
-}
-
-function sessionDurationSecondsSql(range: ClippedRange | null) {
-  if (range === null) return sql<number>`${timeSessions.durationSeconds}`;
-  const sessionStart = range.from === undefined
-    ? sql`${timeSessions.startedAt}`
-    : sql`greatest(${timeSessions.startedAt}, ${range.from.toISOString()})`;
-  const sessionEnd = range.toExclusive === undefined
-    ? sql`${timeSessions.stoppedAt}`
-    : sql`least(${timeSessions.stoppedAt}, ${range.toExclusive.toISOString()})`;
-  const elapsed = sql<number>`floor(greatest(0, extract(epoch from (
-    ${sessionEnd} - ${sessionStart}
-  ))))::integer`;
-  const fullIdle = inactiveDurationSecondsSql(
-    sql`${timeSessions.startedAt}`,
-    sql`${timeSessions.stoppedAt}`,
-  );
-  const clippedIdle = inactiveDurationSecondsSql(sessionStart, sessionEnd);
-  const startsBeforeRange = range.from === undefined
-    ? sql<boolean>`false`
-    : sql<boolean>`${timeSessions.startedAt} < ${range.from.toISOString()}`;
-  const endsAfterRange = range.toExclusive === undefined
-    ? sql<boolean>`false`
-    : sql<boolean>`${timeSessions.stoppedAt} > ${range.toExclusive.toISOString()}`;
-  const boundaryClipped = sql<boolean>`(${startsBeforeRange} or ${endsAfterRange})`;
-  return sql<number>`case
-    when not ${boundaryClipped}
-      then ${timeSessions.durationSeconds}
-    when ${fullIdle} = ${timeSessions.idleSeconds}
-      then greatest(0, ${elapsed} - ${clippedIdle})
-    else 0
-  end::integer`;
-}
-
-function corroboratedSecondsSql(range: ClippedRange | null = null) {
-  const sessionStart = range === null || range.from === undefined
-    ? sql`${timeSessions.startedAt}`
-    : sql`greatest(${timeSessions.startedAt}, ${range.from.toISOString()})`;
-  const sessionEnd = range === null || range.toExclusive === undefined
-    ? sql`${timeSessions.stoppedAt}`
-    : sql`least(${timeSessions.stoppedAt}, ${range.toExclusive.toISOString()})`;
-  const sessionDuration = sessionDurationSecondsSql(range);
-  return sql<string | null>`least(
-    ${sessionDuration},
-    floor(coalesce((
-      select sum(extract(epoch from (merged_end - merged_start)))
-      from (
-        select min(segment_start) as merged_start, max(segment_end) as merged_end
-        from (
-          select segment_start, segment_end,
-            sum(case when previous_end is null or segment_start > previous_end then 1 else 0 end)
-              over (order by segment_start, segment_end rows unbounded preceding) as interval_group
-          from (
-            select segment_start, segment_end,
-              max(segment_end) over (
-                order by segment_start, segment_end
-                rows between unbounded preceding and 1 preceding
-              ) as previous_end
-            from (
-              select
-                greatest(${activitySegments.startedAt}, ${sessionStart}) as segment_start,
-                least(${activitySegments.endedAt}, ${sessionEnd}) as segment_end
-              from ${activitySegments}
-              where ${activitySegments.organizationId} = ${timeSessions.organizationId}
-                and ${activitySegments.userId} = ${timeSessions.userId}
-                and ${timeSessions.deviceId} is not null
-                and ${activitySegments.deviceId} = ${timeSessions.deviceId}
-                and ${activitySegments.kind} = 'active'
-                and ${activitySegments.startedAt} < ${sessionEnd}
-                and ${activitySegments.endedAt} > ${sessionStart}
-                and ${activitySegments.receivedAt} <= ${activitySegments.endedAt} + interval '7 days'
-              union all
-              select
-                greatest(${agentSessions.startedAt}, ${sessionStart}) as segment_start,
-                least(coalesce(${agentSessions.endedAt}, ${agentSessions.lastEventAt}), ${sessionEnd}) as segment_end
-              from ${agentSessions}
-              where ${agentSessions.organizationId} = ${timeSessions.organizationId}
-                and ${agentSessions.userId} = ${timeSessions.userId}
-                and ${agentSessions.linkedSessionId} = ${timeSessions.id}
-                and ${agentSessions.source} <> 'browser'
-                and ${agentSessions.startedAt} < ${sessionEnd}
-                and coalesce(${agentSessions.endedAt}, ${agentSessions.lastEventAt}) > ${sessionStart}
-                and ${agentSessions.receivedAt} <= coalesce(${agentSessions.endedAt}, ${agentSessions.lastEventAt}) + interval '7 days'
-            ) as evidence_segments
-          ) as ordered_segments
-        ) as grouped_segments
-        group by interval_group
-      ) as merged_segments
-    ), 0))
-  )::bigint`;
+function attributedSecondsSql() {
+  return sql<string | null>`case
+    when ${timeSessions.attribution} = 'default' then 0
+    else coalesce(${timeSessions.durationSeconds}, 0)
+  end`;
 }
 
 export class DrizzleReportRepository implements ReportRepository {
   public constructor(private readonly db: DatabaseConnection["db"]) {}
 
   public async findProjectForOrganization(subject: AuthenticatedSubject, projectId: string): Promise<ReportLookupRecord | null> {
-    return withLiveSubject(this.db, subject, async (db) => {
-    const rows = await db
+    const rows = await this.db
       .select({ id: projects.id, name: projects.name })
       .from(projects)
       .where(and(eq(projects.id, projectId), eq(projects.organizationId, subject.organizationId)))
       .limit(1);
     return rows[0] ?? null;
-    });
   }
 
   public async findUserForOrganization(subject: AuthenticatedSubject, userId: string): Promise<ReportLookupRecord | null> {
-    return withLiveSubject(this.db, subject, async (db) => {
-    const rows = await db
+    const rows = await this.db
       .select({ id: users.id, name: users.name })
       .from(users)
       .where(and(eq(users.id, userId), eq(users.organizationId, subject.organizationId)))
       .limit(1);
     return rows[0] ?? null;
-    });
   }
 
   private predicates(subject: AuthenticatedSubject, query: ReportQuery) {
@@ -991,57 +509,16 @@ export class DrizzleReportRepository implements ReportRepository {
       eq(timeSessions.organizationId, subject.organizationId),
       or(eq(timeSessions.status, "stopped"), eq(timeSessions.status, "needs_review")),
     ];
-    const range = clippedRange(query);
-    if (range !== null) {
-      if (range.toExclusive !== undefined) conditions.push(lt(timeSessions.startedAt, range.toExclusive));
-      if (range.from !== undefined) conditions.push(gt(timeSessions.stoppedAt, range.from));
-    } else {
-      if (query.from !== undefined) conditions.push(gte(timeSessions.startedAt, query.from));
-      if (query.toExclusive !== undefined) conditions.push(lt(timeSessions.startedAt, query.toExclusive));
-    }
+    if (query.from !== undefined) conditions.push(gte(timeSessions.startedAt, query.from));
+    if (query.toExclusive !== undefined) conditions.push(lt(timeSessions.startedAt, query.toExclusive));
     if (query.projectId !== undefined) conditions.push(eq(timeSessions.projectId, query.projectId));
     if (query.userId !== undefined) conditions.push(eq(timeSessions.userId, query.userId));
     return conditions;
   }
 
-  private async assertExactRangeSupport(
-    db: Pick<DatabaseConnection["db"], "select">,
-    subject: AuthenticatedSubject,
-    query: ReportQuery,
-  ): Promise<void> {
-    const range = clippedRange(query);
-    if (range === null) return;
-    const clippedAtBoundary = [
-      range.from === undefined
-        ? undefined
-        : and(lt(timeSessions.startedAt, range.from), gt(timeSessions.stoppedAt, range.from)),
-      range.toExclusive === undefined
-        ? undefined
-        : and(lt(timeSessions.startedAt, range.toExclusive), gt(timeSessions.stoppedAt, range.toExclusive)),
-    ].filter((condition): condition is SQL => condition !== undefined);
-    if (clippedAtBoundary.length === 0) return;
-    const fullIdle = inactiveDurationSecondsSql(
-      sql`${timeSessions.startedAt}`,
-      sql`${timeSessions.stoppedAt}`,
-    );
-    const unsupported = await db
-      .select({ id: timeSessions.id })
-      .from(timeSessions)
-      .where(and(
-        ...this.predicates(subject, query),
-        ne(fullIdle, timeSessions.idleSeconds),
-        or(...clippedAtBoundary),
-      ))
-      .limit(1);
-    if (unsupported.length > 0) {
-      throw new AppError("validation_error", "This range includes time without enough activity evidence to clip exactly.");
-    }
-  }
-
   private async summaryFor(db: Pick<DatabaseConnection["db"], "select">, subject: AuthenticatedSubject, query: ReportQuery): Promise<ReportSummaryRecord> {
-    const totalDuration = sum(sessionDurationSecondsSql(clippedRange(query)));
     const rows = await db
-      .select({ totalRows: count(timeSessions.id), totalDurationSeconds: totalDuration })
+      .select({ totalRows: count(timeSessions.id), totalDurationSeconds: sum(timeSessions.durationSeconds) })
       .from(timeSessions)
       .where(and(...this.predicates(subject, query)));
     return rows[0] ?? { totalRows: 0, totalDurationSeconds: 0 };
@@ -1053,7 +530,6 @@ export class DrizzleReportRepository implements ReportRepository {
     query: ReportQuery,
     options: ReportPageOptions,
   ): Promise<ReportRowRecord[]> {
-    const range = clippedRange(query);
     const conditions = [
       ...this.predicates(subject, query),
       eq(users.organizationId, subject.organizationId),
@@ -1071,8 +547,8 @@ export class DrizzleReportRepository implements ReportRepository {
         startedAt: timeSessions.startedAt,
         stoppedAt: timeSessions.stoppedAt,
         idleSeconds: timeSessions.idleSeconds,
-        durationSeconds: sessionDurationSecondsSql(range),
-        corroboratedSeconds: corroboratedSecondsSql(range),
+        durationSeconds: timeSessions.durationSeconds,
+        attribution: timeSessions.attribution,
       })
       .from(timeSessions)
       .innerJoin(users, and(
@@ -1102,7 +578,7 @@ export class DrizzleReportRepository implements ReportRepository {
         stoppedAt: row.stoppedAt,
         idleSeconds: row.idleSeconds,
         durationSeconds: row.durationSeconds,
-        corroboratedSeconds: row.corroboratedSeconds,
+        attribution: row.attribution,
       };
     });
   }
@@ -1112,34 +588,31 @@ export class DrizzleReportRepository implements ReportRepository {
     subject: AuthenticatedSubject,
     query: ReportQuery,
   ): Promise<LeaderboardRowRecord[]> {
-    const range = clippedRange(query);
-    const totalDuration = sum(sessionDurationSecondsSql(range));
-    return this.snapshot(subject, query, async (db) => {
-      const rows = await db
-        .select({
-          userId: users.id,
-          userName: users.name,
-          durationSeconds: totalDuration,
-          sessionCount: count(timeSessions.id),
-          corroboratedSeconds: sum(corroboratedSecondsSql(range)),
-        })
-        .from(timeSessions)
-        .innerJoin(users, and(
-          eq(users.organizationId, timeSessions.organizationId),
-          eq(users.id, timeSessions.userId),
-        ))
-        .where(and(...this.predicates(subject, query), eq(users.organizationId, subject.organizationId)))
-        .groupBy(users.id, users.name)
-        // id breaks ties so equal totals do not reorder between requests.
-        .orderBy(desc(totalDuration), asc(users.id));
+    const totalDuration = sum(timeSessions.durationSeconds);
+    const rows = await this.db
+      .select({
+        userId: users.id,
+        userName: users.name,
+        durationSeconds: totalDuration,
+        sessionCount: count(timeSessions.id),
+        attributedSeconds: sum(attributedSecondsSql()),
+      })
+      .from(timeSessions)
+      .innerJoin(users, and(
+        eq(users.organizationId, timeSessions.organizationId),
+        eq(users.id, timeSessions.userId),
+      ))
+      .where(and(...this.predicates(subject, query), eq(users.organizationId, subject.organizationId)))
+      .groupBy(users.id, users.name)
+      // id breaks ties so equal totals do not reorder between requests.
+      .orderBy(desc(totalDuration), asc(users.id));
 
-      return rows.map((row) => ({
-        user: { id: row.userId, name: row.userName },
-        durationSeconds: row.durationSeconds,
-        sessionCount: row.sessionCount,
-        corroboratedSeconds: row.corroboratedSeconds,
-      }));
-    });
+    return rows.map((row) => ({
+      user: { id: row.userId, name: row.userName },
+      durationSeconds: row.durationSeconds,
+      sessionCount: row.sessionCount,
+      attributedSeconds: row.attributedSeconds,
+    }));
   }
 
   /** One row per project the member recorded time in, heaviest first. */
@@ -1147,44 +620,40 @@ export class DrizzleReportRepository implements ReportRepository {
     subject: AuthenticatedSubject,
     query: ReportQuery,
   ): Promise<ProjectTotalRecord[]> {
-    const range = clippedRange(query);
-    const sessionDuration = sessionDurationSecondsSql(range);
-    const totalDuration = sum(sessionDuration);
-    return this.snapshot(subject, query, async (db) => {
-      const rows = await db
-        .select({
-          projectId: projects.id,
-          projectName: projects.name,
-          durationSeconds: totalDuration,
-          corroboratedSeconds: sum(corroboratedSecondsSql(range)),
-          sessionCount: count(timeSessions.id),
-        })
-        .from(timeSessions)
-        .innerJoin(projects, and(
-          eq(projects.organizationId, timeSessions.organizationId),
-          eq(projects.id, timeSessions.projectId),
-        ))
-        .where(and(
-          ...this.predicates(subject, query),
-          eq(timeSessions.userId, subject.userId),
-          eq(projects.organizationId, subject.organizationId),
-        ))
-        .groupBy(projects.id, projects.name)
-        // id breaks ties so equal totals do not reorder between requests.
-        .orderBy(desc(totalDuration), asc(projects.id));
+    const totalDuration = sum(timeSessions.durationSeconds);
+    const rows = await this.db
+      .select({
+        projectId: projects.id,
+        projectName: projects.name,
+        durationSeconds: totalDuration,
+        attributedSeconds: sum(attributedSecondsSql()),
+        sessionCount: count(timeSessions.id),
+      })
+      .from(timeSessions)
+      .innerJoin(projects, and(
+        eq(projects.organizationId, timeSessions.organizationId),
+        eq(projects.id, timeSessions.projectId),
+      ))
+      .where(and(
+        ...this.predicates(subject, query),
+        eq(timeSessions.userId, subject.userId),
+        eq(projects.organizationId, subject.organizationId),
+      ))
+      .groupBy(projects.id, projects.name)
+      // id breaks ties so equal totals do not reorder between requests.
+      .orderBy(desc(totalDuration), asc(projects.id));
 
-      return rows.map((row) => ({
-        project: { id: row.projectId, name: row.projectName },
-        durationSeconds: row.durationSeconds,
-        corroboratedSeconds: row.corroboratedSeconds,
-        sessionCount: row.sessionCount,
-      }));
-    });
+    return rows.map((row) => ({
+      project: { id: row.projectId, name: row.projectName },
+      durationSeconds: row.durationSeconds,
+      attributedSeconds: row.attributedSeconds,
+      sessionCount: row.sessionCount,
+    }));
   }
 
   /**
    * One row per foreground process the member was active in, heaviest first.
-   * The same freshness window as corroboration applies, and segments are
+   * The same freshness window as observed-session uploads applies, and segments are
    * clamped to the requested range so only in-range time counts.
    */
   public async readAppTotalsForMember(
@@ -1195,172 +664,54 @@ export class DrizzleReportRepository implements ReportRepository {
     // cannot serialize a bare Date — bind the bounds as ISO strings instead.
     const rangeStart = query.from === undefined ? sql`${activitySegments.startedAt}` : sql`${query.from.toISOString()}`;
     const rangeEnd = query.toExclusive === undefined ? sql`${activitySegments.endedAt}` : sql`${query.toExclusive.toISOString()}`;
-    // The subtraction inside extract() is parenthesized on purpose: with bound
-    // parameters inside nested calls Postgres mis-parses the unwrapped form and
-    // rejects the query at the table FROM.
-    const duration = sql<string | null>`floor(sum(greatest(0, extract(epoch from (
+    const duration = sql<string | null>`sum(greatest(0, extract(epoch from
       least(${activitySegments.endedAt}, ${rangeEnd})
-      - greatest(${activitySegments.startedAt}, ${rangeStart})
-    )))))`;
-    return this.snapshot(subject, query, async (db) => {
-      const rows = await db
-        .select({
-          processName: activitySegments.processName,
-          durationSeconds: duration,
-        })
-        .from(activitySegments)
-        .where(and(
-          eq(activitySegments.organizationId, subject.organizationId),
-          eq(activitySegments.userId, subject.userId),
-          eq(activitySegments.kind, "active"),
-          isNotNull(activitySegments.processName),
-          ...(query.from === undefined ? [] : [gt(activitySegments.endedAt, query.from)]),
-          ...(query.toExclusive === undefined ? [] : [lt(activitySegments.startedAt, query.toExclusive)]),
-          sql`${activitySegments.receivedAt} <= ${activitySegments.endedAt} + interval '7 days'`,
-        ))
-        .groupBy(activitySegments.processName)
-        .having(gt(duration, 0))
-        // processName breaks ties so equal totals do not reorder between requests.
-        .orderBy(desc(duration), asc(activitySegments.processName));
+      - greatest(${activitySegments.startedAt}, ${rangeStart}))))`;
+    const rows = await this.db
+      .select({
+        processName: activitySegments.processName,
+        durationSeconds: duration,
+      })
+      .from(activitySegments)
+      .where(and(
+        eq(activitySegments.organizationId, subject.organizationId),
+        eq(activitySegments.userId, subject.userId),
+        eq(activitySegments.kind, "active"),
+        isNotNull(activitySegments.processName),
+        ...(query.from === undefined ? [] : [gt(activitySegments.endedAt, query.from)]),
+        ...(query.toExclusive === undefined ? [] : [lt(activitySegments.startedAt, query.toExclusive)]),
+        sql`${activitySegments.receivedAt} <= ${activitySegments.endedAt} + interval '7 days'`,
+      ))
+      .groupBy(activitySegments.processName)
+      // processName breaks ties so equal totals do not reorder between requests.
+      .orderBy(desc(duration), asc(activitySegments.processName));
 
-      return rows.map((row) => {
-        if (row.processName === null) throw new Error("App totals query returned a null process name.");
-        return { processName: row.processName, durationSeconds: row.durationSeconds };
-      });
+    return rows.map((row) => {
+      if (row.processName === null) throw new Error("App totals query returned a null process name.");
+      return { processName: row.processName, durationSeconds: row.durationSeconds };
     });
   }
 
-  /**
-   * One row per url rule the member's browser spans matched, heaviest first.
-   * Span time counts only where it overlaps the member's fresh "active"
-   * segments, both clamped to the requested range — a focused tab on an idle
-   * machine attributes nothing. Both sides keep corroboration's seven-day
-   * freshness window, and a deleted rule's spans drop out with its mapping row.
-   * Concurrent spans on the same rule and concurrent active segments across
-   * devices each merge into interval sets before their overlap is summed, so
-   * neither side can count one focused wall-clock second twice.
-   */
-  public async readSiteTotalsForMember(
-    subject: AuthenticatedSubject,
-    query: ReportQuery,
-  ): Promise<SiteTotalRecord[]> {
-    // Raw sql`` interpolation bypasses drizzle's Date mapping, and postgres-js
-    // cannot serialize a bare Date — bind the bounds as ISO strings instead.
-    const windowStart = query.from === undefined
-      ? sql`greatest(seg.started_at, s.started_at)`
-      : sql`greatest(seg.started_at, s.started_at, ${query.from.toISOString()})`;
-    const windowEnd = query.toExclusive === undefined
-      ? sql`least(seg.ended_at, s.ended_at)`
-      : sql`least(seg.ended_at, s.ended_at, ${query.toExclusive.toISOString()})`;
-    // Overlapping and touching intervals collapse into islands via the running
-    // max of previous ends. Spans partition by rule; active segments union
-    // across devices because site totals represent focused wall-clock time.
-    return withLiveSubject(this.db, subject, async (db) => {
-      const rows = await db.execute(sql`
-        with spans as (
-        select rule_id, started_at, coalesce(ended_at, last_event_at) as ended_at
-        from agent_sessions
-        where organization_id = ${subject.organizationId}
-          and user_id = ${subject.userId}
-          and source = 'browser'
-          and rule_id is not null
-          and received_at <= coalesce(ended_at, last_event_at) + interval '7 days'
-          ${query.from === undefined ? sql`` : sql`and coalesce(ended_at, last_event_at) > ${query.from.toISOString()}`}
-          ${query.toExclusive === undefined ? sql`` : sql`and started_at < ${query.toExclusive.toISOString()}`}
-      ),
-      islands as (
-        select rule_id, started_at, ended_at,
-          sum(case when prev_end is null or started_at > prev_end then 1 else 0 end)
-            over (partition by rule_id order by started_at, ended_at) as island
-        from (
-          select rule_id, started_at, ended_at,
-            max(ended_at) over (
-              partition by rule_id order by started_at, ended_at
-              rows between unbounded preceding and 1 preceding
-            ) as prev_end
-          from spans
-        ) ordered_spans
-      ),
-      merged_spans as (
-        select rule_id, min(started_at) as started_at, max(ended_at) as ended_at
-        from islands
-        group by rule_id, island
-      ),
-      active_segments as (
-        select started_at, ended_at
-        from activity_segments
-        where organization_id = ${subject.organizationId}
-          and user_id = ${subject.userId}
-          and kind = 'active'
-          and received_at <= ended_at + interval '7 days'
-          ${query.from === undefined ? sql`` : sql`and ended_at > ${query.from.toISOString()}`}
-          ${query.toExclusive === undefined ? sql`` : sql`and started_at < ${query.toExclusive.toISOString()}`}
-      ),
-      active_islands as (
-        select started_at, ended_at,
-          sum(case when prev_end is null or started_at > prev_end then 1 else 0 end)
-            over (order by started_at, ended_at) as island
-        from (
-          select started_at, ended_at,
-            max(ended_at) over (
-              order by started_at, ended_at
-              rows between unbounded preceding and 1 preceding
-            ) as prev_end
-          from active_segments
-        ) ordered_segments
-      ),
-      merged_active_segments as (
-        select min(started_at) as started_at, max(ended_at) as ended_at
-        from active_islands
-        group by island
-      ),
-      site_totals as (
-        select m.id as "mappingId", m.path_prefix as "pattern", m.project_id as "projectId",
-          floor(sum(greatest(0, extract(epoch from (${windowEnd} - ${windowStart})))))::bigint as "durationSeconds"
-        from merged_spans s
-        join project_path_mappings m
-          on m.organization_id = ${subject.organizationId} and m.user_id = ${subject.userId}
-          and m.id = s.rule_id and m.kind = 'url_rule'
-        join merged_active_segments seg
-          on seg.started_at < s.ended_at and seg.ended_at > s.started_at
-        where true
-          ${query.from === undefined ? sql`` : sql`and s.ended_at > ${query.from.toISOString()}`}
-          ${query.toExclusive === undefined ? sql`` : sql`and s.started_at < ${query.toExclusive.toISOString()}`}
-        group by m.id, m.path_prefix, m.project_id
-      )
-      select "mappingId", "pattern", "projectId", "durationSeconds"
-      from site_totals
-      where "durationSeconds" > 0
-      order by "durationSeconds" desc, "mappingId" asc
-      `);
-
-      return (rows as unknown as { mappingId: string; pattern: string; projectId: string | null; durationSeconds: string | null }[]).map((row) => ({
-        mapping: { id: row.mappingId, pattern: row.pattern, projectId: row.projectId },
-        durationSeconds: row.durationSeconds,
-      }));
-    });
+  private async snapshot<T>(callback: (db: Pick<DatabaseConnection["db"], "select">) => Promise<T>): Promise<T> {
+    return this.db.transaction(
+      async (transaction) => callback(transaction),
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
   }
 
-  private async snapshot<T>(
-    subject: AuthenticatedSubject,
-    query: ReportQuery,
-    callback: (db: Pick<DatabaseConnection["db"], "select">) => Promise<T>,
-  ): Promise<T> {
-    return withLiveSubject(this.db, subject, async (db) => {
-      await this.assertExactRangeSupport(db, subject, query);
-      return callback(db);
-    });
+  public async readSiteTotalsForMember(_subject: AuthenticatedSubject, _query: ReportQuery): Promise<SiteTotalRecord[]> {
+    return [];
   }
 
   public readPageForOrganization(subject: AuthenticatedSubject, query: ReportQuery, options: ReportPageOptions): Promise<ReportPageRead> {
-    return this.snapshot(subject, query, async (db) => ({
+    return this.snapshot(async (db) => ({
       summary: await this.summaryFor(db, subject, query),
       rows: await this.rowsFor(db, subject, query, options),
     }));
   }
 
   public readExportForOrganization(subject: AuthenticatedSubject, query: ReportQuery, maxRows: number): Promise<ReportExportRead> {
-    return this.snapshot(subject, query, async (db) => {
+    return this.snapshot(async (db) => {
       const summary = await this.summaryFor(db, subject, query);
       const totalRows = typeof summary.totalRows === "bigint"
         ? summary.totalRows
@@ -1382,23 +733,12 @@ export class DrizzleActivitySegmentRepository implements ActivitySegmentReposito
   /** Replay-safe: the (organization, user, client) unique key makes re-uploads no-ops. */
   public async insertBatch(segments: ActivitySegmentInsert[]): Promise<void> {
     if (segments.length === 0) return;
-    const first = segments[0]!;
-    if (segments.some((segment) => (
-      segment.organizationId !== first.organizationId || segment.userId !== first.userId
-    ))) {
-      throw new AppError("forbidden", "Activity evidence must belong to one workspace member.");
-    }
-    await withLiveSubject(this.db, {
-      organizationId: first.organizationId,
-      userId: first.userId,
-    }, async (db) => {
-      await db
-        .insert(activitySegments)
-        .values(segments)
-        .onConflictDoNothing({
-          target: [activitySegments.organizationId, activitySegments.userId, activitySegments.clientId],
-        });
-    });
+    await this.db
+      .insert(activitySegments)
+      .values(segments)
+      .onConflictDoNothing({
+        target: [activitySegments.organizationId, activitySegments.userId, activitySegments.clientId],
+      });
   }
 }
 
@@ -1410,8 +750,7 @@ function asAgentSessionRecord(row: typeof agentSessions.$inferSelect): AgentSess
     source: row.source,
     externalSessionId: row.externalSessionId,
     projectId: row.projectId,
-    cwd: row.cwd,
-    ruleId: row.ruleId,
+    cwd: row.cwd ?? "",
     status: row.status,
     startedAt: row.startedAt,
     endedAt: row.endedAt,
@@ -1431,23 +770,17 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
   public constructor(private readonly db: DatabaseConnection["db"]) {}
 
   public async findByExternalKey(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string): Promise<AgentSessionRecord | null> {
-    return withLiveSubject(this.db, subject, async (db) => {
-    const rows = await db.select().from(agentSessions).where(and(
+    const rows = await this.db.select().from(agentSessions).where(and(
       eq(agentSessions.organizationId, subject.organizationId),
       eq(agentSessions.userId, subject.userId),
       eq(agentSessions.source, source),
       eq(agentSessions.externalSessionId, externalSessionId),
     )).limit(1);
     return rows[0] === undefined ? null : asAgentSessionRecord(rows[0]);
-    });
   }
 
   public async upsertStarted(input: UpsertStartedAgentSession): Promise<AgentSessionRecord> {
-    return withLiveSubject(this.db, {
-      organizationId: input.organizationId,
-      userId: input.userId,
-    }, async (db) => {
-    const rows = await db
+    const rows = await this.db
       .insert(agentSessions)
       .values({
         organizationId: input.organizationId,
@@ -1455,7 +788,6 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         source: input.source,
         externalSessionId: input.externalSessionId,
         cwd: input.cwd,
-        ruleId: input.ruleId,
         projectId: input.projectId,
         linkedSessionId: input.linkedSessionId,
         status: "running",
@@ -1467,40 +799,22 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
       .onConflictDoUpdate({
         target: agentSessionKey,
         // A replayed start refreshes lastEventAt only; an ended row stays ended.
-        // Drizzle does not run onConflictDoUpdate set values through the column
-        // serializer, so bind an ISO string - a raw Date crashes postgres-js.
         set: {
-          status: sql`case
-            when ${agentSessions.source} = 'browser'
-              and ${agentSessions.status} = 'stale'
-              and ${agentSessions.lastEventAt} < ${input.occurredAt.toISOString()}
-            then 'running'::agent_session_status
-            else ${agentSessions.status}
-          end`,
-          endedAt: sql`case
-            when ${agentSessions.source} = 'browser'
-              and ${agentSessions.status} = 'stale'
-              and ${agentSessions.lastEventAt} < ${input.occurredAt.toISOString()}
-            then null
-            else ${agentSessions.endedAt}
-          end`,
-          lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${input.occurredAt.toISOString()})`,
-          updatedAt: sql`${input.receivedAt.toISOString()}`,
+          lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${input.occurredAt})`,
+          updatedAt: input.receivedAt,
         },
       })
       .returning();
     return asAgentSessionRecord(rows[0]!);
-    });
   }
 
   public async closeRunning(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, endedAt: Date, now: Date): Promise<AgentSessionRecord | null> {
-    return withLiveSubject(this.db, subject, async (db) => {
-    const rows = await db
+    const rows = await this.db
       .update(agentSessions)
       .set({
         status: "ended",
-        endedAt: sql`greatest(${agentSessions.lastEventAt}, ${endedAt.toISOString()})`,
-        lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${endedAt.toISOString()})`,
+        endedAt,
+        lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${endedAt})`,
         updatedAt: now,
       })
       .where(and(
@@ -1508,26 +822,14 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         eq(agentSessions.userId, subject.userId),
         eq(agentSessions.source, source),
         eq(agentSessions.externalSessionId, externalSessionId),
-        or(
-          eq(agentSessions.status, "running"),
-          and(
-            eq(agentSessions.source, "browser"),
-            eq(agentSessions.status, "stale"),
-            sql`${agentSessions.lastEventAt} <= ${endedAt.toISOString()}`,
-          ),
-        ),
+        eq(agentSessions.status, "running"),
       ))
       .returning();
     return rows[0] === undefined ? null : asAgentSessionRecord(rows[0]);
-    });
   }
 
   public async insertEnded(input: InsertEndedAgentSession): Promise<void> {
-    await withLiveSubject(this.db, {
-      organizationId: input.organizationId,
-      userId: input.userId,
-    }, async (db) => {
-    await db
+    await this.db
       .insert(agentSessions)
       .values({
         organizationId: input.organizationId,
@@ -1535,7 +837,6 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         source: input.source,
         externalSessionId: input.externalSessionId,
         cwd: input.cwd,
-        ruleId: input.ruleId,
         projectId: input.projectId,
         status: "ended",
         startedAt: input.occurredAt,
@@ -1544,29 +845,13 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         receivedAt: input.receivedAt,
       })
       .onConflictDoNothing({ target: agentSessionKey });
-    });
   }
 
   public async advanceLastEvent(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, occurredAt: Date, now: Date): Promise<boolean> {
-    return withLiveSubject(this.db, subject, async (db) => {
-    const rows = await db
+    const rows = await this.db
       .update(agentSessions)
       .set({
-        status: sql`case
-          when ${agentSessions.source} = 'browser'
-            and ${agentSessions.status} = 'stale'
-            and ${agentSessions.lastEventAt} < ${occurredAt.toISOString()}
-          then 'running'::agent_session_status
-          else ${agentSessions.status}
-        end`,
-        endedAt: sql`case
-          when ${agentSessions.source} = 'browser'
-            and ${agentSessions.status} = 'stale'
-            and ${agentSessions.lastEventAt} < ${occurredAt.toISOString()}
-          then null
-          else ${agentSessions.endedAt}
-        end`,
-        lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${occurredAt.toISOString()})`,
+        lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${occurredAt})`,
         updatedAt: now,
       })
       .where(and(
@@ -1574,55 +859,32 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         eq(agentSessions.userId, subject.userId),
         eq(agentSessions.source, source),
         eq(agentSessions.externalSessionId, externalSessionId),
-        or(
-          eq(agentSessions.status, "running"),
-          and(
-            eq(agentSessions.source, "browser"),
-            eq(agentSessions.status, "stale"),
-            sql`${agentSessions.lastEventAt} < ${occurredAt.toISOString()}`,
-          ),
-        ),
+        eq(agentSessions.status, "running"),
       ))
       .returning({ id: agentSessions.id });
     return rows.length > 0;
-    });
   }
 
-  public async reapStale(
-    subject: AuthenticatedSubject,
-    cutoffs: AgentSessionStaleCutoffs,
-    now: Date,
-  ): Promise<number> {
-    return withLiveSubject(this.db, subject, async (db) => {
-    const rows = await db
+  public async reapStale(subject: AuthenticatedSubject, cutoff: Date, now: Date): Promise<number> {
+    const rows = await this.db
       .update(agentSessions)
-      .set({ status: "stale", endedAt: sql`${agentSessions.lastEventAt}`, updatedAt: now })
+      .set({ status: "ended", endedAt: sql`${agentSessions.lastEventAt}`, updatedAt: now })
       .where(and(
         eq(agentSessions.organizationId, subject.organizationId),
         eq(agentSessions.userId, subject.userId),
         eq(agentSessions.status, "running"),
-        or(
-          and(eq(agentSessions.source, "browser"), lt(agentSessions.lastEventAt, cutoffs.browser)),
-          and(ne(agentSessions.source, "browser"), lt(agentSessions.lastEventAt, cutoffs.default)),
-        ),
+        lt(agentSessions.lastEventAt, cutoff),
       ))
       .returning({ id: agentSessions.id });
     return rows.length;
-    });
   }
 }
 
 function asPathMappingRecord(row: typeof projectPathMappings.$inferSelect): PathMappingRecord {
-  // The kind_valid CHECK keeps this closed world honest; an unknown value means
-  // the database and the code disagree, which must surface rather than coerce.
-  if (row.kind !== "path_prefix" && row.kind !== "url_rule") {
-    throw new Error(`Path mapping ${row.id} has an unrecognized kind: ${row.kind}`);
-  }
   return {
     id: row.id,
     organizationId: row.organizationId,
     userId: row.userId,
-    kind: row.kind,
     pathPrefix: row.pathPrefix,
     repoUrl: row.repoUrl,
     projectId: row.projectId,
@@ -1633,8 +895,7 @@ export class DrizzlePathMappingRepository implements PathMappingRepository {
   public constructor(private readonly db: DatabaseConnection["db"]) {}
 
   public async listForSubject(subject: AuthenticatedSubject): Promise<PathMappingRecord[]> {
-    return withLiveSubject(this.db, subject, async (db) => {
-    const rows = await db
+    const rows = await this.db
       .select()
       .from(projectPathMappings)
       .where(and(
@@ -1643,37 +904,29 @@ export class DrizzlePathMappingRepository implements PathMappingRepository {
       ))
       .orderBy(asc(projectPathMappings.pathPrefix), asc(projectPathMappings.id));
     return rows.map(asPathMappingRecord);
-    });
   }
 
   public async findById(subject: AuthenticatedSubject, mappingId: string): Promise<PathMappingRecord | null> {
-    return withLiveSubject(this.db, subject, async (db) => {
-    const rows = await db.select().from(projectPathMappings).where(and(
+    const rows = await this.db.select().from(projectPathMappings).where(and(
       eq(projectPathMappings.id, mappingId),
       eq(projectPathMappings.organizationId, subject.organizationId),
       eq(projectPathMappings.userId, subject.userId),
     )).limit(1);
     return rows[0] === undefined ? null : asPathMappingRecord(rows[0]);
-    });
   }
 
   public async findByPathPrefix(subject: AuthenticatedSubject, pathPrefix: string): Promise<PathMappingRecord | null> {
-    return withLiveSubject(this.db, subject, async (db) => {
-    const rows = await db.select().from(projectPathMappings).where(and(
+    const rows = await this.db.select().from(projectPathMappings).where(and(
       eq(projectPathMappings.organizationId, subject.organizationId),
       eq(projectPathMappings.userId, subject.userId),
       eq(projectPathMappings.pathPrefix, pathPrefix),
     )).limit(1);
     return rows[0] === undefined ? null : asPathMappingRecord(rows[0]);
-    });
   }
 
   public async create(input: CreatePathMapping): Promise<PathMappingRecord> {
     try {
-      const rows = await withLiveSubject(this.db, {
-        organizationId: input.organizationId,
-        userId: input.userId,
-      }, async (db) => db.insert(projectPathMappings).values(input).returning());
+      const rows = await this.db.insert(projectPathMappings).values(input).returning();
       return asPathMappingRecord(rows[0]!);
     } catch (error) {
       if (uniqueConstraint(error) === "project_path_mappings_organization_user_prefix_unique") {
@@ -1685,7 +938,7 @@ export class DrizzlePathMappingRepository implements PathMappingRepository {
 
   public async update(subject: AuthenticatedSubject, mappingId: string, input: UpdatePathMapping): Promise<PathMappingRecord | null> {
     try {
-      const rows = await withLiveSubject(this.db, subject, async (db) => db
+      const rows = await this.db
         .update(projectPathMappings)
         .set(input)
         .where(and(
@@ -1693,7 +946,7 @@ export class DrizzlePathMappingRepository implements PathMappingRepository {
           eq(projectPathMappings.organizationId, subject.organizationId),
           eq(projectPathMappings.userId, subject.userId),
         ))
-        .returning());
+        .returning();
       return rows[0] === undefined ? null : asPathMappingRecord(rows[0]);
     } catch (error) {
       if (uniqueConstraint(error) === "project_path_mappings_organization_user_prefix_unique") {
@@ -1704,14 +957,14 @@ export class DrizzlePathMappingRepository implements PathMappingRepository {
   }
 
   public async remove(subject: AuthenticatedSubject, mappingId: string): Promise<boolean> {
-    const rows = await withLiveSubject(this.db, subject, async (db) => db
+    const rows = await this.db
       .delete(projectPathMappings)
       .where(and(
         eq(projectPathMappings.id, mappingId),
         eq(projectPathMappings.organizationId, subject.organizationId),
         eq(projectPathMappings.userId, subject.userId),
       ))
-      .returning({ id: projectPathMappings.id }));
+      .returning({ id: projectPathMappings.id });
     return rows.length > 0;
   }
 }

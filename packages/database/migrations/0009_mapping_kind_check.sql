@@ -1,1 +1,0 @@
-ALTER TABLE "project_path_mappings" ADD CONSTRAINT "project_path_mappings_kind_valid" CHECK ("project_path_mappings"."kind" in ('path_prefix', 'url_rule'));

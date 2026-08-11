@@ -3,11 +3,10 @@
 //!
 //! Lightweight by construction: one Tokio task wakes every 30 seconds and asks
 //! the OS two read-only questions (`GetLastInputInfo`, the foreground process
-//! name — the name only, never a window title). Lock, suspend, and session
-//! disconnect arrive as broadcasts on a hidden window owned by a dedicated
-//! thread, and foreground changes through an out-of-context WinEvent hook on
-//! that thread's message loop, so between events the monitor costs nothing.
-//! There is no injection and no per-keystroke cost.
+//! name — the name only, never a window title). Lock and suspend arrive as
+//! broadcasts on a hidden window owned by a dedicated thread, so between
+//! events the monitor costs nothing. There are no hooks, no injection, and no
+//! per-keystroke cost.
 //!
 //! The signal stream folds into transition-based segments (`active`, `idle`,
 //! `locked`, `suspended`), so a workday produces dozens of rows, not ticks.
@@ -20,26 +19,15 @@
 //! new installs); disabling it aborts both tasks, so a paused monitor records
 //! nothing.
 //!
-//! Tradeoffs, documented:
-//! - The event thread uses a real hidden top-level window rather than a
-//!   message-only one because Windows does not broadcast `WM_POWERBROADCAST`
-//!   to message-only windows.
-//! - Session unlock, reconnect, and resume-from-suspend deliberately raise no
-//!   event — the next poll's Active/Idle signal closes the span, which is the
-//!   same code path a transition would take.
-//! - The poll stays the idle/active authority; the foreground hook only
-//!   sharpens process boundaries inside an open `active` span, so per-app time
-//!   stops inheriting whatever was foreground last before idle.
-//! - Each tick pairs wall time with Windows `GetTickCount64`, whose elapsed
-//!   time includes suspend. Both jumping together past two poll intervals
-//!   means the machine slept without delivering `PBT_APMSUSPEND` (the normal
-//!   case on Modern Standby) and the gap is synthesized as `suspended`; wall
-//!   time jumping alone means the system clock changed, so the open segment is
-//!   split at the jump and a notice is surfaced in `MonitorStatus`.
+//! Tradeoff, documented: the event thread uses a real hidden top-level window
+//! rather than a message-only one because Windows does not broadcast
+//! `WM_POWERBROADCAST` to message-only windows. Session unlock and
+//! resume-from-suspend deliberately raise no event — the next poll's
+//! Active/Idle signal closes the span, which is the same code path a
+//! transition would take.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -47,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use crate::api::{ApiClient, ApiResult, BridgeError, ErrorKind, PathMapping};
-use crate::recovery::{PendingStop, RecoveryState};
+use crate::recovery::RecoveryState;
 use crate::spool;
 
 /// How often the OS is polled. Coarser than this and short active bursts blur
@@ -70,24 +58,15 @@ pub const AGENT_ACTIVE_WINDOW_SECONDS: u64 = 6 * 3_600;
 /// segments are already on disk, so dropping the oldest here loses nothing.
 const MAX_BUFFERED_SEGMENTS: usize = 10_000;
 
-/// What the OS reports. `Locked`, `Suspended`, and `Foreground` are pushed by
-/// the event thread; `Active` and `Idle` come from the 30-second poll.
+/// What the OS reports. `Locked` and `Suspended` are pushed by the event
+/// thread; `Active` and `Idle` come from the 30-second poll.
 // Constructors are Windows-only today (event thread + poll source); non-Windows
 // builds only consume signals in tests.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActivitySignal {
-    Active {
-        process_name: Option<String>,
-    },
-    Idle {
-        idle_seconds: u32,
-    },
-    /// The foreground window changed to another process. Only sharpens the
-    /// process boundary of an open `active` span; it never starts activity.
-    Foreground {
-        process_name: Option<String>,
-    },
+    Active { process_name: Option<String> },
+    Idle { idle_seconds: u32 },
     Locked,
     Suspended,
 }
@@ -126,7 +105,7 @@ struct OpenSegment {
 
 fn signal_kind(signal: &ActivitySignal) -> SegmentKind {
     match signal {
-        ActivitySignal::Active { .. } | ActivitySignal::Foreground { .. } => SegmentKind::Active,
+        ActivitySignal::Active { .. } => SegmentKind::Active,
         ActivitySignal::Idle { .. } => SegmentKind::Idle,
         ActivitySignal::Locked => SegmentKind::Locked,
         ActivitySignal::Suspended => SegmentKind::Suspended,
@@ -135,9 +114,7 @@ fn signal_kind(signal: &ActivitySignal) -> SegmentKind {
 
 fn signal_process_name(signal: &ActivitySignal) -> Option<String> {
     match signal {
-        ActivitySignal::Active { process_name } | ActivitySignal::Foreground { process_name } => {
-            process_name.clone()
-        }
+        ActivitySignal::Active { process_name } => process_name.clone(),
         _ => None,
     }
 }
@@ -160,9 +137,6 @@ impl SegmentBuilder {
     /// signal backdates the transition: the active span ended when the last
     /// input happened (`now - idle_seconds`), not when the poll noticed.
     pub fn apply(&mut self, now: u64, signal: &ActivitySignal) -> Vec<Segment> {
-        if let ActivitySignal::Foreground { process_name } = signal {
-            return self.apply_foreground(now, process_name.clone());
-        }
         let kind = signal_kind(signal);
         let transition_at = match signal {
             ActivitySignal::Idle { idle_seconds } => now.saturating_sub(u64::from(*idle_seconds)),
@@ -182,11 +156,8 @@ impl SegmentBuilder {
             }
             Some(open) => {
                 // Clamp into [open.started_at, now]: an idle span that predates
-                // the open segment must not overlap what came before it. An
-                // out-of-order event (a pushed timestamp predating the open
-                // span, possible after a backwards clock change) collapses to
-                // a zero-length close instead of panicking the clamp.
-                let boundary = transition_at.clamp(open.started_at, open.started_at.max(now));
+                // the open segment must not overlap what came before it.
+                let boundary = transition_at.clamp(open.started_at, now);
                 if boundary > open.started_at {
                     closed_now.push(Segment {
                         kind: open.kind,
@@ -210,51 +181,14 @@ impl SegmentBuilder {
             }
         }
 
-        self.buffer_closed(&closed_now);
+        if !closed_now.is_empty() {
+            self.closed.extend(closed_now.iter().cloned());
+            let overflow = self.closed.len().saturating_sub(MAX_BUFFERED_SEGMENTS);
+            if overflow > 0 {
+                self.closed.drain(..overflow);
+            }
+        }
         closed_now
-    }
-
-    /// A foreground change sharpens the process boundary of an open `active`
-    /// span: close it and reopen under the new process, so per-app time stops
-    /// inheriting the last-foreground label. Outside an active span the event
-    /// means nothing — the poll stays the idle/active authority.
-    fn apply_foreground(&mut self, now: u64, process_name: Option<String>) -> Vec<Segment> {
-        let Some(open) = &self.open else {
-            return Vec::new();
-        };
-        if open.kind != SegmentKind::Active
-            || open.process_name == process_name
-            || now <= open.started_at
-        {
-            return Vec::new();
-        }
-        let closed = Segment {
-            kind: SegmentKind::Active,
-            process_name: open.process_name.clone(),
-            started_at: open.started_at,
-            ended_at: now,
-        };
-        self.open = Some(OpenSegment {
-            kind: SegmentKind::Active,
-            process_name,
-            started_at: now,
-        });
-        self.buffer_closed(std::slice::from_ref(&closed));
-        vec![closed]
-    }
-
-    /// Buffers closed segments for snapshot reads, capped so a monitor running
-    /// for months stays bounded. Spooled segments are already on disk, so
-    /// dropping the oldest here loses nothing.
-    fn buffer_closed(&mut self, segments: &[Segment]) {
-        if segments.is_empty() {
-            return;
-        }
-        self.closed.extend(segments.iter().cloned());
-        let overflow = self.closed.len().saturating_sub(MAX_BUFFERED_SEGMENTS);
-        if overflow > 0 {
-            self.closed.drain(..overflow);
-        }
     }
 
     /// The open span's kind and start, for the lock-aware auto-stop check.
@@ -262,8 +196,10 @@ impl SegmentBuilder {
         self.open.as_ref().map(|open| (open.kind, open.started_at))
     }
 
-    /// Everything recorded so far, with the open span closed at `now`.
-    /// Read-only: the builder keeps folding afterwards.
+    /// Everything recorded so far, with the open span closed at `now`. The
+    /// fold's own view, used by tests to assert on spans the caller never
+    /// sees individually.
+    #[cfg(test)]
     pub fn snapshot(&self, now: u64) -> Vec<Segment> {
         let mut segments = self.closed.clone();
         if let Some(open) = &self.open {
@@ -292,42 +228,6 @@ impl SegmentBuilder {
             started_at: open.started_at,
             ended_at: now,
         })
-    }
-
-    fn closing_segment(&self, now: u64) -> Option<Segment> {
-        let open = self.open.as_ref()?;
-        (now > open.started_at).then(|| Segment {
-            kind: open.kind,
-            process_name: open.process_name.clone(),
-            started_at: open.started_at,
-            ended_at: now,
-        })
-    }
-
-    /// Splits the open span across a wall-clock jump: the old timeline's half
-    /// closes at `end` (the last trusted wall reading) and the same state
-    /// reopens at `restart` on the new timeline. Returns the closed half for
-    /// spooling, when it has any length.
-    pub fn split_at(&mut self, end: u64, restart: u64) -> Option<Segment> {
-        let open = self.open.take()?;
-        let closed = if end > open.started_at {
-            let segment = Segment {
-                kind: open.kind,
-                process_name: open.process_name.clone(),
-                started_at: open.started_at,
-                ended_at: end,
-            };
-            self.buffer_closed(std::slice::from_ref(&segment));
-            Some(segment)
-        } else {
-            None
-        };
-        self.open = Some(OpenSegment {
-            kind: open.kind,
-            process_name: open.process_name,
-            started_at: restart,
-        });
-        closed
     }
 }
 
@@ -370,18 +270,15 @@ impl SegmentRecord {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MonitorSettings {
-    /// Master switch. Off means no polling at all.
+    /// Consent. Off means no polling at all, and it is the only on/off the
+    /// product has.
     pub enabled: bool,
+    /// How long the machine must stay quiet before the open session ends.
+    /// Shorter gaps stay inside it as trimmed idle.
     pub away_threshold_minutes: u32,
-    pub hard_away_limit_minutes: u32,
-    pub auto_stop_on_lock: bool,
-    /// Suppress away auto-stop and idle accrual while an agent session is
-    /// active — an overnight agent run on a locked machine is legitimate work.
+    /// Keep the session open through idle and lock while an agent session is
+    /// running — an overnight agent run is legitimate unattended work.
     pub agent_override_enabled: bool,
-    /// The first-run flow (monitoring question + browser cards) ran to
-    /// completion; false drops a signed-in user into onboarding instead of
-    /// the main screen.
-    pub onboarded: bool,
     /// Stable per-install device id stamped on every segment; generated once.
     pub device_id: String,
 }
@@ -391,10 +288,7 @@ impl Default for MonitorSettings {
         Self {
             enabled: true,
             away_threshold_minutes: 10,
-            hard_away_limit_minutes: 60,
-            auto_stop_on_lock: true,
             agent_override_enabled: true,
-            onboarded: false,
             device_id: String::new(),
         }
     }
@@ -403,23 +297,13 @@ impl Default for MonitorSettings {
 impl MonitorSettings {
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.away_threshold_minutes == 0 || self.away_threshold_minutes > 720 {
-            return Err("The away threshold must be between 1 and 720 minutes.");
-        }
-        if self.hard_away_limit_minutes == 0 || self.hard_away_limit_minutes > 1_440 {
-            return Err("The hard away limit must be between 1 and 1440 minutes.");
-        }
-        if self.away_threshold_minutes >= self.hard_away_limit_minutes {
-            return Err("The away threshold must be shorter than the hard away limit.");
+            return Err("The quiet-time limit must be between 1 and 720 minutes.");
         }
         Ok(())
     }
 
-    pub fn policy(&self) -> Policy {
-        Policy {
-            away_threshold_seconds: u64::from(self.away_threshold_minutes) * 60,
-            hard_away_limit_seconds: u64::from(self.hard_away_limit_minutes) * 60,
-            auto_stop_on_lock: self.auto_stop_on_lock,
-        }
+    pub fn away_threshold_seconds(&self) -> u64 {
+        u64::from(self.away_threshold_minutes) * 60
     }
 
     pub fn patched(&self, patch: &SettingsPatch) -> Self {
@@ -428,14 +312,9 @@ impl MonitorSettings {
             away_threshold_minutes: patch
                 .away_threshold_minutes
                 .unwrap_or(self.away_threshold_minutes),
-            hard_away_limit_minutes: patch
-                .hard_away_limit_minutes
-                .unwrap_or(self.hard_away_limit_minutes),
-            auto_stop_on_lock: patch.auto_stop_on_lock.unwrap_or(self.auto_stop_on_lock),
             agent_override_enabled: patch
                 .agent_override_enabled
                 .unwrap_or(self.agent_override_enabled),
-            onboarded: patch.onboarded.unwrap_or(self.onboarded),
             device_id: self.device_id.clone(),
         }
     }
@@ -447,184 +326,370 @@ impl MonitorSettings {
 pub struct SettingsPatch {
     pub enabled: Option<bool>,
     pub away_threshold_minutes: Option<u32>,
-    pub hard_away_limit_minutes: Option<u32>,
-    pub auto_stop_on_lock: Option<bool>,
     pub agent_override_enabled: Option<bool>,
-    pub onboarded: Option<bool>,
-}
-
-/// The policy inputs the pure decision functions take, already in seconds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Policy {
-    pub away_threshold_seconds: u64,
-    pub hard_away_limit_seconds: u64,
-    pub auto_stop_on_lock: bool,
-}
-
-/// Idle/locked/suspended seconds overlapping `[from, to]`, clamped to the
-/// elapsed span — this is the `idleSeconds` the stop flow submits. While the
-/// agent-active override holds, idle accrual is paused and this returns 0.
-pub fn measured_idle_seconds(segments: &[Segment], from: u64, to: u64, agent_active: bool) -> u32 {
-    if agent_active || to <= from {
-        return 0;
-    }
-    let idle: u64 = segments
-        .iter()
-        .filter(|segment| segment.kind != SegmentKind::Active)
-        .map(|segment| {
-            let start = segment.started_at.max(from);
-            let end = segment.ended_at.min(to);
-            end.saturating_sub(start)
-        })
-        .sum();
-    idle.min(to - from).min(u64::from(u32::MAX)) as u32
-}
-
-/// A run of consecutive non-active time, in seconds, for the away prompt.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AwaySpan {
-    pub started_at: u64,
-    pub seconds: u64,
-    /// Still open at `now`: the user is away right now.
-    pub ongoing: bool,
-}
-
-/// Contiguous idle/locked/suspended runs overlapping `[from, to]`, merged so
-/// an idle span that becomes a lock reads as one away period. Times clamped
-/// into the window.
-fn away_runs(segments: &[Segment], from: u64, to: u64) -> Vec<(u64, u64)> {
-    let mut runs: Vec<(u64, u64)> = Vec::new();
-    for segment in segments {
-        if segment.kind == SegmentKind::Active {
-            continue;
-        }
-        let start = segment.started_at.max(from);
-        let end = segment.ended_at.min(to);
-        if end <= start {
-            continue;
-        }
-        match runs.last_mut() {
-            Some(last) if last.1 >= start => last.1 = last.1.max(end),
-            _ => runs.push((start, end)),
-        }
-    }
-    runs
-}
-
-/// The most recent away run longer than the threshold, if any — what the UI
-/// prompts about on return ("you were away N minutes — discard or keep?").
-pub fn latest_away_span(
-    segments: &[Segment],
-    from: u64,
-    now: u64,
-    threshold_seconds: u64,
-) -> Option<AwaySpan> {
-    let (start, end) = away_runs(segments, from, now).into_iter().next_back()?;
-    let seconds = end - start;
-    if seconds < threshold_seconds {
-        return None;
-    }
-    Some(AwaySpan {
-        started_at: start,
-        seconds,
-        ongoing: end == now,
-    })
-}
-
-/// Start of the away run that is still open at `now`, if the user is away.
-fn current_away_since(segments: &[Segment], from: u64, now: u64) -> Option<u64> {
-    let (start, end) = away_runs(segments, from, now).into_iter().next_back()?;
-    (end == now).then_some(start)
-}
-
-/// Whether the timer should auto-stop, and at what timestamp. Always stops at
-/// the last-active boundary (the away run's start), never at "now", so the
-/// recorded session excludes the unattended tail. The agent-active override
-/// suppresses every automatic stop.
-pub fn decide_auto_stop(
-    now: u64,
-    away_since: Option<u64>,
-    locked_since: Option<u64>,
-    policy: &Policy,
-    agent_active: bool,
-) -> Option<u64> {
-    if agent_active {
-        return None;
-    }
-    if policy.auto_stop_on_lock {
-        if let Some(since) = locked_since {
-            return Some(since.min(now));
-        }
-    }
-    let away = away_since?;
-    if now.saturating_sub(away) >= policy.hard_away_limit_seconds {
-        Some(away)
-    } else {
-        None
-    }
 }
 
 /// What the drain side reports about agent activity. In-memory only: after a
-/// restart the override simply stays off until the next agent event drains,
-/// which fails toward the manual-timer behavior Phase 1 already had.
+/// restart the override simply stays off until the next agent event drains.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentTracking {
-    pub open: bool,
     pub last_event_at: u64,
-    /// The session behind `open`: which CLI and when it began. Cleared with
-    /// `open`; drives the `agentActive` status field.
-    pub active: Option<ActiveAgent>,
-    pub suggestion: Option<PendingSuggestion>,
+    /// Every currently running agent session. A source and its external
+    /// session id identify the lifecycle independently, so ending one tool
+    /// cannot clear another tool that is still running.
+    pub active: BTreeMap<(String, String), ActiveAgent>,
+    /// The latest event already applied per lifecycle. Finished sessions leave
+    /// a small tombstone here so a failed upload replay cannot reopen them.
+    pub seen: BTreeMap<(String, String), SeenAgentEvent>,
 }
 
-/// The agent session currently holding the tracking open, in unix seconds.
-/// The ISO form the UI sees is produced at status time.
+/// A currently running agent session. The ISO form the UI sees is produced at
+/// status time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActiveAgent {
     pub source: String,
+    pub external_session_id: String,
     pub started_at: u64,
+    pub last_event_at: u64,
+    pub project: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeenAgentEvent {
+    pub occurred_at: u64,
+    pub kind: crate::spool::AgentEventKind,
 }
 
 impl AgentTracking {
     pub fn is_active(&self, now: u64, override_enabled: bool) -> bool {
         override_enabled
-            && self.open
-            && now.saturating_sub(self.last_event_at) <= AGENT_ACTIVE_WINDOW_SECONDS
+            && self
+                .active
+                .values()
+                .any(|agent| now.saturating_sub(agent.last_event_at) <= AGENT_ACTIVE_WINDOW_SECONDS)
+    }
+
+    pub fn effective_agent(&self, now: u64) -> Option<&ActiveAgent> {
+        self.active
+            .values()
+            .filter(|agent| now.saturating_sub(agent.last_event_at) <= AGENT_ACTIVE_WINDOW_SECONDS)
+            .max_by(|left, right| {
+                (
+                    left.last_event_at,
+                    left.started_at,
+                    &left.source,
+                    &left.external_session_id,
+                )
+                    .cmp(&(
+                        right.last_event_at,
+                        right.started_at,
+                        &right.source,
+                        &right.external_session_id,
+                    ))
+            })
+    }
+
+    pub fn effective_project(&self, now: u64) -> Option<&str> {
+        self.active
+            .values()
+            .filter(|agent| now.saturating_sub(agent.last_event_at) <= AGENT_ACTIVE_WINDOW_SECONDS)
+            .filter_map(|agent| agent.project.as_deref().map(|project| (agent, project)))
+            .max_by(|(left, _), (right, _)| {
+                (
+                    left.last_event_at,
+                    left.started_at,
+                    &left.source,
+                    &left.external_session_id,
+                )
+                    .cmp(&(
+                        right.last_event_at,
+                        right.started_at,
+                        &right.source,
+                        &right.external_session_id,
+                    ))
+            })
+            .map(|(_, project)| project)
     }
 }
 
-/// "An agent started in a mapped directory while no timer runs" — the one
-/// prompt the monitor raises locally; the server stays authoritative.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+/// How a session learned which project it belongs to. Mirrors the server's
+/// `session_attribution` enum minus `manual`, which only the retired timer
+/// could produce.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Attribution {
+    /// The person picked this project to track into.
+    Selected,
+    /// An agent session's working directory resolved to it.
+    Agent,
+    /// Nothing named a project, so the user's default caught the time.
+    Default,
+}
+
+/// The project a session belongs to, and why.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PendingSuggestion {
+pub struct SessionProject {
     pub project_id: String,
-    pub source: String,
-    pub since: String,
-    /// The browser span the suggestion was raised for, when it was. Internal
-    /// only (never serialized): it is how dismissal is remembered per span.
-    #[serde(skip)]
-    pub span_id: Option<String>,
+    pub attribution: Attribution,
 }
 
-/// The browser-span side of the drain's bookkeeping. Kept apart from
-/// `AgentTracking` so a focused tab never opens the away override: an open
-/// browser span says nothing once the human leaves.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct BrowserTracking {
-    /// Every span the drain has seen, by span id. Bounded: past the cap the
-    /// oldest-starter is evicted.
-    pub spans: std::collections::BTreeMap<String, BrowserSpan>,
-    /// The span the user dismissed; a drain never re-raises it.
-    pub dismissed_span: Option<String>,
+/// One finished session, in the exact shape `/sessions/observed` accepts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservedSession {
+    pub client_id: String,
+    pub project_id: String,
+    pub attribution: Attribution,
+    pub started_at: String,
+    pub stopped_at: String,
+    pub idle_seconds: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BrowserSpan {
+/// The session the tracker currently holds open, persisted so a crash cannot
+/// swallow work that was already recorded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenSession {
+    pub client_id: String,
+    pub project: SessionProject,
     pub started_at: u64,
-    /// The latest event seen for the span (its end, once ended).
-    pub last_seen: u64,
-    pub project_id: String,
+    /// Idle runs that stayed under the threshold and so sit inside this
+    /// session. They are reported so the server subtracts them from duration.
+    pub idle_seconds: u64,
+    /// The end of the most recent active span: where the session closes if the
+    /// app quits rather than the machine going idle.
+    pub last_active_at: u64,
+}
+
+/// Turns the monitor's own working/idle/locked/suspended boundaries into
+/// sessions, with no human involvement anywhere in the loop.
+///
+/// A session opens on the first active span and closes when the machine goes
+/// quiet for longer than the away threshold, when the screen locks, when the
+/// machine suspends, when the attributed project changes, or when the app
+/// quits. It always closes at the last-active boundary, never at "now", so
+/// idle time is never counted inside a session; shorter idle gaps stay inside
+/// and are reported as trimmed idle instead of fragmenting the day.
+///
+/// An open agent session holds a session open through idle and lock, the same
+/// override the away policy has always applied: an overnight agent run is
+/// unattended work, not an abandoned desk.
+#[derive(Debug, Default)]
+pub struct SessionTracker {
+    open: Option<OpenSession>,
+    previous: Option<(SegmentKind, u64)>,
+    /// Last time an agent was active during the current open session. Used to
+    /// exclude agent-covered idle from trimmed-idle accounting so overnight
+    /// agent runs survive into the session duration instead of being subtracted.
+    agent_seen_at: u64,
+    /// When the agent first became active during the current idle period.
+    /// Reset to 0 when the session enters an active span, so only idle-
+    /// internal agent starts count for the resumed-idle coverage calculation.
+    agent_first_in_idle: u64,
+}
+
+/// What the tracker needs to know about the world on each tick.
+pub struct TrackerInput<'a> {
+    pub now: u64,
+    /// The segment span currently open, as the fold sees it.
+    pub open_span: Option<(SegmentKind, u64)>,
+    /// The project a new or continuing session belongs to; `None` means the
+    /// host cannot attribute time yet (signed out, or no project resolved).
+    pub project: Option<&'a SessionProject>,
+    pub agent_active: bool,
+    pub away_threshold_seconds: u64,
+}
+
+impl SessionTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn open_session(&self) -> Option<&OpenSession> {
+        self.open.as_ref()
+    }
+
+    /// Folds one tick and returns whatever it finished. `new_client_id` mints
+    /// the id for a session this tick opens; the caller supplies it so the
+    /// tracker stays free of randomness and stays testable.
+    pub fn apply(&mut self, input: TrackerInput<'_>, new_client_id: &str) -> Vec<ObservedSession> {
+        let mut closed = Vec::new();
+        let Some((kind, span_started_at)) = input.open_span else {
+            self.previous = None;
+            return closed;
+        };
+
+        let resumed_idle = match self.previous {
+            Some((SegmentKind::Idle, idle_started_at)) if kind != SegmentKind::Idle => Some((
+                idle_started_at,
+                span_started_at.saturating_sub(idle_started_at),
+            )),
+            _ => None,
+        };
+        if let Some((idle_started_at, idle_seconds)) = resumed_idle {
+            if idle_seconds >= input.away_threshold_seconds && !input.agent_active {
+                // A long idle spell closes at its last active boundary: if an
+                // agent was working during the idle, close where the agent
+                // stopped; otherwise close at the first idle boundary.
+                let close_boundary = if self.agent_seen_at >= idle_started_at {
+                    self.agent_seen_at
+                } else {
+                    idle_started_at
+                };
+                // Idle before the first agent evidence is not covered.
+                if let Some(open) = self.open.as_mut() {
+                    if self.agent_first_in_idle > idle_started_at {
+                        let uncovered = self.agent_first_in_idle.saturating_sub(idle_started_at);
+                        open.idle_seconds += uncovered;
+                    }
+                }
+                closed.extend(self.close_at(close_boundary));
+            } else if let Some(open) = self.open.as_mut() {
+                // Exclude any portion of the idle gap that was covered by an
+                // active agent: that time counts as work, not trimmed idle.
+                let agent_end = if input.agent_active {
+                    span_started_at
+                } else {
+                    self.agent_seen_at
+                };
+                let agent_covered = if self.agent_first_in_idle >= idle_started_at
+                    && self.agent_first_in_idle > 0
+                {
+                    // Agent became active mid-idle; cover from that point to the agent's last known moment.
+                    agent_end.saturating_sub(self.agent_first_in_idle)
+                } else if self.agent_first_in_idle > 0 {
+                    // Agent was already active before idle began: full coverage.
+                    idle_seconds
+                } else {
+                    0
+                };
+                let added = idle_seconds.saturating_sub(agent_covered);
+                if added > 0 {
+                    open.idle_seconds += added;
+                }
+            }
+        }
+        self.previous = Some((kind, span_started_at));
+
+        // Nothing to attribute time to: close what is open and record nothing new.
+        let Some(project) = input.project else {
+            closed.extend(self.close_at(self.last_boundary(input.now)));
+            return closed;
+        };
+
+        match kind {
+            SegmentKind::Active => {
+                // The project changed under an open session: the old one ends
+                // where its work last showed, and the new one picks up there,
+                // so no second of activity is dropped or counted twice.
+                let mut opens_at = span_started_at.min(input.now);
+                if self
+                    .open
+                    .as_ref()
+                    .is_some_and(|open| &open.project != project)
+                {
+                    let boundary = self.last_boundary(input.now);
+                    closed.extend(self.close_at(boundary));
+                    // The new project cannot inherit a just-finished short
+                    // idle gap as active work. It begins when activity resumed.
+                    opens_at = resumed_idle.map_or(boundary, |_| span_started_at);
+                }
+                self.agent_first_in_idle = 0;
+                match self.open.as_mut() {
+                    Some(open) => open.last_active_at = input.now,
+                    None => {
+                        self.open = Some(OpenSession {
+                            client_id: new_client_id.to_string(),
+                            project: project.clone(),
+                            started_at: opens_at,
+                            idle_seconds: 0,
+                            last_active_at: input.now,
+                        });
+                    }
+                }
+            }
+            SegmentKind::Idle => {
+                let quiet_for = input.now.saturating_sub(span_started_at);
+                if quiet_for >= input.away_threshold_seconds && !input.agent_active {
+                    let close_boundary = if self.agent_seen_at >= span_started_at {
+                        self.agent_seen_at
+                    } else {
+                        span_started_at
+                    };
+                    // Idle before the first agent evidence is not covered.
+                    if let Some(open) = self.open.as_mut() {
+                        if self.agent_first_in_idle > span_started_at {
+                            let uncovered =
+                                self.agent_first_in_idle.saturating_sub(span_started_at);
+                            open.idle_seconds += uncovered;
+                        }
+                    }
+                    closed.extend(self.close_at(close_boundary));
+                } else if input.agent_active {
+                    if let Some(open) = self.open.as_mut() {
+                        open.last_active_at = input.now;
+                    }
+                    if self.agent_first_in_idle == 0 {
+                        self.agent_first_in_idle = input.now;
+                    }
+                    self.agent_seen_at = input.now;
+                }
+            }
+            // The screen locked or the machine slept: the person left, and the
+            // session ends where they stopped working — or where the agent
+            // last reported, whichever is later.
+            SegmentKind::Locked | SegmentKind::Suspended => {
+                if !input.agent_active {
+                    let boundary =
+                        span_started_at.max(self.open.as_ref().map_or(0, |o| o.last_active_at));
+                    closed.extend(self.close_at(boundary));
+                } else if let Some(open) = self.open.as_mut() {
+                    open.last_active_at = input.now;
+                    if self.agent_first_in_idle == 0 {
+                        self.agent_first_in_idle = input.now;
+                    }
+                    self.agent_seen_at = input.now;
+                }
+            }
+        }
+        closed
+    }
+
+    /// Closes whatever is open, for app shutdown or for recording being
+    /// switched off. Nothing after the last active moment is ever billed.
+    pub fn flush(&mut self, now: u64) -> Option<ObservedSession> {
+        self.previous = None;
+        self.close_at(self.last_boundary(now))
+    }
+
+    /// Where a session ends when the reason is not a boundary of its own: the
+    /// last moment the machine was known to be in use.
+    fn last_boundary(&self, now: u64) -> u64 {
+        self.open
+            .as_ref()
+            .map_or(now, |open| open.last_active_at.min(now))
+    }
+
+    fn close_at(&mut self, stopped_at: u64) -> Option<ObservedSession> {
+        let open = self.open.take()?;
+        self.agent_seen_at = 0;
+        self.agent_first_in_idle = 0;
+        let stopped_at = stopped_at.max(open.started_at);
+        // A session with no elapsed time is not evidence of anything.
+        if stopped_at <= open.started_at {
+            return None;
+        }
+        let elapsed = stopped_at - open.started_at;
+        Some(ObservedSession {
+            client_id: open.client_id,
+            project_id: open.project.project_id,
+            attribution: open.project.attribution,
+            started_at: iso8601(open.started_at),
+            stopped_at: iso8601(stopped_at),
+            idle_seconds: open.idle_seconds.min(elapsed) as u32,
+        })
+    }
 }
 
 /// The state the poll task, the upload task, and the Tauri commands share.
@@ -634,11 +699,42 @@ pub struct MonitorShared {
     /// Local cache of the user's path mappings, refreshed on each upload run.
     pub mappings: Vec<PathMapping>,
     pub agent: AgentTracking,
-    pub browser: BrowserTracking,
     pub last_upload_at: Option<String>,
-    /// Wall time of the last detected system-clock change, surfaced in
-    /// `MonitorStatus`. Sticky until the next change or a restart.
-    pub clock_change_at: Option<u64>,
+    /// Turns activity boundaries into sessions; the whole recording model.
+    pub tracker: SessionTracker,
+    /// The user's fallback project, resolved once per sign-in.
+    pub default_project: Option<String>,
+    /// The account the monitor is currently allowed to record for. This is
+    /// separate from the token so locally queued sessions retain their owner.
+    pub account_id: Option<String>,
+    /// An explicit choice to track into one project, which outranks the
+    /// working directory an agent happens to be in.
+    pub selected_project: Option<String>,
+}
+
+impl MonitorShared {
+    /// Precedence: what the person chose, then what an agent's working
+    /// directory resolved to, then the default project that catches the rest.
+    pub fn current_project(&self, now: u64) -> Option<SessionProject> {
+        if let Some(project_id) = &self.selected_project {
+            return Some(SessionProject {
+                project_id: project_id.clone(),
+                attribution: Attribution::Selected,
+            });
+        }
+        if let Some(project_id) = self.agent.effective_project(now) {
+            return Some(SessionProject {
+                project_id: project_id.to_string(),
+                attribution: Attribution::Agent,
+            });
+        }
+        self.default_project
+            .as_ref()
+            .map(|project_id| SessionProject {
+                project_id: project_id.clone(),
+                attribution: Attribution::Default,
+            })
+    }
 }
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -675,120 +771,6 @@ impl PlatformEvents {
     }
 }
 
-// wparam values of WM_WTSSESSION_CHANGE (winuser.h), defined here rather than
-// imported so the mapping is testable on any OS.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-const WTS_CONSOLE_DISCONNECT_WP: usize = 0x2;
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-const WTS_REMOTE_DISCONNECT_WP: usize = 0x4;
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-const WTS_SESSION_LOCK_WP: usize = 0x7;
-
-/// Maps a `WM_WTSSESSION_CHANGE` wparam to a signal. Console and remote
-/// disconnects — fast user switching, RDP takeover — mean the session left the
-/// local console, which records exactly like a lock. Connect, reconnect, and
-/// unlock raise no event: the next poll closes the span, same as always.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn session_change_signal(wparam: usize) -> Option<ActivitySignal> {
-    match wparam {
-        WTS_SESSION_LOCK_WP | WTS_CONSOLE_DISCONNECT_WP | WTS_REMOTE_DISCONNECT_WP => {
-            Some(ActivitySignal::Locked)
-        }
-        _ => None,
-    }
-}
-
-/// Store-packaged (UWP) apps draw inside a frame window owned by
-/// ApplicationFrameHost.exe; the app's real process owns the child
-/// CoreWindow. The image-name casing varies between builds.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn is_uwp_frame_host(process_name: &str) -> bool {
-    process_name.eq_ignore_ascii_case("applicationframehost.exe")
-}
-
-/// One tick's two clock readings: wall time (unix seconds) beside a monotonic
-/// source (seconds from an arbitrary process-local epoch, never compared
-/// across restarts).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct TickReading {
-    wall: u64,
-    mono: u64,
-}
-
-/// What comparing two consecutive tick readings says happened between them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ClockGap {
-    /// Both clocks jumped together: the machine slept without a suspend
-    /// broadcast (Modern Standby). Carries the wall-clock span of the gap.
-    Slept { from: u64, to: u64 },
-    /// Wall time moved against the monotonic clock: the system clock changed.
-    ClockChanged,
-}
-
-/// A gap must exceed two poll intervals before it means anything; below that,
-/// a slow tick is just a slow tick.
-const CLOCK_GAP_THRESHOLD_SECONDS: u64 = 2 * POLL_INTERVAL_SECONDS;
-
-fn classify_clock_gap(prior: TickReading, reading: TickReading) -> Option<ClockGap> {
-    let mono_delta = reading.mono.saturating_sub(prior.mono);
-    let wall_delta = i128::from(reading.wall) - i128::from(prior.wall);
-    let divergence = (wall_delta - i128::from(mono_delta)).abs();
-    if divergence > i128::from(CLOCK_GAP_THRESHOLD_SECONDS) {
-        return Some(ClockGap::ClockChanged);
-    }
-    if mono_delta > CLOCK_GAP_THRESHOLD_SECONDS {
-        return Some(ClockGap::Slept {
-            from: prior.wall,
-            to: reading.wall,
-        });
-    }
-    None
-}
-
-/// One tick of the poll loop, folded into segments: gap synthesis first (its
-/// timestamp predates anything pushed since the last tick), then pushed
-/// session events, then the poll's own signal. Returns the closed segments
-/// for spooling and the clock gap detected, so the caller can surface a
-/// clock-change notice.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn fold_tick(
-    builder: &mut SegmentBuilder,
-    previous: &mut Option<TickReading>,
-    reading: TickReading,
-    pushed: Vec<(u64, ActivitySignal)>,
-    signal: &ActivitySignal,
-) -> (Vec<Segment>, Option<ClockGap>) {
-    let prior = *previous;
-    let gap = prior.and_then(|prior| classify_clock_gap(prior, reading));
-    *previous = Some(reading);
-
-    let mut closed = Vec::new();
-    match gap {
-        // Slept without a suspend broadcast: the whole wall-clock gap is
-        // Suspended; the poll signal below closes it at `reading.wall`.
-        Some(ClockGap::Slept { from, to }) => {
-            debug_assert_eq!(to, reading.wall);
-            closed.extend(builder.apply(from, &ActivitySignal::Suspended));
-        }
-        // The wall clock jumped against the monotonic one: split the open
-        // span at the last trusted wall reading and reopen it on the new
-        // timeline.
-        Some(ClockGap::ClockChanged) => {
-            if let Some(prior) = prior {
-                closed.extend(builder.split_at(prior.wall, reading.wall));
-            }
-        }
-        None => {}
-    }
-    // Event timestamps come from when the OS broadcast fired, which can be
-    // long ago (a suspend/resume pair spanning the night).
-    for (at, pushed_signal) in pushed {
-        closed.extend(builder.apply(at, &pushed_signal));
-    }
-    closed.extend(builder.apply(reading.wall, signal));
-    (closed, gap)
-}
-
 /// Per-CLI hook registration status, detected by a plain substring check for
 /// the hook binary name inside the CLI's own config file. Cheap and read-only,
 /// and honest about being a heuristic: it cannot tell a live registration
@@ -797,11 +779,7 @@ fn fold_tick(
 #[serde(rename_all = "camelCase")]
 pub struct HookRegistration {
     pub source: String,
-    /// The hook is already mentioned in the CLI's config.
     pub detected: bool,
-    /// The CLI's config file exists at all — the CLI is on the machine, so
-    /// the settings UI offers the opt-in. CLIs without a config stay hidden.
-    pub installed: bool,
     pub config_path: String,
 }
 
@@ -851,7 +829,6 @@ pub fn detect_hooks(probes: &[HookProbe]) -> Vec<HookRegistration> {
             HookRegistration {
                 source: probe.source.to_string(),
                 detected,
-                installed: probe.config_path.exists(),
                 config_path: probe.config_path.to_string_lossy().into_owned(),
             }
         })
@@ -1132,18 +1109,8 @@ fn write_json_atomically(
     Ok(())
 }
 
-/// The away data the UI prompts with, carried by `monitor_status`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AwayInfo {
-    pub started_at: String,
-    pub seconds: u64,
-    pub ongoing: bool,
-    pub exceeds_hard_limit: bool,
-}
-
-/// The agent session currently holding the away override open, surfaced so
-/// the UI can explain why idle trimming is paused.
+/// The agent session holding the open session through quiet time, surfaced so
+/// the panel can say why recording did not stop.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentActive {
@@ -1160,30 +1127,35 @@ pub struct MonitorStatus {
     pub last_upload_at: Option<String>,
     pub segment_backlog: u32,
     pub agent_backlog: u32,
-    pub browser_capture_paused: bool,
+    pub session_backlog: u32,
     pub hooks: Vec<HookRegistration>,
-    /// Per-browser extension health, for the setup cards and settings badges.
-    pub browsers: Vec<crate::browser::BrowserHealth>,
-    pub pending_suggestion: Option<PendingSuggestion>,
-    /// The agent session holding the away override open, if any — explains to
-    /// the user why `session_idle_seconds` is frozen.
+    /// The agent session holding the open session through quiet time, if any.
     pub agent_active: Option<AgentActive>,
-    /// Idle trimmed from the running session so far, when a timer runs.
-    pub session_idle_seconds: Option<u32>,
-    pub away: Option<AwayInfo>,
-    /// Wall time of the last detected system-clock change. The open segment
-    /// was split at the jump; this tells the UI the timeline had a seam.
-    pub clock_change_detected_at: Option<String>,
+    /// The session recording right now, which exists whenever the machine is
+    /// in use and recording is on.
+    pub current_session: Option<CurrentSession>,
+    /// Every project the caller could pick, so the UI can offer the override
+    /// without a second round trip.
+    pub selected_project_id: Option<String>,
+}
+
+/// The open session, as the UI shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentSession {
+    pub project_id: String,
+    pub attribution: Attribution,
+    pub since: String,
+    /// Quiet time already sitting inside this session, which the server
+    /// subtracts from its duration.
+    pub idle_seconds: u32,
 }
 
 /// Lines (≈ pending rows) in a spool file, for the backlog counters.
 fn count_lines(path: &Path) -> u32 {
-    spool::pending_spool_paths(path)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|generation| std::fs::read(generation).ok())
+    std::fs::read(path)
         .map(|bytes| bytes.iter().filter(|byte| **byte == b'\n').count() as u32)
-        .sum()
+        .unwrap_or(0)
 }
 
 pub struct MonitorConfig {
@@ -1191,27 +1163,16 @@ pub struct MonitorConfig {
     pub settings_path: PathBuf,
     pub segments_path: PathBuf,
     pub agent_path: PathBuf,
-    /// Beside the agent spool: the browser spool, rules file, tally, and
-    /// handshake marker live here.
-    pub browser_dir: PathBuf,
-    pub recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
+    pub sessions_path: PathBuf,
     pub recovery_path: PathBuf,
+    pub recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
 }
-
-pub(crate) type InvalidSessionHandler = Arc<dyn Fn() + Send + Sync>;
 
 struct MonitorTasks {
     /// No poll task on non-Windows builds (no `ActivitySource` ships there);
     /// the upload task still drains the agent spool.
     poll: Option<tokio::task::JoinHandle<()>>,
     upload: tokio::task::JoinHandle<()>,
-}
-
-#[derive(Clone)]
-struct MonitorPaths {
-    segments_path: PathBuf,
-    agent_path: PathBuf,
-    browser_dir: PathBuf,
 }
 
 /// Owns the monitor's tasks and shared state. Constructed at app start; the
@@ -1221,17 +1182,15 @@ pub struct Monitor {
     #[cfg_attr(not(windows), allow(dead_code))]
     events: Arc<PlatformEvents>,
     settings_path: PathBuf,
-    paths: Mutex<MonitorPaths>,
-    identity: Mutex<Option<spool::EvidenceIdentity>>,
-    recording: Arc<AtomicBool>,
-    capture_paused: Arc<AtomicBool>,
-    identity_invalidated: Arc<AtomicBool>,
-    invalid_session_handler: Arc<Mutex<Option<InvalidSessionHandler>>>,
+    segments_path: PathBuf,
+    agent_path: PathBuf,
+    sessions_path: Mutex<PathBuf>,
+    sessions_path_base: PathBuf,
     client: ApiClient,
-    recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
-    // Read only by the Windows-gated poll/auto-stop path today.
+    // Written by the Windows-gated poll task, which persists the open session.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    recovery_path: Mutex<PathBuf>,
+    recovery_path: PathBuf,
+    recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
     tasks: tokio::sync::Mutex<Option<MonitorTasks>>,
     upload_now: Arc<Notify>,
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -1247,25 +1206,21 @@ impl Monitor {
                 settings,
                 mappings: Vec::new(),
                 agent: AgentTracking::default(),
-                browser: BrowserTracking::default(),
                 last_upload_at: None,
-                clock_change_at: None,
+                tracker: SessionTracker::new(),
+                default_project: None,
+                account_id: None,
+                selected_project: None,
             })),
             events: Arc::new(PlatformEvents::new()),
             settings_path: config.settings_path,
-            paths: Mutex::new(MonitorPaths {
-                segments_path: config.segments_path,
-                agent_path: config.agent_path,
-                browser_dir: config.browser_dir,
-            }),
-            identity: Mutex::new(None),
-            recording: Arc::new(AtomicBool::new(false)),
-            capture_paused: Arc::new(AtomicBool::new(false)),
-            identity_invalidated: Arc::new(AtomicBool::new(false)),
-            invalid_session_handler: Arc::new(Mutex::new(None)),
+            segments_path: config.segments_path,
+            agent_path: config.agent_path,
+            sessions_path: Mutex::new(config.sessions_path.clone()),
+            sessions_path_base: config.sessions_path,
             client: config.client,
+            recovery_path: config.recovery_path,
             recovery: config.recovery,
-            recovery_path: Mutex::new(config.recovery_path),
             tasks: tokio::sync::Mutex::new(None),
             upload_now: Arc::new(Notify::new()),
             event_thread_once: std::sync::Once::new(),
@@ -1277,7 +1232,7 @@ impl Monitor {
     }
 
     pub async fn is_running(&self) -> bool {
-        !self.capture_paused.load(Ordering::SeqCst) && self.tasks.lock().await.is_some()
+        self.tasks.lock().await.is_some()
     }
 
     /// Starts the poll and upload tasks. Idempotent; a no-op when running.
@@ -1286,12 +1241,6 @@ impl Monitor {
         if guard.is_some() {
             return;
         }
-        let Some(identity) = lock(&self.identity).clone() else {
-            return;
-        };
-        self.capture_paused.store(false, Ordering::SeqCst);
-        self.recording.store(true, Ordering::SeqCst);
-        let paths = lock(&self.paths).clone();
 
         #[cfg(windows)]
         let poll = {
@@ -1301,12 +1250,11 @@ impl Monitor {
             Some(tokio::spawn(poll_loop(
                 Arc::clone(&self.shared),
                 Arc::clone(&self.events),
-                paths.segments_path.clone(),
+                self.segments_path.clone(),
+                self.agent_path.clone(),
+                self.session_spool_path(),
+                self.recovery_path.clone(),
                 Arc::clone(&self.recovery),
-                lock(&self.recovery_path).clone(),
-                Arc::clone(&self.upload_now),
-                Arc::clone(&self.recording),
-                Arc::clone(&self.capture_paused),
             )))
         };
         #[cfg(not(windows))]
@@ -1315,15 +1263,10 @@ impl Monitor {
         let upload = tokio::spawn(crate::uploader::upload_loop(
             Arc::clone(&self.shared),
             self.client.clone(),
-            paths.segments_path,
-            paths.agent_path,
-            paths.browser_dir,
-            identity,
-            Arc::clone(&self.recovery),
+            self.segments_path.clone(),
+            self.agent_path.clone(),
+            self.session_spool_path(),
             Arc::clone(&self.upload_now),
-            Arc::clone(&self.recording),
-            Arc::clone(&self.identity_invalidated),
-            Arc::clone(&self.invalid_session_handler),
         ));
         *guard = Some(MonitorTasks { poll, upload });
     }
@@ -1338,58 +1281,26 @@ impl Monitor {
             }
             tasks.upload.abort();
         }
-        let (closed, device_id) = {
+        let now = unix_now();
+        let (closed, finished, device_id, account_id) = {
             let mut shared = lock(&self.shared);
             let device_id = shared.settings.device_id.clone();
-            (shared.builder.flush(unix_now()), device_id)
+            let account_id = shared.account_id.clone();
+            let segment = shared.builder.flush(now);
+            // Recording stopping is a session boundary like any other: the work
+            // already done is written down, not discarded.
+            let session = shared.tracker.flush(now);
+            (segment, session, device_id, account_id)
         };
         if let Some(segment) = closed {
-            if self.recording.load(Ordering::SeqCst) && lock(&self.identity).is_some() {
-                let _ = append_segment_line(&lock(&self.paths).segments_path, &segment, &device_id);
+            append_segment_line(&self.segments_path, &segment, &device_id);
+        }
+        if let Some(session) = finished {
+            if account_id.is_some() {
+                append_session_line(&self.session_spool_path(), &session);
             }
         }
-    }
-
-    pub async fn activate_identity(&self, identity: spool::EvidenceIdentity) {
-        self.stop().await;
-        let evidence = spool::evidence_paths(&identity);
-        *lock(&self.paths) = MonitorPaths {
-            segments_path: evidence.segments_path,
-            agent_path: evidence.agent_path,
-            browser_dir: evidence.browser_dir,
-        };
-        *lock(&self.recovery_path) = evidence.recovery_path;
-        *lock(&self.identity) = Some(identity);
-        self.capture_paused.store(false, Ordering::SeqCst);
-        self.recording.store(true, Ordering::SeqCst);
-        self.identity_invalidated.store(false, Ordering::SeqCst);
-        self.clear_identity_state();
-    }
-
-    pub async fn deactivate_identity(&self) {
-        self.stop().await;
-        self.capture_paused.store(false, Ordering::SeqCst);
-        self.recording.store(false, Ordering::SeqCst);
-        *lock(&self.identity) = None;
-        self.clear_identity_state();
-    }
-
-    fn clear_identity_state(&self) {
-        let mut shared = lock(&self.shared);
-        shared.builder = SegmentBuilder::new();
-        shared.mappings.clear();
-        shared.agent = AgentTracking::default();
-        shared.browser = BrowserTracking::default();
-        shared.last_upload_at = None;
-        shared.clock_change_at = None;
-    }
-
-    pub fn identity_invalidated(&self) -> bool {
-        self.identity_invalidated.load(Ordering::SeqCst)
-    }
-
-    pub fn set_invalid_session_handler(&self, handler: InvalidSessionHandler) {
-        *lock(&self.invalid_session_handler) = Some(handler);
+        self.persist_open_session(account_id.as_deref(), None).await;
     }
 
     /// Starts the tasks when the setting is on; called after a successful
@@ -1412,10 +1323,10 @@ impl Monitor {
         if let Err(reason) = next.validate() {
             return Err(BridgeError::new(ErrorKind::Validation, reason));
         }
-        let was_enabled = self.is_enabled();
+        let was_running = self.is_running().await;
         lock(&self.shared).settings = next.clone();
         persist_settings(&self.settings_path, &next)?;
-        match (next.enabled, was_enabled) {
+        match (next.enabled, was_running) {
             (true, false) => self.start().await,
             (false, true) => self.stop().await,
             _ => {}
@@ -1423,95 +1334,19 @@ impl Monitor {
         Ok(next)
     }
 
-    /// Clears the pending suggestion. A browser-span suggestion's dismissal is
-    /// remembered for that span: the next drain must not re-raise it.
-    pub fn clear_suggestion(&self) {
-        let mut shared = lock(&self.shared);
-        if let Some(suggestion) = shared.agent.suggestion.take() {
-            if let Some(span_id) = suggestion.span_id {
-                shared.browser.dismissed_span = Some(span_id);
-            }
-        }
-    }
-
-    /// Refreshes the local mapping cache and rewrites the browser rules file
-    /// when the `url_rule` set changed; the extension picks it up through the
-    /// host. A failed write keeps the old file — stale rules beat none.
     pub fn cache_mappings(&self, mappings: Vec<PathMapping>) {
-        if let Err(error) = crate::browser::write_rules_file(&self.browser_dir(), &mappings) {
-            eprintln!("clock-in: could not write the browser rules file: {error}");
-        }
         lock(&self.shared).mappings = mappings;
-    }
-
-    /// The mappings cache, for suggestion filtering.
-    pub fn cached_mappings(&self) -> Vec<PathMapping> {
-        lock(&self.shared).mappings.clone()
-    }
-
-    /// Where the browser spool, rules file, tally, and handshake marker live.
-    pub fn browser_dir(&self) -> PathBuf {
-        lock(&self.paths).browser_dir.clone()
-    }
-
-    pub fn trusted_device_id(&self) -> ApiResult<String> {
-        let device_id = lock(&self.shared).settings.device_id.clone();
-        uuid::Uuid::parse_str(&device_id)
-            .map(|_| device_id)
-            .map_err(|_| {
-                BridgeError::unknown("A valid recording device is required to start a timer.")
-            })
-    }
-
-    /// Asks the upload task to run now instead of at the next 5-minute tick
-    /// (timer stop, an auto-stop enqueue). Coalesces with a run in flight.
-    pub fn request_upload(&self) {
-        self.upload_now.notify_one();
-    }
-
-    /// The measured `idleSeconds` for a stop, when monitoring was watching
-    /// this session. Returns `None` when the monitor is off, the session is
-    /// not the one we recorded as running, or the clock data is unusable —
-    /// the caller then keeps whatever the UI sent.
-    pub async fn measured_idle_for_stop(&self, session_id: &str, stopped_at: u64) -> Option<u32> {
-        if !self.is_running().await {
-            return None;
-        }
-        let running = self.recovery.lock().await.running.clone()?;
-        if running.session_id != session_id {
-            return None;
-        }
-        let started = parse_iso8601(&running.started_at)?;
-        let shared = lock(&self.shared);
-        let segments = shared.builder.snapshot(stopped_at);
-        let agent_active = shared
-            .agent
-            .is_active(stopped_at, shared.settings.agent_override_enabled);
-        Some(measured_idle_seconds(
-            &segments,
-            started,
-            stopped_at,
-            agent_active,
-        ))
     }
 
     pub async fn status(&self) -> MonitorStatus {
         let running = self.is_running().await;
-        let timer_started = {
-            let recovery = self.recovery.lock().await;
-            recovery
-                .running
-                .as_ref()
-                .and_then(|timer| parse_iso8601(&timer.started_at))
-        };
         let now = unix_now();
         let shared = lock(&self.shared);
-        let policy = shared.settings.policy();
         let agent_active = if shared
             .agent
             .is_active(now, shared.settings.agent_override_enabled)
         {
-            shared.agent.active.as_ref().map(|active| AgentActive {
+            shared.agent.effective_agent(now).map(|active| AgentActive {
                 source: active.source.clone(),
                 since: iso8601(active.started_at),
             })
@@ -1519,52 +1354,113 @@ impl Monitor {
             None
         };
 
-        let (session_idle_seconds, away) = match timer_started {
-            Some(started) => {
-                let segments = shared.builder.snapshot(now);
-                let agent_active = shared
-                    .agent
-                    .is_active(now, shared.settings.agent_override_enabled);
-                let idle = measured_idle_seconds(&segments, started, now, agent_active);
-                let away = latest_away_span(&segments, started, now, policy.away_threshold_seconds)
-                    .map(|span| AwayInfo {
-                        started_at: iso8601(span.started_at),
-                        seconds: span.seconds,
-                        ongoing: span.ongoing,
-                        exceeds_hard_limit: span.seconds >= policy.hard_away_limit_seconds,
-                    });
-                (Some(idle), away)
-            }
-            None => (None, None),
-        };
-
-        let paths = lock(&self.paths).clone();
-        let active_identity = lock(&self.identity).is_some();
         MonitorStatus {
             enabled: shared.settings.enabled,
             running,
             last_upload_at: shared.last_upload_at.clone(),
-            segment_backlog: if active_identity {
-                count_lines(&paths.segments_path)
-            } else {
-                0
-            },
-            agent_backlog: if active_identity {
-                count_lines(&paths.agent_path)
-            } else {
-                0
-            },
-            browser_capture_paused: active_identity
-                && crate::browser::capture_is_paused(&paths.browser_dir),
+            segment_backlog: count_lines(&self.segments_path),
+            agent_backlog: count_lines(&self.agent_path),
+            session_backlog: count_lines(&self.session_spool_path()),
             hooks: detect_hooks(&default_hook_probes()),
-            browsers: crate::browser::health_all(&paths.browser_dir),
-            pending_suggestion: shared.agent.suggestion.clone(),
             agent_active,
-            session_idle_seconds,
-            away,
-            clock_change_detected_at: shared.clock_change_at.map(iso8601),
+            current_session: shared.tracker.open_session().map(|open| CurrentSession {
+                project_id: open.project.project_id.clone(),
+                attribution: open.project.attribution,
+                since: iso8601(open.started_at),
+                idle_seconds: open.idle_seconds as u32,
+            }),
+            selected_project_id: shared.selected_project.clone(),
         }
     }
+
+    /// Points recording at one project until the person clears it. The change
+    /// closes the open session at its last active moment, so the switch never
+    /// backdates work into the newly chosen project.
+    pub fn select_project(&self, project_id: Option<String>) {
+        let mut shared = lock(&self.shared);
+        shared.selected_project = project_id;
+    }
+
+    /// Establishes the project that catches time nothing else names.
+    pub fn set_default_project(&self, project_id: Option<String>) {
+        lock(&self.shared).default_project = project_id;
+    }
+
+    /// Starts a clean account-bound recording context. Callers stop the old
+    /// context first, so no session can survive into a different account.
+    pub fn begin_account(&self, user_id: &str) {
+        let mut shared = lock(&self.shared);
+        shared.mappings.clear();
+        shared.agent = AgentTracking::default();
+        shared.tracker = SessionTracker::new();
+        shared.default_project = None;
+        shared.selected_project = None;
+        shared.account_id = Some(user_id.to_string());
+        *lock(&self.sessions_path) = scoped_sessions_path(&self.sessions_path_base, user_id);
+    }
+
+    /// Removes account-bound in-memory state after its sessions have been
+    /// flushed, so a later sign-in cannot inherit a project or agent source.
+    pub fn clear_account(&self) {
+        let mut shared = lock(&self.shared);
+        shared.mappings.clear();
+        shared.agent = AgentTracking::default();
+        shared.tracker = SessionTracker::new();
+        shared.default_project = None;
+        shared.selected_project = None;
+        shared.account_id = None;
+    }
+
+    pub fn account_id(&self) -> Option<String> {
+        lock(&self.shared).account_id.clone()
+    }
+
+    /// Closes whatever the previous run left open, so a crash or a forced
+    /// shutdown still reports the work it had already recorded.
+    pub fn carry_over(&self, state: &RecoveryState, user_id: &str) {
+        if let Some(session) = crate::recovery::close_carried_session(state, user_id) {
+            append_session_line(&self.session_spool_path(), &session);
+        }
+    }
+
+    fn session_spool_path(&self) -> PathBuf {
+        lock(&self.sessions_path).clone()
+    }
+
+    async fn persist_open_session(&self, user_id: Option<&str>, open_session: Option<OpenSession>) {
+        persist_open_session(&self.recovery_path, &self.recovery, user_id, open_session).await;
+    }
+}
+
+fn scoped_sessions_path(base: &Path, user_id: &str) -> PathBuf {
+    let stem = base
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("sessions");
+    base.with_file_name(format!("{stem}-{user_id}.jsonl"))
+}
+
+async fn persist_open_session(
+    path: &Path,
+    recovery: &Arc<tokio::sync::Mutex<RecoveryState>>,
+    user_id: Option<&str>,
+    open_session: Option<OpenSession>,
+) {
+    let Some(user_id) = user_id else {
+        return;
+    };
+    let mut state = recovery.lock().await;
+    match open_session {
+        Some(open_session) => {
+            state
+                .open_sessions
+                .insert(user_id.to_string(), open_session);
+        }
+        None => {
+            state.open_sessions.remove(user_id);
+        }
+    }
+    let _ = crate::write_recovery_file(path, &state);
 }
 
 pub fn load_settings(path: &Path) -> MonitorSettings {
@@ -1592,164 +1488,109 @@ pub(crate) fn persist_settings(path: &Path, settings: &MonitorSettings) -> ApiRe
 
 /// Appends one closed segment to the segment spool. Spool failures are
 /// logged without the payload (paths and process names stay out of logs).
-fn append_segment_line(path: &Path, segment: &Segment, device_id: &str) -> bool {
+fn append_segment_line(path: &Path, segment: &Segment, device_id: &str) {
     let record = SegmentRecord::from_segment(segment, device_id);
     let mut line = match serde_json::to_vec(&record) {
         Ok(line) => line,
-        Err(_) => return false,
+        Err(_) => return,
     };
     line.push(b'\n');
     if spool::append_line(path, &line, spool::MAX_SPOOL_BYTES).is_err() {
         eprintln!("clock-in: could not persist an activity segment");
-        return false;
     }
-    true
 }
 
-pub(crate) fn flush_open_segment_to_spool(
-    shared: &Arc<Mutex<MonitorShared>>,
-    path: &Path,
-    now: u64,
-) -> bool {
-    let mut shared = lock(shared);
-    let Some(segment) = shared.builder.closing_segment(now) else {
-        return true;
-    };
-    if !append_segment_line(path, &segment, &shared.settings.device_id) {
-        return false;
-    }
-    let _ = shared.builder.flush(now);
-    true
-}
-
-/// The 30-second poll task: detect sleep/clock gaps, drain pushed session
-/// events, poll the OS, fold signals into segments, spool transitions,
-/// enforce the auto-stop policy.
+/// The 30-second poll task: drain pushed session events, poll the OS, fold
+/// signals into segments, spool transitions, enforce the auto-stop policy.
 #[cfg_attr(not(windows), allow(dead_code))]
-#[allow(clippy::too_many_arguments)]
 async fn poll_loop(
     shared: Arc<Mutex<MonitorShared>>,
     events: Arc<PlatformEvents>,
     segments_path: PathBuf,
-    recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
+    agent_path: PathBuf,
+    sessions_path: PathBuf,
     recovery_path: PathBuf,
-    upload_now: Arc<Notify>,
-    recording: Arc<AtomicBool>,
-    capture_paused: Arc<AtomicBool>,
+    recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
 ) {
     let source = platform::Poller::new();
-    let mut previous: Option<TickReading> = None;
     let mut tick = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECONDS));
     // A slept machine replays missed ticks one at a time, not in a burst.
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        if !recording.load(Ordering::SeqCst) {
-            return;
-        }
-        let reading = TickReading {
-            wall: unix_now(),
-            // Unlike std::time::Instant/QueryPerformanceCounter on affected
-            // Modern Standby hardware, this Windows source is documented to
-            // include time spent suspended.
-            mono: platform::suspend_inclusive_seconds(),
-        };
+        let now = unix_now();
         let pushed = events.drain();
-        let signal = source.poll();
+        let replayed = crate::uploader::replay_agent_spool(&shared, &agent_path);
 
-        let (closed, device_id) = {
+        let mut closed = Vec::new();
+        let (device_id, finished, account_id, open_session) = {
             let mut shared = lock(&shared);
-            let (closed, gap) =
-                fold_tick(&mut shared.builder, &mut previous, reading, pushed, &signal);
-            if matches!(gap, Some(ClockGap::ClockChanged)) {
-                shared.clock_change_at = Some(reading.wall);
+            // Event timestamps come from when the OS broadcast fired, which
+            // can be long ago (a suspend/resume pair spanning the night).
+            for (at, signal) in pushed {
+                closed.extend(shared.builder.apply(at, &signal));
             }
-            (closed, shared.settings.device_id.clone())
+            let signal = source.poll();
+            closed.extend(shared.builder.apply(now, &signal));
+            let device_id = shared.settings.device_id.clone();
+            let mut finished = replayed;
+            finished.extend(advance_sessions(&mut shared, now));
+            let account_id = shared.account_id.clone();
+            let open_session = shared.tracker.open_session().cloned();
+            (device_id, finished, account_id, open_session)
         };
         for segment in &closed {
-            if !append_segment_line(&segments_path, segment, &device_id) {
-                capture_paused.store(true, Ordering::SeqCst);
-                return;
+            append_segment_line(&segments_path, segment, &device_id);
+        }
+        for session in &finished {
+            if account_id.is_some() {
+                append_session_line(&sessions_path, session);
             }
         }
-
-        enforce_auto_stop(
-            &shared,
-            &recovery,
+        // The open session goes to disk every tick: a crash then costs the gap
+        // since the last tick, not the whole session.
+        persist_open_session(
             &recovery_path,
-            &upload_now,
-            reading.wall,
+            &recovery,
+            account_id.as_deref(),
+            open_session,
         )
         .await;
     }
 }
 
-/// Auto-stops the running timer when the away policy says to. The stop queues
-/// through the same pending-sync machinery a manual offline stop uses:
-/// recorded locally first, uploaded when a connection allows, and surfaced to
-/// the UI as a pending sync at next launch.
-async fn enforce_auto_stop(
-    shared: &Arc<Mutex<MonitorShared>>,
-    recovery: &Arc<tokio::sync::Mutex<RecoveryState>>,
-    recovery_path: &Path,
-    upload_now: &Arc<Notify>,
-    now: u64,
-) {
-    let running = recovery.lock().await.running.clone();
-    let Some(running) = running else {
-        return;
-    };
-    let Some(timer_started) = parse_iso8601(&running.started_at) else {
-        return;
-    };
-
-    let decision = {
-        let shared = lock(shared);
-        let settings = &shared.settings;
-        let policy = settings.policy();
-        let segments = shared.builder.snapshot(now);
-        let locked_since = match shared.builder.open_span() {
-            Some((SegmentKind::Locked, started)) => Some(started),
-            _ => None,
-        };
-        let agent_active = shared.agent.is_active(now, settings.agent_override_enabled);
-        decide_auto_stop(
+/// Folds this tick's activity boundaries into sessions. Split out from the
+/// poll task so it stays a plain function over shared state.
+pub fn advance_sessions(shared: &mut MonitorShared, now: u64) -> Vec<ObservedSession> {
+    let project = shared.current_project(now);
+    let agent_active = shared
+        .agent
+        .is_active(now, shared.settings.agent_override_enabled);
+    let away_threshold_seconds = shared.settings.away_threshold_seconds();
+    let open_span = shared.builder.open_span();
+    let client_id = uuid::Uuid::new_v4().to_string();
+    shared.tracker.apply(
+        TrackerInput {
             now,
-            current_away_since(&segments, timer_started, now),
-            locked_since,
-            &policy,
+            open_span,
+            project: project.as_ref(),
             agent_active,
-        )
-        .map(|stop_at| {
-            (
-                stop_at,
-                measured_idle_seconds(&segments, timer_started, stop_at, agent_active),
-            )
-        })
-    };
-    let Some((stop_at, idle_seconds)) = decision else {
-        return;
-    };
+            away_threshold_seconds,
+        },
+        &client_id,
+    )
+}
 
-    let mut state = recovery.lock().await;
-    // The timer may have stopped between the decision and this lock.
-    let Some(still_running) = state.running.clone() else {
-        return;
+/// Appends one finished session to its spool. Failures are logged without the
+/// payload, exactly like segments.
+fn append_session_line(path: &Path, session: &ObservedSession) {
+    let mut line = match serde_json::to_vec(session) {
+        Ok(line) => line,
+        Err(_) => return,
     };
-    if still_running.session_id != running.session_id {
-        return;
-    }
-    let stop = PendingStop {
-        session_id: running.session_id.clone(),
-        stopped_at: iso8601(stop_at),
-        idle_seconds,
-    };
-    if state.enqueue_stop(stop).is_err() {
-        eprintln!("clock-in: could not queue an automatic stop; the queue is full");
-        return;
-    }
-    if crate::write_recovery_file(recovery_path, &state).is_ok() {
-        upload_now.notify_one();
+    line.push(b'\n');
+    if spool::append_line(path, &line, spool::MAX_SPOOL_BYTES).is_err() {
+        eprintln!("clock-in: could not persist a finished session");
     }
 }
 
@@ -1858,29 +1699,19 @@ mod platform {
     use windows_sys::Win32::System::RemoteDesktop::{
         WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
     };
-    use windows_sys::Win32::System::SystemInformation::{GetTickCount, GetTickCount64};
+    use windows_sys::Win32::System::SystemInformation::GetTickCount;
     use windows_sys::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows, GetClassNameW,
-        GetForegroundWindow, GetMessageW, GetWindowLongPtrW, GetWindowThreadProcessId,
-        RegisterClassW, SetWindowLongPtrW, TranslateMessage, CHILDID_SELF, CW_USEDEFAULT,
-        EVENT_SYSTEM_FOREGROUND, GWLP_USERDATA, MSG, OBJID_WINDOW, PBT_APMSUSPEND,
-        WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_POWERBROADCAST, WM_WTSSESSION_CHANGE,
-        WNDCLASSW, WS_POPUP,
+        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetForegroundWindow, GetMessageW,
+        GetWindowLongPtrW, GetWindowThreadProcessId, RegisterClassW, SetWindowLongPtrW,
+        TranslateMessage, CW_USEDEFAULT, GWLP_USERDATA, MSG, PBT_APMSUSPEND, WM_POWERBROADCAST,
+        WM_WTSSESSION_CHANGE, WNDCLASSW, WS_POPUP, WTS_SESSION_LOCK,
     };
 
-    use super::{
-        is_uwp_frame_host, session_change_signal, unix_now, ActivitySignal, ActivitySource,
-        PlatformEvents, IDLE_THRESHOLD_SECONDS,
-    };
-
-    /// The child-window class that marks a UWP app's real content window
-    /// inside the ApplicationFrameHost.exe frame.
-    const UWP_CORE_WINDOW_CLASS: &str = "Windows.UI.Core.CoreWindow";
+    use super::{unix_now, ActivitySignal, ActivitySource, PlatformEvents, IDLE_THRESHOLD_SECONDS};
 
     pub struct Poller;
 
@@ -1905,11 +1736,6 @@ mod platform {
         }
     }
 
-    /// Seconds since Windows started, including time spent suspended.
-    pub fn suspend_inclusive_seconds() -> u64 {
-        unsafe { GetTickCount64() / 1_000 }
-    }
-
     /// Seconds since the last keyboard or mouse input, per `GetLastInputInfo`.
     /// `GetTickCount` wraps at ~49.7 days; the wrapping subtraction absorbs it.
     fn idle_seconds() -> Option<u32> {
@@ -1929,37 +1755,16 @@ mod platform {
     /// never the window title. `None` when the OS won't say (no foreground
     /// window, access denied), which the segment simply records without one.
     fn foreground_process_name() -> Option<String> {
-        process_name_for_window(unsafe { GetForegroundWindow() })
-    }
-
-    /// The executable name of the process owning `window`. Store-packaged
-    /// (UWP) apps report as ApplicationFrameHost.exe; those resolve through
-    /// the child CoreWindow's process so Calculator, Photos, and friends
-    /// report their own names.
-    fn process_name_for_window(window: HWND) -> Option<String> {
-        if window.is_null() {
-            return None;
-        }
-        let mut process_id = 0u32;
-        unsafe { GetWindowThreadProcessId(window, &mut process_id) };
-        if process_id == 0 {
-            return None;
-        }
-        let name = process_name_for_pid(process_id)?;
-        if is_uwp_frame_host(&name) {
-            if let Some(child_id) = uwp_child_process_id(window) {
-                if let Some(child_name) = process_name_for_pid(child_id) {
-                    return Some(child_name);
-                }
-            }
-        }
-        Some(name)
-    }
-
-    /// The executable file name of a process id, or `None` when the process
-    /// won't open (access denied, already exited).
-    fn process_name_for_pid(process_id: u32) -> Option<String> {
         unsafe {
+            let window = GetForegroundWindow();
+            if window.is_null() {
+                return None;
+            }
+            let mut process_id = 0u32;
+            GetWindowThreadProcessId(window, &mut process_id);
+            if process_id == 0 {
+                return None;
+            }
             let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
             if process.is_null() {
                 return None;
@@ -1979,51 +1784,11 @@ mod platform {
         }
     }
 
-    /// The PID of the UWP app's real process: the descendant window whose
-    /// class is `Windows.UI.Core.CoreWindow`. `None` when the frame hosts
-    /// none (the app is still starting) — the caller keeps the frame name.
-    fn uwp_child_process_id(window: HWND) -> Option<u32> {
-        struct Search {
-            process_id: u32,
-        }
-        unsafe extern "system" fn visit(child: HWND, lparam: LPARAM) -> i32 {
-            let search = unsafe { &mut *(lparam as *mut Search) };
-            let mut class = [0u16; 64];
-            let length = unsafe { GetClassNameW(child, class.as_mut_ptr(), class.len() as i32) };
-            if length > 0
-                && String::from_utf16_lossy(&class[..length as usize]) == UWP_CORE_WINDOW_CLASS
-            {
-                let mut process_id = 0u32;
-                unsafe { GetWindowThreadProcessId(child, &mut process_id) };
-                if process_id != 0 {
-                    search.process_id = process_id;
-                    return 0; // Found: stop enumerating.
-                }
-            }
-            1
-        }
-        let mut search = Search { process_id: 0 };
-        unsafe {
-            EnumChildWindows(window, Some(visit), &mut search as *mut Search as LPARAM);
-        }
-        (search.process_id != 0).then_some(search.process_id)
-    }
-
-    /// Publishes lock, disconnect, and suspend broadcasts plus foreground
-    /// changes into `events`. Runs for the process lifetime: the thread is
-    /// created once, and between events it sleeps inside `GetMessageW` at
-    /// zero background cost.
+    /// Publishes lock and suspend broadcasts into `events`. Runs for the
+    /// process lifetime: the thread is created once, and between broadcasts
+    /// it sleeps inside `GetMessageW` at zero background cost.
     pub fn spawn_event_thread(events: Arc<PlatformEvents>) {
         std::thread::spawn(move || unsafe { event_loop(events) });
-    }
-
-    thread_local! {
-        /// The queue the WinEvent callback pushes into. Set once on this
-        /// thread before the hook is registered; the Arc behind the pointer
-        /// is leaked in `event_loop`, so the pointer stays valid for the
-        /// process lifetime.
-        static HOOK_EVENTS: std::cell::Cell<*const PlatformEvents> =
-            const { std::cell::Cell::new(std::ptr::null()) };
     }
 
     unsafe fn event_loop(events: Arc<PlatformEvents>) {
@@ -2069,23 +1834,6 @@ mod platform {
             SetWindowLongPtrW(window, GWLP_USERDATA, leaked as isize);
             WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION);
         }
-        // Foreground changes arrive over this same message loop. Out of
-        // context means no injection into other processes — events are posted
-        // to our queue; skip-own-process keeps our own window's focus out.
-        // If the hook fails to register, the poll still tracks the
-        // foreground every 30 seconds, just with coarser boundaries.
-        HOOK_EVENTS.with(|cell| cell.set(leaked));
-        let _hook = unsafe {
-            SetWinEventHook(
-                EVENT_SYSTEM_FOREGROUND,
-                EVENT_SYSTEM_FOREGROUND,
-                std::ptr::null_mut(),
-                Some(foreground_event_proc),
-                0,
-                0,
-                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-            )
-        };
 
         let mut message: MSG = unsafe { std::mem::zeroed() };
         while unsafe { GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) } > 0 {
@@ -2094,35 +1842,6 @@ mod platform {
                 DispatchMessageW(&message);
             }
         }
-    }
-
-    /// The WinEventProc behind `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)`,
-    /// invoked on the event thread through its message loop. Only real
-    /// window-level foreground changes interest us, and only while the machine
-    /// reads as active: a focus change on an idle machine is programmatic,
-    /// and the poll owns the idle/active call.
-    unsafe extern "system" fn foreground_event_proc(
-        _hook: HWINEVENTHOOK,
-        _event: u32,
-        window: HWND,
-        id_object: i32,
-        id_child: i32,
-        _event_thread: u32,
-        _event_time: u32,
-    ) {
-        if window.is_null() || id_object != OBJID_WINDOW || id_child != CHILDID_SELF as i32 {
-            return;
-        }
-        if idle_seconds().is_some_and(|idle| idle >= IDLE_THRESHOLD_SECONDS) {
-            return;
-        }
-        HOOK_EVENTS.with(|cell| {
-            let events = cell.get();
-            if !events.is_null() {
-                let process_name = process_name_for_window(window);
-                unsafe { &*events }.push(unix_now(), ActivitySignal::Foreground { process_name });
-            }
-        });
     }
 
     unsafe extern "system" fn window_proc(
@@ -2134,11 +1853,11 @@ mod platform {
         let events = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *const PlatformEvents;
         if !events.is_null() {
             let signal = match message {
-                // Lock, fast-user-switch disconnect, and RDP-takeover
-                // disconnect all record as locked. Unlock, reconnect, and
-                // resume raise no event: the next poll's Active or Idle
-                // signal closes the span the same way a transition would.
-                WM_WTSSESSION_CHANGE => session_change_signal(wparam),
+                WM_WTSSESSION_CHANGE if wparam == WTS_SESSION_LOCK as usize => {
+                    Some(ActivitySignal::Locked)
+                }
+                // Unlock and resume raise no event: the next poll's Active or
+                // Idle signal closes the span the same way a transition would.
                 WM_POWERBROADCAST if wparam == PBT_APMSUSPEND as usize => {
                     Some(ActivitySignal::Suspended)
                 }
@@ -2172,17 +1891,11 @@ mod platform {
             ActivitySignal::Active { process_name: None }
         }
     }
-
-    /// The poll loop is Windows-only, so this is a compile-time placeholder.
-    pub fn suspend_inclusive_seconds() -> u64 {
-        0
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
 
     fn active(name: &str) -> ActivitySignal {
         ActivitySignal::Active {
@@ -2193,12 +1906,6 @@ mod tests {
     fn idle(seconds: u32) -> ActivitySignal {
         ActivitySignal::Idle {
             idle_seconds: seconds,
-        }
-    }
-
-    fn foreground(name: &str) -> ActivitySignal {
-        ActivitySignal::Foreground {
-            process_name: Some(name.to_string()),
         }
     }
 
@@ -2294,294 +2001,6 @@ mod tests {
     }
 
     #[test]
-    fn a_foreground_change_splits_the_open_active_span() {
-        let mut builder = SegmentBuilder::new();
-        builder.apply(1_000, &active("chrome.exe"));
-
-        // Switching from Chrome to VS Code at t=1030 closes Chrome's span and
-        // opens a new one, instead of the whole span inheriting one label.
-        let closed = builder.apply(1_030, &foreground("code.exe"));
-        assert_eq!(
-            closed,
-            vec![{
-                let mut chrome = segment(SegmentKind::Active, 1_000, 1_030);
-                chrome.process_name = Some("chrome.exe".to_string());
-                chrome
-            }]
-        );
-        assert_eq!(builder.open_span(), Some((SegmentKind::Active, 1_030)));
-
-        // Same process again: nothing to split.
-        assert!(builder.apply(1_060, &foreground("code.exe")).is_empty());
-
-        // The poll keeps confirming the new label and coalescing.
-        assert!(builder.apply(1_090, &active("code.exe")).is_empty());
-        let snapshot = builder.snapshot(1_090);
-        let open = snapshot.last().expect("the active span is open");
-        assert_eq!(open.process_name.as_deref(), Some("code.exe"));
-        assert_eq!((open.started_at, open.ended_at), (1_030, 1_090));
-
-        // A foreground event with an unresolvable process still splits: the
-        // time after the switch is honestly unlabeled, not Chrome's.
-        let closed = builder.apply(1_120, &ActivitySignal::Foreground { process_name: None });
-        assert_eq!(closed.len(), 1);
-        assert_eq!(closed[0].process_name.as_deref(), Some("code.exe"));
-        let open = builder
-            .snapshot(1_150)
-            .last()
-            .expect("span is open")
-            .clone();
-        assert_eq!(open.process_name, None);
-        assert_eq!(open.started_at, 1_120);
-    }
-
-    #[test]
-    fn foreground_events_only_sharpen_active_spans() {
-        let mut builder = SegmentBuilder::new();
-        // Nothing open: the poll opens spans, not the hook.
-        assert!(builder.apply(1_000, &foreground("code.exe")).is_empty());
-        assert_eq!(builder.open_span(), None);
-
-        // While idle, a programmatic focus change is not activity.
-        builder.apply(1_000, &idle(120));
-        assert_eq!(builder.open_span(), Some((SegmentKind::Idle, 880)));
-        assert!(builder.apply(1_030, &foreground("code.exe")).is_empty());
-        assert_eq!(builder.open_span(), Some((SegmentKind::Idle, 880)));
-
-        // While locked, same.
-        builder.apply(1_100, &ActivitySignal::Locked);
-        assert!(builder.apply(1_130, &foreground("code.exe")).is_empty());
-        assert_eq!(builder.open_span(), Some((SegmentKind::Locked, 1_100)));
-    }
-
-    #[test]
-    fn classify_clock_gap_distinguishes_sleep_from_clock_changes() {
-        let prior = TickReading {
-            wall: 1_000,
-            mono: 100,
-        };
-        // A normal 30s tick: nothing.
-        assert_eq!(
-            classify_clock_gap(
-                prior,
-                TickReading {
-                    wall: 1_030,
-                    mono: 130
-                }
-            ),
-            None
-        );
-        // A tick delayed past two poll intervals with both clocks moving
-        // together: the machine slept without a suspend broadcast.
-        assert_eq!(
-            classify_clock_gap(
-                prior,
-                TickReading {
-                    wall: 8_200,
-                    mono: 7_300
-                }
-            ),
-            Some(ClockGap::Slept {
-                from: 1_000,
-                to: 8_200
-            })
-        );
-        // Wall jumped alone, forward or backward: the system clock changed.
-        assert_eq!(
-            classify_clock_gap(
-                prior,
-                TickReading {
-                    wall: 4_630,
-                    mono: 130
-                }
-            ),
-            Some(ClockGap::ClockChanged)
-        );
-        assert_eq!(
-            classify_clock_gap(
-                prior,
-                TickReading {
-                    wall: 200,
-                    mono: 130
-                }
-            ),
-            Some(ClockGap::ClockChanged)
-        );
-        // A slow tick within two intervals on both clocks is still normal.
-        assert_eq!(
-            classify_clock_gap(
-                prior,
-                TickReading {
-                    wall: 1_045,
-                    mono: 130
-                }
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn a_joint_clock_jump_synthesizes_a_suspended_gap() {
-        let mut builder = SegmentBuilder::new();
-        let mut previous = None;
-        builder.apply(900, &active("code.exe"));
-        let (closed, gap) = fold_tick(
-            &mut builder,
-            &mut previous,
-            TickReading {
-                wall: 1_000,
-                mono: 100,
-            },
-            Vec::new(),
-            &active("code.exe"),
-        );
-        assert!(closed.is_empty() && gap.is_none());
-
-        // Eight hours later the machine wakes; the suspend broadcast never
-        // fired (Modern Standby). The gap becomes Suspended, not active time.
-        let (closed, gap) = fold_tick(
-            &mut builder,
-            &mut previous,
-            TickReading {
-                wall: 8_200,
-                mono: 7_300,
-            },
-            Vec::new(),
-            &active("code.exe"),
-        );
-        assert_eq!(
-            gap,
-            Some(ClockGap::Slept {
-                from: 1_000,
-                to: 8_200
-            })
-        );
-        assert_eq!(
-            closed,
-            vec![
-                {
-                    let mut work = segment(SegmentKind::Active, 900, 1_000);
-                    work.process_name = Some("code.exe".to_string());
-                    work
-                },
-                segment(SegmentKind::Suspended, 1_000, 8_200),
-            ]
-        );
-        assert_eq!(builder.open_span(), Some((SegmentKind::Active, 8_200)));
-    }
-
-    #[test]
-    fn a_wall_only_jump_splits_the_span_at_the_last_trusted_reading() {
-        let mut builder = SegmentBuilder::new();
-        let mut previous = None;
-        builder.apply(900, &active("code.exe"));
-        fold_tick(
-            &mut builder,
-            &mut previous,
-            TickReading {
-                wall: 1_000,
-                mono: 100,
-            },
-            Vec::new(),
-            &active("code.exe"),
-        );
-
-        // The wall clock jumped an hour forward while 30 monotonic seconds
-        // passed: the system clock changed mid-span.
-        let (closed, gap) = fold_tick(
-            &mut builder,
-            &mut previous,
-            TickReading {
-                wall: 4_630,
-                mono: 130,
-            },
-            Vec::new(),
-            &active("code.exe"),
-        );
-        assert_eq!(gap, Some(ClockGap::ClockChanged));
-        // The old timeline's half closed at the last trusted wall reading...
-        assert_eq!(
-            closed,
-            vec![{
-                let mut work = segment(SegmentKind::Active, 900, 1_000);
-                work.process_name = Some("code.exe".to_string());
-                work
-            }]
-        );
-        // ...and the same state reopened on the new timeline.
-        assert_eq!(builder.open_span(), Some((SegmentKind::Active, 4_630)));
-        let snapshot = builder.snapshot(4_630);
-        assert_eq!(snapshot.len(), 1, "only the closed half is history");
-    }
-
-    #[test]
-    fn pushed_events_still_apply_after_a_clock_change_split() {
-        let mut builder = SegmentBuilder::new();
-        let mut previous = None;
-        builder.apply(900, &active("code.exe"));
-        fold_tick(
-            &mut builder,
-            &mut previous,
-            TickReading {
-                wall: 1_000,
-                mono: 100,
-            },
-            Vec::new(),
-            &active("code.exe"),
-        );
-
-        // The clock jumped backwards; a lock event pushed after the jump
-        // carries a timestamp on the new (earlier) timeline and must not
-        // panic the fold.
-        let (closed, gap) = fold_tick(
-            &mut builder,
-            &mut previous,
-            TickReading {
-                wall: 200,
-                mono: 130,
-            },
-            vec![(190, ActivitySignal::Locked)],
-            &ActivitySignal::Locked,
-        );
-        assert_eq!(gap, Some(ClockGap::ClockChanged));
-        assert_eq!(builder.open_span(), Some((SegmentKind::Locked, 200)));
-        // The old timeline's active half still spooled.
-        assert!(closed
-            .iter()
-            .any(|segment| { segment.kind == SegmentKind::Active && segment.ended_at == 1_000 }));
-    }
-
-    #[test]
-    fn session_disconnects_map_to_locked_like_the_lock_broadcast() {
-        assert_eq!(
-            session_change_signal(WTS_SESSION_LOCK_WP),
-            Some(ActivitySignal::Locked)
-        );
-        assert_eq!(
-            session_change_signal(WTS_CONSOLE_DISCONNECT_WP),
-            Some(ActivitySignal::Locked),
-            "fast user switching records as locked"
-        );
-        assert_eq!(
-            session_change_signal(WTS_REMOTE_DISCONNECT_WP),
-            Some(ActivitySignal::Locked),
-            "RDP takeover records as locked"
-        );
-        // Unlock, connect, and logon raise no event: the poll closes the span.
-        for wparam in [0x1, 0x3, 0x5, 0x8] {
-            assert_eq!(session_change_signal(wparam), None);
-        }
-    }
-
-    #[test]
-    fn uwp_frame_host_detection_is_case_insensitive_and_exact() {
-        assert!(is_uwp_frame_host("ApplicationFrameHost.exe"));
-        assert!(is_uwp_frame_host("applicationframehost.exe"));
-        assert!(!is_uwp_frame_host("chrome.exe"));
-        assert!(!is_uwp_frame_host("ApplicationFrameHost.exe.tmp"));
-    }
-
-    #[test]
     fn iso8601_round_trips_through_the_parser() {
         for unix in [0, 1_704_067_200, 951_827_200, 1_786_000_000] {
             assert_eq!(parse_iso8601(&iso8601(unix)), Some(unix));
@@ -2616,169 +2035,604 @@ mod tests {
         }
     }
 
-    #[test]
-    fn measured_idle_sums_non_active_overlap_and_clamps_to_elapsed() {
-        let segments = vec![
-            segment(SegmentKind::Active, 1_000, 1_200),
-            segment(SegmentKind::Idle, 1_200, 1_500),
-            segment(SegmentKind::Active, 1_500, 1_600),
-            segment(SegmentKind::Locked, 1_600, 2_000),
-        ];
+    fn project(id: &str, attribution: Attribution) -> SessionProject {
+        SessionProject {
+            project_id: id.to_string(),
+            attribution,
+        }
+    }
 
-        // Timer 1000..2000: idle 300 + locked 400.
-        assert_eq!(measured_idle_seconds(&segments, 1_000, 2_000, false), 700);
-        // Timer starts mid-idle: only the overlapping tail counts.
-        assert_eq!(measured_idle_seconds(&segments, 1_300, 2_000, false), 600);
-        // Stop before the locked span ends: clamped to the stop time.
-        assert_eq!(measured_idle_seconds(&segments, 1_000, 1_800, false), 500);
-        // The agent-active override pauses idle accrual entirely.
-        assert_eq!(measured_idle_seconds(&segments, 1_000, 2_000, true), 0);
-        // A zero-length window measures zero, not a panic.
-        assert_eq!(measured_idle_seconds(&segments, 2_000, 1_000, false), 0);
+    /// Drives the tracker the way the poll task does: one tick per call, with
+    /// the fold's open span and the project the host would attribute to.
+    fn tick(
+        tracker: &mut SessionTracker,
+        now: u64,
+        open_span: Option<(SegmentKind, u64)>,
+        project: Option<&SessionProject>,
+        agent_active: bool,
+    ) -> Vec<ObservedSession> {
+        tracker.apply(
+            TrackerInput {
+                now,
+                open_span,
+                project,
+                agent_active,
+                away_threshold_seconds: 600,
+            },
+            &format!("client-{now}"),
+        )
     }
 
     #[test]
-    fn durable_flush_preserves_an_open_segment_before_identity_teardown() {
-        let dir = std::env::temp_dir().join(format!(
-            "clock-in-monitor-auth-flush-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        let path = dir.join("segments.jsonl");
-        let mut builder = SegmentBuilder::new();
-        builder.apply(
-            1_000,
-            &ActivitySignal::Active {
-                process_name: Some("Code.exe".to_string()),
-            },
+    fn a_session_opens_on_activity_with_nobody_pressing_anything() {
+        let mut tracker = SessionTracker::new();
+        let project = project("p1", Attribution::Default);
+
+        let closed = tick(
+            &mut tracker,
+            1_030,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
         );
-        let shared = Arc::new(Mutex::new(MonitorShared {
-            builder,
-            settings: MonitorSettings {
-                device_id: "device-one".to_string(),
-                ..MonitorSettings::default()
-            },
+
+        assert!(closed.is_empty(), "an opening session finishes nothing");
+        let open = tracker.open_session().expect("a session is open");
+        assert_eq!(open.started_at, 1_000, "it starts where the activity did");
+        assert_eq!(open.project.project_id, "p1");
+    }
+
+    #[test]
+    fn quiet_time_past_the_threshold_closes_the_session_where_work_stopped() {
+        let mut tracker = SessionTracker::new();
+        let project = project("p1", Attribution::Agent);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
+
+        // Nine minutes of quiet is not enough to end anything.
+        let early = tick(
+            &mut tracker,
+            2_140,
+            Some((SegmentKind::Idle, 1_600)),
+            Some(&project),
+            false,
+        );
+        assert!(early.is_empty());
+
+        let closed = tick(
+            &mut tracker,
+            2_200,
+            Some((SegmentKind::Idle, 1_600)),
+            Some(&project),
+            false,
+        );
+
+        let [session] = closed.as_slice() else {
+            panic!("one session closed")
+        };
+        assert_eq!(session.started_at, iso8601(1_000));
+        // At the last active moment, never at "now": idle is never inside it.
+        assert_eq!(session.stopped_at, iso8601(1_600));
+        assert_eq!(session.attribution, Attribution::Agent);
+        assert!(tracker.open_session().is_none());
+    }
+
+    #[test]
+    fn short_quiet_gaps_stay_inside_the_session_as_trimmed_idle() {
+        let mut tracker = SessionTracker::new();
+        let project = project("p1", Attribution::Default);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
+        // Four minutes idle, then back to work: one session, not two.
+        tick(
+            &mut tracker,
+            1_300,
+            Some((SegmentKind::Idle, 1_200)),
+            Some(&project),
+            false,
+        );
+        let closed = tick(
+            &mut tracker,
+            1_500,
+            Some((SegmentKind::Active, 1_440)),
+            Some(&project),
+            false,
+        );
+
+        assert!(closed.is_empty(), "a short gap fragments nothing");
+        assert_eq!(
+            tracker.open_session().expect("still open").idle_seconds,
+            240
+        );
+
+        let finished = tracker.flush(1_500).expect("the session closes");
+        assert_eq!(finished.idle_seconds, 240);
+        assert_eq!(finished.started_at, iso8601(1_000));
+    }
+
+    #[test]
+    fn locking_or_sleeping_ends_the_session_at_that_moment() {
+        for kind in [SegmentKind::Locked, SegmentKind::Suspended] {
+            let mut tracker = SessionTracker::new();
+            let project = project("p1", Attribution::Default);
+            tick(
+                &mut tracker,
+                1_000,
+                Some((SegmentKind::Active, 1_000)),
+                Some(&project),
+                false,
+            );
+
+            let closed = tick(
+                &mut tracker,
+                1_800,
+                Some((kind, 1_700)),
+                Some(&project),
+                false,
+            );
+
+            let [session] = closed.as_slice() else {
+                panic!("one session closed for {kind:?}")
+            };
+            assert_eq!(session.stopped_at, iso8601(1_700));
+        }
+    }
+
+    #[test]
+    fn an_open_agent_session_holds_the_session_through_quiet_time_and_lock() {
+        let mut tracker = SessionTracker::new();
+        let project = project("p1", Attribution::Agent);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
+
+        // Hours of quiet, but an agent is working: this is unattended work.
+        let quiet = tick(
+            &mut tracker,
+            40_000,
+            Some((SegmentKind::Idle, 1_600)),
+            Some(&project),
+            true,
+        );
+        let locked = tick(
+            &mut tracker,
+            44_000,
+            Some((SegmentKind::Locked, 41_000)),
+            Some(&project),
+            true,
+        );
+
+        assert!(quiet.is_empty());
+        assert!(locked.is_empty());
+        assert!(tracker.open_session().is_some());
+    }
+
+    #[test]
+    fn agent_evidence_advances_the_counted_boundary_on_lock() {
+        // R10: an overnight agent run on a locked machine must count the
+        // agent's working time as session duration, not trim it as idle.
+        let mut tracker = SessionTracker::new();
+        let project = project("p1", Attribution::Agent);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
+
+        // Machine locks; agent is still running.
+        tick(
+            &mut tracker,
+            2_000,
+            Some((SegmentKind::Locked, 2_000)),
+            Some(&project),
+            true,
+        );
+        let open = tracker.open_session().expect("session survives lock");
+        assert_eq!(
+            open.last_active_at, 2_000,
+            "agent evidence advances the boundary past the lock"
+        );
+
+        // Agent keeps running while the machine stays locked.
+        tick(
+            &mut tracker,
+            3_000,
+            Some((SegmentKind::Locked, 2_000)),
+            Some(&project),
+            true,
+        );
+        let open = tracker.open_session().unwrap();
+        assert_eq!(
+            open.last_active_at, 3_000,
+            "each agent event advances the boundary"
+        );
+
+        // Agent finishes; machine stays locked. Session closes at the last
+        // agent boundary, not at the original lock moment.
+        let closed = tick(
+            &mut tracker,
+            5_000,
+            Some((SegmentKind::Locked, 2_000)),
+            Some(&project),
+            false,
+        );
+        let [session] = closed.as_slice() else {
+            panic!("session closes when agent stops on a locked machine")
+        };
+        assert_eq!(session.started_at, iso8601(1_000));
+        assert_eq!(session.stopped_at, iso8601(3_000));
+        // The post-agent locked gap (3_000 to 5_000) is NOT inside the session.
+        assert!(tracker.open_session().is_none());
+    }
+
+    #[test]
+    fn agent_covered_idle_is_not_subtracted_from_session_duration() {
+        // R10: idle time with an active agent must not be booked as trimmed
+        // idle. The agent's working interval survives into the session.
+        let mut tracker = SessionTracker::new();
+        let project = project("p1", Attribution::Agent);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
+
+        // Person steps away; machine goes idle — short gap, under threshold.
+        tick(
+            &mut tracker,
+            1_100,
+            Some((SegmentKind::Idle, 1_100)),
+            Some(&project),
+            false,
+        );
+
+        // Agent runs while machine is idle: advances the boundary.
+        tick(
+            &mut tracker,
+            1_300,
+            Some((SegmentKind::Idle, 1_100)),
+            Some(&project),
+            true,
+        );
+        assert_eq!(tracker.open_session().unwrap().last_active_at, 1_300);
+
+        tick(
+            &mut tracker,
+            1_500,
+            Some((SegmentKind::Idle, 1_100)),
+            Some(&project),
+            true,
+        );
+        assert_eq!(tracker.open_session().unwrap().last_active_at, 1_500);
+
+        // Person returns while agent is still running.
+        tick(
+            &mut tracker,
+            1_600,
+            Some((SegmentKind::Active, 1_600)),
+            Some(&project),
+            true,
+        );
+
+        let finished = tracker.flush(1_600).expect("session closes");
+        assert_eq!(finished.started_at, iso8601(1_000));
+        assert_eq!(finished.stopped_at, iso8601(1_600));
+        // The idle gap from 1_100 to 1_600 had agent coverage, so only the
+        // pre-agent portion (1_100–1_300 = 200 s) is trimmed idle.
+        assert_eq!(finished.idle_seconds, 200);
+    }
+
+    #[test]
+    fn agent_stops_during_idle_then_idle_continues_past_threshold() {
+        // R10: when an agent runs during idle, then stops, and idle continues
+        // past the away threshold, the session closes at the last agent
+        // boundary — not at the original idle start.
+        let mut tracker = SessionTracker::new();
+        let project = project("p1", Attribution::Agent);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
+
+        // Person steps away; machine goes idle.
+        tick(
+            &mut tracker,
+            1_100,
+            Some((SegmentKind::Idle, 1_100)),
+            Some(&project),
+            false,
+        );
+
+        // Agent runs while machine is idle: advances the boundary.
+        tick(
+            &mut tracker,
+            1_200,
+            Some((SegmentKind::Idle, 1_100)),
+            Some(&project),
+            true,
+        );
+        tick(
+            &mut tracker,
+            1_500,
+            Some((SegmentKind::Idle, 1_100)),
+            Some(&project),
+            true,
+        );
+
+        // Agent stops; machine stays idle. Idle continues past threshold.
+        let closed = tick(
+            &mut tracker,
+            2_100,
+            Some((SegmentKind::Idle, 1_100)),
+            Some(&project),
+            false,
+        );
+        let [session] = closed.as_slice() else {
+            panic!("session closes when idle outlasts agent work")
+        };
+        // Session must close at the last agent boundary (1_500), not the
+        // original idle start (1_100).
+        assert_eq!(session.started_at, iso8601(1_000));
+        assert_eq!(session.stopped_at, iso8601(1_500));
+        // Pre-agent uncovered idle (1_100–1_200 = 100 s) is trimmed.
+        assert_eq!(session.idle_seconds, 100);
+    }
+
+    #[test]
+    fn a_changed_project_closes_one_session_and_opens_the_next() {
+        let mut tracker = SessionTracker::new();
+        let first = project("p1", Attribution::Default);
+        let second = project("p2", Attribution::Agent);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&first),
+            false,
+        );
+        tick(
+            &mut tracker,
+            1_500,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&first),
+            false,
+        );
+
+        let closed = tick(
+            &mut tracker,
+            1_800,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&second),
+            false,
+        );
+
+        let [session] = closed.as_slice() else {
+            panic!("one session closed")
+        };
+        assert_eq!(session.project_id, "p1");
+        // The first session keeps its own time; the second starts clean.
+        assert_eq!(session.stopped_at, iso8601(1_500));
+        let open = tracker.open_session().expect("the next session is open");
+        assert_eq!(open.project.project_id, "p2");
+        // It picks up exactly where the previous one stopped: no gap, no overlap.
+        assert_eq!(open.started_at, 1_500);
+    }
+
+    #[test]
+    fn a_project_change_after_a_short_idle_gap_starts_when_activity_resumes() {
+        let mut tracker = SessionTracker::new();
+        let first = project("p1", Attribution::Default);
+        let second = project("p2", Attribution::Agent);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&first),
+            false,
+        );
+        tick(
+            &mut tracker,
+            1_030,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&first),
+            false,
+        );
+        tick(
+            &mut tracker,
+            1_400,
+            Some((SegmentKind::Idle, 1_200)),
+            Some(&first),
+            false,
+        );
+
+        let closed = tick(
+            &mut tracker,
+            1_500,
+            Some((SegmentKind::Active, 1_500)),
+            Some(&second),
+            false,
+        );
+
+        let [session] = closed.as_slice() else {
+            panic!("the first project closes");
+        };
+        assert_eq!(session.project_id, "p1");
+        assert_eq!(session.idle_seconds, 30);
+        let open = tracker.open_session().expect("the second project opens");
+        assert_eq!(open.project.project_id, "p2");
+        assert_eq!(open.started_at, 1_500);
+    }
+
+    #[test]
+    fn nothing_is_recorded_while_no_project_can_be_named() {
+        let mut tracker = SessionTracker::new();
+
+        let nothing = tick(
+            &mut tracker,
+            1_030,
+            Some((SegmentKind::Active, 1_000)),
+            None,
+            false,
+        );
+
+        assert!(nothing.is_empty());
+        assert!(tracker.open_session().is_none());
+    }
+
+    #[test]
+    fn a_signed_out_host_closes_what_it_had_already_recorded() {
+        let mut tracker = SessionTracker::new();
+        let project = project("p1", Attribution::Selected);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
+        tick(
+            &mut tracker,
+            1_600,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
+
+        let closed = tick(
+            &mut tracker,
+            1_900,
+            Some((SegmentKind::Active, 1_000)),
+            None,
+            false,
+        );
+
+        let [session] = closed.as_slice() else {
+            panic!("one session closed")
+        };
+        assert_eq!(session.stopped_at, iso8601(1_600));
+    }
+
+    #[test]
+    fn flushing_never_bills_the_time_after_the_last_active_moment() {
+        let mut tracker = SessionTracker::new();
+        let project = project("p1", Attribution::Default);
+        tick(
+            &mut tracker,
+            1_000,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
+        tick(
+            &mut tracker,
+            1_030,
+            Some((SegmentKind::Active, 1_000)),
+            Some(&project),
+            false,
+        );
+        tick(
+            &mut tracker,
+            1_400,
+            Some((SegmentKind::Idle, 1_200)),
+            Some(&project),
+            false,
+        );
+
+        let finished = tracker.flush(9_999).expect("the open session closes");
+
+        // The last tick that saw the machine in use, not the moment of quitting.
+        assert_eq!(finished.stopped_at, iso8601(1_030));
+        assert!(
+            tracker.flush(9_999).is_none(),
+            "there is nothing left to close"
+        );
+    }
+
+    #[test]
+    fn the_pinned_project_outranks_an_agent_and_the_default() {
+        let mut shared = MonitorShared {
+            builder: SegmentBuilder::new(),
+            settings: MonitorSettings::default(),
             mappings: Vec::new(),
             agent: AgentTracking::default(),
-            browser: BrowserTracking::default(),
             last_upload_at: None,
-            clock_change_at: None,
-        }));
-
-        assert!(flush_open_segment_to_spool(&shared, &path, 1_030));
-        let (records, _) =
-            spool::read_pending_lines::<SegmentRecord>(&path).expect("durable segment reads");
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].kind, SegmentKind::Active);
-        assert_eq!(records[0].started_at, iso8601(1_000));
-        assert_eq!(records[0].ended_at, iso8601(1_030));
-        assert!(lock(&shared).builder.snapshot(1_060).is_empty());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn away_runs_merge_contiguous_idle_lock_and_suspend() {
-        let segments = vec![
-            segment(SegmentKind::Active, 1_000, 1_200),
-            segment(SegmentKind::Idle, 1_200, 1_500),
-            segment(SegmentKind::Locked, 1_500, 1_800),
-            segment(SegmentKind::Active, 1_800, 1_900),
-            segment(SegmentKind::Suspended, 1_900, 2_500),
-        ];
-        assert_eq!(
-            away_runs(&segments, 1_000, 2_500),
-            vec![(1_200, 1_800), (1_900, 2_500)]
-        );
-    }
-
-    #[test]
-    fn the_latest_away_span_respects_the_threshold_and_marks_ongoing() {
-        let segments = vec![
-            segment(SegmentKind::Idle, 1_000, 1_300),
-            segment(SegmentKind::Active, 1_300, 1_400),
-            segment(SegmentKind::Idle, 1_400, 2_000),
-        ];
-
-        // 900s and 600s runs; a 10-minute threshold matches neither.
-        assert_eq!(latest_away_span(&segments, 1_000, 2_000, 601), None);
-        // At exactly 600s the ongoing run qualifies.
-        let span = latest_away_span(&segments, 1_000, 2_000, 600).expect("span qualifies");
-        assert_eq!(span.started_at, 1_400);
-        assert_eq!(span.seconds, 600);
-        assert!(span.ongoing);
-        // Once activity resumes, the same run is no longer ongoing.
-        let span = latest_away_span(&segments, 1_000, 2_100, 600).expect("span still qualifies");
-        assert!(!span.ongoing);
-    }
-
-    #[test]
-    fn auto_stop_fires_at_the_last_active_boundary_past_the_hard_limit() {
-        let policy = Policy {
-            away_threshold_seconds: 600,
-            hard_away_limit_seconds: 3_600,
-            auto_stop_on_lock: false,
+            tracker: SessionTracker::new(),
+            default_project: Some("default".to_string()),
+            account_id: None,
+            selected_project: None,
         };
 
         assert_eq!(
-            decide_auto_stop(4_599, Some(1_000), None, &policy, false),
-            None
+            shared.current_project(10_000),
+            Some(project("default", Attribution::Default)),
         );
-        assert_eq!(
-            decide_auto_stop(4_600, Some(1_000), None, &policy, false),
-            Some(1_000)
-        );
-        // The agent-active override suppresses the stop no matter how long.
-        assert_eq!(
-            decide_auto_stop(99_000, Some(1_000), None, &policy, true),
-            None
-        );
-        // Nobody is away: nothing to stop.
-        assert_eq!(decide_auto_stop(9_000, None, None, &policy, false), None);
-    }
 
-    #[test]
-    fn auto_stop_on_lock_only_fires_when_the_setting_is_on() {
-        let off = Policy {
-            away_threshold_seconds: 600,
-            hard_away_limit_seconds: 3_600,
-            auto_stop_on_lock: false,
-        };
-        let on = Policy {
-            auto_stop_on_lock: true,
-            ..off
-        };
+        shared.agent.active.insert(
+            ("claude_code".to_string(), "s1".to_string()),
+            ActiveAgent {
+                source: "claude_code".to_string(),
+                external_session_id: "s1".to_string(),
+                started_at: 10_000,
+                last_event_at: 10_000,
+                project: Some("agent".to_string()),
+            },
+        );
+        assert_eq!(
+            shared.current_project(10_000),
+            Some(project("agent", Attribution::Agent)),
+        );
 
+        shared.selected_project = Some("pinned".to_string());
         assert_eq!(
-            decide_auto_stop(2_000, Some(1_900), Some(1_900), &off, false),
-            None
+            shared.current_project(10_000),
+            Some(project("pinned", Attribution::Selected)),
         );
-        assert_eq!(
-            decide_auto_stop(2_000, Some(1_900), Some(1_900), &on, false),
-            Some(1_900)
-        );
-        // The override beats the lock setting too.
-        assert_eq!(
-            decide_auto_stop(2_000, Some(1_900), Some(1_900), &on, true),
-            None
-        );
+
+        shared.default_project = None;
+        shared.agent.active.clear();
+        shared.selected_project = None;
+        assert_eq!(shared.current_project(10_000), None);
     }
 
     #[test]
     fn agent_tracking_is_active_only_inside_the_staleness_window() {
-        let tracking = AgentTracking {
-            open: true,
-            last_event_at: 10_000,
-            active: None,
-            suggestion: None,
-        };
+        let mut tracking = AgentTracking::default();
+        tracking.active.insert(
+            ("claude_code".to_string(), "s1".to_string()),
+            ActiveAgent {
+                source: "claude_code".to_string(),
+                external_session_id: "s1".to_string(),
+                started_at: 10_000,
+                last_event_at: 10_000,
+                project: None,
+            },
+        );
         assert!(tracking.is_active(10_000 + AGENT_ACTIVE_WINDOW_SECONDS, true));
         assert!(!tracking.is_active(10_001 + AGENT_ACTIVE_WINDOW_SECONDS, true));
         assert!(!tracking.is_active(10_000, false), "the setting gates it");
-        let closed = AgentTracking {
-            open: false,
-            ..tracking.clone()
-        };
+        let mut closed = tracking.clone();
+        closed.active.clear();
         assert!(!closed.is_active(10_000, true), "an ended session is over");
     }
 
@@ -2789,8 +2643,6 @@ mod tests {
         let defaults = MonitorSettings::default();
         assert!(defaults.enabled);
         assert_eq!(defaults.away_threshold_minutes, 10);
-        assert_eq!(defaults.hard_away_limit_minutes, 60);
-        assert!(defaults.auto_stop_on_lock);
         assert!(defaults.agent_override_enabled);
 
         let parsed: MonitorSettings =
@@ -2800,7 +2652,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_validation_enforces_bounds_and_ordering() {
+    fn settings_validation_enforces_the_quiet_time_bounds() {
         assert!(settings().validate().is_ok());
 
         let mut bad = settings();
@@ -2808,12 +2660,7 @@ mod tests {
         assert!(bad.validate().is_err());
 
         let mut bad = settings();
-        bad.away_threshold_minutes = 60;
-        bad.hard_away_limit_minutes = 60;
-        assert!(bad.validate().is_err(), "threshold must be below the limit");
-
-        let mut bad = settings();
-        bad.hard_away_limit_minutes = 10_000;
+        bad.away_threshold_minutes = 721;
         assert!(bad.validate().is_err());
     }
 
@@ -2824,7 +2671,7 @@ mod tests {
             ..SettingsPatch::default()
         });
         assert_eq!(patched.away_threshold_minutes, 15);
-        assert_eq!(patched.hard_away_limit_minutes, 60);
+        assert!(patched.agent_override_enabled);
         assert!(patched.enabled);
         assert_eq!(patched.device_id, "device-1");
     }
@@ -2915,7 +2762,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_measurement_is_none_while_the_monitor_is_stopped() {
+    async fn a_stopped_monitor_reports_no_recording_and_no_open_session() {
         let dir =
             std::env::temp_dir().join(format!("clock-in-monitor-idle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2929,32 +2776,43 @@ mod tests {
             settings_path: dir.join("settings.json"),
             segments_path: dir.join("segments-spool.jsonl"),
             agent_path: dir.join("agent-spool.jsonl"),
-            browser_dir: dir.clone(),
-            recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
+            sessions_path: dir.join("sessions-spool.jsonl"),
             recovery_path: dir.join("recovery.json"),
+            recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
         });
 
         assert!(!monitor.is_running().await);
-        assert!(monitor.is_enabled(), "monitoring defaults to on");
-        assert_eq!(monitor.measured_idle_for_stop("s1", 1_000).await, None);
+        assert!(monitor.is_enabled(), "recording defaults to on");
 
         let status = monitor.status().await;
         assert!(status.enabled);
         assert!(!status.running);
-        assert_eq!(status.session_idle_seconds, None);
-        assert!(status.away.is_none());
-        assert!(status.pending_suggestion.is_none());
+        assert!(status.current_session.is_none());
         assert!(status.agent_active.is_none());
+        assert!(status.selected_project_id.is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[tokio::test]
-    async fn storage_backpressure_pauses_capture_without_stopping_uploads() {
-        let dir = std::env::temp_dir().join(format!(
-            "clock-in-monitor-storage-backpressure-{}",
-            std::process::id()
-        ));
+    #[test]
+    fn session_spools_are_scoped_to_the_recording_account() {
+        let base = PathBuf::from("sessions-spool.jsonl");
+        assert_ne!(
+            scoped_sessions_path(&base, "u1"),
+            scoped_sessions_path(&base, "u2")
+        );
+        assert_eq!(
+            scoped_sessions_path(&base, "u1")
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("sessions-spool-u1.jsonl"),
+        );
+    }
+
+    #[test]
+    fn changing_accounts_clears_the_previous_project_override() {
+        let dir =
+            std::env::temp_dir().join(format!("clock-in-monitor-account-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let client = ApiClient::new(
             "http://127.0.0.1:9/auth".to_string(),
@@ -2966,57 +2824,27 @@ mod tests {
             settings_path: dir.join("settings.json"),
             segments_path: dir.join("segments-spool.jsonl"),
             agent_path: dir.join("agent-spool.jsonl"),
-            browser_dir: dir.clone(),
-            recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
+            sessions_path: dir.join("sessions-spool.jsonl"),
             recovery_path: dir.join("recovery.json"),
+            recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
         });
-        monitor.recording.store(true, Ordering::SeqCst);
-        monitor.capture_paused.store(true, Ordering::SeqCst);
-        let upload = tokio::spawn(std::future::pending());
-        *monitor.tasks.lock().await = Some(MonitorTasks { poll: None, upload });
 
-        let status = monitor.status().await;
-        assert!(status.enabled);
-        assert!(!status.running);
-        assert!(monitor.recording.load(Ordering::SeqCst));
+        monitor.begin_account("u1");
+        monitor.set_default_project(Some("p-default-u1".to_string()));
+        monitor.select_project(Some("p-selected-u1".to_string()));
+        monitor.begin_account("u2");
 
-        monitor.stop().await;
+        let state = lock(&monitor.shared);
+        assert_eq!(state.account_id.as_deref(), Some("u2"));
+        assert!(state.selected_project.is_none());
+        assert!(state.default_project.is_none());
+        assert!(state.mappings.is_empty());
+        drop(state);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
-    async fn invalid_session_remains_visible_after_deactivation() {
-        let dir = std::env::temp_dir().join(format!(
-            "clock-in-monitor-invalid-session-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        let client = ApiClient::new(
-            "http://127.0.0.1:9/auth".to_string(),
-            "http://127.0.0.1:9".to_string(),
-        )
-        .expect("client builds");
-        let monitor = Monitor::new(MonitorConfig {
-            client,
-            settings_path: dir.join("settings.json"),
-            segments_path: dir.join("segments-spool.jsonl"),
-            agent_path: dir.join("agent-spool.jsonl"),
-            browser_dir: dir.clone(),
-            recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
-            recovery_path: dir.join("recovery.json"),
-        });
-
-        monitor.recording.store(true, Ordering::SeqCst);
-        monitor.identity_invalidated.store(true, Ordering::SeqCst);
-        monitor.deactivate_identity().await;
-        assert!(monitor.identity_invalidated());
-        assert!(!monitor.recording.load(Ordering::SeqCst));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn status_reports_the_agent_session_behind_a_frozen_idle_trim() {
+    async fn status_reports_the_agent_session_holding_recording_open() {
         let dir =
             std::env::temp_dir().join(format!("clock-in-monitor-agent-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -3030,21 +2858,24 @@ mod tests {
             settings_path: dir.join("settings.json"),
             segments_path: dir.join("segments-spool.jsonl"),
             agent_path: dir.join("agent-spool.jsonl"),
-            browser_dir: dir.clone(),
-            recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
+            sessions_path: dir.join("sessions-spool.jsonl"),
             recovery_path: dir.join("recovery.json"),
+            recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
         });
 
         let now = unix_now();
-        lock(&monitor.shared).agent = AgentTracking {
-            open: true,
-            last_event_at: now,
-            active: Some(ActiveAgent {
+        let mut tracking = AgentTracking::default();
+        tracking.active.insert(
+            ("kimi_code".to_string(), "s1".to_string()),
+            ActiveAgent {
                 source: "kimi_code".to_string(),
+                external_session_id: "s1".to_string(),
                 started_at: now - 600,
-            }),
-            suggestion: None,
-        };
+                last_event_at: now,
+                project: None,
+            },
+        );
+        lock(&monitor.shared).agent = tracking;
 
         let status = monitor.status().await;
         let active = status
@@ -3062,46 +2893,11 @@ mod tests {
         assert!(monitor.status().await.agent_active.is_none());
 
         lock(&monitor.shared).settings.agent_override_enabled = true;
-        lock(&monitor.shared).agent.open = false;
+        lock(&monitor.shared).agent.active.clear();
         assert!(
             monitor.status().await.agent_active.is_none(),
             "an ended session is over"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn status_surfaces_a_clock_change_notice() {
-        let dir =
-            std::env::temp_dir().join(format!("clock-in-monitor-clock-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let client = ApiClient::new(
-            "http://127.0.0.1:9/auth".to_string(),
-            "http://127.0.0.1:9".to_string(),
-        )
-        .expect("client builds");
-        let monitor = Monitor::new(MonitorConfig {
-            client,
-            settings_path: dir.join("settings.json"),
-            segments_path: dir.join("segments-spool.jsonl"),
-            agent_path: dir.join("agent-spool.jsonl"),
-            browser_dir: dir.clone(),
-            recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
-            recovery_path: dir.join("recovery.json"),
-        });
-
-        assert_eq!(monitor.status().await.clock_change_detected_at, None);
-
-        lock(&monitor.shared).clock_change_at = Some(1_704_067_200);
-        let status = monitor.status().await;
-        assert_eq!(
-            status.clock_change_detected_at.as_deref(),
-            Some("2024-01-01T00:00:00Z")
-        );
-        // The payload uses the camelCase keys the bridge decodes.
-        let json = serde_json::to_value(&status).expect("status serializes");
-        assert_eq!(json["clockChangeDetectedAt"], "2024-01-01T00:00:00Z");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

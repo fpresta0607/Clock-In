@@ -14,7 +14,10 @@ import {
   currentSessionResponseSchema,
   leaderboardResponseSchema,
   meResponseSchema,
+  isAttributed,
   meStatsResponseSchema,
+  observedSessionBatchRequestSchema,
+  sessionAttributionValues,
   pathMappingCreateRequestSchema,
   pathMappingListResponseSchema,
   pathMappingUpdateRequestSchema,
@@ -51,7 +54,9 @@ const reportRow = {
   stoppedAt,
   idleSeconds: 120,
   durationSeconds: 3_600,
-  corroboratedSeconds: 1_800,
+  attribution: "agent",
+  attributedSeconds: 3_600,
+  unattributedSeconds: 0,
 };
 
 describe("authentication contracts", () => {
@@ -79,6 +84,7 @@ describe("project contracts", () => {
         id: ids.project,
         name: "Website redesign",
         color: "#2563eb",
+        createdAt: "2026-08-10T12:00:00.000Z",
         isArchived: false,
         isDefault: true,
       }),
@@ -133,6 +139,7 @@ describe("session contracts", () => {
           stoppedAt: null,
           idleSeconds: 0,
           durationSeconds: null,
+          attribution: "manual",
         },
       }),
     ).toMatchObject({ session: { id: ids.session, status: "running" } });
@@ -148,6 +155,7 @@ describe("session contracts", () => {
       stoppedAt,
       idleSeconds: 0,
       durationSeconds: 3_784,
+      attribution: "manual",
     };
 
     expect(sessionStartResponseSchema.parse({ session: { ...completedSession, status: "stopped" } })).toMatchObject({
@@ -172,6 +180,7 @@ describe("session contracts", () => {
           stoppedAt,
           idleSeconds: 120,
           durationSeconds: 3664,
+          attribution: "manual",
         },
       }),
     ).toMatchObject({ session: { status: "stopped", durationSeconds: 3664 } });
@@ -189,6 +198,7 @@ describe("session contracts", () => {
         stoppedAt: null,
         idleSeconds: 0,
         durationSeconds: null,
+        attribution: "manual",
       },
     })).toThrow();
   });
@@ -207,9 +217,39 @@ describe("session contracts", () => {
           stoppedAt: null,
           idleSeconds: 0,
           durationSeconds: null,
+          attribution: "manual",
         },
       }),
     ).toMatchObject({ session: { status: "running" } });
+  });
+
+  it("accepts a batch of observed sessions and refuses to call them manual", () => {
+    const observed = {
+      clientId: ids.client,
+      projectId: ids.project,
+      attribution: "default",
+      startedAt,
+      stoppedAt,
+      idleSeconds: 0,
+    };
+    expect(observedSessionBatchRequestSchema.parse({ sessions: [observed] })).toMatchObject({
+      sessions: [{ attribution: "default", idleSeconds: 0 }],
+    });
+    // idleSeconds is optional on the wire so a desktop with nothing to trim can omit it.
+    const { idleSeconds: _omitted, ...withoutIdle } = observed;
+    expect(observedSessionBatchRequestSchema.parse({ sessions: [withoutIdle] })).toMatchObject({
+      sessions: [{ idleSeconds: 0 }],
+    });
+    // "manual" belongs to the retired timer; the desktop can never claim it.
+    expect(() => observedSessionBatchRequestSchema.parse({ sessions: [{ ...observed, attribution: "manual" }] })).toThrow();
+    expect(() => observedSessionBatchRequestSchema.parse({ sessions: [] })).toThrow();
+    expect(() => observedSessionBatchRequestSchema.parse({ sessions: [{ ...observed, idleSeconds: -1 }] })).toThrow();
+  });
+
+  it("marks every session attribution and knows which ones are attributed", () => {
+    expect(sessionAttributionValues).toEqual(["manual", "selected", "agent", "default"]);
+    expect(sessionAttributionValues.filter(isAttributed)).toEqual(["manual", "selected", "agent"]);
+    expect(isAttributed("default")).toBe(false);
   });
 
   it("rejects session timestamps and durations that contradict the status", () => {
@@ -223,6 +263,7 @@ describe("session contracts", () => {
       stoppedAt: null,
       idleSeconds: 0,
       durationSeconds: null,
+      attribution: "manual",
     };
 
     expect(() => sessionSchema.parse({ ...runningSession, stoppedAt })).toThrow();
@@ -295,22 +336,22 @@ describe("report and error contracts", () => {
       totalDurationSeconds: 3_600,
       pagination: { page: 1, pageSize: 50, totalRows: 1, totalPages: 1 },
       rows: [reportRow],
-    })).toMatchObject({ totalDurationSeconds: 3_600, rows: [{ status: "stopped", corroboratedSeconds: 1_800 }] });
+    })).toMatchObject({ totalDurationSeconds: 3_600, rows: [{ status: "stopped", attributedSeconds: 3_600 }] });
   });
 
-  it("requires corroborated seconds on report rows and leaderboard entries", () => {
-    const { corroboratedSeconds: _dropped, ...uncorroboratedRow } = reportRow;
+  it("requires attributed seconds on report rows and leaderboard entries", () => {
+    const { attributedSeconds: _dropped, ...unattributedRow } = reportRow;
     expect(() => reportResponseSchema.parse({
       filters: {},
       totalDurationSeconds: 0,
       pagination: { page: 1, pageSize: 50, totalRows: 1, totalPages: 1 },
-      rows: [uncorroboratedRow],
+      rows: [unattributedRow],
     })).toThrow();
     expect(() => reportResponseSchema.parse({
       filters: {},
       totalDurationSeconds: 0,
       pagination: { page: 1, pageSize: 50, totalRows: 1, totalPages: 1 },
-      rows: [{ ...reportRow, corroboratedSeconds: -1 }],
+      rows: [{ ...reportRow, attributedSeconds: -1 }],
     })).toThrow();
 
     const entry = {
@@ -318,14 +359,15 @@ describe("report and error contracts", () => {
       user: { id: ids.user, name: "Alex Morgan" },
       durationSeconds: 3_600,
       sessionCount: 2,
-      corroboratedSeconds: 1_800,
+      attributedSeconds: 1_800,
+      unattributedSeconds: 1_800,
     };
     expect(
       leaderboardResponseSchema.parse({ filters: {}, totalDurationSeconds: 3_600, entries: [entry] }),
-    ).toMatchObject({ entries: [{ rank: 1, corroboratedSeconds: 1_800 }] });
-    const { corroboratedSeconds: _droppedFromEntry, ...uncorroboratedEntry } = entry;
-    expect(() => leaderboardResponseSchema.parse({ filters: {}, totalDurationSeconds: 0, entries: [uncorroboratedEntry] })).toThrow();
-    expect(() => leaderboardResponseSchema.parse({ filters: {}, totalDurationSeconds: 0, entries: [{ ...entry, corroboratedSeconds: 1.5 }] })).toThrow();
+    ).toMatchObject({ entries: [{ rank: 1, attributedSeconds: 1_800 }] });
+    const { attributedSeconds: _droppedFromEntry, ...unattributedEntry } = entry;
+    expect(() => leaderboardResponseSchema.parse({ filters: {}, totalDurationSeconds: 0, entries: [unattributedEntry] })).toThrow();
+    expect(() => leaderboardResponseSchema.parse({ filters: {}, totalDurationSeconds: 0, entries: [{ ...entry, attributedSeconds: 1.5 }] })).toThrow();
   });
 
   it("rejects running rows and incomplete report rows", () => {
@@ -339,6 +381,7 @@ describe("report and error contracts", () => {
       stoppedAt: null,
       idleSeconds: 0,
       durationSeconds: null,
+      attribution: "manual",
     };
     expect(() => reportResponseSchema.parse({ filters: {}, totalDurationSeconds: 0, rows: [row] })).toThrow();
   });
@@ -411,7 +454,7 @@ describe("agent session contracts", () => {
   };
 
   it("covers every supported agent source and event kind", () => {
-    expect(agentSourceValues).toEqual(["claude_code", "codex", "kimi_code", "cursor", "browser", "other"]);
+    expect(agentSourceValues).toEqual(["claude_code", "codex", "kimi_code", "cursor", "other"]);
     expect(agentEventKindValues).toEqual(["started", "ended", "heartbeat"]);
   });
 
@@ -422,33 +465,7 @@ describe("agent session contracts", () => {
     ).toHaveLength(2);
   });
 
-  it("accepts browser span events carrying a rule id instead of a cwd", () => {
-    const browserEvent = {
-      source: "browser",
-      externalSessionId: "span-7",
-      event: "started",
-      occurredAt: startedAt,
-      ruleId: ids.session,
-    };
-    expect(agentSessionEventSchema.parse(browserEvent)).toEqual(browserEvent);
-    expect(
-      agentSessionEventBatchRequestSchema.parse({ events: [browserEvent, { ...browserEvent, event: "heartbeat" }] }).events,
-    ).toHaveLength(2);
-  });
-
-  it("requires exactly one of cwd and ruleId, keyed to the event source", () => {
-    const browserEvent = {
-      source: "browser",
-      externalSessionId: "span-7",
-      event: "started",
-      occurredAt: startedAt,
-      ruleId: ids.session,
-    };
-    // A browser span identifies a rule, never a filesystem path.
-    expect(() => agentSessionEventSchema.parse({ ...browserEvent, ruleId: undefined })).toThrow();
-    expect(() => agentSessionEventSchema.parse({ ...browserEvent, cwd: "C:/dev/Clock-In" })).toThrow();
-    expect(() => agentSessionEventSchema.parse({ ...browserEvent, ruleId: "not-a-uuid" })).toThrow();
-    // Agent CLI sources identify a working directory, never a rule.
+  it("rejects an agent event carrying a ruleId and requires a cwd", () => {
     expect(() => agentSessionEventSchema.parse({ ...event, ruleId: ids.session })).toThrow();
     const { cwd: _dropped, ...withoutCwd } = event;
     expect(() => agentSessionEventSchema.parse(withoutCwd)).toThrow();
@@ -574,12 +591,14 @@ describe("personal stats contracts", () => {
   const stats = {
     filters: { from: "2026-08-01", to: "2026-08-06" },
     totalDurationSeconds: 7_200,
-    corroboratedSeconds: 5_400,
+    attributedSeconds: 5_400,
+    unattributedSeconds: 1_800,
     projects: [
       {
         project: { id: ids.project, name: "Website redesign" },
         durationSeconds: 7_200,
-        corroboratedSeconds: 5_400,
+        attributedSeconds: 5_400,
+        unattributedSeconds: 1_800,
         sessionCount: 2,
       },
     ],
@@ -599,7 +618,7 @@ describe("personal stats contracts", () => {
     ],
   };
 
-  it("accepts a per-project corroborated/uncorroborated split with per-app and per-site breakdowns", () => {
+  it("accepts a per-project attributed/unattributed split with a per-app breakdown", () => {
     expect(meStatsResponseSchema.parse(stats)).toEqual(stats);
     expect(meStatsResponseSchema.parse({ ...stats, filters: {}, projects: [], apps: [], sites: [] })).toEqual({ ...stats, filters: {}, projects: [], apps: [], sites: [] });
     expect(meStatsResponseSchema.parse({
@@ -609,7 +628,7 @@ describe("personal stats contracts", () => {
   });
 
   it("rejects unsafe or negative counters and unknown fields", () => {
-    expect(() => meStatsResponseSchema.parse({ ...stats, corroboratedSeconds: -1 })).toThrow();
+    expect(() => meStatsResponseSchema.parse({ ...stats, attributedSeconds: -1 })).toThrow();
     expect(() => meStatsResponseSchema.parse({ ...stats, totalDurationSeconds: 1.5 })).toThrow();
     expect(() => meStatsResponseSchema.parse({ ...stats, totalDurationSeconds: Number.MAX_SAFE_INTEGER + 1 })).toThrow();
     expect(() => meStatsResponseSchema.parse({ ...stats, filters: { from: "2026-99-99" } })).toThrow();
@@ -620,7 +639,7 @@ describe("personal stats contracts", () => {
     })).toThrow();
     expect(() => meStatsResponseSchema.parse({
       ...stats,
-      projects: [{ ...stats.projects[0], corroboratedSeconds: undefined }],
+      projects: [{ ...stats.projects[0], attributedSeconds: undefined }],
     })).toThrow();
     expect(() => meStatsResponseSchema.parse({
       ...stats,

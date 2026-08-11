@@ -795,17 +795,6 @@ pub fn seal_pending_spool_paths(path: &Path) -> SpoolResult<Vec<PathBuf>> {
     })
 }
 
-pub(crate) fn discard_locked(path: &Path) -> SpoolResult<()> {
-    for candidate in all_spool_paths_locked(path)? {
-        remove_if_exists(&candidate)?;
-        remove_if_exists(&sibling(&candidate, ".partial"))?;
-        remove_if_exists(&sibling(&candidate, ".corrupt"))?;
-        remove_if_exists(&sibling(&candidate, ".tmp"))?;
-        remove_if_exists(&sibling(&candidate, ".bak"))?;
-    }
-    Ok(())
-}
-
 /// The line-typed core of `read_pending`, shared with the segment spool the
 /// activity monitor drains (same durability discipline, different row type).
 pub(crate) fn read_pending_lines<T: serde::de::DeserializeOwned>(
@@ -1118,9 +1107,7 @@ fn namespace_has_pending_evidence_while_leased(dir: &Path) -> SpoolResult<bool> 
     }
     match std::fs::read(dir.join("recovery.json")) {
         Ok(bytes) => match serde_json::from_slice::<crate::recovery::RecoveryState>(&bytes) {
-            Ok(recovery) => Ok(recovery.local_start.is_some()
-                || recovery.running.is_some()
-                || !recovery.pending_stops.is_empty()),
+            Ok(recovery) => Ok(!recovery.open_sessions.is_empty()),
             Err(_) => Ok(true),
         },
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),

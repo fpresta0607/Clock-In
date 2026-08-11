@@ -6,9 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::monitor::SegmentRecord;
-use crate::recovery::{PendingStop, RunningTimer, StartIntent};
-use crate::spool::{EvidenceIdentity, SpoolEvent};
+use crate::monitor::{ObservedSession, SegmentRecord};
+use crate::spool::SpoolEvent;
 
 /// Matches the `BridgeErrorKind` union the React bridge narrows on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,8 +126,8 @@ pub struct TimerProject {
     pub name: String,
     #[serde(default)]
     pub color: Option<String>,
-    #[serde(default)]
-    pub is_default: bool,
+    #[serde(skip_serializing)]
+    pub created_at: String,
 }
 
 #[derive(Deserialize)]
@@ -141,7 +140,6 @@ struct MeUser {
     id: String,
     email: String,
     name: String,
-    organization_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,8 +179,6 @@ struct LeaderboardResponse {
 #[derive(Deserialize)]
 struct ProjectListResponse {
     projects: Vec<ProjectListItem>,
-    #[serde(default, rename = "selectedProjectId")]
-    selected_project_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -192,42 +188,8 @@ struct ProjectListItem {
     name: String,
     #[serde(default)]
     color: Option<String>,
+    created_at: String,
     is_archived: bool,
-    #[serde(default)]
-    is_default: bool,
-}
-
-pub struct ProjectSelection {
-    pub projects: Vec<TimerProject>,
-    pub selected_project_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct SessionEnvelope {
-    session: Option<SessionPayload>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionPayload {
-    id: String,
-    client_id: String,
-    project_id: String,
-    #[serde(default)]
-    description: Option<String>,
-    started_at: String,
-}
-
-impl From<SessionPayload> for RunningTimer {
-    fn from(payload: SessionPayload) -> Self {
-        Self {
-            session_id: payload.id,
-            client_id: payload.client_id,
-            project_id: payload.project_id,
-            description: payload.description.unwrap_or_default(),
-            started_at: payload.started_at,
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -239,6 +201,14 @@ struct AuthErrorBody {
 #[derive(Deserialize)]
 struct TokenResponse {
     token: String,
+}
+
+/// What `/sessions/observed` answers with. Only the refusals matter to the
+/// caller, and a refusal is permanent.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservedSessionBatchOutcome {
+    pub rejected: Vec<SegmentRejection>,
 }
 
 /// The server's verdict on an uploaded activity-segment batch. Rejected rows
@@ -272,24 +242,11 @@ struct AgentEventBatchResponse {
     results: Vec<AgentEventOutcome>,
 }
 
-/// What a mapping row matches against: a local path prefix (agent sessions) or
-/// a URL rule (browser spans). Server-assigned; older servers omit it, so it
-/// defaults to path prefixes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MappingKind {
-    #[default]
-    PathPrefix,
-    UrlRule,
-}
-
 /// A per-user path prefix → project mapping, as `/path-mappings` returns it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PathMapping {
     pub id: String,
-    #[serde(default)]
-    pub kind: MappingKind,
     pub path_prefix: String,
     #[serde(default)]
     pub repo_url: Option<String>,
@@ -305,8 +262,6 @@ struct PathMappingListResponse {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PathMappingCreateInput {
-    #[serde(default)]
-    pub kind: MappingKind,
     pub path_prefix: String,
     #[serde(default)]
     pub repo_url: Option<String>,
@@ -327,38 +282,19 @@ pub struct PathMappingUpdateInput {
     pub project_id: Option<String>,
 }
 
-/// The `GET /me/stats` response: the reporting service's corroboration math
+/// The `GET /me/stats` response: the reporting service's attribution totals
 /// scoped to the caller.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeStats {
     pub filters: MeStatsFilters,
     pub total_duration_seconds: u64,
-    pub corroborated_seconds: u64,
+    pub attributed_seconds: u64,
+    pub unattributed_seconds: u64,
     pub projects: Vec<MeStatsProject>,
     // Without this field serde silently drops the array and the TS bridge
     // rejects the whole response as invalid.
     pub apps: Vec<MeStatsApp>,
-    // Same for the per-rule browser totals; older servers omit it.
-    #[serde(default)]
-    pub sites: Vec<MeStatsSite>,
-}
-
-/// Per-rule browser focus totals: the pattern is text the user wrote, and
-/// `project_id` is null while the rule is unattributed.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MeStatsSite {
-    pub mapping: MeStatsSiteMapping,
-    pub duration_seconds: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MeStatsSiteMapping {
-    pub id: String,
-    pub pattern: String,
-    pub project_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -375,10 +311,6 @@ pub struct MeStatsFilters {
     pub from: Option<String>,
     #[serde(default)]
     pub to: Option<String>,
-    #[serde(default)]
-    pub from_at: Option<String>,
-    #[serde(default)]
-    pub to_exclusive_at: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -386,7 +318,8 @@ pub struct MeStatsFilters {
 pub struct MeStatsProject {
     pub project: MeStatsProjectRef,
     pub duration_seconds: u64,
-    pub corroborated_seconds: u64,
+    pub attributed_seconds: u64,
+    pub unattributed_seconds: u64,
     pub session_count: u64,
 }
 
@@ -562,50 +495,13 @@ impl ApiClient {
         })
     }
 
-    pub async fn preview_organization_join(
-        &self,
-        access_token: &str,
-        invite_code: &str,
-    ) -> ApiResult<Organization> {
-        let response = self
-            .http
-            .post(format!("{}/organization/join-preview", self.api_base_url))
-            .bearer_auth(access_token)
-            .json(&serde_json::json!({ "inviteCode": invite_code }))
-            .send()
-            .await
-            .map_err(|error| classify_transport(&error))?;
-        if !response.status().is_success() {
-            return Err(match response.status().as_u16() {
-                404 => BridgeError::new(
-                    ErrorKind::Validation,
-                    "That invite code does not match a workspace.",
-                ),
-                status => classify(status),
-            });
-        }
-        let body: OrganizationResponse = response
-            .json()
-            .await
-            .map_err(|_| BridgeError::unknown("The workspace response could not be read."))?;
-        Ok(body.organization)
-    }
-
     /// Moves an existing account into a teammate's workspace.
-    pub async fn join_organization(
-        &self,
-        access_token: &str,
-        invite_code: &str,
-        expected_organization_id: &str,
-    ) -> ApiResult<()> {
+    pub async fn join_organization(&self, access_token: &str, invite_code: &str) -> ApiResult<()> {
         let response = self
             .http
             .post(format!("{}/organization/join", self.api_base_url))
             .bearer_auth(access_token)
-            .json(&serde_json::json!({
-                "inviteCode": invite_code,
-                "expectedOrganizationId": expected_organization_id,
-            }))
+            .json(&serde_json::json!({ "inviteCode": invite_code }))
             .send()
             .await
             .map_err(|error| classify_transport(&error))?;
@@ -636,32 +532,18 @@ impl ApiClient {
         Ok(body.entries)
     }
 
-    pub async fn me_with_identity(
-        &self,
-        access_token: &str,
-    ) -> ApiResult<(TimerUser, EvidenceIdentity)> {
+    pub async fn me(&self, access_token: &str) -> ApiResult<TimerUser> {
         let body: MeResponse = self.get_json(access_token, "/me").await?;
-        let identity = EvidenceIdentity::new(&body.user.id, &body.user.organization_id)
-            .ok_or_else(|| BridgeError::unknown("The account identity could not be read."))?;
-        Ok((
-            TimerUser {
-                id: body.user.id,
-                email: body.user.email,
-                name: body.user.name,
-            },
-            identity,
-        ))
+        Ok(TimerUser {
+            id: body.user.id,
+            email: body.user.email,
+            name: body.user.name,
+        })
     }
 
-    pub async fn identity(&self, access_token: &str) -> ApiResult<EvidenceIdentity> {
-        self.me_with_identity(access_token)
-            .await
-            .map(|(_, identity)| identity)
-    }
-
-    pub async fn projects(&self, access_token: &str) -> ApiResult<ProjectSelection> {
+    pub async fn projects(&self, access_token: &str) -> ApiResult<Vec<TimerProject>> {
         let body: ProjectListResponse = self.get_json(access_token, "/projects").await?;
-        let projects = body
+        Ok(body
             .projects
             .into_iter()
             .filter(|project| !project.is_archived)
@@ -669,13 +551,9 @@ impl ApiClient {
                 id: project.id,
                 name: project.name,
                 color: project.color,
-                is_default: project.is_default,
+                created_at: project.created_at,
             })
-            .collect();
-        Ok(ProjectSelection {
-            projects,
-            selected_project_id: body.selected_project_id,
-        })
+            .collect())
     }
 
     /// Creates a project for the signed-in member; the API answers 201 with the
@@ -701,37 +579,22 @@ impl ApiClient {
             id: body.id,
             name: body.name,
             color: body.color,
-            is_default: body.is_default,
+            created_at: body.created_at,
         })
     }
 
-    pub async fn current_session(&self, access_token: &str) -> ApiResult<Option<RunningTimer>> {
-        let body: SessionEnvelope = self.get_json(access_token, "/sessions/current").await?;
-        Ok(body.session.map(RunningTimer::from))
-    }
-
-    /// Idempotent on `clientId`: replaying the identical payload after a timeout
-    /// returns the session that was already created rather than a second one.
-    pub async fn start_session(
+    /// Uploads one batch of finished sessions (at most 500 rows; the caller
+    /// chunks). Returns how many rows the server refused.
+    pub async fn upload_observed_sessions(
         &self,
         access_token: &str,
-        intent: &StartIntent,
-    ) -> ApiResult<RunningTimer> {
-        let device_id = intent.device_id.as_ref().ok_or_else(|| {
-            BridgeError::unknown("A recording device is required to start a timer.")
-        })?;
-        let request = serde_json::json!({
-            "clientId": intent.client_id,
-            "projectId": intent.project_id,
-            "deviceId": device_id,
-            "description": intent.description,
-            "startedAt": intent.started_at,
-        });
+        sessions: &[ObservedSession],
+    ) -> ApiResult<usize> {
         let response = self
             .http
-            .post(format!("{}/sessions", self.api_base_url))
+            .post(format!("{}/sessions/observed", self.api_base_url))
             .bearer_auth(access_token)
-            .json(&request)
+            .json(&serde_json::json!({ "sessions": sessions }))
             .send()
             .await
             .map_err(|error| classify_transport(&error))?;
@@ -739,36 +602,11 @@ impl ApiClient {
         if !response.status().is_success() {
             return Err(classify(response.status().as_u16()));
         }
-
-        let body: SessionEnvelope = response
+        let outcome: ObservedSessionBatchOutcome = response
             .json()
             .await
-            .map_err(|_| BridgeError::unknown("The session response could not be read."))?;
-        body.session
-            .map(RunningTimer::from)
-            .ok_or_else(|| BridgeError::unknown("The server did not return a started session."))
-    }
-
-    pub async fn stop_session(&self, access_token: &str, stop: &PendingStop) -> ApiResult<()> {
-        let response = self
-            .http
-            .post(format!(
-                "{}/sessions/{}/stop",
-                self.api_base_url, stop.session_id
-            ))
-            .bearer_auth(access_token)
-            .json(&serde_json::json!({
-                "stoppedAt": stop.stopped_at,
-                "idleSeconds": stop.idle_seconds,
-            }))
-            .send()
-            .await
-            .map_err(|error| classify_transport(&error))?;
-
-        if response.status().is_success() {
-            return Ok(());
-        }
-        Err(classify(response.status().as_u16()))
+            .map_err(|_| BridgeError::unknown("The session upload response could not be read."))?;
+        Ok(outcome.rejected.len())
     }
 
     /// Uploads one activity-segment batch (at most 500 rows; the caller chunks).
@@ -820,18 +658,19 @@ impl ApiClient {
         Ok(body.results)
     }
 
+    /// The caller's own stats for a date range (`YYYY-MM-DD`, either optional).
     pub async fn me_stats(
         &self,
         access_token: &str,
-        from_at: Option<&str>,
-        to_exclusive_at: Option<&str>,
+        from: Option<&str>,
+        to: Option<&str>,
     ) -> ApiResult<MeStats> {
         let mut query: Vec<(&str, &str)> = Vec::new();
-        if let Some(from_at) = from_at {
-            query.push(("fromAt", from_at));
+        if let Some(from) = from {
+            query.push(("from", from));
         }
-        if let Some(to_exclusive_at) = to_exclusive_at {
-            query.push(("toExclusiveAt", to_exclusive_at));
+        if let Some(to) = to {
+            query.push(("to", to));
         }
         let response = self
             .http
@@ -862,7 +701,6 @@ impl ApiClient {
         input: &PathMappingCreateInput,
     ) -> ApiResult<PathMapping> {
         let mut body = serde_json::json!({
-            "kind": input.kind,
             "pathPrefix": input.path_prefix,
             "projectId": input.project_id,
         });
@@ -990,8 +828,8 @@ mod tests {
     fn archived_projects_never_reach_the_picker() {
         let body: ProjectListResponse = serde_json::from_str(
             r##"{"projects":[
-                {"id":"a","name":"Active","color":null,"isArchived":false},
-                {"id":"b","name":"Archived","color":"#2563eb","isArchived":true}
+                {"id":"a","name":"Active","color":null,"createdAt":"2026-08-10T12:00:00Z","isArchived":false},
+                {"id":"b","name":"Archived","color":"#2563eb","createdAt":"2026-08-11T12:00:00Z","isArchived":true}
             ]}"##,
         )
         .expect("project list parses");
@@ -1008,35 +846,12 @@ mod tests {
     #[test]
     fn reads_a_created_project_without_a_color() {
         let body: ProjectListItem =
-            serde_json::from_str(r#"{"id":"p1","name":"Field work","isArchived":false}"#)
+            serde_json::from_str(r#"{"id":"p1","name":"Field work","createdAt":"2026-08-10T12:00:00Z","isArchived":false}"#)
                 .expect("created project parses");
 
         assert_eq!(body.name, "Field work");
         assert_eq!(body.color, None);
         assert!(!body.is_archived);
-    }
-
-    #[test]
-    fn reads_a_running_session_and_defaults_a_null_description() {
-        let body: SessionEnvelope = serde_json::from_str(
-            r#"{"session":{"id":"s1","clientId":"c1","projectId":"p1","description":null,
-                "status":"running","startedAt":"2026-08-06T14:00:00.000Z","stoppedAt":null,
-                "idleSeconds":0,"durationSeconds":null}}"#,
-        )
-        .expect("session parses");
-        let running: RunningTimer = body.session.expect("a session is present").into();
-
-        assert_eq!(running.session_id, "s1");
-        assert_eq!(running.client_id, "c1");
-        assert_eq!(running.description, "");
-    }
-
-    #[test]
-    fn reads_an_absent_current_session() {
-        let body: SessionEnvelope =
-            serde_json::from_str(r#"{"session":null}"#).expect("empty session parses");
-
-        assert!(body.session.is_none());
     }
 
     #[test]
@@ -1158,13 +973,15 @@ mod tests {
     fn reads_the_me_stats_response_shape() {
         let stats: MeStats = serde_json::from_str(
             r#"{
-                "filters": {"fromAt": "2026-08-01T05:00:00.000Z", "toExclusiveAt": "2026-08-02T05:00:00.000Z"},
+                "filters": {"from": "2026-08-01"},
                 "totalDurationSeconds": 7200,
-                "corroboratedSeconds": 5400,
+                "attributedSeconds": 5400,
+                "unattributedSeconds": 1800,
                 "projects": [{
                     "project": {"id": "p1", "name": "Clock-In"},
                     "durationSeconds": 7200,
-                    "corroboratedSeconds": 5400,
+                    "attributedSeconds": 5400,
+                    "unattributedSeconds": 1800,
                     "sessionCount": 3
                 }],
                 "apps": [
@@ -1175,16 +992,13 @@ mod tests {
         )
         .expect("stats parse");
 
-        assert_eq!(
-            stats.filters.from_at.as_deref(),
-            Some("2026-08-01T05:00:00.000Z")
-        );
-        assert_eq!(
-            stats.filters.to_exclusive_at.as_deref(),
-            Some("2026-08-02T05:00:00.000Z")
-        );
+        assert_eq!(stats.filters.from.as_deref(), Some("2026-08-01"));
+        assert_eq!(stats.filters.to, None);
         assert_eq!(stats.projects[0].project.name, "Clock-In");
-        assert_eq!(stats.projects[0].corroborated_seconds, 5400);
+        assert_eq!(stats.attributed_seconds, 5400);
+        assert_eq!(stats.unattributed_seconds, 1_800);
+        assert_eq!(stats.projects[0].attributed_seconds, 5400);
+        assert_eq!(stats.projects[0].unattributed_seconds, 1_800);
         assert_eq!(stats.apps[0].process_name, "Code.exe");
         assert_eq!(stats.apps[0].duration_seconds, 4800);
     }

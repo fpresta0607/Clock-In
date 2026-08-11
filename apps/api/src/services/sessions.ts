@@ -1,7 +1,10 @@
+import type { SessionAttribution } from "@clock-in/shared";
+
 import type { AuthenticatedSubject } from "../auth.js";
 import { AppError } from "../errors.js";
 import {
   SessionRepositoryError,
+  type ObservedSessionInsert,
   type ProjectRepository,
   type SessionRecord,
   type SessionRepository,
@@ -24,6 +27,21 @@ export interface StopSessionInput {
   idleSeconds: number;
 }
 
+/** One finished session as the desktop observed it, before validation. */
+export interface ObservedSessionInput {
+  clientId: string;
+  projectId: string;
+  attribution: Exclude<SessionAttribution, "manual">;
+  startedAt: Date;
+  stoppedAt: Date;
+  idleSeconds: number;
+}
+
+export interface ObservedSessionBatchResult {
+  accepted: number;
+  rejected: { clientId: string; reason: string }[];
+}
+
 interface NormalizedStartInput {
   clientId: string;
   projectId: string;
@@ -40,9 +58,14 @@ export interface SessionServiceDependencies {
 }
 
 export interface SessionService {
+  /** @deprecated The manual timer is retired; kept so older installed builds keep their data. */
   start(subject: AuthenticatedSubject, input: StartSessionInput): Promise<SessionRecord>;
+  /** @deprecated See `start`. */
   stop(subject: AuthenticatedSubject, sessionId: string, input: StopSessionInput): Promise<SessionRecord>;
+  /** @deprecated See `start`. Observed sessions arrive finished, so nothing runs server-side. */
   current(subject: AuthenticatedSubject): Promise<SessionRecord | null>;
+  /** Stores finished sessions the desktop observed. Per-row rejections never fail the batch. */
+  recordObserved(subject: AuthenticatedSubject, inputs: ObservedSessionInput[]): Promise<ObservedSessionBatchResult>;
 }
 
 function sameStartIdentity(existing: SessionRecord, input: NormalizedStartInput): boolean {
@@ -110,7 +133,6 @@ export function createSessionService(dependencies: SessionServiceDependencies): 
           userId: subject.userId,
           clientId: normalized.clientId,
           projectId: normalized.projectId,
-          deviceId: normalized.deviceId,
           description: normalized.description,
           startedAt: normalized.startedAt,
         });
@@ -159,6 +181,64 @@ export function createSessionService(dependencies: SessionServiceDependencies): 
 
     current(subject: AuthenticatedSubject): Promise<SessionRecord | null> {
       return dependencies.sessions.findRunning(subject);
+    },
+
+    async recordObserved(
+      subject: AuthenticatedSubject,
+      inputs: ObservedSessionInput[],
+    ): Promise<ObservedSessionBatchResult> {
+      const now = clock();
+      const rejected: { clientId: string; reason: string }[] = [];
+      const inserts: ObservedSessionInsert[] = [];
+      // One membership lookup per distinct project, not per session: a day of
+      // observed sessions is mostly the same one or two projects.
+      const projects = new Map<string, string | null>();
+
+      for (const input of inputs) {
+        const elapsedMs = input.stoppedAt.getTime() - input.startedAt.getTime();
+        const problem = await (async (): Promise<string | null> => {
+          if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return "The session must end after it started.";
+          if (input.stoppedAt.getTime() > now.getTime() + futureStopToleranceMs) {
+            return "The session ends too far in the future.";
+          }
+          if (input.startedAt.getTime() < now.getTime() - maxStartBackdateMs) {
+            return "The session is older than the seven-day evidence window.";
+          }
+          const elapsedSeconds = Math.floor(elapsedMs / 1_000);
+          if (input.idleSeconds > elapsedSeconds) return "Idle seconds must not exceed elapsed time.";
+          if (!projects.has(input.projectId)) {
+            const project = await dependencies.projects.findForMember(subject, input.projectId);
+            projects.set(
+              input.projectId,
+              project === null ? "Project not found." : project.archived ? "Archived projects cannot record time." : null,
+            );
+          }
+          return projects.get(input.projectId) ?? null;
+        })();
+
+        if (problem !== null) {
+          rejected.push({ clientId: input.clientId, reason: problem });
+          continue;
+        }
+
+        const elapsedSeconds = Math.floor(elapsedMs / 1_000);
+        inserts.push({
+          organizationId: subject.organizationId,
+          userId: subject.userId,
+          clientId: input.clientId,
+          projectId: input.projectId,
+          attribution: input.attribution,
+          startedAt: input.startedAt,
+          stoppedAt: input.stoppedAt,
+          idleSeconds: input.idleSeconds,
+          durationSeconds: elapsedSeconds - input.idleSeconds,
+          status: elapsedSeconds > reviewThresholdSeconds ? "needs_review" : "stopped",
+        });
+      }
+
+      // Replays are ignored on the client id, so a retried batch is a no-op.
+      await dependencies.sessions.insertObservedBatch(inserts);
+      return { accepted: inserts.length, rejected };
     },
   };
 }

@@ -23,8 +23,7 @@ export function createAgentSessionRoutes(service: AgentSessionService): Hono<Api
       externalSessionId: event.externalSessionId,
       event: event.event,
       occurredAt: new Date(event.occurredAt),
-      ...(event.cwd === undefined ? {} : { cwd: event.cwd }),
-      ...(event.ruleId === undefined ? {} : { ruleId: event.ruleId }),
+      cwd: event.cwd ?? "",
     })));
     return context.json(agentSessionEventBatchResponseSchema.parse(result));
   });

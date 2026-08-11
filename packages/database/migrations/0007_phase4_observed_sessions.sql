@@ -1,0 +1,2 @@
+CREATE TYPE "public"."session_attribution" AS ENUM('manual', 'selected', 'agent', 'default');--> statement-breakpoint
+ALTER TABLE "time_sessions" ADD COLUMN "attribution" "session_attribution" DEFAULT 'manual' NOT NULL;
