@@ -38,6 +38,33 @@ curl -s -H "authorization: Bearer <jwt>" \
 A `validation_error` from that second call means the API predates instant
 bounds and needs `railway up`.
 
+### The exact command that ships the API, and what it changes
+
+`railway up` uploads the working tree it is run from, so the directory and the
+commit checked out in it *are* the deploy. Neither is inferred from GitHub, and a
+feature branch left checked out will ship instead of `main`.
+
+```bash
+cd /home/fpresta0607/firstmate/projects/Clock-In   # the directory Railway is linked to
+git checkout main && git pull                      # ship main, never a feature branch
+git rev-parse --short HEAD                         # record what is going out
+railway up --detach
+```
+
+What it changes: it builds `apps/api/Dockerfile` per `railway.json` and creates a
+new deployment on service `api` (`f3f5e1de-4aef-4d5b-98ae-f521cd37c703`) in the
+`production` environment, replacing whatever is live. It takes the API from a
+build that answers `400` to `fromAt`/`toExclusiveAt` to one that accepts them,
+which is the entire Reports and Leaderboard fix.
+
+What it does not change: no variables, no domains, and no schema. Nothing
+migrates on deploy, for the reason in the next section.
+
+Confirm with the two calls above. The leaderboard call returning JSON instead of
+`validation_error` is the fix landing. To roll back, redeploy the previous
+deployment from the Railway dashboard; the schema changes are additive, and the
+older build serves every route unchanged against the migrated schema.
+
 ### Migrate first, then deploy, and never the other way round
 
 The API does not migrate on boot. `apps/api/src/server.ts` only opens a database
