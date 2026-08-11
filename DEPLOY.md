@@ -38,6 +38,52 @@ curl -s -H "authorization: Bearer <jwt>" \
 A `validation_error` from that second call means the API predates instant
 bounds and needs `railway up`.
 
+### Migrate first, then deploy, and never the other way round
+
+The API does not migrate on boot. `apps/api/src/server.ts` only opens a database
+client, and `railway.json` sets no `preDeployCommand`, so `railway up` can never
+apply a migration as a side effect. That is a safety property, not an oversight:
+schema changes are yours to run deliberately, with the command under
+"Run the migrations once" below.
+
+It also means order matters, and only one order works. A build of `main` talking
+to a database that is missing `time_sessions.attribution` answers `500` on both
+report endpoints, because every report query selects that column. Deploying the
+API before migrating therefore trades the `400` for a `500` and fixes nothing.
+Run the migration, confirm it, then `railway up`.
+
+### Production's migration journal has entries this repo no longer carries
+
+`drizzle.__drizzle_migrations` in production records ten migrations. Six match
+files in `packages/database/migrations` by content hash; the rest do not. Three
+of them are the migrations phase 3 applied and later rewrote in the repo
+(`0007_browser_attribution`, `0008_browser_span_rules`, `0009_mapping_kind_check`),
+so production already carries DDL that no file on `main` performs.
+
+Drizzle decides what to apply by comparing `created_at` against each folder's
+timestamp and never checks the hash, so it happily replays a chain that does not
+match the database in front of it. Concretely, `0008_agent_runtime_roster`
+re-adds `agent_sessions.rule_id`, which production already has, and the run stops
+there:
+
+```
+Failed query: ALTER TABLE "agent_sessions" ADD COLUMN "rule_id" uuid;
+```
+
+The whole run is one transaction, so it rolls back cleanly and leaves the journal
+untouched. Nothing is half-applied, but nothing is applied either.
+
+Before migrating production, dry-run against a replica rather than trusting the
+folder. Rebuild one from production's own journal, apply the repo's migrations,
+and read the error:
+
+```bash
+psql "$PROD_DATABASE_URL" -c \
+  'select hash, created_at from drizzle.__drizzle_migrations order by id'
+# recreate that exact schema locally, then:
+DATABASE_URL='postgres://…/replica' pnpm --filter @clock-in/database migrate
+```
+
 ---
 
 ## 1. API on Railway
