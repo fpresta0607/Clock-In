@@ -1,0 +1,150 @@
+name: Unsigned test installers
+
+# Builds desktop installers with NO signing and publishes NO release. The
+# installers are uploaded as workflow-run artifacts for manual download.
+#
+# This is deliberately NOT a relaxation of `release.yml`. That workflow still
+# refuses to publish anything unsigned, and nothing here touches it. The two
+# paths differ in what they build:
+#
+#   release.yml            cargo/tauri *release* build. `build.rs` treats a
+#                          release build as a production artifact and demands
+#                          the updater key plus platform signing credentials.
+#   this workflow          tauri *debug* build (`tauri build --debug`), which
+#                          `build.rs` already classifies as a development
+#                          build: no signing credentials, and
+#                          `bundle.createUpdaterArtifacts` must stay off.
+#
+# So the signing gate is honoured rather than bypassed, and adding Azure
+# Trusted Signing later only touches `release.yml` and the signing config.
+# Nothing in this file has to change for that.
+
+on:
+  # Once this file is on the default branch: Actions -> Unsigned test
+  # installers -> Run workflow (any branch).
+  workflow_dispatch:
+  # workflow_dispatch only exists for workflows already on the default branch,
+  # so this prefix is how you exercise the workflow from a branch before it
+  # merges: push to `unsigned-test/anything`.
+  push:
+    branches: ["unsigned-test/**"]
+
+# Read-only on purpose: this job cannot create a release even by mistake.
+permissions:
+  contents: read
+
+concurrency:
+  group: unsigned-test-installers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installers:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # NSIS only: WiX's light.exe fails to bundle the unoptimized debug
+          # binary into an MSI. The NSIS setup .exe is the installer to run.
+          - os: windows-latest
+            target: windows
+            bundle_args: "--bundles nsis"
+          # macOS bundles cleanly unsigned with the configured targets (.app
+          # and .dmg), so it takes no override.
+          - os: macos-latest
+            target: macos
+            bundle_args: ""
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    # Job-level so the helper build and the bundle build see identical values;
+    # `build.rs` reruns on any change to these, and a mismatch between the two
+    # steps would recompile the whole crate. These are the same public
+    # repository variables the release workflow bakes in, so the test build
+    # talks to the real API instead of localhost.
+    env:
+      CLOCK_IN_AUTH_URL: ${{ vars.CLOCK_IN_AUTH_URL }}
+      CLOCK_IN_API_URL: ${{ vars.CLOCK_IN_API_URL }}
+      CLOCK_IN_CHROME_EXTENSION_ID: ${{ vars.CLOCK_IN_CHROME_EXTENSION_ID }}
+      CLOCK_IN_EDGE_EXTENSION_ID: ${{ vars.CLOCK_IN_EDGE_EXTENSION_ID }}
+      CLOCK_IN_FIREFOX_EXTENSION_ID: ${{ vars.CLOCK_IN_FIREFOX_EXTENSION_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+          key: unsigned-test
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build the hook helper
+        run: cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml --bin clock-in-hook
+
+      # `externalBin` resolves `binaries/<name>-<target-triple>`, so the helper
+      # has to sit there under that name before the bundler runs. Same staging
+      # rule as the release workflow, minus the signing.
+      - name: Stage the hook helper for bundling
+        shell: bash
+        run: |
+          set -euo pipefail
+          triple="$(rustc -vV | sed -n 's/^host: //p')"
+          suffix=""
+          if [ "${{ matrix.target }}" = windows ]; then
+            suffix=".exe"
+          fi
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp "apps/desktop/src-tauri/target/debug/clock-in-hook$suffix" \
+            "apps/desktop/src-tauri/binaries/clock-in-hook-$triple$suffix"
+
+      # --debug is what keeps this build outside the production signing gate.
+      # No TAURI_CONFIG override, so `bundle.createUpdaterArtifacts` stays off
+      # and the run produces no updater manifest to mistake for a release.
+      - name: Build unsigned installers
+        working-directory: apps/desktop
+        run: pnpm exec tauri build --debug ${{ matrix.bundle_args }}
+
+      - name: Collect the installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=unsigned-artifacts
+          bundle=apps/desktop/src-tauri/target/debug/bundle
+          mkdir -p "$out"
+          found=0
+          while IFS= read -r -d '' installer; do
+            cp "$installer" "$out/UNSIGNED-TEST-$(basename "$installer")"
+            found=1
+          done < <(find "$bundle" -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' \) -print0)
+          if [ "$found" -eq 0 ]; then
+            echo "No installer was produced under $bundle" >&2
+            find "$bundle" -maxdepth 2 >&2 || true
+            exit 1
+          fi
+          cat > "$out/UNSIGNED-TEST-BUILD.txt" <<EOF
+          Clock-In unsigned test build
+          ============================
+
+          These installers are NOT code signed and are NOT a release. They come
+          from ${{ github.repository }} run ${{ github.run_id }}, commit
+          ${{ github.sha }}.
+
+          What that means:
+            * Windows SmartScreen will warn about an unknown publisher.
+            * There is no auto-updater. This build cannot update itself and
+              cannot be updated by a later signed release; uninstall it first.
+            * It is a debug build, so it is larger and slower than a release
+              build, and on Windows it opens a console window beside the app.
+
+          Do not distribute these. Signed installers come from the tagged
+          release workflow only.
+          EOF
+          ls -l "$out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UNSIGNED-TEST-BUILD-${{ matrix.target }}-${{ github.run_number }}
+          path: unsigned-artifacts/*
+          if-no-files-found: error

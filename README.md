@@ -432,8 +432,10 @@ yet:
   lands in the default project and reads as unattributed.
 - **One project at a time.** Concurrent agent sessions in different projects do not split a
   session; the last one to report wins, and the boundary between them is a session close.
-- **Installers are unsigned** — Windows SmartScreen warns, and macOS needs right-click → Open.
-  Fixing that needs paid certificates (see DEPLOY.md).
+- **No signing credentials yet** — paid certificates are needed for a real release (see
+  DEPLOY.md). Until they arrive, the **Unsigned test installers** workflow builds unsigned
+  installers you can download and run; Windows SmartScreen warns, macOS needs `xattr`,
+  and these debug builds cannot auto-update (all covered in DEPLOY.md).
 - Evidence can be forged by a determined user. Automatic recording raises the cost and the
   visibility of padding; it does not attempt cryptographic proof.
 
