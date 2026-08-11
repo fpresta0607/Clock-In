@@ -454,7 +454,7 @@ describe("agent session contracts", () => {
   };
 
   it("covers every supported agent source and event kind", () => {
-    expect(agentSourceValues).toEqual(["claude_code", "codex", "kimi_code", "cursor", "browser", "other"]);
+    expect(agentSourceValues).toEqual(["claude_code", "codex", "kimi_code", "cursor", "other"]);
     expect(agentEventKindValues).toEqual(["started", "ended", "heartbeat"]);
   });
 
@@ -465,33 +465,7 @@ describe("agent session contracts", () => {
     ).toHaveLength(2);
   });
 
-  it("accepts browser span events carrying a rule id instead of a cwd", () => {
-    const browserEvent = {
-      source: "browser",
-      externalSessionId: "span-7",
-      event: "started",
-      occurredAt: startedAt,
-      ruleId: ids.session,
-    };
-    expect(agentSessionEventSchema.parse(browserEvent)).toEqual(browserEvent);
-    expect(
-      agentSessionEventBatchRequestSchema.parse({ events: [browserEvent, { ...browserEvent, event: "heartbeat" }] }).events,
-    ).toHaveLength(2);
-  });
-
-  it("requires exactly one of cwd and ruleId, keyed to the event source", () => {
-    const browserEvent = {
-      source: "browser",
-      externalSessionId: "span-7",
-      event: "started",
-      occurredAt: startedAt,
-      ruleId: ids.session,
-    };
-    // A browser span identifies a rule, never a filesystem path.
-    expect(() => agentSessionEventSchema.parse({ ...browserEvent, ruleId: undefined })).toThrow();
-    expect(() => agentSessionEventSchema.parse({ ...browserEvent, cwd: "C:/dev/Clock-In" })).toThrow();
-    expect(() => agentSessionEventSchema.parse({ ...browserEvent, ruleId: "not-a-uuid" })).toThrow();
-    // Agent CLI sources identify a working directory, never a rule.
+  it("rejects an agent event carrying a ruleId and requires a cwd", () => {
     expect(() => agentSessionEventSchema.parse({ ...event, ruleId: ids.session })).toThrow();
     const { cwd: _dropped, ...withoutCwd } = event;
     expect(() => agentSessionEventSchema.parse(withoutCwd)).toThrow();

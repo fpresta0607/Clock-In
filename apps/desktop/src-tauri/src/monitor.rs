@@ -2396,6 +2396,8 @@ mod tests {
         // original idle start (1_100).
         assert_eq!(session.started_at, iso8601(1_000));
         assert_eq!(session.stopped_at, iso8601(1_500));
+        // Pre-agent uncovered idle (1_100–1_200 = 100 s) is trimmed.
+        assert_eq!(session.idle_seconds, 100);
     }
 
     #[test]
