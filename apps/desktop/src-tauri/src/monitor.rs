@@ -630,7 +630,7 @@ impl SessionTracker {
                     if let Some(open) = self.open.as_mut() {
                         open.last_active_at = input.now;
                     }
-                    if self.agent_seen_at == 0 {
+                    if self.agent_first_in_idle == 0 {
                         self.agent_first_in_idle = input.now;
                     }
                     self.agent_seen_at = input.now;
@@ -647,7 +647,7 @@ impl SessionTracker {
                     closed.extend(self.close_at(boundary));
                 } else if let Some(open) = self.open.as_mut() {
                     open.last_active_at = input.now;
-                    if self.agent_seen_at == 0 {
+                    if self.agent_first_in_idle == 0 {
                         self.agent_first_in_idle = input.now;
                     }
                     self.agent_seen_at = input.now;

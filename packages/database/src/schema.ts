@@ -291,7 +291,7 @@ export const agentSessions = pgTable(
       sql`(
         (${table.status} = 'running' and ${table.endedAt} is null)
         or
-        (${table.status} in ('ended', 'stale') and ${table.endedAt} is not null)
+        (${table.status} = 'ended' and ${table.endedAt} is not null)
       )`,
     ),
     check(
