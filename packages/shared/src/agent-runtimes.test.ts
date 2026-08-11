@@ -74,8 +74,10 @@ describe("the agent runtime roster", () => {
     // comparable exists for the rest, and Clock-In will not draw a lookalike,
     // so they use the generic agent badge instead.
     expect(findAgentRuntime("opencode")?.icon).toBe("opencode");
-    for (const id of ["claude_code", "codex", "cursor", "kimi_code", "pi", "grok", "muse"]) {
-      expect(findAgentRuntime(id)?.icon).toBeNull();
+    for (const runtime of agentRuntimes) {
+      if (runtime.id !== "opencode") {
+        expect(runtime.icon).toBeNull();
+      }
     }
   });
 });
