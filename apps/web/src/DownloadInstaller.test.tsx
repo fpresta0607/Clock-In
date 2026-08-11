@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 import { render, screen } from "@testing-library/react";
+import { userEvent } from "@testing-library/user-event";
 import { load as parseYaml } from "js-yaml";
 import { describe, expect, it } from "vitest";
 
@@ -9,6 +10,7 @@ import {
   DownloadInstaller,
   InstallerLink,
   macInstallerUrl,
+  unsignedNote,
   windowsInstallerUrl,
 } from "./DownloadInstaller.js";
 
@@ -80,39 +82,88 @@ describe("installer URLs", () => {
   });
 });
 
-describe("DownloadInstaller", () => {
-  it("offers Windows as the primary download with the newest build's URL", () => {
+describe("DownloadInstaller in the masthead", () => {
+  const openMenu = async () => {
+    const person = userEvent.setup();
     render(<DownloadInstaller />);
+    await person.click(screen.getByRole("button", { name: /download/i }));
+    return person;
+  };
+
+  it("is one control, with nothing else of its own on screen beside it", () => {
+    const { container } = render(<DownloadInstaller />);
+
+    // The whole point of the rework: the header row holds a single element from
+    // this component, not a button plus a wrapped note plus a stacked link.
+    const trigger = screen.getByRole("button", { name: /download/i });
+    expect(container.querySelector(".download-menu")?.children).toHaveLength(1);
+    expect(trigger).toHaveClass("ghost");
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    expect(container.textContent).toBe("Download");
+  });
+
+  it("warns about the unsigned build before anything is downloaded", async () => {
+    // Discoverable without opening anything…
+    render(<DownloadInstaller />);
+    expect(screen.getByRole("button", { name: /download/i })).toHaveAttribute("title", unsignedNote);
+
+    // …and stated in the panel, tied to both installers.
+    const person = userEvent.setup();
+    await person.click(screen.getByRole("button", { name: /download/i }));
+    for (const name of ["Download for Windows", "Mac installer (Apple silicon)"]) {
+      expect(screen.getByRole("link", { name })).toHaveAccessibleDescription(unsignedNote);
+    }
+  });
+
+  it("offers Windows as the primary download with the newest build's URL", async () => {
+    await openMenu();
 
     const windows = screen.getByRole("link", { name: "Download for Windows" });
     expect(windows).toHaveAttribute("href", windowsInstallerUrl);
-    expect(windows).toHaveClass("download-button");
+    expect(windows).toHaveClass("is-primary");
   });
 
-  it("says out loud that the build is unsigned, and ties it to the button", () => {
-    render(<DownloadInstaller />);
+  it("carries the Mac build in the same panel, secondary to Windows", async () => {
+    await openMenu();
 
-    const windows = screen.getByRole("link", { name: "Download for Windows" });
-    expect(windows).toHaveAccessibleDescription("Unsigned test build. Windows will ask you to confirm.");
-  });
-
-  it("keeps macOS secondary so only one link in the corner reads as the download", () => {
-    render(<DownloadInstaller />);
-
-    expect(screen.getByRole("link", { name: "Mac installer (Apple silicon)" }))
-      .toHaveAttribute("href", macInstallerUrl);
+    const mac = screen.getByRole("link", { name: "Mac installer (Apple silicon)" });
+    expect(mac).toHaveAttribute("href", macInstallerUrl);
+    expect(mac).not.toHaveClass("is-primary");
     expect(screen.getAllByRole("link", { name: /download/i })).toHaveLength(1);
   });
 
-  it("places itself where the surface asked", () => {
-    const { container, rerender } = render(<DownloadInstaller placement="floating" />);
-    expect(container.querySelector(".download-corner")).toHaveClass("is-floating");
+  it("says whether the panel is open, and closes again", async () => {
+    const person = await openMenu();
+    const trigger = screen.getByRole("button", { name: /download/i });
 
-    rerender(<DownloadInstaller placement="hero" />);
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(trigger).toHaveAttribute("aria-controls", screen.getByRole("link", { name: "Download for Windows" }).closest(".download-panel")?.id);
+
+    await person.keyboard("{Escape}");
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("link", { name: "Download for Windows" })).not.toBeInTheDocument();
+  });
+
+  it("closes when the click lands anywhere else", async () => {
+    const person = await openMenu();
+
+    await person.click(document.body);
+
+    expect(screen.getByRole("button", { name: /download/i })).toHaveAttribute("aria-expanded", "false");
+  });
+});
+
+describe("DownloadInstaller in the welcome hero", () => {
+  it("still says everything at once, because that page is the download", () => {
+    const { container } = render(<DownloadInstaller placement="hero" />);
+
     expect(container.querySelector(".download-corner")).toHaveClass("is-hero");
-
-    rerender(<DownloadInstaller />);
-    expect(container.querySelector(".download-corner")).toHaveClass("is-header");
+    const windows = screen.getByRole("link", { name: "Download for Windows" });
+    expect(windows).toHaveAttribute("href", windowsInstallerUrl);
+    expect(windows).toHaveClass("download-button");
+    expect(windows).toHaveAccessibleDescription(unsignedNote);
+    expect(screen.getByRole("link", { name: "Mac installer (Apple silicon)" }))
+      .toHaveAttribute("href", macInstallerUrl);
   });
 });
 
