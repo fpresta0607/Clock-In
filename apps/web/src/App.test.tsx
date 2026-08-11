@@ -353,25 +353,28 @@ describe("dashboard", () => {
 });
 
 describe("getting the desktop app", () => {
-  it("offers the installer from the top-right corner before anyone signs in", async () => {
-    render(<App client={clientFor()} />);
+  it("leaves the sign-in page alone", async () => {
+    const { container } = render(<App client={clientFor()} />);
     await screen.findByRole("heading", { name: "Sign in" });
 
-    // A visitor who wants the app has not signed in yet, so this is the one
-    // surface the button cannot be missing from.
-    const link = screen.getByRole("link", { name: "Download for Windows" });
-    expect(link).toHaveAttribute("href", windowsInstallerUrl);
-    expect(link).toHaveAccessibleDescription(/unsigned test build/i);
-    expect(link.closest(".download-corner")).toHaveClass("is-floating");
+    // Signing in is the only thing anyone came to this page to do, so the
+    // download control is not floated over it.
+    expect(container.querySelector(".download-menu, .download-corner")).toBeNull();
+    expect(screen.queryByRole("link", { name: /download/i })).not.toBeInTheDocument();
   });
 
-  it("keeps the same installer in the dashboard masthead after signing in", async () => {
-    await signIn(clientFor());
+  it("keeps the same installer one pill wide in the dashboard masthead", async () => {
+    const person = await signIn(clientFor());
     await screen.findByRole("heading", { name: "SIQstack" });
 
-    const link = screen.getByRole("link", { name: "Download for Windows" });
-    expect(link).toHaveAttribute("href", windowsInstallerUrl);
-    expect(link.closest(".masthead-actions")).not.toBeNull();
+    const trigger = screen.getByRole("button", { name: /download/i });
+    expect(trigger.closest(".masthead-actions")).not.toBeNull();
+    // Nothing of the download's own is in the header row until it is asked for.
+    expect(screen.queryByRole("link", { name: /installer|download/i })).not.toBeInTheDocument();
+
+    await person.click(trigger);
+    expect(screen.getByRole("link", { name: "Download for Windows" }))
+      .toHaveAttribute("href", windowsInstallerUrl);
   });
 
   it("hands out one installer everywhere, including from the help dialog", async () => {

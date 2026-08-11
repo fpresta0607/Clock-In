@@ -211,7 +211,6 @@ export const App = ({ client }: AppProps) => {
     return (
       <main className="shell auth-shell">
         <WebGLShader />
-        <DownloadInstaller placement="floating" />
         <section className="card glass" aria-labelledby="auth-title">
           <p className="eyebrow">Clock-In</p>
           <h1 id="auth-title">{isSignUp ? "Create your account" : "Sign in"}</h1>

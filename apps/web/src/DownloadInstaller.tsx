@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 const downloadBase = "https://github.com/fpresta0607/Clock-In/releases/download/unsigned-latest";
 
@@ -25,17 +25,95 @@ export const macInstallerUrl = `${downloadBase}/Clock-In-UNSIGNED-TEST-macos-aar
 export const unsignedNote = "Unsigned test build. Windows will ask you to confirm.";
 
 /**
- * Where the button is sitting, which is all that changes about it:
+ * Where the button is sitting, which decides how loud it is allowed to be:
  *
- * - `floating` pins it to the top-right of the viewport, for the surfaces
- *   (sign-in, create-account) whose own layout is centred and owns no corner.
- * - `header` puts it in the dashboard masthead, which is already the top-right
- *   corner of that page.
- * - `hero` is the big centred call to action on the post-sign-up screen.
+ * - `header` is the dashboard masthead, a single row of small controls it has
+ *   to sit inside without breaking. There it is one compact pill matching its
+ *   neighbours, and everything else it has to say lives behind that pill.
+ * - `hero` is the post-sign-up screen, whose whole job is handing out the app,
+ *   so there the button is the page and says all of it at once.
+ *
+ * There is deliberately no floating variant: a download control pinned over a
+ * sign-in card is nobody's next step on that page.
  */
-type Placement = "floating" | "header" | "hero";
+type Placement = "header" | "hero";
 
 type DownloadInstallerProps = { placement?: Placement };
+
+const DownloadIcon = () => (
+  <svg className="download-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+    <path
+      d="M8 1.75v8.5m0 0L4.75 7M8 10.25L11.25 7M2.5 12.75h11"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+/**
+ * The masthead pill. One control the height of the Sign out button beside it,
+ * opening everything that used to be stacked underneath it in the header: the
+ * unsigned-build warning and the Mac build.
+ */
+const HeaderMenu = () => {
+  const panelId = useId();
+  const noteId = useId();
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent): void => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div className="download-menu" ref={root}>
+      <button
+        className="ghost download-trigger"
+        type="button"
+        aria-expanded={open}
+        aria-controls={panelId}
+        // The SmartScreen warning is still on the control itself, not only
+        // inside the panel: a visitor who never opens the panel can still meet
+        // it on hover, and it is what the button is described by either way.
+        title={unsignedNote}
+        onClick={() => setOpen((wasOpen) => !wasOpen)}
+      >
+        <DownloadIcon />
+        Download
+        <span className="download-chevron" aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="card glass download-panel" id={panelId}>
+          <p className="download-note" id={noteId}>{unsignedNote}</p>
+          <a className="download-choice is-primary" href={windowsInstallerUrl} rel="noreferrer" aria-describedby={noteId}>
+            Download for Windows
+          </a>
+          {/* Secondary on purpose, and deliberately not called "download":
+              Windows is the platform that matters, and only one link in here
+              should read like the download. */}
+          <a className="download-choice" href={macInstallerUrl} rel="noreferrer" aria-describedby={noteId}>
+            Mac installer (Apple silicon)
+          </a>
+        </div>
+      )}
+    </div>
+  );
+};
 
 /**
  * The one component that hands out the desktop app. Every surface that offers
@@ -44,15 +122,13 @@ type DownloadInstallerProps = { placement?: Placement };
  */
 export const DownloadInstaller = ({ placement = "header" }: DownloadInstallerProps) => {
   const noteId = useId();
+  if (placement === "header") return <HeaderMenu />;
   return (
-    <div className={`download-corner is-${placement}`}>
+    <div className="download-corner is-hero">
       <a className="download-button" href={windowsInstallerUrl} rel="noreferrer" aria-describedby={noteId}>
         Download for Windows
       </a>
       <p className="download-note" id={noteId}>{unsignedNote}</p>
-      {/* Secondary on purpose, and deliberately not called "download": Windows
-          is the platform that matters, and the primary button should be the
-          only thing in this corner that reads like one. */}
       <a className="download-secondary" href={macInstallerUrl} rel="noreferrer">
         Mac installer (Apple silicon)
       </a>

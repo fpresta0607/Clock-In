@@ -48,42 +48,69 @@ a.primary { display: inline-block; text-decoration: none; }
 }
 .range-picker span { position: absolute; }
 
-/* The installer hand-out (DownloadInstaller.tsx). Top-right on every surface:
-   the dashboard already has a top-right corner in its masthead, so there it
-   rides along; the centred sign-in and welcome layouts own no corner, so the
-   floating variant pins to the viewport instead. */
-.download-corner { display: grid; justify-items: end; gap: 5px; text-align: right; }
-.download-corner.is-floating { position: fixed; top: 16px; right: 16px; z-index: 5; }
-.download-corner.is-hero { justify-items: center; text-align: center; }
+/* The installer hand-out (DownloadInstaller.tsx), in its two shapes.
+
+   In the masthead it is one pill built out of `.ghost`, exactly like the Sign
+   out button two places along, so the header stays a single row of matching
+   controls. Everything it has to say beyond the word "Download" is in the
+   panel it opens, because a sub-label and a second link in the header turned
+   that row into three. */
+.download-menu { position: relative; display: flex; }
+.download-trigger { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.download-icon { width: 14px; height: 14px; flex: none; color: var(--accent-green); }
+.download-chevron {
+  width: 0; height: 0; flex: none;
+  border-top: 4px solid currentColor;
+  border-right: 3.5px solid transparent;
+  border-left: 3.5px solid transparent;
+  opacity: .7;
+}
+.download-trigger[aria-expanded="true"] { border-color: var(--glass-border-hover); }
+
+.download-panel {
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 6;
+  display: grid; gap: 8px; justify-items: start;
+  width: max-content; max-width: min(280px, calc(100vw - 40px));
+  padding: 14px; text-align: left;
+}
+a.download-choice {
+  display: block; width: 100%;
+  border-radius: 6px; padding: 7px 10px;
+  color: #ffffff; font-size: .84rem; text-decoration: none;
+  transition: background .15s ease;
+}
+a.download-choice:hover { background: rgba(163, 179, 194, .12); }
+a.download-choice.is-primary { border: 1px solid var(--accent-green); background: var(--accent-green); color: #03130c; font-weight: 700; }
+a.download-choice.is-primary:hover { background: var(--accent-green-deep); border-color: var(--accent-green-deep); }
+
+/* The hero on the post-sign-up screen: that page exists to hand out the app,
+   so it says all of it at once and shouts the button. */
+.download-corner { display: grid; justify-items: center; gap: 5px; text-align: center; }
 
 a.download-button {
   display: inline-block;
   border: 1px solid var(--accent-green);
   border-radius: 9999px;
-  padding: 12px 24px;
+  padding: 16px 38px;
   background: var(--accent-green);
   color: #03130c;
-  font-size: .87rem;
+  font-size: 1rem;
   font-weight: 750;
-  letter-spacing: .07em;
+  letter-spacing: .08em;
   text-decoration: none;
   text-transform: uppercase;
   box-shadow: 0 0 20px rgba(0, 229, 155, .28);
   transition: background .15s ease, border-color .15s ease;
 }
 a.download-button:hover { background: var(--accent-green-deep); border-color: var(--accent-green-deep); }
-.is-hero a.download-button { padding: 16px 38px; font-size: 1rem; letter-spacing: .08em; }
 
-/* The SmartScreen warning is stated on screen rather than hidden in a tooltip:
-   a visitor who meets that dialog unwarned reads it as malware. */
+/* The SmartScreen warning: on screen in the hero, and in the masthead panel
+   plus the trigger's tooltip. A visitor who meets that dialog unwarned reads
+   it as malware, so it is never further away than the click before the
+   download. */
 .download-note { margin: 0; max-width: 32ch; color: var(--text-secondary); font-size: .72rem; line-height: 1.4; }
 a.download-secondary { color: var(--text-secondary); font-size: .72rem; text-decoration: underline; text-underline-offset: 3px; }
 a.download-secondary:hover { color: #ffffff; }
-
-/* Small screens: the floating button would sit on top of the sign-in card. */
-@media (max-width: 640px) {
-  .download-corner.is-floating { position: static; justify-items: center; text-align: center; margin: 0 auto 8px; }
-}
 
 /* Round "?" trigger in the masthead and the dialog it opens */
 .help-button { width: 32px; height: 32px; padding: 0; font-weight: 700; }
