@@ -75,6 +75,8 @@ export const App = ({ client }: AppProps) => {
   const load = useCallback(async (selected: Range) => {
     setLoading(true);
     setDataError(undefined);
+    setBoardFailed(false);
+    setRowsFailed(false);
     const query = rangeQuery(selected);
     // Settled rather than all: these three calls fail independently, and one
     // refused report must not throw away the workspace that loaded beside it.
