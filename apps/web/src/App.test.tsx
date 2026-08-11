@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { App, rangeQuery } from "./App.js";
 import { ClientError, type Client } from "./client.js";
+import { windowsInstallerUrl } from "./DownloadInstaller.js";
 
 // jsdom has no WebGL context; the shader is decorative.
 vi.mock("./WebGLShader.js", () => ({ WebGLShader: () => null }));
@@ -168,7 +169,7 @@ describe("dashboard", () => {
     await person.click(screen.getByRole("button", { name: "Create account" }));
 
     expect(await screen.findByRole("heading", { name: /the app/i })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /download/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Download for Windows" })).toHaveAttribute("href", windowsInstallerUrl);
 
     await person.click(screen.getByRole("button", { name: "Skip to your dashboard" }));
     expect(await screen.findByRole("heading", { name: "SIQstack" })).toBeInTheDocument();
@@ -348,5 +349,38 @@ describe("dashboard", () => {
 
     await screen.findByRole("heading", { name: "Leaderboard" });
     expect(screen.queryByRole("heading", { name: "Joining a teammate?" })).not.toBeInTheDocument();
+  });
+});
+
+describe("getting the desktop app", () => {
+  it("offers the installer from the top-right corner before anyone signs in", async () => {
+    render(<App client={clientFor()} />);
+    await screen.findByRole("heading", { name: "Sign in" });
+
+    // A visitor who wants the app has not signed in yet, so this is the one
+    // surface the button cannot be missing from.
+    const link = screen.getByRole("link", { name: "Download for Windows" });
+    expect(link).toHaveAttribute("href", windowsInstallerUrl);
+    expect(link).toHaveAccessibleDescription(/unsigned test build/i);
+    expect(link.closest(".download-corner")).toHaveClass("is-floating");
+  });
+
+  it("keeps the same installer in the dashboard masthead after signing in", async () => {
+    await signIn(clientFor());
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    const link = screen.getByRole("link", { name: "Download for Windows" });
+    expect(link).toHaveAttribute("href", windowsInstallerUrl);
+    expect(link.closest(".masthead-actions")).not.toBeNull();
+  });
+
+  it("hands out one installer everywhere, including from the help dialog", async () => {
+    const person = await signIn(clientFor());
+    await screen.findByRole("heading", { name: "SIQstack" });
+    await person.click(screen.getByRole("button", { name: "How Clock-In works" }));
+
+    const dialog = screen.getByRole("dialog", { name: "How Clock-In works" });
+    expect(within(dialog).getByRole("link", { name: "Download for Windows" }))
+      .toHaveAttribute("href", windowsInstallerUrl);
   });
 });

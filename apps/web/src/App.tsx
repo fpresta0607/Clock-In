@@ -9,7 +9,7 @@ import {
 } from "@clock-in/shared";
 
 import { ClientError, type Client } from "./client.js";
-import { DownloadApp } from "./DownloadApp.js";
+import { DownloadInstaller } from "./DownloadInstaller.js";
 import { HelpModal } from "./HelpModal.js";
 import { WebGLShader } from "./WebGLShader.js";
 
@@ -211,6 +211,7 @@ export const App = ({ client }: AppProps) => {
     return (
       <main className="shell auth-shell">
         <WebGLShader />
+        <DownloadInstaller placement="floating" />
         <section className="card glass" aria-labelledby="auth-title">
           <p className="eyebrow">Clock-In</p>
           <h1 id="auth-title">{isSignUp ? "Create your account" : "Sign in"}</h1>
@@ -268,7 +269,7 @@ export const App = ({ client }: AppProps) => {
             Clock-In tracks time from your desktop. Download the app, sign in with this account,
             and your hours show up on the dashboard.
           </p>
-          <DownloadApp className="primary cta" />
+          <DownloadInstaller placement="hero" />
           <button className="link" type="button" onClick={() => setJustSignedUp(false)}>
             Skip to your dashboard
           </button>
@@ -294,7 +295,7 @@ export const App = ({ client }: AppProps) => {
               ))}
             </select>
           </label>
-          <DownloadApp />
+          <DownloadInstaller />
           <button
             className="ghost help-button"
             type="button"
