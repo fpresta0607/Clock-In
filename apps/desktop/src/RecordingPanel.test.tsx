@@ -8,6 +8,8 @@ import type { MonitorStatus } from "./bridge.js";
 const status: MonitorStatus = {
   enabled: true,
   running: true,
+  observing: true,
+  lastPollAgeSeconds: 12,
   lastUploadAt: "2026-08-09T14:55:00.000Z",
   segmentBacklog: 0,
   agentBacklog: 0,

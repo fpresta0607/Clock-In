@@ -6,17 +6,25 @@ import type { MonitorStatus } from "./bridge.js";
 
 /// What the panel says is happening right now. `paused` is "switched on but
 /// the host is not running the tasks" (signed out, unsupported platform);
-/// `unknown` is "the host did not answer the status call at all".
-export type RecordingState = "on" | "paused" | "off" | "unknown";
+/// `stalled` is "the tasks are up but this machine has stopped being
+/// sampled"; `unknown` is "the host did not answer the status call at all".
+///
+/// This is the one place the recording state is decided. Every surface reads
+/// it, so no two parts of the app can disagree about whether recording is on.
+export type RecordingState = "on" | "stalled" | "paused" | "off" | "unknown";
 
 export const recordingState = (status: MonitorStatus | undefined): RecordingState => {
   if (status === undefined) return "unknown";
   if (!status.enabled) return "off";
-  return status.running ? "on" : "paused";
+  if (!status.running) return "paused";
+  // `running` only says the tasks were started. Claiming "on" from it alone is
+  // what let a dead poll task look healthy while nothing was being recorded.
+  return status.observing ? "on" : "stalled";
 };
 
 const HEADLINE: Record<RecordingState, string> = {
   on: "Recording is on",
+  stalled: "Recording has stopped responding",
   paused: "Recording is on, but not running right now",
   off: "Recording is off",
   unknown: "Clock-In can't check this computer",
@@ -24,6 +32,7 @@ const HEADLINE: Record<RecordingState, string> = {
 
 const SUMMARY: Record<RecordingState, string> = {
   on: "Clock-In is writing your hours down for you, for as long as this app is open. There is nothing to start and nothing to stop.",
+  stalled: "Clock-In has not looked at this computer for a while, so hours are not being written down right now. Restarting the app fixes it.",
   paused: "It starts again on its own.",
   off: "Clock-In is writing nothing down and no hours are being recorded on this computer.",
   unknown: "It can't say what it is doing at the moment.",
@@ -31,6 +40,7 @@ const SUMMARY: Record<RecordingState, string> = {
 
 const COMPUTER_STATE: Record<RecordingState, string> = {
   on: "On, looks every 30 seconds",
+  stalled: "Not responding",
   paused: "Waiting to start",
   off: "Off",
   unknown: "Unknown",
@@ -229,6 +239,39 @@ export const RecordingPanel = ({
           {status?.lastUploadAt != null && ` Last sent at ${clockTime(status.lastUploadAt)}.`}
           {backlog > 0 && ` ${backlog} ${backlog === 1 ? "note is" : "notes are"} still waiting to be sent.`}
         </p>
+
+        {status !== undefined && (
+          <details className="recording-diagnostics" data-testid="recording-diagnostics">
+            <summary>Technical details</summary>
+            {/* The proof surface for the recording chain. Each line is one link,
+                so "nothing is being recorded" can be read off the screen instead
+                of inferred from an empty report days later. */}
+            <dl className="diagnostic-list">
+              <div>
+                <dt>Last look at this computer</dt>
+                <dd data-testid="diagnostic-poll">
+                  {status.lastPollAgeSeconds === null
+                    ? "Never — this computer has not been sampled yet"
+                    : `${status.lastPollAgeSeconds}s ago`}
+                </dd>
+              </div>
+              <div>
+                <dt>Waiting to be sent</dt>
+                <dd data-testid="diagnostic-backlog">
+                  {status.segmentBacklog} app {status.segmentBacklog === 1 ? "note" : "notes"},{" "}
+                  {status.sessionBacklog} {status.sessionBacklog === 1 ? "stretch" : "stretches"},{" "}
+                  {status.agentBacklog} AI {status.agentBacklog === 1 ? "note" : "notes"}
+                </dd>
+              </div>
+              <div>
+                <dt>Last sent to your workspace</dt>
+                <dd data-testid="diagnostic-upload">
+                  {status.lastUploadAt === null ? "Never" : clockTime(status.lastUploadAt)}
+                </dd>
+              </div>
+            </dl>
+          </details>
+        )}
       </section>
     </div>
   );

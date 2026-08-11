@@ -16,7 +16,7 @@ import {
   type TimerBridge,
 } from "./bridge.js";
 import { agentRuntimeForBinary, formatDuration } from "@clock-in/shared";
-import { RecordingPanel } from "./RecordingPanel.js";
+import { RecordingPanel, recordingState, type RecordingState } from "./RecordingPanel.js";
 import { WebGLShader } from "./WebGLShader.js";
 
 type AppProps = {
@@ -115,6 +115,41 @@ const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
   if (rows.length <= TOP_APP_ROWS) return rows;
   const rest = rows.slice(TOP_APP_ROWS).reduce((sum, row) => sum + row.durationSeconds, 0);
   return [...rows.slice(0, TOP_APP_ROWS), { key: "everything-else", label: "Everything else", durationSeconds: rest, agent: false }];
+};
+
+/// Every sentence the main page says about recording, keyed by the one shared
+/// recording state. Keeping them in tables rather than inline conditionals is
+/// what stops a surface from asserting something the state never claimed.
+const MONITOR_LINE: Record<RecordingState, string> = {
+  on: "Recording on",
+  stalled: "Recording stopped responding",
+  paused: "Recording paused",
+  off: "Recording off",
+  unknown: "Checking this computer…",
+};
+
+const IDLE_HEADING: Record<RecordingState, string> = {
+  on: "Nothing to record yet",
+  stalled: "Recording stopped responding",
+  paused: "Recording is starting",
+  off: "Recording is off",
+  unknown: "Checking this computer…",
+};
+
+const IDLE_BLURB: Record<RecordingState, string> = {
+  on: "Clock-In starts writing your hours down as soon as you use this computer. There is nothing to press.",
+  stalled: "Clock-In has not looked at this computer for a while. Restarting the app starts it again.",
+  paused: "It starts on its own in a moment.",
+  off: "Turn recording on and Clock-In keeps your hours without you doing anything.",
+  unknown: "Clock-In is asking this computer what it is doing.",
+};
+
+const TODAY_EMPTY: Record<RecordingState, string> = {
+  on: "Nothing has been added up yet. Your hours appear here as they are sent to your workspace.",
+  stalled: "Nothing new is being written down, because recording stopped responding.",
+  paused: "Nothing yet. Recording is about to start.",
+  off: "Nothing yet. Turn recording on to see where your time goes.",
+  unknown: "Clock-In can't reach the recorder on this computer, so it can't say.",
 };
 
 type StatsRange = "today" | "week";
@@ -610,11 +645,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   }
 
   const ready: SignedInAccount = account;
-  const recordingState = monitorStatus === undefined
-    ? undefined
-    : monitorStatus.enabled
-      ? monitorStatus.running ? "on" : "paused"
-      : "off";
+  // One derivation, shared with the recording panel. The main page used to
+  // decide this for itself, which is how the timer could say it was recording
+  // while the card under it said recording was off.
+  const state = recordingState(monitorStatus);
   const current = monitorStatus?.currentSession ?? null;
   const currentProject = current ? ready.projects.find((item) => item.id === current.projectId) : undefined;
   const pinnedProject = monitorStatus?.selectedProjectId ?? ready.selectedProjectId ?? "";
@@ -626,12 +660,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       <WebGLShader />
       <Titlebar onOpenSettings={() => setSettingsOpen(true)} />
       <div className="screen">
-        {monitorStatus && recordingState && (
+        {monitorStatus && (
           <p className="monitor-line">
-            <span className={`monitor-dot is-${recordingState}`} aria-hidden="true" />
-            <span className="monitor-state">
-              {recordingState === "on" ? "Recording on" : recordingState === "paused" ? "Recording paused" : "Recording off"}
-            </span>
+            <span className={`monitor-dot is-${state}`} aria-hidden="true" />
+            <span className="monitor-state">{MONITOR_LINE[state]}</span>
             <button className="monitor-explain" type="button" onClick={() => setRecordingOpen(true)}>
               What&apos;s recorded?
             </button>
@@ -666,12 +698,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             </>
           ) : (
             <>
-              <h2 id="recording-heading">{recordingState === "off" ? "Recording is off" : "Nothing to record yet"}</h2>
-              <p className="subtle">
-                {recordingState === "off"
-                  ? "Turn recording on and Clock-In keeps your hours without you doing anything."
-                  : "Clock-In starts writing your hours down as soon as you use this computer. There is nothing to press."}
-              </p>
+              <h2 id="recording-heading">{IDLE_HEADING[state]}</h2>
+              <p className="subtle">{IDLE_BLURB[state]}</p>
             </>
           )}
 
@@ -713,7 +741,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             <>
               <p className="today-total"><strong>{formatCompact(stats.totalDurationSeconds)}</strong> recorded</p>
               {appRows.length === 0 ? (
-                <p className="subtle">Nothing yet. Turn on recording in settings to see where your time goes.</p>
+                // Derived from the same state as the timer above it. Hard-coding
+                // "turn on recording" here is what made one screen contradict
+                // itself while recording was demonstrably on.
+                <p className="subtle" data-testid="today-empty">{TODAY_EMPTY[state]}</p>
               ) : (
                 <ul className="app-list">
                   {appRows.map((row) => (

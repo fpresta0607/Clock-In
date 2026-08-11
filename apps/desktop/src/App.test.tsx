@@ -43,6 +43,8 @@ const settings = {
 const status = {
   enabled: true,
   running: true,
+  observing: true,
+  lastPollAgeSeconds: 12,
   lastUploadAt: "2026-08-06T14:55:00.000Z",
   segmentBacklog: 0,
   agentBacklog: 0,
@@ -220,11 +222,39 @@ describe("recording", () => {
 
   it("says recording is off, and never implies otherwise", async () => {
     render(<App bridge={bridgeFor({
-      monitorStatus: vi.fn().mockResolvedValue({ ...status, enabled: false, running: false }),
+      monitorStatus: vi.fn().mockResolvedValue({ ...status, enabled: false, running: false, observing: false }),
     })} />);
 
     expect(await screen.findByText("Recording off")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Recording is off" })).toBeInTheDocument();
+  });
+
+  // The screenshot bug: the timer said RECORDING while the card under it said
+  // "Turn on recording in settings". Both now read the one shared state, so no
+  // arrangement of props can make them disagree.
+  it("never tells you to turn recording on while it is recording", async () => {
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(recording),
+      // Recording is demonstrably on, but nothing has been added up yet.
+      meStats: vi.fn().mockResolvedValue({ ...meStats, totalDurationSeconds: 0, apps: [] }),
+    })} />);
+
+    expect(await screen.findByText("Recording on")).toBeInTheDocument();
+    expect(await screen.findByTestId("elapsed-time")).toBeInTheDocument();
+    const empty = await screen.findByTestId("today-empty");
+    expect(empty).not.toHaveTextContent(/turn (on )?recording/i);
+    expect(empty).toHaveTextContent("Nothing has been added up yet.");
+  });
+
+  // A poll task that dies leaves `running` true. Reading "on" from that alone
+  // is what let the app look healthy while it recorded nothing for days.
+  it("says recording stopped responding when the machine is no longer sampled", async () => {
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue({ ...recording, observing: false, lastPollAgeSeconds: 900 }),
+    })} />);
+
+    expect(await screen.findByText("Recording stopped responding")).toBeInTheDocument();
+    expect(screen.queryByText("Recording on")).not.toBeInTheDocument();
   });
 
   it("reports quiet time taken off and the AI tool holding recording open", async () => {
@@ -243,7 +273,9 @@ describe("recording", () => {
   it("renders no recording surfaces when the host cannot report status", async () => {
     render(<App bridge={bridgeFor()} />);
 
-    await screen.findByRole("heading", { name: "Nothing to record yet" });
+    // A host that cannot answer is its own state: the screen says it is still
+    // checking rather than borrowing the wording of a healthy idle machine.
+    await screen.findByRole("heading", { name: "Checking this computer…" });
     await waitFor(() => expect(screen.queryByText(/^Recording (on|paused|off)$/)).not.toBeInTheDocument());
   });
 
@@ -437,7 +469,7 @@ describe("the what's-recorded panel", () => {
 
   it("turns recording on from the panel when it is off", async () => {
     const bridge = bridgeFor({
-      monitorStatus: vi.fn().mockResolvedValue({ ...status, enabled: false, running: false }),
+      monitorStatus: vi.fn().mockResolvedValue({ ...status, enabled: false, running: false, observing: false }),
       monitorSetEnabled: vi.fn().mockResolvedValue({ ...settings, enabled: true }),
     });
     const person = userEvent.setup();

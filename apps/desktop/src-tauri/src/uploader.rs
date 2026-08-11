@@ -809,6 +809,7 @@ mod tests {
             mappings: vec![mapping("m1", "C:/clock", "p-clock")],
             agent: AgentTracking::default(),
             last_upload_at: None,
+            last_poll_at: None,
             tracker: crate::monitor::SessionTracker::new(),
             default_project: Some("p-default".to_string()),
             account_id: Some("u1".to_string()),

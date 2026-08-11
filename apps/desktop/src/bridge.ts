@@ -65,6 +65,12 @@ export type CurrentSession = {
 export type MonitorStatus = {
   enabled: boolean;
   running: boolean;
+  /// Whether this machine is actually being sampled, as opposed to the tasks
+  /// merely having been started. A poll task that dies leaves `running` true,
+  /// so this is what the recording state is allowed to claim "on" from.
+  observing: boolean;
+  /// Seconds since the last completed poll; `null` before the first one.
+  lastPollAgeSeconds: number | null;
   lastUploadAt: string | null;
   segmentBacklog: number;
   agentBacklog: number;
@@ -310,6 +316,11 @@ export const decodeMonitorStatus = (value: unknown): MonitorStatus => {
   return {
     enabled: boolean(candidate.enabled),
     running: boolean(candidate.running),
+    observing: boolean(candidate.observing),
+    lastPollAgeSeconds:
+      candidate.lastPollAgeSeconds === null || candidate.lastPollAgeSeconds === undefined
+        ? null
+        : nonnegativeInteger(candidate.lastPollAgeSeconds),
     lastUploadAt: timestampOrNull(candidate.lastUploadAt),
     segmentBacklog: nonnegativeInteger(candidate.segmentBacklog),
     agentBacklog: nonnegativeInteger(candidate.agentBacklog),

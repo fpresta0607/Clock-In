@@ -51,6 +51,8 @@ describe("defaultBridge", () => {
   const statusPayload = {
     enabled: true,
     running: true,
+    observing: true,
+    lastPollAgeSeconds: 12,
     lastUploadAt: "2026-08-06T15:00:00.000Z",
     segmentBacklog: 3,
     agentBacklog: 1,

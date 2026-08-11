@@ -54,10 +54,30 @@ const IDLE_THRESHOLD_SECONDS: u32 = POLL_INTERVAL_SECONDS as u32;
 /// active for the away override. Matches the server's staleness window.
 pub const AGENT_ACTIVE_WINDOW_SECONDS: u64 = 6 * 3_600;
 
+/// How stale the last poll may be before the monitor stops claiming it is
+/// watching this machine. Three intervals, so one late tick is not an alarm.
+///
+/// This exists because "the tasks were started" and "the machine is being
+/// sampled" are different facts: a poll task that panics leaves its
+/// `JoinHandle` in place, and without this the UI would go on saying
+/// "Recording on" forever while nothing was being recorded.
+pub const STALE_POLL_SECONDS: u64 = 3 * POLL_INTERVAL_SECONDS;
+
 /// Closed segments stay in memory so stop-time idle math and the live session
 /// view work offline; the cap bounds a process that runs for months. Spooled
 /// segments are already on disk, so dropping the oldest here loses nothing.
 const MAX_BUFFERED_SEGMENTS: usize = 10_000;
+
+/// The longest an active span may stay open before it is closed where it
+/// stands and a fresh one opens in its place.
+///
+/// Without this, an active span only ever closed on a *state* change, so a
+/// machine in continuous use held one span in memory indefinitely and spooled
+/// nothing — the failure that left `activity_segments` empty. A ceiling means
+/// evidence reaches disk on a schedule no matter how long one app stays in
+/// front. Five minutes matches the uploader's pass, so a closed span waits at
+/// most one pass to leave the machine.
+const MAX_OPEN_ACTIVE_SECONDS: u64 = 300;
 
 /// What the OS reports. `Locked` and `Suspended` are pushed by the event
 /// thread; `Active` and `Idle` come from the 30-second poll.
@@ -120,6 +140,29 @@ fn signal_process_name(signal: &ActivitySignal) -> Option<String> {
     }
 }
 
+/// Whether the open span keeps running for this signal, given the signal does
+/// not change the state. It ends early when the app in front changed or when
+/// it has been open for `MAX_OPEN_ACTIVE_SECONDS`.
+///
+/// Only *active* spans are ever split. An idle, locked, or suspended span's
+/// start is what the session tracker measures quiet time from, so splitting
+/// one would restart the away threshold on every poll and no session would
+/// ever close.
+fn continues_open_span(open: &OpenSegment, signal: &ActivitySignal, now: u64) -> bool {
+    let ActivitySignal::Active { process_name } = signal else {
+        return true;
+    };
+    if now.saturating_sub(open.started_at) >= MAX_OPEN_ACTIVE_SECONDS {
+        return false;
+    }
+    match (process_name, &open.process_name) {
+        (Some(name), Some(current)) => name == current,
+        // A poll that could not name the foreground process says nothing about
+        // whether the app changed, so it never forces a boundary.
+        _ => true,
+    }
+}
+
 /// Folds a timestamped signal stream into transition-based segments.
 /// Transitions close the open span and open a new one; repeats coalesce.
 #[derive(Default)]
@@ -137,6 +180,13 @@ impl SegmentBuilder {
     /// segments the transition closed, for the caller to spool. An `Idle`
     /// signal backdates the transition: the active span ended when the last
     /// input happened (`now - idle_seconds`), not when the poll noticed.
+    ///
+    /// Three things close an active span: a change of state, a change of the
+    /// app in front, and `MAX_OPEN_ACTIVE_SECONDS` of the same app. The last
+    /// two matter as much as the first — while only state changes closed
+    /// spans, per-app time was "whichever app happened to be in front when the
+    /// machine went idle", and a machine in continuous use spooled nothing at
+    /// all.
     pub fn apply(&mut self, now: u64, signal: &ActivitySignal) -> Vec<Segment> {
         let kind = signal_kind(signal);
         let transition_at = match signal {
@@ -146,8 +196,30 @@ impl SegmentBuilder {
 
         let mut closed_now = Vec::new();
         match &mut self.open {
+            Some(open) if open.kind == kind && !continues_open_span(open, signal, now) => {
+                // Still the same state, but this span has to end: either the
+                // app in front changed, or it has been open long enough that
+                // holding it any longer would keep evidence off disk.
+                if now > open.started_at {
+                    closed_now.push(Segment {
+                        kind: open.kind,
+                        process_name: open.process_name.take(),
+                        started_at: open.started_at,
+                        ended_at: now,
+                    });
+                    *open = OpenSegment {
+                        kind,
+                        process_name: signal_process_name(signal),
+                        started_at: now,
+                    };
+                } else {
+                    // Zero-length: nothing worth recording, so just adopt the
+                    // new foreground name.
+                    open.process_name = signal_process_name(signal);
+                }
+            }
             Some(open) if open.kind == kind => {
-                // Same state continues; remember the latest foreground process.
+                // Same state, same app, still within the ceiling.
                 if let ActivitySignal::Active {
                     process_name: Some(name),
                 } = signal
@@ -701,6 +773,9 @@ pub struct MonitorShared {
     pub mappings: Vec<PathMapping>,
     pub agent: AgentTracking,
     pub last_upload_at: Option<String>,
+    /// Unix seconds of the last completed poll. `None` until the first one,
+    /// and the only evidence that the poll task is still alive.
+    pub last_poll_at: Option<u64>,
     /// Turns activity boundaries into sessions; the whole recording model.
     pub tracker: SessionTracker,
     /// The user's fallback project, resolved once per sign-in.
@@ -1133,6 +1208,15 @@ pub struct AgentActive {
 pub struct MonitorStatus {
     pub enabled: bool,
     pub running: bool,
+    /// Whether this machine is actually being sampled right now, which is a
+    /// different fact from `running`: a poll task that panicked leaves its
+    /// handle in place, so `running` alone would keep claiming the machine is
+    /// watched long after the last sample. `false` also covers platforms with
+    /// no poll source at all.
+    pub observing: bool,
+    /// Seconds since the last completed poll, for the diagnostics readout.
+    /// `None` when no poll has ever completed on this run.
+    pub last_poll_age_seconds: Option<u32>,
     pub last_upload_at: Option<String>,
     pub segment_backlog: u32,
     pub agent_backlog: u32,
@@ -1216,6 +1300,7 @@ impl Monitor {
                 mappings: Vec::new(),
                 agent: AgentTracking::default(),
                 last_upload_at: None,
+                last_poll_at: None,
                 tracker: SessionTracker::new(),
                 default_project: None,
                 account_id: None,
@@ -1363,9 +1448,17 @@ impl Monitor {
             None
         };
 
+        let last_poll_age = shared
+            .last_poll_at
+            .map(|at| now.saturating_sub(at))
+            .map(|age| u32::try_from(age).unwrap_or(u32::MAX));
+
         MonitorStatus {
             enabled: shared.settings.enabled,
             running,
+            observing: running
+                && last_poll_age.is_some_and(|age| u64::from(age) <= STALE_POLL_SECONDS),
+            last_poll_age_seconds: last_poll_age,
             last_upload_at: shared.last_upload_at.clone(),
             segment_backlog: count_lines(&self.segments_path),
             agent_backlog: count_lines(&self.agent_path),
@@ -1542,6 +1635,9 @@ async fn poll_loop(
             let signal = source.poll();
             closed.extend(shared.builder.apply(now, &signal));
             let device_id = shared.settings.device_id.clone();
+            // Stamped only once the tick has actually sampled the OS, so a
+            // task that dies mid-poll stops refreshing its own liveness.
+            shared.last_poll_at = Some(now);
             let mut finished = replayed;
             finished.extend(advance_sessions(&mut shared, now));
             let account_id = shared.account_id.clone();
@@ -1934,19 +2030,166 @@ mod tests {
         }
     }
 
+    /// The regression behind an empty `activity_segments`: a machine in
+    /// continuous use never changes state, so while only state changes closed
+    /// a span, the fold held one span in memory for as long as the app ran and
+    /// handed the spool nothing to write.
+    #[test]
+    fn a_machine_in_continuous_use_spools_segments_without_ever_going_idle() {
+        let mut builder = SegmentBuilder::new();
+        let mut spooled = Vec::new();
+        // Eight hours of "active, same app", one poll every interval.
+        let start = 1_000;
+        let mut now = start;
+        while now < start + 8 * 3_600 {
+            spooled.extend(builder.apply(now, &active("code.exe")));
+            now += POLL_INTERVAL_SECONDS;
+        }
+
+        assert!(
+            !spooled.is_empty(),
+            "continuous use has to reach the spool, not sit in memory"
+        );
+        assert!(
+            spooled
+                .iter()
+                .all(|segment| segment.kind == SegmentKind::Active),
+            "every span of continuous use is active"
+        );
+        assert!(
+            spooled
+                .iter()
+                .all(|segment| segment.ended_at - segment.started_at <= MAX_OPEN_ACTIVE_SECONDS),
+            "no span outlives the ceiling"
+        );
+        let recorded: u64 = spooled
+            .iter()
+            .map(|segment| segment.ended_at - segment.started_at)
+            .sum();
+        assert!(
+            recorded >= 8 * 3_600 - MAX_OPEN_ACTIVE_SECONDS,
+            "the spooled spans account for the whole stretch, less the span still open"
+        );
+    }
+
+    /// Spans must not overlap or leave gaps: the server sums them, so a split
+    /// that double-counts a second inflates everyone's hours.
+    #[test]
+    fn split_active_spans_tile_the_stretch_without_gaps_or_overlap() {
+        let mut builder = SegmentBuilder::new();
+        let mut spooled = Vec::new();
+        let mut now = 1_000;
+        while now < 1_000 + 2_000 {
+            spooled.extend(builder.apply(now, &active("code.exe")));
+            now += POLL_INTERVAL_SECONDS;
+        }
+
+        for pair in spooled.windows(2) {
+            assert_eq!(
+                pair[0].ended_at, pair[1].started_at,
+                "one span ends exactly where the next begins"
+            );
+        }
+        assert_eq!(
+            spooled.first().map(|segment| segment.started_at),
+            Some(1_000),
+            "the first span starts where the fold did"
+        );
+    }
+
+    /// Per-app time is the point of the stats surface, so the app in front
+    /// changing is a boundary in its own right.
+    #[test]
+    fn a_foreground_change_closes_the_span_and_names_the_app_that_earned_it() {
+        let mut builder = SegmentBuilder::new();
+        assert!(builder.apply(1_000, &active("code.exe")).is_empty());
+        assert!(builder.apply(1_030, &active("code.exe")).is_empty());
+
+        let closed = builder.apply(1_060, &active("chrome.exe"));
+        assert_eq!(
+            closed,
+            vec![Segment {
+                kind: SegmentKind::Active,
+                process_name: Some("code.exe".to_string()),
+                started_at: 1_000,
+                ended_at: 1_060,
+            }],
+            "the closed span belongs to the app that was actually in front"
+        );
+
+        let closed = builder.apply(1_090, &active("code.exe"));
+        assert_eq!(
+            closed,
+            vec![Segment {
+                kind: SegmentKind::Active,
+                process_name: Some("chrome.exe".to_string()),
+                started_at: 1_060,
+                ended_at: 1_090,
+            }],
+            "switching back closes the browser's span at the switch"
+        );
+    }
+
+    /// A poll that cannot name the foreground process must not manufacture a
+    /// boundary, or an unreadable window would shred the day into fragments.
+    #[test]
+    fn an_unnamed_foreground_process_does_not_split_the_span() {
+        let mut builder = SegmentBuilder::new();
+        builder.apply(1_000, &active("code.exe"));
+        assert!(
+            builder
+                .apply(1_030, &ActivitySignal::Active { process_name: None })
+                .is_empty(),
+            "an unreadable foreground window is not a change of app"
+        );
+    }
+
+    /// Splitting active spans must not touch how quiet time is measured: the
+    /// away threshold reads the open *idle* span's start, so idle spans stay
+    /// whole however long they run.
+    #[test]
+    fn idle_spans_are_never_split_so_the_away_threshold_still_fires() {
+        let mut builder = SegmentBuilder::new();
+        builder.apply(1_000, &active("code.exe"));
+        builder.apply(1_060, &idle(60));
+
+        let mut now = 1_090;
+        while now < 1_000 + 4 * MAX_OPEN_ACTIVE_SECONDS {
+            assert!(
+                builder.apply(now, &idle(now as u32 - 1_000)).is_empty(),
+                "a long quiet stretch stays one span"
+            );
+            now += POLL_INTERVAL_SECONDS;
+        }
+        assert_eq!(
+            builder.open_span().map(|(kind, _)| kind),
+            Some(SegmentKind::Idle),
+            "the quiet span is still the open one"
+        );
+        assert_eq!(
+            builder.open_span().map(|(_, started_at)| started_at),
+            Some(1_000),
+            "and it still starts where the machine actually went quiet"
+        );
+    }
+
     #[test]
     fn active_idle_active_folds_into_transition_segments() {
         let mut builder = SegmentBuilder::new();
 
         assert!(builder.apply(1_000, &active("code.exe")).is_empty());
-        // Same kind coalesces; the latest foreground process is remembered.
-        assert!(builder.apply(1_060, &active("msedge.exe")).is_empty());
+        // The app in front changed, so the editor's span ends at the switch
+        // instead of being relabelled to whatever came next.
+        let closed = builder.apply(1_060, &active("msedge.exe"));
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].process_name.as_deref(), Some("code.exe"));
+        assert_eq!((closed[0].started_at, closed[0].ended_at), (1_000, 1_060));
         // Idle for 120s at t=1300: the active span ended at the last input.
         let closed = builder.apply(1_300, &idle(120));
         assert_eq!(closed.len(), 1);
         assert_eq!(closed[0].kind, SegmentKind::Active);
         assert_eq!(closed[0].process_name.as_deref(), Some("msedge.exe"));
-        assert_eq!((closed[0].started_at, closed[0].ended_at), (1_000, 1_180));
+        assert_eq!((closed[0].started_at, closed[0].ended_at), (1_060, 1_180));
         // Idle continues: no new segment.
         assert!(builder.apply(1_360, &idle(300)).is_empty());
         // Back to work: the idle span closes at the transition.
@@ -2586,6 +2829,7 @@ mod tests {
             mappings: Vec::new(),
             agent: AgentTracking::default(),
             last_upload_at: None,
+            last_poll_at: None,
             tracker: SessionTracker::new(),
             default_project: Some("default".to_string()),
             account_id: None,
