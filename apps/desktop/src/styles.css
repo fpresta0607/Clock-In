@@ -354,6 +354,9 @@ select:disabled { opacity: .55; }
 .agent-mark.is-generic { border: 1px solid var(--glass-border); background: rgba(3, 5, 10, .5); color: var(--text-secondary); font-size: .62rem; letter-spacing: 0; }
 .source-state { flex: none; color: var(--text-secondary); font-size: .78rem; }
 .source-state.is-on { color: var(--mint); }
+/* A tool that is not on this machine is a fact, not a problem, so it recedes
+   rather than reading as something left undone. */
+.source-state.is-absent { opacity: .6; }
 .source-fix { flex: none; min-height: 28px; border: 1px solid var(--glass-border); border-radius: var(--radius); padding: 2px 11px; background: rgba(3, 5, 10, .5); color: #ffffff; font-size: .7rem; letter-spacing: .06em; text-transform: uppercase; }
 .source-fix:hover, .source-fix:focus-visible { border-color: var(--glass-border-hover); }
 .source-note { flex-basis: 100%; margin: 4px 0 0; color: var(--text-secondary); font-size: .78rem; line-height: 1.5; }

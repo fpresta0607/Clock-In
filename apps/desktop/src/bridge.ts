@@ -32,6 +32,11 @@ export type OrganizationOverview = {
 export type HookRegistration = {
   source: string;
   detected: boolean;
+  /// Whether the CLI looks present on this machine at all.
+  installed: boolean;
+  /// Installed, not connected, and not something the host can wire up itself.
+  /// The only rows that should ask a person for anything.
+  needsYou: boolean;
   configPath: string;
 };
 
@@ -281,6 +286,8 @@ const decodeHookRegistration = (value: unknown): HookRegistration => {
   return {
     source: string(candidate.source),
     detected: boolean(candidate.detected),
+    installed: boolean(candidate.installed),
+    needsYou: boolean(candidate.needsYou),
     configPath: string(candidate.configPath),
   };
 };

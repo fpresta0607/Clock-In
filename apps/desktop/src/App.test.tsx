@@ -50,8 +50,8 @@ const status = {
   agentBacklog: 0,
   sessionBacklog: 0,
   hooks: [
-    { source: "claude_code", detected: true, configPath: "C:/Users/dev/.claude/settings.json" },
-    { source: "codex", detected: false, configPath: "C:/Users/dev/.codex/config.toml" },
+    { source: "claude_code", detected: true, installed: true, needsYou: false, configPath: "C:/Users/dev/.claude/settings.json" },
+    { source: "codex", detected: false, installed: true, needsYou: false, configPath: "C:/Users/dev/.codex/config.toml" },
   ],
   agentActive: null,
   currentSession: null,

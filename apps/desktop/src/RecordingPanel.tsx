@@ -169,6 +169,9 @@ export const RecordingPanel = ({
                 <span className="source-name">This computer</span>
                 <span className={`source-state ${state === "on" ? "is-on" : "is-off"}`}>{COMPUTER_STATE[state]}</span>
               </li>
+              {/* State, not a to-do list. Clock-In connects what it can on
+                  startup, so a row only carries a button when a person really
+                  is the only one who can finish it. */}
               {status.hooks.map((hook) => (
                 <li key={hook.source} className="source-row">
                   <span className="source-name">
@@ -177,6 +180,15 @@ export const RecordingPanel = ({
                   </span>
                   {hook.detected ? (
                     <span className="source-state is-on">Connected</span>
+                  ) : !hook.installed ? (
+                    <span className="source-state is-absent">Not on this computer</span>
+                  ) : hook.needsYou ? (
+                    <>
+                      <span className="source-state is-off">Needs a hand</span>
+                      <button type="button" className="source-fix" onClick={() => onConnectAgent(hook.source)}>
+                        Show me how
+                      </button>
+                    </>
                   ) : (
                     <>
                       <span className="source-state is-off">Not connected</span>

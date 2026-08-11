@@ -15,8 +15,8 @@ const status: MonitorStatus = {
   agentBacklog: 0,
   sessionBacklog: 0,
   hooks: [
-    { source: "claude_code", detected: true, configPath: "C:/Users/dev/.claude/settings.json" },
-    { source: "codex", detected: false, configPath: "C:/Users/dev/.codex/config.toml" },
+    { source: "claude_code", detected: true, installed: true, needsYou: false, configPath: "C:/Users/dev/.claude/settings.json" },
+    { source: "codex", detected: false, installed: true, needsYou: false, configPath: "C:/Users/dev/.codex/config.toml" },
   ],
   agentActive: null,
   currentSession: {
@@ -114,6 +114,36 @@ describe("RecordingPanel", () => {
 
     await person.click(within(codex as HTMLElement).getByRole("button", { name: "Connect" }));
     expect(props.onConnectAgent).toHaveBeenCalledWith("codex");
+  });
+
+  // Discovery connects what it can at startup, so the list reports state
+  // instead of handing out a row of Connect buttons.
+  it("reports each connector's state and asks only where a person is needed", () => {
+    panelFor({
+      status: {
+        ...status,
+        hooks: [
+          { source: "claude_code", detected: true, installed: true, needsYou: false, configPath: "C:/Users/dev/.claude/settings.json" },
+          { source: "grok", detected: false, installed: false, needsYou: false, configPath: "C:/Users/dev/.grok/settings.json" },
+          { source: "kimi_code", detected: false, installed: true, needsYou: true, configPath: "C:/Users/dev/.kimi/config.toml" },
+        ],
+      },
+    });
+
+    const panel = screen.getByRole("dialog", { name: "What Clock-In is recording" });
+    const connected = within(panel).getByText("Claude Code").closest("li") as HTMLElement;
+    expect(connected).toHaveTextContent("Connected");
+    expect(within(connected).queryByRole("button")).not.toBeInTheDocument();
+
+    // Not installed is a state, not a job for the reader.
+    const absent = within(panel).getByText("Grok").closest("li") as HTMLElement;
+    expect(absent).toHaveTextContent("Not on this computer");
+    expect(within(absent).queryByRole("button")).not.toBeInTheDocument();
+
+    // The one row that genuinely cannot be finished without a person.
+    const manual = within(panel).getByText("Kimi Code").closest("li") as HTMLElement;
+    expect(manual).toHaveTextContent("Needs a hand");
+    expect(within(manual).getByRole("button", { name: "Show me how" })).toBeInTheDocument();
   });
 
   it("says the browser is not watched rather than implying a connection", () => {

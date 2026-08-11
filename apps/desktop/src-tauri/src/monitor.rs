@@ -894,6 +894,13 @@ impl PlatformEvents {
 pub struct HookRegistration {
     pub source: String,
     pub detected: bool,
+    /// Whether this CLI looks present on this machine at all, so the panel can
+    /// say "not installed" instead of offering to connect something that is
+    /// not there.
+    pub installed: bool,
+    /// Installed, not connected, and not something Clock-In can wire up on its
+    /// own — the only rows that should ask a person for anything.
+    pub needs_you: bool,
     pub config_path: String,
 }
 
@@ -930,6 +937,18 @@ pub fn default_hook_probes() -> Vec<HookProbe> {
         .collect()
 }
 
+/// Whether this CLI looks installed on this machine, judged by its own config
+/// directory existing. Deliberately a filesystem question and never a spawn: a
+/// GUI app that shells out to `where claude` flashes a console window at the
+/// user, which is the bug that made this app open a terminal in the first
+/// place.
+pub fn runtime_is_installed(probe: &HookProbe) -> bool {
+    probe
+        .config_path
+        .parent()
+        .is_some_and(|directory| directory.is_dir())
+}
+
 pub fn detect_hooks(probes: &[HookProbe]) -> Vec<HookRegistration> {
     probes
         .iter()
@@ -937,13 +956,54 @@ pub fn detect_hooks(probes: &[HookProbe]) -> Vec<HookRegistration> {
             let detected = std::fs::read_to_string(&probe.config_path)
                 .map(|content| content.contains(HOOK_BINARY_NAME))
                 .unwrap_or(false);
+            let installed = runtime_is_installed(probe);
             HookRegistration {
                 source: probe.source.to_string(),
                 detected,
+                installed,
+                // The only rows worth a person's attention: the tool is here,
+                // it is not connected, and Clock-In cannot connect it itself.
+                needs_you: installed
+                    && !detected
+                    && probe.registration == agent_runtimes::Registration::Manual,
                 config_path: probe.config_path.to_string_lossy().into_owned(),
             }
         })
         .collect()
+}
+
+/// Connects every installed CLI that Clock-In can wire up by itself, and
+/// reports which ones it connected.
+///
+/// This is what makes the connector list report state instead of asking for
+/// clicks. It is deliberately narrow: a runtime is touched only when its own
+/// config directory already exists, so Clock-In never creates configuration
+/// for a tool that is not installed, and only when its hook mechanism is a
+/// config shape the host knows how to merge. Anything else — Kimi, Pi,
+/// opencode, Grok, Muse, Copilot — stays a `needs_you` row carrying the exact
+/// text to paste, because guessing a rewrite of a file Clock-In does not own
+/// is worse than asking.
+pub fn auto_connect_hooks(probes: &[HookProbe]) -> Vec<String> {
+    let mut connected = Vec::new();
+    for probe in probes {
+        if probe.registration == agent_runtimes::Registration::Manual
+            || !runtime_is_installed(probe)
+        {
+            continue;
+        }
+        let already = std::fs::read_to_string(&probe.config_path)
+            .map(|content| content.contains(HOOK_BINARY_NAME))
+            .unwrap_or(false);
+        if already {
+            continue;
+        }
+        // A failure here is not worth interrupting startup over: the row stays
+        // "not connected" and the panel's own button still works.
+        if let Ok(HookRegisterResult::Registered { .. }) = register_hook(probe.source) {
+            connected.push(probe.source.to_string());
+        }
+    }
+    connected
 }
 
 /// The outcome of an opt-in `hook_register` call. Claude Code's settings.json
@@ -1452,6 +1512,14 @@ impl Monitor {
     /// machine's evidence to whoever signs in next, so setup never starts it.
     pub async fn ensure_running(&self) {
         if self.is_enabled() {
+            // Discovery before the first poll, so an installed CLI is already
+            // wired by the time the panel is opened. Silent by design: a
+            // connector Clock-In can switch on by itself is not a decision
+            // worth putting in front of somebody.
+            let connected = auto_connect_hooks(&default_hook_probes());
+            if !connected.is_empty() {
+                eprintln!("clock-in: connected {} agent CLI(s)", connected.len());
+            }
             self.start().await;
         }
     }
@@ -2129,6 +2197,122 @@ mod tests {
             recorded >= 8 * 3_600 - MAX_OPEN_ACTIVE_SECONDS,
             "the spooled spans account for the whole stretch, less the span still open"
         );
+    }
+
+    /// A probe set rooted in a scratch directory, so discovery can be driven
+    /// without touching a real CLI's configuration.
+    fn probe_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "clock-in-probe-{name}-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the scratch directory is creatable");
+        dir
+    }
+
+    fn probe(
+        root: &Path,
+        source: &'static str,
+        registration: agent_runtimes::Registration,
+    ) -> HookProbe {
+        HookProbe {
+            source,
+            config_path: root.join(source).join("settings.json"),
+            registration,
+        }
+    }
+
+    /// "Installed" is the config directory existing. Creating it is how a test
+    /// says a CLI is on this machine.
+    fn install(probe: &HookProbe) {
+        std::fs::create_dir_all(probe.config_path.parent().expect("a parent"))
+            .expect("the config directory is creatable");
+    }
+
+    /// A CLI that is not installed must never be touched: Clock-In does not
+    /// create configuration for tools that are not there.
+    #[test]
+    fn discovery_leaves_uninstalled_runtimes_alone() {
+        let root = probe_dir("uninstalled");
+        let probes = vec![probe(
+            &root,
+            "claude_code",
+            agent_runtimes::Registration::ClaudeJson,
+        )];
+
+        assert!(auto_connect_hooks(&probes).is_empty(), "nothing to connect");
+        assert!(
+            !probes[0].config_path.parent().expect("a parent").exists(),
+            "discovery did not invent a config directory"
+        );
+
+        let detected = detect_hooks(&probes);
+        assert!(!detected[0].installed, "reported as not installed");
+        assert!(
+            !detected[0].needs_you,
+            "a tool that is not here asks nothing of anybody"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A CLI whose hooks Clock-In cannot write stays a row that reports what
+    /// it needs, rather than a guessed rewrite of somebody else's file.
+    #[test]
+    fn discovery_surfaces_only_the_runtimes_that_genuinely_need_a_person() {
+        let root = probe_dir("manual");
+        let manual = probe(&root, "kimi_code", agent_runtimes::Registration::Manual);
+        install(&manual);
+        let probes = vec![manual];
+
+        assert!(
+            auto_connect_hooks(&probes).is_empty(),
+            "a manual runtime is never silently rewritten"
+        );
+
+        let detected = detect_hooks(&probes);
+        assert!(detected[0].installed, "it is on this machine");
+        assert!(!detected[0].detected, "and not connected");
+        assert!(
+            detected[0].needs_you,
+            "so this is the one row worth asking about"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Discovery has to be idempotent: every app start runs it, and a second
+    /// pass must not report work it did not do.
+    #[test]
+    fn discovery_reports_nothing_the_second_time_around() {
+        let root = probe_dir("idempotent");
+        let claude = probe(
+            &root,
+            "claude_code",
+            agent_runtimes::Registration::ClaudeJson,
+        );
+        install(&claude);
+        std::fs::write(&claude.config_path, "{}").expect("a config file");
+        let probes = vec![claude];
+
+        // The hook binary has to exist beside the test runner for a real
+        // registration to succeed, which it does not here; either way the
+        // contract is the same: whatever the first pass did, the second does
+        // nothing new and never reports a connection it did not make.
+        let first = auto_connect_hooks(&probes);
+        let second = auto_connect_hooks(&probes);
+        assert!(
+            second.is_empty(),
+            "a second pass connects nothing again: first={first:?}"
+        );
+        assert!(
+            !detect_hooks(&probes)[0].needs_you,
+            "a runtime Clock-In can wire itself never asks a person"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The main page's live stats: per-app time for the open session, counted
