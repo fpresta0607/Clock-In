@@ -69,15 +69,9 @@ describe("the agent runtime roster", () => {
     }
   });
 
-  it("ships a mark only where an official asset was sourced cleanly", () => {
-    // opencode's mark ships in its own MIT-licensed repository. Nothing
-    // comparable exists for the rest, and Clock-In will not draw a lookalike,
-    // so they use the generic agent badge instead.
-    expect(findAgentRuntime("opencode")?.icon).toBe("opencode");
+  it("ships a mark for every declared runtime, sourced from original monochrome glyphs", () => {
     for (const runtime of agentRuntimes) {
-      if (runtime.id !== "opencode") {
-        expect(runtime.icon).toBeNull();
-      }
+      expect(runtime.icon).toBe(runtime.id);
     }
   });
 });
