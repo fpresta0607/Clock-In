@@ -795,7 +795,6 @@ pub fn seal_pending_spool_paths(path: &Path) -> SpoolResult<Vec<PathBuf>> {
     })
 }
 
-
 /// The line-typed core of `read_pending`, shared with the segment spool the
 /// activity monitor drains (same durability discipline, different row type).
 pub(crate) fn read_pending_lines<T: serde::de::DeserializeOwned>(

@@ -329,13 +329,16 @@ export const agentSessionEventSchema = z
   })
   .strict()
   .superRefine((event, ctx) => {
-    const expectsRule = event.source === "browser";
-    if ((event.ruleId !== undefined) !== expectsRule || (event.cwd !== undefined) === expectsRule) {
+    if (event.ruleId !== undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: expectsRule
-          ? "Browser events carry a ruleId and no cwd."
-          : "Agent events carry a cwd and no ruleId.",
+        message: "Agent events carry a cwd and no ruleId.",
+      });
+    }
+    if (event.cwd === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Agent events carry a cwd and no ruleId.",
       });
     }
   });

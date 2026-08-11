@@ -162,21 +162,20 @@ start procurement before the release, not after:
 - **Windows:** an OV/EV code-signing certificate (~$200-600/yr)
 - **macOS:** Apple Developer Program ($99/yr) for signing and notarization
 
-All three desktop binaries (the app, `clock-in-hook`, and
-`clock-in-browser-host`) sign with the same certificate. On Windows the
+Both desktop binaries (the app and `clock-in-hook`) sign with the same
+certificate. `clock-in-browser-host` will ship with the phase-3 browser
+extension; until that lands, only `clock-in-hook` is built. On Windows the
 workflow imports the `.pfx` into the runner's certificate store, or uses the
-configured store thumbprint directly, then signs the helpers with `signtool`
+configured store thumbprint directly, then signs the helper with `signtool`
 and configures Tauri to sign the app and installers with that thumbprint; on
 macOS the bundler deep-signs everything inside the `.app` and notarizes it.
 
-Both helpers ship inside the installer via `externalBin` in
-`apps/desktop/src-tauri/tauri.conf.json`: the workflow stages them as
-`src-tauri/binaries/<name>-<target-triple>` before the bundler runs, and the
-bundler installs them beside the app executable. That sibling rule is how the
-app finds them at runtime - hook registration quotes the `clock-in-hook`
-path beside the running app, and browser native-messaging registration writes
-the `clock-in-browser-host` path beside the running app into each browser's
-HKCU manifest.
+The helper ships inside the installer via `externalBin` in
+`apps/desktop/src-tauri/tauri.conf.json`: the workflow stages it as
+`src-tauri/binaries/clock-in-hook-<target-triple>` before the bundler runs, and
+the bundler installs it beside the app executable. That sibling rule is how the
+app finds it at runtime — hook registration quotes the `clock-in-hook` path
+beside the running app.
 
 Set these under Settings → Secrets and variables → Actions → **Secrets**:
 

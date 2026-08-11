@@ -540,8 +540,7 @@ impl SessionTracker {
                 // Idle before the first agent evidence is not covered.
                 if let Some(open) = self.open.as_mut() {
                     if self.agent_first_in_idle > idle_started_at {
-                        let uncovered =
-                            self.agent_first_in_idle.saturating_sub(idle_started_at);
+                        let uncovered = self.agent_first_in_idle.saturating_sub(idle_started_at);
                         open.idle_seconds += uncovered;
                     }
                 }
@@ -621,7 +620,8 @@ impl SessionTracker {
                     // Idle before the first agent evidence is not covered.
                     if let Some(open) = self.open.as_mut() {
                         if self.agent_first_in_idle > span_started_at {
-                            let uncovered = self.agent_first_in_idle.saturating_sub(span_started_at);
+                            let uncovered =
+                                self.agent_first_in_idle.saturating_sub(span_started_at);
                             open.idle_seconds += uncovered;
                         }
                     }
@@ -641,9 +641,8 @@ impl SessionTracker {
             // last reported, whichever is later.
             SegmentKind::Locked | SegmentKind::Suspended => {
                 if !input.agent_active {
-                    let boundary = span_started_at.max(
-                        self.open.as_ref().map_or(0, |o| o.last_active_at),
-                    );
+                    let boundary =
+                        span_started_at.max(self.open.as_ref().map_or(0, |o| o.last_active_at));
                     closed.extend(self.close_at(boundary));
                 } else if let Some(open) = self.open.as_mut() {
                     open.last_active_at = input.now;

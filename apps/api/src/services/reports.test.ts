@@ -375,7 +375,7 @@ describe("me/stats", () => {
   it("returns an empty stats response when the caller recorded nothing", async () => {
     const result = await createReportService({ reports: new Reports(), reaper: silentReaper }).meStats(subject, {});
 
-    expect(result).toEqual({ filters: {}, totalDurationSeconds: 0, attributedSeconds: 0, unattributedSeconds: 0, projects: [], apps: [] });
+    expect(result).toEqual({ filters: {}, totalDurationSeconds: 0, attributedSeconds: 0, unattributedSeconds: 0, projects: [], apps: [], sites: [] });
   });
 
   it("rejects reversed or excessive date ranges like the org reports do", async () => {

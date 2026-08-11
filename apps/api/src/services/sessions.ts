@@ -133,7 +133,6 @@ export function createSessionService(dependencies: SessionServiceDependencies): 
           userId: subject.userId,
           clientId: normalized.clientId,
           projectId: normalized.projectId,
-          deviceId: normalized.deviceId,
           description: normalized.description,
           startedAt: normalized.startedAt,
         });

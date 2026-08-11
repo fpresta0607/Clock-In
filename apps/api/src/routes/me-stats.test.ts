@@ -71,6 +71,43 @@ interface StoredSegment {
   receivedAt: Date;
 }
 
+interface StoredAgent {
+  organizationId: string;
+  userId: string;
+  source: string;
+  ruleId: string | null;
+  linkedSessionId: string;
+  startedAt: Date;
+  endedAt: Date | null;
+  lastEventAt: Date;
+  receivedAt: Date;
+}
+
+interface StoredMapping {
+  id: string;
+  organizationId: string;
+  userId: string;
+  kind: "url_rule" | "path_prefix";
+  pattern: string;
+  projectId: string | null;
+}
+
+/** Merge overlapping intervals into non-overlapping spans. */
+function mergeIntervals(intervals: { start: number; end: number }[]): { start: number; end: number }[] {
+  if (intervals.length === 0) return [];
+  const sorted = [...intervals].sort((a, b) => a.start - b.start);
+  const merged = [sorted[0]!];
+  for (let i = 1; i < sorted.length; i++) {
+    const last = merged[merged.length - 1]!;
+    if (sorted[i]!.start <= last.end) {
+      last.end = Math.max(last.end, sorted[i]!.end);
+    } else {
+      merged.push(sorted[i]!);
+    }
+  }
+  return merged;
+}
+
 const freshnessWindowMs = 7 * 24 * 60 * 60 * 1_000;
 
 
@@ -83,24 +120,38 @@ const freshnessWindowMs = 7 * 24 * 60 * 60 * 1_000;
 class MemoryReports implements ReportRepository {
   public readonly sessions: StoredSession[] = [];
   public readonly segments: StoredSegment[] = [];
+  public readonly agents: StoredAgent[] = [];
+  public readonly mappings: StoredMapping[] = [];
 
 
   private filtered(subject: AuthenticatedSubject, query: ReportQuery): StoredSession[] {
     return this.sessions.filter((session) => session.organizationId === subject.organizationId
-      && (query.from === undefined || session.startedAt >= query.from)
+      && (query.from === undefined || session.stoppedAt >= query.from)
       && (query.toExclusive === undefined || session.startedAt < query.toExclusive)
       && (query.userId === undefined || session.userId === query.userId)
       && (query.projectId === undefined || session.project.id === query.projectId));
   }
 
+  /** Clip a session's contribution to the query range, in seconds. */
+  private clippedSeconds(session: StoredSession, query: ReportQuery): number {
+    if (query.from === undefined && query.toExclusive === undefined) return session.durationSeconds;
+    const rangeStart = query.from?.getTime() ?? session.startedAt.getTime();
+    const rangeEnd = query.toExclusive?.getTime() ?? session.stoppedAt.getTime();
+    const overlapStart = Math.max(session.startedAt.getTime(), rangeStart);
+    const overlapEnd = Math.min(session.stoppedAt.getTime(), rangeEnd);
+    return Math.max(0, Math.floor((overlapEnd - overlapStart) / 1_000));
+  }
+
   public async readProjectTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<ProjectTotalRecord[]> {
     const byProject = new Map<string, ProjectTotalRecord>();
     for (const session of this.filtered(subject, query)) {
+      const clipped = this.clippedSeconds(session, query);
+      if (clipped === 0) continue;
       const existing = byProject.get(session.project.id)
         ?? { project: session.project, durationSeconds: 0, attributedSeconds: 0, sessionCount: 0 };
-      existing.durationSeconds = (existing.durationSeconds as number) + session.durationSeconds;
+      existing.durationSeconds = (existing.durationSeconds as number) + clipped;
       existing.attributedSeconds = (existing.attributedSeconds as number)
-        + (session.attribution === "default" ? 0 : session.durationSeconds);
+        + (session.attribution === "default" ? 0 : clipped);
       existing.sessionCount = (existing.sessionCount as number) + 1;
       byProject.set(session.project.id, existing);
     }
@@ -388,8 +439,8 @@ describe("me/stats routes", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
       totalDurationSeconds: 600,
-      attributedSeconds: 300,
-      projects: [{ project: { id: ids.project }, durationSeconds: 600, attributedSeconds: 300, sessionCount: 1 }],
+      attributedSeconds: 600,
+      projects: [{ project: { id: ids.project }, durationSeconds: 600, attributedSeconds: 600, sessionCount: 1 }],
     });
   });
 
@@ -450,7 +501,7 @@ describe("me/stats routes", () => {
     });
 
     const empty = await app.request("http://api.test/me/stats?from=2026-08-01&to=2026-08-02", { headers });
-    await expect(empty.json()).resolves.toEqual({ filters: { from: "2026-08-01", to: "2026-08-02" }, totalDurationSeconds: 0, attributedSeconds: 0, unattributedSeconds: 0, projects: [], apps: [] });
+    await expect(empty.json()).resolves.toEqual({ filters: { from: "2026-08-01", to: "2026-08-02" }, totalDurationSeconds: 0, attributedSeconds: 0, unattributedSeconds: 0, projects: [], apps: [], sites: [] });
   });
 
   it("closes stale agent sessions on the read path before computing stats", async () => {

@@ -296,12 +296,18 @@ fn track_agent_event(
                     external_session_id: event.external_session_id.clone(),
                     started_at: at,
                     last_event_at: at,
-                    project: event.cwd.as_deref().and_then(|cwd| resolve_project(cwd, mappings)),
+                    project: event
+                        .cwd
+                        .as_deref()
+                        .and_then(|cwd| resolve_project(cwd, mappings)),
                 },
             );
         }
         AgentEventKind::Heartbeat => {
-            let resolved = event.cwd.as_deref().and_then(|cwd| resolve_project(cwd, mappings));
+            let resolved = event
+                .cwd
+                .as_deref()
+                .and_then(|cwd| resolve_project(cwd, mappings));
             let active = tracking
                 .active
                 .entry(key.clone())

@@ -153,17 +153,17 @@ describe("timer routes", () => {
     await expect(invalid.json()).resolves.toEqual({ error: { code: "validation_error", message: "Invalid request body." } });
 
     const unknownProject = await app.request("http://api.test/sessions", {
-      method: "POST", headers, body: JSON.stringify({ clientId: "b1c7e513-b094-4d4c-ae55-21790ae019a4", projectId: "f1c7e513-b094-4d4c-ae55-21790ae019a4" }),
+      method: "POST", headers, body: JSON.stringify({ clientId: "b1c7e513-b094-4d4c-ae55-21790ae019a4", projectId: "f1c7e513-b094-4d4c-ae55-21790ae019a4", deviceId: "d1c7e513-b094-4d4c-ae55-21790ae019a4" }),
     });
     expect(unknownProject.status).toBe(404);
     await expect(unknownProject.json()).resolves.toEqual({ error: { code: "not_found", message: "Project not found." } });
 
-    const started = await app.request("http://api.test/sessions", { method: "POST", headers, body: JSON.stringify({ clientId: ids.client, projectId: ids.project, description: "Route test", startedAt: "2026-08-06T13:00:00.000Z" }) });
+    const started = await app.request("http://api.test/sessions", { method: "POST", headers, body: JSON.stringify({ clientId: ids.client, projectId: ids.project, deviceId: "f1c7e513-b094-4d4c-ae55-21790ae019a4", description: "Route test", startedAt: "2026-08-06T13:00:00.000Z" }) });
     expect(started.status).toBe(200);
     await expect(started.json()).resolves.toMatchObject({ session: { status: "running", description: "Route test", startedAt: "2026-08-06T13:00:00.000Z" } });
 
     const conflict = await app.request("http://api.test/sessions", {
-      method: "POST", headers, body: JSON.stringify({ clientId: "b1c7e513-b094-4d4c-ae55-21790ae019a4", projectId: ids.project }),
+      method: "POST", headers, body: JSON.stringify({ clientId: "b1c7e513-b094-4d4c-ae55-21790ae019a4", projectId: ids.project, deviceId: "d1c7e513-b094-4d4c-ae55-21790ae019a4" }),
     });
     expect(conflict.status).toBe(409);
     await expect(conflict.json()).resolves.toEqual({ error: { code: "session_already_running", message: "A time session is already running." } });
@@ -189,7 +189,7 @@ describe("timer routes", () => {
     await expect(stopped.json()).resolves.toMatchObject({ session: { status: "stopped", durationSeconds: 540, idleSeconds: 60 } });
 
     const idempotentRetry = await app.request("http://api.test/sessions", {
-      method: "POST", headers, body: JSON.stringify({ clientId: ids.client, projectId: ids.project, description: "Route test", startedAt: "2026-08-06T13:00:00.000Z" }),
+      method: "POST", headers, body: JSON.stringify({ clientId: ids.client, projectId: ids.project, deviceId: "f1c7e513-b094-4d4c-ae55-21790ae019a4", description: "Route test", startedAt: "2026-08-06T13:00:00.000Z" }),
     });
     expect(idempotentRetry.status).toBe(200);
     await expect(idempotentRetry.json()).resolves.toMatchObject({ session: { status: "stopped", durationSeconds: 540 } });
@@ -201,7 +201,7 @@ describe("timer routes", () => {
     await expect(malformedId.json()).resolves.toEqual({ error: { code: "validation_error", message: "Invalid session id." } });
 
     const farFutureStart = await app.request("http://api.test/sessions", {
-      method: "POST", headers, body: JSON.stringify({ clientId: "b1c7e513-b094-4d4c-ae55-21790ae019a4", projectId: ids.project, startedAt: "2026-08-06T14:00:30.001Z" }),
+      method: "POST", headers, body: JSON.stringify({ clientId: "b1c7e513-b094-4d4c-ae55-21790ae019a4", projectId: ids.project, deviceId: "f1c7e513-b094-4d4c-ae55-21790ae019a4", startedAt: "2026-08-06T14:00:30.001Z" }),
     });
     expect(farFutureStart.status).toBe(400);
     await expect(farFutureStart.json()).resolves.toEqual({ error: { code: "validation_error", message: "Invalid session start time." } });
