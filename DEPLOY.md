@@ -201,6 +201,58 @@ the updater config in
 `apps/desktop/src-tauri/tauri.conf.json`. Back the private key up somewhere
 durable: losing it means existing installs can never verify an update again.
 
+### Unsigned test installers
+
+Before the signing certificates exist, `.github/workflows/unsigned-test-installers.yml`
+builds installers you can actually download and install. It publishes **no**
+release and uploads nothing to GitHub Releases: the installers are workflow-run
+artifacts, and the job runs with read-only `contents` permission so it could not
+publish one if it tried.
+
+This is not a way around the signing gate. `release.yml` still refuses to
+publish anything unsigned, and this workflow does not touch it or the signing
+configuration. It builds with `tauri build --debug`, which
+`apps/desktop/src-tauri/build.rs` already classifies as a development build:
+signing credentials are not required, and `bundle.createUpdaterArtifacts` stays
+off, so no updater manifest is produced. Adding Azure Trusted Signing later
+changes `release.yml` only.
+
+**To trigger it:** Actions → *Unsigned test installers* → **Run workflow**.
+Because GitHub only offers *Run workflow* for workflows already on the default
+branch, the workflow also runs on any push to a branch named
+`unsigned-test/<anything>`, which is how you exercise a change to it before it
+merges.
+
+**To download:** open the run and grab the artifact named
+`UNSIGNED-TEST-BUILD-windows-<run number>` (or `-macos-`). Inside are the
+installers, each prefixed `UNSIGNED-TEST-`, plus an `UNSIGNED-TEST-BUILD.txt`
+recording the commit they came from. Windows ships the NSIS
+`...-setup.exe` only: WiX's `light.exe` cannot bundle the unoptimized debug
+binary into an MSI, so that target is skipped here. The tagged release still
+builds both.
+
+**Installing on Windows.** The installer is not signed, so SmartScreen shows a
+blue *"Windows protected your PC / Windows Defender SmartScreen prevented an
+unrecognized app from starting"* dialog with only a **Don't run** button. Click
+**More info**, then **Run anyway**. The UAC prompt that follows names the
+publisher as **Unknown**. Browsers may also flag the download itself: in Edge or
+Chrome, open the downloads list and choose **Keep** on the blocked file. If the
+file came through as a zip artifact, unblock it before extracting (right-click
+the zip → Properties → **Unblock**), otherwise the mark-of-the-web propagates to
+the installer.
+
+Because these are debug builds, they are noticeably larger and slower than a
+release build, and on Windows a console window opens beside the app. That is
+expected and disappears in a signed release build. There is no auto-updater in
+these builds, and a signed release cannot upgrade one in place: uninstall the
+test build before installing a real release.
+
+macOS installers are built by the same workflow. They are unsigned and
+un-notarized, so Gatekeeper blocks them harder than SmartScreen does: after
+mounting the `.dmg` and copying the app, clear the quarantine flag with
+`xattr -dr com.apple.quarantine "/Applications/Clock-In.app"` before it will
+launch.
+
 ---
 
 ## 5. Browser extension stores

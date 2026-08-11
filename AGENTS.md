@@ -38,6 +38,11 @@ runtime and model are independent — neither is ever derived from the other.
 - The Rust toolchain lives at `~/.cargo/bin` and may not be on `PATH`. Rust gate:
   `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`,
   all with `--manifest-path apps/desktop/src-tauri/Cargo.toml`.
+- `build.rs` treats *any* build with `debug_assertions` off as a production artifact
+  and demands the updater key plus platform signing credentials. So an unsigned
+  installer is a `tauri build --debug` bundle
+  (`.github/workflows/unsigned-test-installers.yml`), never a relaxed release build;
+  `release.yml` and `src/release_signing.rs` stay fail-closed.
 - Desktop settings are read with `#[serde(default)]`, so removing a field is safe
   for existing installs, but *adding* one needs a sensible default or old files
   parse into something surprising.
