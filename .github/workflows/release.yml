@@ -60,7 +60,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if gh workflow run "Unsigned test installers" --ref "${{ github.sha }}"; then
+          if gh workflow run "Unsigned test installers" --ref "${{ github.ref_name }}"; then
             echo "::notice::Dispatched the unsigned installer publish for ${{ github.ref_name }}."
           else
             echo "::warning::Could not dispatch the unsigned installer publish; run it by hand from the Actions tab."
