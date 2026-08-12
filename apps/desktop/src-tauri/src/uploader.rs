@@ -1,5 +1,6 @@
 //! The evidence uploader: one Tokio task that wakes every five minutes (and
-//! on demand at timer stop), uploads buffered activity segments, drains the
+//! on demand when a session finishes, when the UI asks to sync now, and once
+//! more before exit), uploads buffered activity segments, drains the
 //! agent-event spool, and keeps agent-activity tracking in step with the
 //! session-boundary tracker.
 //!
@@ -55,8 +56,9 @@ pub async fn upload_loop(
 }
 
 /// One upload pass. Returns as soon as anything is unreachable; whatever was
-/// not acknowledged stays in its spool for the next pass.
-async fn upload_once(
+/// not acknowledged stays in its spool for the next pass. Also the exit
+/// flush: the monitor runs one bounded pass before the process quits.
+pub(crate) async fn upload_once(
     shared: &Arc<Mutex<MonitorShared>>,
     client: &ApiClient,
     segments_path: &Path,
@@ -535,6 +537,76 @@ mod tests {
         let (pending, _) =
             spool::read_pending_lines::<SegmentRecord>(&path).expect("the spool reads");
         assert!(pending.is_empty(), "an accepted batch leaves the spool");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One spooled finished session, exactly as `append_session_line` writes it.
+    fn spool_one_session(path: &Path) {
+        let session = ObservedSession {
+            client_id: "ac1da70b-d921-42ec-8f8f-03a0cdd5be01".to_string(),
+            project_id: "2c8ce697-8011-4c66-9421-7fc83d39cb92".to_string(),
+            attribution: crate::monitor::Attribution::Default,
+            started_at: "2026-08-12T13:36:06Z".to_string(),
+            stopped_at: "2026-08-12T13:36:36Z".to_string(),
+            idle_seconds: 0,
+        };
+        let mut line = serde_json::to_vec(&session).expect("the session encodes");
+        line.push(b'\n');
+        spool::append_line(path, &line, spool::MAX_SPOOL_BYTES).expect("the spool accepts a line");
+    }
+
+    /// The regression that stranded a real session on disk: a finished
+    /// session in the spool must reach `/sessions/observed` on the next pass
+    /// and leave the spool once the server has taken it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_accepted_session_reaches_the_observed_endpoint_and_leaves_the_spool() {
+        let dir = temp_dir("session-accepted");
+        let path = dir.join("sessions-spool.jsonl");
+        spool_one_session(&path);
+
+        let (port, server) = stub_server(200, r#"{"accepted":1,"rejected":[]}"#).await;
+        assert!(
+            upload_sessions(&stub_client(port), "token", &path).await,
+            "an accepted batch reports success"
+        );
+
+        let request = server.await.expect("the stub finishes");
+        assert!(
+            request.starts_with("POST /sessions/observed "),
+            "the batch goes to the observed-session endpoint: {request}"
+        );
+        assert!(
+            request.contains("\"attribution\":\"default\"")
+                && request.contains("\"startedAt\":\"2026-08-12T13:36:06Z\""),
+            "the wire payload carries the contract's field names: {request}"
+        );
+
+        let (pending, _) =
+            spool::read_pending_lines::<ObservedSession>(&path).expect("the spool reads");
+        assert!(pending.is_empty(), "an accepted batch leaves the spool");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A refused session batch keeps the evidence for the next pass, exactly
+    /// like segments.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_session_batch_stays_spooled() {
+        let dir = temp_dir("session-refused");
+        let path = dir.join("sessions-spool.jsonl");
+        spool_one_session(&path);
+
+        let (port, server) = stub_server(500, r#"{"code":"internal_error"}"#).await;
+        assert!(
+            !upload_sessions(&stub_client(port), "token", &path).await,
+            "a refused batch reports failure"
+        );
+        let _ = server.await;
+
+        let (pending, _) =
+            spool::read_pending_lines::<ObservedSession>(&path).expect("the spool reads");
+        assert_eq!(pending.len(), 1, "a refused batch stays spooled");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

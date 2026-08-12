@@ -374,6 +374,13 @@ async fn monitor_status(state: State<'_, AppState>) -> ApiResult<MonitorStatus> 
     Ok(state.monitor.status().await)
 }
 
+/// The UI's "Sync now": wakes the uploader instead of waiting out the
+/// five-minute tick. Fire-and-forget; the status poll reports the result.
+#[tauri::command]
+fn monitor_sync_now(state: State<'_, AppState>) {
+    state.monitor.request_upload();
+}
+
 /// Opt-in hook registration for one agent CLI, triggered from the settings
 /// UI. Never silent: the user clicks, and the result says whether the CLI's
 /// config was merged or a paste-it-yourself snippet came back.
@@ -514,7 +521,12 @@ fn flush_monitor_and_exit(app: &tauri::AppHandle, code: i32) {
     EXIT_FLUSH_STARTED.store(true, Ordering::SeqCst);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        app.state::<AppState>().monitor.stop().await;
+        let state = app.state::<AppState>();
+        state.monitor.stop().await;
+        // The session the flush just spooled reaches the server before the
+        // process dies; otherwise it sits invisible until the next launch.
+        // Offline, the pass gives up within its timeout and quit proceeds.
+        state.monitor.upload_flush().await;
         app.exit(code);
     });
 }
@@ -663,6 +675,7 @@ pub fn run() {
             org_join,
             session_select_project,
             monitor_status,
+            monitor_sync_now,
             hook_register,
             monitor_set_enabled,
             settings_get,

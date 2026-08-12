@@ -68,6 +68,10 @@ pub const STALE_POLL_SECONDS: u64 = 3 * POLL_INTERVAL_SECONDS;
 /// segments are already on disk, so dropping the oldest here loses nothing.
 const MAX_BUFFERED_SEGMENTS: usize = 10_000;
 
+/// The exit flush's upload budget. Long enough for one pass over a normal
+/// backlog, short enough that quitting offline never feels hung.
+const EXIT_UPLOAD_FLUSH_SECONDS: u64 = 5;
+
 /// The longest an active span may stay open before it is closed where it
 /// stands and a fresh one opens in its place.
 ///
@@ -1459,6 +1463,7 @@ impl Monitor {
                 self.session_spool_path(),
                 self.recovery_path.clone(),
                 Arc::clone(&self.recovery),
+                Arc::clone(&self.upload_now),
             )))
         };
         #[cfg(not(windows))]
@@ -1649,7 +1654,32 @@ impl Monitor {
     pub fn carry_over(&self, state: &RecoveryState, user_id: &str) {
         if let Some(session) = crate::recovery::close_carried_session(state, user_id) {
             append_session_line(&self.session_spool_path(), &session);
+            self.request_upload();
         }
+    }
+
+    /// Wakes the uploader now instead of at the next five-minute tick. A
+    /// notify with no task listening stores a permit, so calling this before
+    /// `start` still triggers the first pass.
+    pub fn request_upload(&self) {
+        self.upload_now.notify_one();
+    }
+
+    /// One bounded upload pass for the exit path: a session that finished
+    /// moments before quit must reach the server now, not at the next
+    /// launch. The timeout keeps an offline quit prompt.
+    pub async fn upload_flush(&self) {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(EXIT_UPLOAD_FLUSH_SECONDS),
+            crate::uploader::upload_once(
+                &self.shared,
+                &self.client,
+                &self.segments_path,
+                &self.agent_path,
+                &self.session_spool_path(),
+            ),
+        )
+        .await;
     }
 
     fn session_spool_path(&self) -> PathBuf {
@@ -1740,6 +1770,7 @@ async fn poll_loop(
     sessions_path: PathBuf,
     recovery_path: PathBuf,
     recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
+    upload_now: Arc<Notify>,
 ) {
     let source = platform::Poller::new();
     let mut tick = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECONDS));
@@ -1778,6 +1809,11 @@ async fn poll_loop(
             if account_id.is_some() {
                 append_session_line(&sessions_path, session);
             }
+        }
+        if account_id.is_some() && !finished.is_empty() {
+            // A finished session uploads now, not at the next five-minute
+            // tick: quitting soon after stopping work must not strand it.
+            upload_now.notify_one();
         }
         // The open session goes to disk every tick: a crash then costs the gap
         // since the last tick, not the whole session.
