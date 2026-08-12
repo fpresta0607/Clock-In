@@ -151,7 +151,7 @@ describe("sign-in", () => {
   it("shows a labelled sign-in form after a signed-out bootstrap", async () => {
     render(<App bridge={bridgeFor({ bootstrap: vi.fn().mockResolvedValue({ kind: "signed-out" }) })} />);
 
-    expect(await screen.findByRole("heading", { name: "Clock in" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeVisible();
     expect(screen.getByLabelText("Email")).toHaveAttribute("type", "email");
     expect(screen.getByLabelText("Password")).toHaveAttribute("type", "password");
     expect(screen.queryByRole("button", { name: "Settings" })).not.toBeInTheDocument();
@@ -162,13 +162,13 @@ describe("sign-in", () => {
     const person = userEvent.setup();
     render(<App bridge={bridgeFor({ bootstrap: vi.fn().mockResolvedValue({ kind: "signed-out" }), login })} />);
 
-    await screen.findByRole("heading", { name: "Clock in" });
+    await screen.findByRole("heading", { name: "Sign in" });
     await person.type(screen.getByLabelText("Email"), user.email);
     await person.type(screen.getByLabelText("Password"), "not-stored-here");
     await person.click(screen.getByRole("button", { name: "Sign in" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Those details did not match.");
-    expect(screen.getByRole("heading", { name: "Clock in" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Sign in" })).toBeInTheDocument();
   });
 
   it("signs in and lands on the recording screen", async () => {
@@ -178,7 +178,7 @@ describe("sign-in", () => {
       monitorStatus: vi.fn().mockResolvedValue(recording),
     })} />);
 
-    await screen.findByRole("heading", { name: "Clock in" });
+    await screen.findByRole("heading", { name: "Sign in" });
     await person.type(screen.getByLabelText("Email"), user.email);
     await person.type(screen.getByLabelText("Password"), "not-stored-here");
     await person.click(screen.getByRole("button", { name: "Sign in" }));
@@ -489,7 +489,7 @@ describe("settings", () => {
     await person.click(await within(dialog).findByRole("button", { name: "Log out" }));
 
     await waitFor(() => expect(bridge.logout).toHaveBeenCalledTimes(1));
-    expect(await screen.findByRole("heading", { name: "Clock in" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
   });
 });
 

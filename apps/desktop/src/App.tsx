@@ -740,13 +740,14 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         <WebGLShader />
         <Titlebar />
         <div className="center-stage">
+          {/* The titlebar already says the app's name; the card says only
+              what to do here. */}
           <section className="sign-in-panel card" aria-labelledby="sign-in-title">
-            <p className="eyebrow">Clock-In</p>
-            <h1 id="sign-in-title">{isSignUp ? "Create your account" : "Clock in"}</h1>
+            <h1 id="sign-in-title">{isSignUp ? "Create your account" : "Sign in"}</h1>
             <p className="subtle">
               {isSignUp
                 ? "Your workspace and first project are set up automatically."
-                : "Sign in and Clock-In keeps your hours for you."}
+                : "Clock-In keeps your hours for you."}
             </p>
             {authError && <p className="form-error" role="alert">{authError}</p>}
             <form onSubmit={submitAuth}>

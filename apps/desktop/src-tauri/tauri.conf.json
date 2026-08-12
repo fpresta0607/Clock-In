@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "Clock-In",
-        "width": 480,
-        "height": 760,
+        "width": 520,
+        "height": 920,
         "minWidth": 400,
         "minHeight": 600,
         "resizable": true,
