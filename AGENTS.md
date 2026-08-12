@@ -60,7 +60,10 @@ timer once said RECORDING above a card reading "Turn on recording in settings".
   and demands the updater key plus platform signing credentials. So an unsigned
   installer is a `tauri build --debug` bundle
   (`.github/workflows/unsigned-test-installers.yml`), never a relaxed release build;
-  `release.yml` and `src/release_signing.rs` stay fail-closed. Because the shipped
+  `release.yml` fails hard on partial signing but skips (neutral) when no
+  platform-signing secrets are configured — unsigned is the project's accepted
+  distribution, and the workflow dispatches the unsigned installer publish instead.
+  `src/release_signing.rs` stays fail-closed. Because the shipped
   installer is a *debug* build, never gate user-facing behaviour on
   `debug_assertions`: that condition is true in the artifact people download.
   `windows_subsystem` was gated that way and every install opened a console window

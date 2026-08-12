@@ -249,11 +249,14 @@ messaging integration stays disabled.
 
 ### Code signing and auto-update
 
-Production release builds and the release workflow fail closed when Windows or
-macOS signing credentials, notarization credentials, or the Tauri updater
-signing key are missing. Local unsigned builds are explicit development-only
-builds and cannot create production updater artifacts; a tagged release must
-include signed installers and updater artifacts.
+Production release builds fail closed when signing credentials are missing —
+`build.rs` and `src/release_signing.rs` gate every build. The release workflow
+(`release.yml`) runs a signing preflight first: when no platform-signing
+secrets are configured it skips the signed build job and dispatches the
+unsigned installer publish instead, so a version tag never runs red (unsigned
+is the project's accepted distribution today). Partial configuration still
+fails hard. Local unsigned builds are explicit development-only builds and
+cannot create production updater artifacts.
 
 The certificates have days-to-weeks of identity-verification lead time, so
 start procurement before the release, not after:
@@ -308,9 +311,10 @@ hands out**. The build job still runs with read-only `contents` permission and
 cannot publish anything; a separate `publish` job, which compiles nothing,
 uploads what that job produced.
 
-This is not a way around the signing gate. `release.yml` still refuses to
-publish anything unsigned, and this workflow does not touch it or the signing
-configuration. It builds with `tauri build --debug`, which
+This is not a way around the signing gate — `build.rs` still classifies a
+`--debug` build as development and keeps `createUpdaterArtifacts` off. When a
+version tag has no signing configured, `release.yml` dispatches this workflow
+automatically so every tag leaves something installable behind. It builds with `tauri build --debug`, which
 `apps/desktop/src-tauri/build.rs` already classifies as a development build:
 signing credentials are not required. `bundle.createUpdaterArtifacts` stays
 off (`build.rs` refuses it for unsigned builds), but the workflow signs the
