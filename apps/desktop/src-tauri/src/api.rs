@@ -659,18 +659,19 @@ impl ApiClient {
     }
 
     /// The caller's own stats for a date range (`YYYY-MM-DD`, either optional).
+    /// Instant bounds rather than calendar dates: the server reads a bare date
+    /// as a UTC day, which would roll "today" over in the afternoon for anyone
+    /// west of Greenwich. The caller sends its own local midnight instead.
     pub async fn me_stats(
         &self,
         access_token: &str,
-        from: Option<&str>,
-        to: Option<&str>,
+        from_at: Option<&str>,
+        to_exclusive_at: Option<&str>,
     ) -> ApiResult<MeStats> {
         let mut query: Vec<(&str, &str)> = Vec::new();
-        if let Some(from) = from {
-            query.push(("from", from));
-        }
-        if let Some(to) = to {
-            query.push(("to", to));
+        if let (Some(from_at), Some(to_exclusive_at)) = (from_at, to_exclusive_at) {
+            query.push(("fromAt", from_at));
+            query.push(("toExclusiveAt", to_exclusive_at));
         }
         let response = self
             .http

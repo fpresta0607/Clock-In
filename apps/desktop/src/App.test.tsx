@@ -55,6 +55,8 @@ const status = {
   ],
   agentActive: null,
   currentSession: null,
+  openSpan: null,
+  agentSessions: [],
   selectedProjectId: null,
 };
 
@@ -125,6 +127,7 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   pathMappingsUpdate: vi.fn().mockResolvedValue(mapping),
   pathMappingsDelete: vi.fn().mockResolvedValue(undefined),
   appIcons: vi.fn().mockResolvedValue({}),
+  quotaStatus: vi.fn().mockResolvedValue({ status: "ready", checkedAt: null, detail: null, providers: [] }),
   onUpdateAvailable: vi.fn().mockResolvedValue(() => undefined),
   ...overrides,
 });
@@ -203,9 +206,10 @@ describe("recording", () => {
   it("shows the stretch of work in progress with nothing to press", async () => {
     render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(recording) })} />);
 
-    // The clock and the day's total: no project name, no explaining sentences.
+    // One accumulated figure for the day, under the date: a second timer for
+    // the open stretch only ever raised the question of which was the total.
     expect(await screen.findByTestId("elapsed-time")).toBeInTheDocument();
-    expect(await screen.findByTestId("today-line")).toHaveTextContent(/^Today · /);
+    expect(screen.queryByTestId("today-line")).not.toBeInTheDocument();
     expect(screen.queryByText(/Filed here because/)).not.toBeInTheDocument();
     // Nothing in the product starts or stops time any more.
     expect(screen.queryByRole("button", { name: /start/i })).not.toBeInTheDocument();
@@ -215,8 +219,10 @@ describe("recording", () => {
   it("explains an idle machine instead of pretending to record", async () => {
     render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(status) })} />);
 
-    expect(await screen.findByRole("heading", { name: "Nothing to record yet" })).toBeInTheDocument();
-    expect(screen.getByText(/There is nothing to press/)).toBeInTheDocument();
+    // The clock still shows the day's total; the note says why nothing is
+    // being added to it right now.
+    expect(await screen.findByTestId("elapsed-time")).toBeInTheDocument();
+    expect(await screen.findByText(/There is nothing to press/)).toBeInTheDocument();
   });
 
   it("says recording is off, and never implies otherwise", async () => {
@@ -224,8 +230,10 @@ describe("recording", () => {
       monitorStatus: vi.fn().mockResolvedValue({ ...status, enabled: false, running: false, observing: false }),
     })} />);
 
+    // Recording state is a dot and a spoken label beside the project now, so
+    // the surface never has to repeat itself in a heading.
     expect(await screen.findByText("Recording off")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Recording is off" })).toBeInTheDocument();
+    expect(screen.getByText(/Turn recording on/)).toBeInTheDocument();
   });
 
   // The screenshot bug: the timer said RECORDING while the card under it said
@@ -265,16 +273,28 @@ describe("recording", () => {
     expect(screen.queryByText("Recording on")).not.toBeInTheDocument();
   });
 
-  it("names the AI tool holding recording open in the status line", async () => {
+  it("gives every running agent session its own row, named by its project", async () => {
     render(<App bridge={bridgeFor({
       monitorStatus: vi.fn().mockResolvedValue({
         ...recording,
-        agentActive: { source: "kimi_code", since: "2026-08-06T14:10:00.000Z" },
+        // Two terminals of the same tool, working in different folders.
+        agentSessions: [
+          { source: "claude_code", externalSessionId: "one", projectId: project.id, since: new Date(Date.now() - 600_000).toISOString() },
+          { source: "claude_code", externalSessionId: "two", projectId: otherProject.id, since: new Date(Date.now() - 120_000).toISOString() },
+        ],
       }),
     })} />);
 
-    // One compact line instead of a sentence on the clock card.
-    expect(await screen.findByText("Recording on · Kimi Code working")).toBeInTheDocument();
+    const rows = within(await screen.findByTestId("session-app-list")).getAllByRole("listitem");
+    const claude = rows.filter((row) => row.textContent?.includes("Claude Code"));
+    // One row for the tool, naming every project its sessions are in. Five
+    // terminals are one tool, not five slices of the day.
+    expect(claude).toHaveLength(1);
+    expect(claude[0]).toHaveTextContent(project.name);
+    expect(claude[0]).toHaveTextContent(otherProject.name);
+    // No minutes of its own: an agent runs beside the editor it lives in, so
+    // its wall-clock would double-count time already counted there.
+    expect(claude[0]).toHaveTextContent("working");
   });
 
   it("renders no recording surfaces when the host cannot report status", async () => {
@@ -282,24 +302,26 @@ describe("recording", () => {
 
     // A host that cannot answer is its own state: the screen says it is still
     // checking rather than borrowing the wording of a healthy idle machine.
-    await screen.findByRole("heading", { name: "Checking this computer…" });
+    expect(await screen.findByText(/asking this computer what it is doing/)).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByText(/^Recording (on|paused|off)$/)).not.toBeInTheDocument());
   });
 
-  it("keeps the project picker behind the corner caret", async () => {
+  it("names the workspace and project above the clock, with the picker behind Change", async () => {
     const person = userEvent.setup();
     render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(recording) })} />);
 
-    // Collapsed by default: no dropdown competing with the clock. The caret
-    // still names the filing target for anyone who asks.
-    const caret = await screen.findByTestId("filing-change");
-    expect(caret).toHaveAccessibleName(/picked automatically/);
+    // The header says where time is landing, in words rather than an icon.
+    const where = await screen.findByTestId("filing-where");
+    await waitFor(() => expect(where).toHaveTextContent("SIQstack"));
+    expect(where).toHaveTextContent(project.name);
+
+    // Collapsed by default: no dropdown competing with the clock.
     expect(screen.queryByLabelText("File my time under")).not.toBeInTheDocument();
 
-    await person.click(caret);
+    await person.click(screen.getByTestId("filing-change"));
     expect(screen.getByLabelText("File my time under")).toBeVisible();
 
-    await person.click(caret);
+    await person.click(screen.getByTestId("filing-change"));
     expect(screen.queryByLabelText("File my time under")).not.toBeInTheDocument();
   });
 
@@ -317,9 +339,9 @@ describe("recording", () => {
     await person.selectOptions(picker, otherProject.id);
     await waitFor(() => expect(sessionSelectProject).toHaveBeenCalledWith(otherProject.id));
 
-    // Choosing collapses the picker and the caret names the pinned project.
+    // Choosing collapses the picker and the header names the pinned project.
     await waitFor(() => expect(screen.queryByLabelText("File my time under")).not.toBeInTheDocument());
-    expect(screen.getByTestId("filing-change")).toHaveAccessibleName(/Client work/);
+    expect(screen.getByTestId("filing-where")).toHaveTextContent(otherProject.name);
   });
 
   it("creates a project and pins recording to it", async () => {
@@ -336,15 +358,15 @@ describe("recording", () => {
     await waitFor(() => expect(bridge.sessionSelectProject).toHaveBeenCalledWith(newProject.id));
   });
 
-  it("names a waiting backlog and says it syncs on its own", async () => {
+  it("says nothing about syncing, which happens on its own", async () => {
     const backlogged = { ...recording, segmentBacklog: 2, sessionBacklog: 1 };
     render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(backlogged) })} />);
 
-    const line = await screen.findByTestId("sync-line");
-    expect(line).toHaveTextContent("3 recorded items are still on this computer");
-    expect(line).toHaveTextContent("sync on their own");
-    // Sync is automatic: nothing here to press.
-    expect(within(line).queryByRole("button")).not.toBeInTheDocument();
+    await screen.findByTestId("elapsed-time");
+    // A backlog is the app's problem, not the reader's: it drains by itself
+    // and never earns a banner on the record surface.
+    expect(screen.queryByTestId("sync-line")).not.toBeInTheDocument();
+    expect(screen.queryByText(/still on this computer/i)).not.toBeInTheDocument();
   });
 });
 
@@ -584,8 +606,6 @@ describe("the today panel", () => {
     expect(rows[1]).toHaveTextContent("30 min");
     expect(rows[2]).toHaveTextContent("VS Code");
     expect(rows[2]).toHaveTextContent("15 min");
-    // The runtime that is working right now says so on its own row.
-    expect(rows[0]).toHaveTextContent("working now");
   });
 
   it("keeps agent runtimes on their own rows instead of folding them together", async () => {
@@ -625,6 +645,67 @@ describe("the today panel", () => {
     const projects = within(await screen.findByTestId("project-list")).getAllByRole("listitem");
     expect(projects[0]).toHaveTextContent("Field work");
     expect(projects[0]).toHaveTextContent(/sec/);
+  });
+
+  it("counts the still-open span so the app in front is neither frozen nor missing", async () => {
+    const live = {
+      ...recording,
+      // In front for two minutes, and no upload covers it yet.
+      openSpan: { processName: "WindowsTerminal.exe", since: new Date(Date.now() - 120_000).toISOString() },
+    };
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(live),
+      meStats: vi.fn().mockResolvedValue({
+        ...meStats,
+        apps: [{ processName: "Code.exe", durationSeconds: 60 }],
+      }),
+    })} />);
+
+    const rows = within(await screen.findByTestId("session-app-list")).getAllByRole("listitem");
+    // The open app appears at all - the server has never heard of it - and
+    // outranks the app the server does know about.
+    expect(rows[0]).toHaveTextContent("Windows Terminal");
+    expect(rows[0]).toHaveTextContent("2 min");
+    expect(rows[1]).toHaveTextContent("VS Code");
+  });
+
+  it("puts the plan reading on an agent's row instead of a share bar", async () => {
+    const quotaStatus = vi.fn().mockResolvedValue({
+      status: "ready",
+      checkedAt: "2026-08-12T19:00:00.000Z",
+      detail: null,
+      providers: [{
+        provider: "claude",
+        label: "Claude",
+        sources: ["claude_code"],
+        status: "known",
+        account: { email: "dev@clock-in.test", organization: null },
+        plan: "max",
+        percentRemaining: 73,
+        bindingWindowId: "five_hour",
+        windows: [{ id: "five_hour", label: "session", kind: "session", percentRemaining: 73, resetsAt: null }],
+        detail: null,
+        reason: null,
+        stale: false,
+      }],
+    });
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(recording),
+      quotaStatus,
+      meStats: vi.fn().mockResolvedValue({
+        ...meStats,
+        apps: [{ processName: "claude.exe", durationSeconds: 3_600 }],
+      }),
+    })} />);
+
+    // One row: the agent that is working, its own running time, and its plan
+    // reading - not a separate list of every tool that could be installed.
+    const rows = within(await screen.findByTestId("session-app-list")).getAllByRole("listitem");
+    const row = rows.find((candidate) => candidate.textContent?.includes("Claude Code"));
+    expect(row).toBeDefined();
+    // The dial carries the whole reading as its label, so the arc is never
+    // the only thing saying it.
+    expect(await within(row!).findByRole("button", { name: /73% remaining on the max plan/i })).toBeInTheDocument();
   });
 
   it("shows the OS icon for an app when the host has one", async () => {
@@ -695,9 +776,10 @@ describe("the team board", () => {
 
     await waitFor(() => expect(bridge.orgJoin).toHaveBeenCalledWith("PQRTU-VWXY3"));
     // The group names the team you are now on, in a sentence rather than as a
-    // bare heading beside a code.
-    expect(await screen.findByText("Joined Team")).toBeInTheDocument();
-    expect(screen.getByTestId("invite-code")).toHaveTextContent("PQRTU-VWXY3");
+    // bare heading beside a code. The home header names it too, so the
+    // assertion is scoped to the settings dialog.
+    expect(await within(dialog).findByText("Joined Team")).toBeInTheDocument();
+    expect(within(dialog).getByTestId("invite-code")).toHaveTextContent("PQRTU-VWXY3");
   });
 });
 

@@ -44,6 +44,35 @@ pub struct AgentRuntime {
     pub registration: Registration,
     /// Paste-it-yourself lines; `{command}` stands in for the hook binary path.
     pub manual_snippet: Vec<String>,
+    /// Executables this runtime runs as. An agent works in the background, so
+    /// finding it by process is how the host sees one that never owns a
+    /// window - the hooks say when a session started, this says it is here.
+    #[serde(default)]
+    pub binaries: Vec<String>,
+}
+
+/// The runtime an executable belongs to, matched the way Windows compares
+/// names: case-insensitively, with or without the `.exe`. This is how an
+/// agent working in the background is found at all, so the roster's binaries
+/// are the single list that decides it.
+pub fn runtime_for_binary(process_name: &str) -> Option<&'static AgentRuntime> {
+    let name = bare_name(process_name);
+    if name.is_empty() {
+        return None;
+    }
+    runtimes().iter().find(|runtime| {
+        runtime
+            .binaries
+            .iter()
+            .any(|binary| bare_name(binary) == name)
+    })
+}
+
+/// Lowercased and stripped of its extension, so the roster's "claude" and the
+/// process table's "Claude.EXE" compare equal.
+fn bare_name(value: &str) -> String {
+    let lowered = value.trim().to_ascii_lowercase();
+    lowered.strip_suffix(".exe").unwrap_or(&lowered).to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +114,37 @@ pub fn manual_snippet(id: &str, command: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The process table reports "claude.exe"; the roster declares "claude".
+    /// An agent that works in the background is found only through this, so
+    /// the spellings have to meet.
+    #[test]
+    fn an_executable_finds_its_runtime_however_the_os_spells_it() {
+        for spelling in ["claude.exe", "Claude.EXE", "claude", "CLAUDE"] {
+            assert_eq!(
+                runtime_for_binary(spelling).map(|runtime| runtime.id.as_str()),
+                Some("claude_code"),
+                "{spelling} names Claude Code",
+            );
+        }
+        assert!(runtime_for_binary("chrome.exe").is_none());
+        assert!(runtime_for_binary("").is_none());
+    }
+
+    #[test]
+    fn every_runtime_that_can_be_seen_running_declares_a_binary() {
+        // A runtime with no binary can only ever be found by its hook, which
+        // is what left background agents invisible.
+        let bare: Vec<&str> = runtimes()
+            .iter()
+            .filter(|runtime| runtime.binaries.is_empty())
+            .map(|runtime| runtime.id.as_str())
+            .collect();
+        assert!(
+            bare.is_empty(),
+            "these runtimes declare no binary: {bare:?}"
+        );
+    }
 
     #[test]
     fn the_bundled_roster_parses_and_declares_the_runtimes_in_use() {

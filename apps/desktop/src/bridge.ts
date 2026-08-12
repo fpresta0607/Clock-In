@@ -94,7 +94,70 @@ export type MonitorStatus = {
   hooks: readonly HookRegistration[];
   agentActive: AgentActive | null;
   currentSession: CurrentSession | null;
+  /// The active span still open on this machine, which no upload covers yet.
+  openSpan: { processName: string; since: string } | null;
+  /// Every agent session running right now - one per terminal or window, each
+  /// with the project its working directory resolved to.
+  agentSessions: readonly AgentSessionRow[];
   selectedProjectId: string | null;
+};
+
+/// One agent session running right now. Several run side by side, so each is
+/// identified by the lifecycle the tool itself reported.
+export type AgentSessionRow = {
+  source: string;
+  externalSessionId: string;
+  projectId: string | null;
+  since: string;
+};
+
+/// One limit a coding-agent provider reports — a rolling session window, a
+/// weekly window, or a per-model bound. Several apply at once; the smallest is
+/// what the dial shows.
+export type QuotaWindow = {
+  id: string;
+  label: string;
+  kind: string;
+  percentRemaining: number;
+  resetsAt: string | null;
+};
+
+/// The provider login a reading belongs to. Read from the machine's own
+/// credentials for display only; it never leaves the device.
+export type QuotaAccount = {
+  email: string | null;
+  organization: string | null;
+};
+
+/// What one provider has left, for the account signed in to it on this machine
+/// right now — not for whoever recorded a past session. `unknown` covers every
+/// way a reading can fail (no tooling installed, signed out, unreadable state)
+/// and always carries a `detail` sentence saying which.
+export type AgentQuota = {
+  provider: string;
+  label: string;
+  /// Agent-session sources this provider backs (`claude_code` → `claude`), so
+  /// an attributed row finds its dial without a second lookup table.
+  sources: readonly string[];
+  status: "known" | "unknown";
+  account: QuotaAccount | null;
+  plan: string | null;
+  percentRemaining: number | null;
+  bindingWindowId: string | null;
+  windows: readonly QuotaWindow[];
+  detail: string | null;
+  /// The provider's own error code, for the expandable detail.
+  reason: string | null;
+  stale: boolean;
+};
+
+/// `pending` is the host still reading; `unavailable` means no source answered
+/// at all. Both leave every dial in its unknown state.
+export type QuotaSnapshot = {
+  status: "pending" | "ready" | "unavailable";
+  checkedAt: string | null;
+  detail: string | null;
+  providers: readonly AgentQuota[];
 };
 
 export type MonitorSettings = {
@@ -165,7 +228,9 @@ export interface TimerBridge {
   monitorSetEnabled(enabled: boolean): Promise<MonitorSettings>;
   settingsGet(): Promise<MonitorSettings>;
   settingsUpdate(input: SettingsPatch): Promise<MonitorSettings>;
-  meStats(from?: string, to?: string): Promise<MeStats>;
+  /// Instant bounds, so "today" means the caller's local day rather than a
+  /// UTC one that rolls over mid-afternoon.
+  meStats(fromAt: string, toExclusiveAt: string): Promise<MeStats>;
   projectCreate(input: ProjectCreateInput): Promise<TimerProject>;
   pathMappingsList(): Promise<readonly PathMapping[]>;
   pathMappingsCreate(input: PathMappingCreateInput): Promise<PathMapping>;
@@ -173,6 +238,9 @@ export interface TimerBridge {
   pathMappingsDelete(id: string): Promise<void>;
   /// OS icons for executables, as data URIs; null where the OS has none.
   appIcons(processNames: readonly string[]): Promise<Record<string, string | null>>;
+  /// How much of each coding agent's plan is left, read locally. Advisory:
+  /// unknown readings are normal and never an error.
+  quotaStatus(): Promise<QuotaSnapshot>;
   /// Subscribes to "an update is downloading" notices; resolves to the
   /// unsubscribe function.
   onUpdateAvailable(handler: (version: string) => void): Promise<() => void>;
@@ -281,6 +349,76 @@ const boolean = (value: unknown): boolean => {
   return value as boolean;
 };
 
+const percentage = (value: unknown): number => {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100) invalidResponse();
+  return value as number;
+};
+
+const decodeQuotaWindow = (value: unknown): QuotaWindow => {
+  const candidate = record(value);
+  return {
+    id: string(candidate.id),
+    label: string(candidate.label),
+    kind: string(candidate.kind),
+    percentRemaining: percentage(candidate.percentRemaining),
+    // Left as the provider wrote it rather than validated as a timestamp: the
+    // dial only ever prints it, and a formatting quirk from another tool is no
+    // reason to throw a whole reading away.
+    resetsAt: stringOrNull(candidate.resetsAt ?? null),
+  };
+};
+
+const decodeQuotaAccount = (value: unknown): QuotaAccount | null => {
+  if (value === null || value === undefined) return null;
+  const candidate = record(value);
+  return {
+    email: stringOrNull(candidate.email ?? null),
+    organization: stringOrNull(candidate.organization ?? null),
+  };
+};
+
+const decodeAgentQuota = (value: unknown): AgentQuota => {
+  const candidate = record(value);
+  const sources = candidate.sources;
+  const windows = candidate.windows;
+  if (!Array.isArray(sources) || !Array.isArray(windows)) invalidResponse();
+  const status = candidate.status;
+  if (status !== "known" && status !== "unknown") invalidResponse();
+  const percentRemaining = candidate.percentRemaining === null || candidate.percentRemaining === undefined
+    ? null
+    : percentage(candidate.percentRemaining);
+  // A "known" reading without a number would draw an arc over nothing.
+  if (status === "known" && percentRemaining === null) invalidResponse();
+  return {
+    provider: string(candidate.provider),
+    label: string(candidate.label),
+    sources: (sources as unknown[]).map(string),
+    status: status as "known" | "unknown",
+    account: decodeQuotaAccount(candidate.account),
+    plan: stringOrNull(candidate.plan ?? null),
+    percentRemaining,
+    bindingWindowId: stringOrNull(candidate.bindingWindowId ?? null),
+    windows: (windows as unknown[]).map(decodeQuotaWindow),
+    detail: stringOrNull(candidate.detail ?? null),
+    reason: stringOrNull(candidate.reason ?? null),
+    stale: boolean(candidate.stale),
+  };
+};
+
+export const decodeQuotaSnapshot = (value: unknown): QuotaSnapshot => {
+  const candidate = record(value);
+  const providers = candidate.providers;
+  if (!Array.isArray(providers)) invalidResponse();
+  const status = candidate.status;
+  if (status !== "pending" && status !== "ready" && status !== "unavailable") invalidResponse();
+  return {
+    status: status as "pending" | "ready" | "unavailable",
+    checkedAt: stringOrNull(candidate.checkedAt ?? null),
+    detail: stringOrNull(candidate.detail ?? null),
+    providers: (providers as unknown[]).map(decodeAgentQuota),
+  };
+};
+
 const stringOrNull = (value: unknown): string | null => {
   if (value === null) return null;
   return string(value);
@@ -372,6 +510,18 @@ export const decodeMonitorStatus = (value: unknown): MonitorStatus => {
     hooks: (hooks as unknown[]).map(decodeHookRegistration),
     agentActive: candidate.agentActive === null ? null : decodeAgentActive(candidate.agentActive),
     currentSession: candidate.currentSession === null ? null : decodeCurrentSession(candidate.currentSession),
+    openSpan: candidate.openSpan === null || candidate.openSpan === undefined
+      ? null
+      : { processName: string(record(candidate.openSpan).processName), since: timestamp(record(candidate.openSpan).since) },
+    agentSessions: (Array.isArray(candidate.agentSessions) ? candidate.agentSessions : []).map((entry) => {
+      const session = record(entry);
+      return {
+        source: string(session.source),
+        externalSessionId: string(session.externalSessionId),
+        projectId: uuidOrNull(session.projectId ?? null),
+        since: timestamp(session.since),
+      };
+    }),
     selectedProjectId: uuidOrNull(candidate.selectedProjectId),
   };
 };
@@ -468,17 +618,14 @@ export const defaultBridge: TimerBridge = {
   monitorSetEnabled: (enabled) => invokeDecoded("monitor_set_enabled", decodeMonitorSettings, { enabled }),
   settingsGet: () => invokeDecoded("settings_get", decodeMonitorSettings),
   settingsUpdate: (input) => invokeDecoded("settings_update", decodeMonitorSettings, { input }),
-  meStats: (from, to) =>
-    invokeDecoded("me_stats", decodeMeStats, {
-      ...(from === undefined ? {} : { from }),
-      ...(to === undefined ? {} : { to }),
-    }),
+  meStats: (fromAt, toExclusiveAt) => invokeDecoded("me_stats", decodeMeStats, { fromAt, toExclusiveAt }),
   projectCreate: (input) => invokeDecoded("project_create", decodeProject, { input }),
   pathMappingsList: () => invokeDecoded("path_mappings_list", decodePathMappings),
   pathMappingsCreate: (input) => invokeDecoded("path_mappings_create", decodePathMapping, { input }),
   pathMappingsUpdate: (id, input) => invokeDecoded("path_mappings_update", decodePathMapping, { id, input }),
   pathMappingsDelete: (id) => invokeDecoded("path_mappings_delete", decodeVoid, { id }),
   appIcons: (processNames) => invokeDecoded("app_icons", decodeAppIcons, { processNames }),
+  quotaStatus: () => invokeDecoded("quota_status", decodeQuotaSnapshot),
   onUpdateAvailable: async (handler) => {
     const { listen } = await import("@tauri-apps/api/event");
     return listen<string>("update-available", (event) => handler(event.payload));

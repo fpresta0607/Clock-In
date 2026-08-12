@@ -8,6 +8,7 @@ mod agent_runtimes;
 mod api;
 mod app_icons;
 mod monitor;
+mod quota;
 mod recovery;
 mod uploader;
 // Shared with the `clock-in-hook` binary; the uploader drains it from here.
@@ -131,6 +132,10 @@ pub struct AppState {
     recovery: Arc<Mutex<RecoveryState>>,
     recovery_path: Mutex<PathBuf>,
     monitor: monitor::Monitor,
+    /// Reads how much of each coding agent's plan is left, from the evidence
+    /// those CLIs already keep on this machine. Never uploaded, never on the
+    /// critical path: the command answers from cache and refreshes behind it.
+    quota: quota::QuotaMonitor,
 }
 
 impl AppState {
@@ -414,14 +419,26 @@ async fn settings_update(
 #[tauri::command]
 async fn me_stats(
     state: State<'_, AppState>,
-    from: Option<String>,
-    to: Option<String>,
+    from_at: Option<String>,
+    to_exclusive_at: Option<String>,
 ) -> ApiResult<MeStats> {
     let access_token = state.access_token().await?;
     state
         .client
-        .me_stats(&access_token, from.as_deref(), to.as_deref())
+        .me_stats(
+            &access_token,
+            from_at.as_deref(),
+            to_exclusive_at.as_deref(),
+        )
         .await
+}
+
+/// How much of each coding agent's plan is left, read from what those CLIs
+/// already store on this machine. Answers from cache immediately; a stale
+/// reading refreshes on a background thread rather than holding the UI.
+#[tauri::command]
+fn quota_status(state: State<'_, AppState>) -> quota::QuotaSnapshot {
+    state.quota.snapshot()
 }
 
 /// Real OS icons for the executables the usage meter lists, as PNG data URIs
@@ -673,6 +690,7 @@ pub fn run() {
                 recovery,
                 recovery_path: Mutex::new(recovery_path),
                 monitor,
+                quota: quota::QuotaMonitor::new(),
             });
             build_tray(app.handle())?;
             Ok(())
@@ -686,6 +704,7 @@ pub fn run() {
             org_join,
             session_select_project,
             monitor_status,
+            quota_status,
             hook_register,
             monitor_set_enabled,
             settings_get,

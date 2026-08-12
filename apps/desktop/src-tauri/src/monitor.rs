@@ -273,6 +273,19 @@ impl SegmentBuilder {
         self.open.as_ref().map(|open| (open.kind, open.started_at))
     }
 
+    /// The app in front right now and when it took over, if the open span is
+    /// active work. The UI adds the time since to that app's row, which is
+    /// what keeps the day's breakdown ticking between uploads: a span the
+    /// server has not seen yet would otherwise read as a frozen total, or as
+    /// a missing app when the current one has never closed a span.
+    pub fn open_active_app(&self) -> Option<(String, u64)> {
+        let open = self.open.as_ref()?;
+        if open.kind != SegmentKind::Active {
+            return None;
+        }
+        Some((open.process_name.clone()?, open.started_at))
+    }
+
     /// Active seconds per app between `since` and `now`, heaviest first.
     ///
     /// This is what the main page's live stats read, and it is answered from
@@ -1326,9 +1339,15 @@ pub struct MonitorStatus {
     pub hooks: Vec<HookRegistration>,
     /// The agent session holding the open session through quiet time, if any.
     pub agent_active: Option<AgentActive>,
+    /// Every agent session running right now, one per terminal or window.
+    pub agent_sessions: Vec<AgentSession>,
     /// The session recording right now, which exists whenever the machine is
     /// in use and recording is on.
     pub current_session: Option<CurrentSession>,
+    /// The active span still open on this machine. Uploaded evidence stops at
+    /// the last span that closed, so the UI adds this one itself rather than
+    /// showing a total that stands still while the work continues.
+    pub open_span: Option<OpenSpan>,
     /// Every project the caller could pick, so the UI can offer the override
     /// without a second round trip.
     pub selected_project_id: Option<String>,
@@ -1347,6 +1366,27 @@ pub struct CurrentSession {
     /// Where this session's time has gone, per app, heaviest first. Local and
     /// live: it counts the span still open, so it ticks with the work.
     pub apps: Vec<SessionApp>,
+}
+
+/// One agent session running right now. Several run side by side - four
+/// Claude Code terminals in one editor is an ordinary day - and each carries
+/// the project its working directory resolved to, so the UI can show them
+/// apart instead of collapsing them into a single "an agent is working".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSession {
+    pub source: String,
+    pub external_session_id: String,
+    pub project_id: Option<String>,
+    pub since: String,
+}
+
+/// The active span the machine is in the middle of: which app, and since when.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenSpan {
+    pub process_name: String,
+    pub since: String,
 }
 
 /// One app's share of the open session.
@@ -1603,6 +1643,54 @@ impl Monitor {
                     })
                     .collect(),
             }),
+            // Every lifecycle still inside the activity window, newest first.
+            // Reported whether or not the override is switched on: these are
+            // what is running, not a reason to hold a session open.
+            agent_sessions: {
+                let mut sessions: Vec<AgentSession> = shared
+                    .agent
+                    .active
+                    .values()
+                    .filter(|active| {
+                        now.saturating_sub(active.last_event_at) <= AGENT_ACTIVE_WINDOW_SECONDS
+                    })
+                    .map(|active| AgentSession {
+                        source: active.source.clone(),
+                        external_session_id: active.external_session_id.clone(),
+                        project_id: active.project.clone(),
+                        since: iso8601(active.started_at),
+                    })
+                    .collect();
+                // A hook says a session started; the process table says one is
+                // here. An agent that was already running when Clock-In
+                // started - or whose start event was uploaded and truncated
+                // long ago - leaves no event to replay, so it is found by its
+                // process instead and keyed by pid so the two never collide.
+                for process in crate::app_icons::running_processes() {
+                    let Some(runtime) = agent_runtimes::runtime_for_binary(&process.process_name)
+                    else {
+                        continue;
+                    };
+                    if sessions.iter().any(|session| session.source == runtime.id) {
+                        continue;
+                    }
+                    sessions.push(AgentSession {
+                        source: runtime.id.clone(),
+                        external_session_id: format!("pid-{}", process.process_id),
+                        project_id: None,
+                        since: iso8601(process.started_at.unwrap_or(now)),
+                    });
+                }
+                sessions.sort_by(|left, right| right.since.cmp(&left.since));
+                sessions
+            },
+            open_span: shared
+                .builder
+                .open_active_app()
+                .map(|(process_name, started_at)| OpenSpan {
+                    process_name,
+                    since: iso8601(started_at),
+                }),
             selected_project_id: shared.selected_project.clone(),
         }
     }
@@ -1762,6 +1850,10 @@ fn append_segment_line(path: &Path, segment: &Segment, device_id: &str) {
 /// The 30-second poll task: drain pushed session events, poll the OS, fold
 /// signals into segments, spool transitions, enforce the auto-stop policy.
 #[cfg_attr(not(windows), allow(dead_code))]
+// The task's inputs are each a distinct handle or path it owns for the
+// process's lifetime; bundling them into a struct would name the same things
+// twice without making the task any easier to read.
+#[allow(clippy::too_many_arguments)]
 async fn poll_loop(
     shared: Arc<Mutex<MonitorShared>>,
     events: Arc<PlatformEvents>,

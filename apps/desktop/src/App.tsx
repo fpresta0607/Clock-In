@@ -12,11 +12,14 @@ import {
   type MonitorStatus,
   type OrganizationOverview,
   type PathMapping,
+  type AgentQuota,
+  type QuotaSnapshot,
   type SessionApp,
   type SettingsPatch,
   type TimerBridge,
 } from "./bridge.js";
 import { AgentRuntimeIcon } from "./agent-icons.js";
+import { QuotaDial } from "./QuotaDial.js";
 import { agentRuntimeForBinary, formatDuration } from "@clock-in/shared";
 import { RecordingPanel, recordingState, type RecordingState } from "./RecordingPanel.js";
 import { WebGLShader } from "./WebGLShader.js";
@@ -28,6 +31,10 @@ type AppProps = {
 /// Status polls stay well above the host's own 30-second activity tick; the
 /// latency this buys is fine for a tray utility.
 const MONITOR_POLL_MS = 15_000;
+
+/// Plan quota moves slowly and each read shells out to another tool, so it is
+/// asked for far less often than the recording status.
+const QUOTA_POLL_MS = 120_000;
 
 const FRIENDLY_APP_NAMES: Record<string, string> = {
   chrome: "Google Chrome",
@@ -74,6 +81,10 @@ const formatHuman = (seconds: number): string => {
   if (minutes > 0) return `${minutes} min`;
   return `${total} sec`;
 };
+
+/// The reading for one agent source (`claude_code` → the `claude` provider).
+const quotaFor = (snapshot: QuotaSnapshot | undefined, source: string): AgentQuota | undefined =>
+  snapshot?.providers.find((provider) => provider.sources.includes(source));
 
 const elapsedSeconds = (since: string, now: number): number =>
   Math.max(0, Math.floor((now - Date.parse(since)) / 1_000));
@@ -165,6 +176,8 @@ type MeterRow = {
   /// The executable behind the row, for the OS icon lookup. Absent on the
   /// folded "Everything else" row.
   processName: string | undefined;
+  /// Extra words beside the name - the folder an agent session is working in.
+  detail?: string | undefined;
   durationSeconds: number;
   /// Percentage of the longest row, for the bar in the row.
   share: number;
@@ -206,12 +219,17 @@ const buildMeterRows = (apps: readonly SessionApp[]): MeterRow[] => {
 type StatsRange = "today" | "week";
 
 /// Local midnight today, or local midnight on Monday for "this week".
-const rangeStart = (range: StatsRange): string => {
+/// The range as instants on this computer's clock: "today" runs from local
+/// midnight to the next one. Calendar dates would be read as a UTC day, which
+/// rolls over in the afternoon anywhere west of Greenwich - the day's total
+/// would reset hours before midnight and carry the previous evening's work.
+const rangeBounds = (range: StatsRange): { fromAt: string; toExclusiveAt: string } => {
   const start = new Date();
   if (range === "week") start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
   start.setHours(0, 0, 0, 0);
-  // The API reads calendar days, not timestamps: a full ISO datetime is a 400.
-  return start.toISOString().slice(0, 10);
+  const end = new Date(start);
+  end.setDate(end.getDate() + (range === "week" ? 7 : 1));
+  return { fromAt: start.toISOString(), toExclusiveAt: end.toISOString() };
 };
 
 type TitlebarProps = {
@@ -273,6 +291,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [appIcons, setAppIcons] = useState<Record<string, string | null>>({});
+  const [quota, setQuota] = useState<QuotaSnapshot | undefined>();
   const [statsTick, setStatsTick] = useState(0);
   const [hookChoice, setHookChoice] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
@@ -391,7 +410,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     let active = true;
     const service = bridge;
     const generation = bridgeGeneration.current;
-    void service.meStats(rangeStart(statsRange)).then(
+    const bounds = rangeBounds(statsRange);
+    void service.meStats(bounds.fromAt, bounds.toExclusiveAt).then(
       (result) => {
         if (active && isCurrent(service, generation)) {
           setStats(result);
@@ -406,6 +426,26 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     );
     return () => { active = false; };
   }, [bridge, statsRange, signedIn?.user.id, statsTick]);
+
+  // Agent plan quota, read from this machine. Advisory and never on the
+  // critical path: a failure leaves the dials unknown rather than saying so.
+  useEffect(() => {
+    if (signedIn === undefined) return undefined;
+    let active = true;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const read = (): void => {
+      void service.quotaStatus().then(
+        (snapshot) => {
+          if (active && isCurrent(service, generation)) setQuota(snapshot);
+        },
+        () => undefined,
+      );
+    };
+    read();
+    const timer = window.setInterval(read, QUOTA_POLL_MS);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [bridge, signedIn?.user.id]);
 
   // Keeps the Today panel close to live: a slow tick refreshes the totals.
   useEffect(() => {
@@ -795,16 +835,87 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const pinnedProjectName = pinnedProject === ""
     ? undefined
     : ready.projects.find((item) => item.id === pinnedProject)?.name ?? "Unknown project";
+  // With nothing pinned, the header still names where time is landing right
+  // now rather than leaving the question open.
+  const liveProjectName = currentProject?.name;
   const defaultProject = ready.projects.find((item) => item.id === ready.defaultProjectId);
   const backlog = monitorStatus === undefined
     ? 0
     : monitorStatus.segmentBacklog + monitorStatus.agentBacklog + monitorStatus.sessionBacklog;
   const appRows = stats === undefined ? [] : buildAppRows(stats.apps);
-  const todayRows = stats === undefined ? [] : buildMeterRows(stats.apps);
+  // Uploaded evidence stops at the last span that closed, so the app in front
+  // right now is either frozen at its last total or missing from the day
+  // entirely. Its open span is added here, which is what makes these rows tick
+  // with the clock instead of jumping every few minutes.
+  const openSpan = monitorStatus?.openSpan ?? null;
+  const openSpanSeconds = openSpan === null ? 0 : elapsedSeconds(openSpan.since, now);
+  const liveApps = stats === undefined ? [] : (() => {
+    if (openSpan === null || openSpanSeconds <= 0) return [...stats.apps];
+    const merged = stats.apps.map((app) => (
+      app.processName === openSpan.processName
+        ? { ...app, durationSeconds: app.durationSeconds + openSpanSeconds }
+        : app
+    ));
+    return merged.some((app) => app.processName === openSpan.processName)
+      ? merged
+      : [...merged, { processName: openSpan.processName, durationSeconds: openSpanSeconds }];
+  })();
+  // An agent working inside an editor's terminal never owns the foreground,
+  // so it earns no row of its own from window activity. When one is working
+  // its own time is what it has been running for, and that row carries the
+  // plan reading - so quota only ever appears for an agent actually in use.
+  const todayRows = buildMeterRows(liveApps);
+  // One row per tool, not per terminal: five Claude Code processes are one
+  // tool that has been working since the earliest of them started. Counting
+  // them separately would read as five times the work actually done.
+  const agentRows = [...(monitorStatus?.agentSessions ?? [])
+    .reduce((bySource, session) => {
+      const existing = bySource.get(session.source);
+      const projectName = ready.projects.find((item) => item.id === session.projectId)?.name;
+      bySource.set(session.source, {
+        since: existing === undefined || session.since < existing.since ? session.since : existing.since,
+        sessions: (existing?.sessions ?? 0) + 1,
+        projects: projectName === undefined
+          ? existing?.projects ?? []
+          : [...(existing?.projects ?? []), projectName],
+      });
+      return bySource;
+    }, new Map<string, { since: string; sessions: number; projects: string[] }>())
+    .entries()]
+    .map(([source, group]) => ({
+      key: `agent-${source}`,
+      label: sourceLabel(source),
+      // Name the projects when the hooks knew them, else say how many are up.
+      detail: group.projects.length > 0
+        ? [...new Set(group.projects)].join(", ")
+        : group.sessions > 1 ? `${group.sessions} sessions` : undefined,
+      source,
+      processName: undefined,
+      // Deliberately not the time since it started. An agent runs beside the
+      // editor and the terminal it lives in, so its wall-clock overlaps
+      // theirs; counting it as its own slice would total more hours than the
+      // day had. Every row here measures the same thing - time this machine
+      // spent with that app in front - and the row says "working" instead.
+      durationSeconds: 0,
+      working: true,
+      share: 0,
+    }));
+  // A tool gets exactly one row. The same agent can arrive twice - once as a
+  // running session, once as foreground time under its own executable - and
+  // the two measure overlapping wall-clock, so the longer reading stands
+  // rather than the two being added into a total that never happened.
+  // A tool gets exactly one row: an agent that also spent time in front folds
+  // its foreground minutes into the same line rather than appearing twice.
+  const meterRows = [
+    ...agentRows.map((row) => {
+      const sameTool = todayRows.find((candidate) => candidate.source === row.source);
+      return sameTool === undefined ? row : { ...row, durationSeconds: sameTool.durationSeconds };
+    }),
+    ...todayRows.filter((row) => !agentRows.some((agent) => agent.source === row.source)),
+  ].sort((left, right) => right.durationSeconds - left.durationSeconds);
   // Finished time already on the server plus the stretch still being written.
   // The open stretch also lands on its project's row below, so the breakdown
-  // ticks with the clock instead of trailing it by a whole session. App rows
-  // need no top-up: segments upload within a poll of being recorded.
+  // ticks with the clock instead of trailing it by a whole session.
   const liveSeconds = current === null ? 0 : elapsedSeconds(current.since, now);
   const todayTotalSeconds = (stats?.totalDurationSeconds ?? 0) + liveSeconds;
   const projectTotals = new Map<string, { name: string; color: string | null; durationSeconds: number }>();
@@ -840,62 +951,45 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             Version {updateVersion} is on its way — Clock-In restarts itself when it&apos;s ready.
           </p>
         )}
-        {monitorStatus && (
-          <p className="monitor-line">
-            <span className={`monitor-dot is-${state}`} aria-hidden="true" />
-            <span className="monitor-state">
-              {MONITOR_LINE[state]}
-              {monitorStatus.agentActive && ` · ${sourceLabel(monitorStatus.agentActive.source)} working`}
-            </span>
-            <button className="monitor-explain" type="button" onClick={() => setRecordingOpen(true)}>
-              What&apos;s recorded?
-            </button>
-          </p>
-        )}
-        {backlog > 0 && (
-          <p className="sync-banner" data-testid="sync-line" role="status">
-            {backlog === 1 ? "1 recorded item is" : `${backlog} recorded items are`} still on this
-            computer — they sync on their own as soon as the server is reachable.
-          </p>
-        )}
         {accountError && !settingsOpen && <p className="form-error" role="alert">{accountError}</p>}
 
-        {/* The clock and nothing else: the stretch being written now, and the
-            day's total under it. Every explanatory sentence this card used to
-            carry lives in the "what's recorded" panel instead. */}
-        <section className="hero card recording-card" aria-labelledby="recording-heading">
+        {/* Where the time is filing, named in words rather than hidden behind
+            an icon: the workspace, then the project, then a plain link to
+            change it. */}
+        <div className="filing-header">
+          <p className="filing-where" data-testid="filing-where">
+            {overview && <span className="filing-org">{overview.organization.name}</span>}
+            <span className="filing-project">
+              <span className={`monitor-dot is-${state}`} aria-hidden="true" />
+              {pinnedProjectName ?? liveProjectName ?? "Picked automatically"}
+            </span>
+            <span className="visually-hidden">{MONITOR_LINE[state]}</span>
+          </p>
           <button
-            className="hero-picker-toggle"
+            className="filing-change"
             type="button"
             data-testid="filing-change"
             aria-expanded={projectPickerOpen}
-            aria-label={pinnedProjectName === undefined
-              ? "Choose project (picked automatically now)"
-              : `Choose project (filing under ${pinnedProjectName})`}
-            title={pinnedProjectName === undefined
-              ? "Project picked automatically"
-              : `Filing under ${pinnedProjectName}`}
             onClick={() => setProjectPickerOpen((open) => !open)}
           >
-            ⌄
+            {projectPickerOpen ? "Done" : "Change"}
           </button>
-          {current ? (
-            <>
-              <h2 id="recording-heading" className="visually-hidden">Recording now</h2>
-              <output className="elapsed" data-testid="elapsed-time" aria-label="Time in this stretch of work">
-                {formatDuration(elapsedSeconds(current.since, now))}
-              </output>
-              <p className="today-line" data-testid="today-line">Today · {formatHuman(todayTotalSeconds)}</p>
-            </>
-          ) : (
-            <>
-              <h2 id="recording-heading">{IDLE_HEADING[state]}</h2>
-              <p className="subtle">{IDLE_BLURB[state]}</p>
-              {todayTotalSeconds > 0 && (
-                <p className="today-line" data-testid="today-line">Today · {formatHuman(todayTotalSeconds)}</p>
-              )}
-            </>
-          )}
+        </div>
+
+        {/* The clock and nothing else: a label, the stretch being written now,
+            and the day's total under it. Every explanatory sentence this card
+            used to carry lives in the "what's recorded" panel instead. */}
+        <section className="hero card recording-card" aria-labelledby="recording-heading">
+          {/* One number: everything this day has accumulated, whether the app
+              was open for it or not. A separate stretch timer only ever
+              raised the question of which of the two was the real total. */}
+          <h2 id="recording-heading" className="hero-title">
+            {new Date(now).toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" })}
+          </h2>
+          <output className="elapsed" data-testid="elapsed-time" aria-label="Time recorded today">
+            {formatDuration(todayTotalSeconds)}
+          </output>
+          {current === null && <p className="subtle hero-note">{IDLE_BLURB[state]}</p>}
           {projectPickerOpen && (
             <>
               <label className="hero-project">
@@ -930,7 +1024,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           <div className="panel-head">
             <h2 id="today-panel-title">Today</h2>
           </div>
-          {todayRows.length === 0 && projectRows.length === 0 ? (
+          {meterRows.length === 0 && projectRows.length === 0 ? (
             <p className="subtle" data-testid="today-panel-empty">{TODAY_EMPTY[state]}</p>
           ) : (
             <>
@@ -954,9 +1048,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                   ))}
                 </ul>
               )}
-              {todayRows.length > 0 && (
+              {meterRows.length > 0 && (
                 <ul className="meter-list meter-apps" data-testid="session-app-list">
-                  {todayRows.map((row) => (
+                  {meterRows.map((row) => (
                     <li key={row.key} className="meter-row">
                       {row.source !== undefined
                         ? <AgentRuntimeIcon source={row.source} />
@@ -965,16 +1059,28 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                           : <span className="app-mark is-plain" aria-hidden="true" />}
                       <span className="meter-name">
                         {row.label}
-                        {row.source !== undefined && monitorStatus?.agentActive?.source === row.source && (
-                          <span className="app-active"> · working now</span>
-                        )}
+                        {row.detail !== undefined && <span className="meter-detail"> · {row.detail}</span>}
                       </span>
-                      <span
-                        className="meter-bar"
-                        aria-hidden="true"
-                        style={{ "--share": `${row.share}%` } as React.CSSProperties}
-                      />
-                      <span className="meter-duration">{formatHuman(row.durationSeconds)}</span>
+                      {row.source === undefined ? (
+                        <span
+                          className="meter-bar"
+                          aria-hidden="true"
+                          style={{ "--share": `${row.share}%` } as React.CSSProperties}
+                        />
+                      ) : (
+                        // An agent row answers a different question than a
+                        // share of the day: how much of its plan is left.
+                        <QuotaDial
+                          agentLabel={sourceLabel(row.source)}
+                          quota={quotaFor(quota, row.source)}
+                          pending={quota === undefined || quota.status === "pending"}
+                        />
+                      )}
+                      <span className="meter-duration">
+                        {row.durationSeconds === 0 && row.source !== undefined
+                          ? <span className="app-active">working</span>
+                          : formatHuman(row.durationSeconds)}
+                      </span>
                     </li>
                   ))}
                 </ul>
@@ -983,14 +1089,27 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           )}
         </section>
 
-        <button
-          className="all-stats-trigger"
-          type="button"
-          onClick={() => setAllStatsOpen(true)}
-          data-testid="all-stats-trigger"
-        >
-          All stats
-        </button>
+        {/* The two ways out of this screen, kept to icons at the foot of it:
+            neither is what the app is for. */}
+        <div className="screen-foot">
+          <button
+            className="foot-button"
+            type="button"
+            onClick={() => setAllStatsOpen(true)}
+            data-testid="all-stats-trigger"
+          >
+            All stats
+          </button>
+          <button
+            className="foot-button is-icon"
+            type="button"
+            aria-label="What's recorded?"
+            title="What's recorded?"
+            onClick={() => setRecordingOpen(true)}
+          >
+            ⓘ
+          </button>
+        </div>
       </div>
 
       {allStatsOpen && (
