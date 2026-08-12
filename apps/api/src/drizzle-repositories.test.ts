@@ -37,7 +37,7 @@ describe("Drizzle session repository", () => {
 });
 
 describe("Drizzle account store", () => {
-  it("allows an administrator to move workspaces when no evidence exists", async () => {
+  it("refuses to move the final administrator while other members remain", async () => {
     const targetOrganizationId = "a1c7e513-b094-4d4c-ae55-21790ae019a4";
     const currentOrganizationId = "b1c7e513-b094-4d4c-ae55-21790ae019a4";
     const deleted: unknown[] = [];
@@ -62,8 +62,57 @@ describe("Drizzle account store", () => {
           }]);
         }
         if (selectStep === 3) return { from: () => ({ where: async () => [{ total: 0 }] }) };
-        if (selectStep === 4) return { from: () => ({ where: async () => [{ total: 0 }] }) };
-        if (selectStep === 5) return { from: () => ({ where: async () => [{ total: 0 }] }) };
+        if (selectStep === 4) return limited([{ id: "remaining-member" }]);
+        if (selectStep === 5) return limited([]);
+        throw new Error(`unexpected select ${selectStep}`);
+      },
+      delete: (table: unknown) => {
+        deleted.push(table);
+        return { where: async () => undefined };
+      },
+    };
+    const db = {
+      transaction: async (callback: (handle: typeof transaction) => Promise<unknown>) => callback(transaction),
+    } as unknown as DatabaseConnection["db"];
+    const accounts = new DrizzleAccountStore(db);
+
+    await expect(accounts.joinOrganization({ organizationId: currentOrganizationId, userId: input.userId }, "ACDEF-GHJKM"))
+      .rejects.toMatchObject({
+        code: "conflict",
+        message: "The final administrator cannot leave a workspace while it still has members.",
+      });
+    expect(deleted).toEqual([]);
+  });
+
+  it("allows an administrator alone in their workspace to move", async () => {
+    const targetOrganizationId = "a1c7e513-b094-4d4c-ae55-21790ae019a4";
+    const currentOrganizationId = "b1c7e513-b094-4d4c-ae55-21790ae019a4";
+    const deleted: unknown[] = [];
+    let selectStep = 0;
+    const limited = (rows: unknown[]) => ({
+      from: () => ({ where: () => ({ limit: async () => rows }) }),
+    });
+    const transaction = {
+      execute: async () => selectStep === 0
+        ? [{ organization_id: currentOrganizationId, role: "admin" }]
+        : [{ id: input.userId }],
+      select: () => {
+        selectStep += 1;
+        if (selectStep === 1) return limited([{ id: targetOrganizationId }]);
+        if (selectStep === 2) {
+          return limited([{
+            id: input.userId,
+            email: "legacy@example.com",
+            name: "Legacy Admin",
+            organizationId: currentOrganizationId,
+            role: "admin",
+          }]);
+        }
+        if (selectStep === 3) return { from: () => ({ where: async () => [{ total: 0 }] }) };
+        if (selectStep === 4) return limited([]);
+        if (selectStep === 5) return limited([]);
+        if (selectStep === 6) return { from: () => ({ where: async () => [] }) };
+        if (selectStep === 7) return { from: () => ({ where: async () => [{ total: 0 }] }) };
         throw new Error(`unexpected select ${selectStep}`);
       },
       update: () => ({

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import { generateInviteCode, type AgentSource } from "@clock-in/shared";
-import { and, asc, count, desc, eq, gt, gte, isNotNull, lt, or, sql, sum } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, isNotNull, lt, ne, or, sql, sum } from "drizzle-orm";
 import {
   activitySegments,
   agentSessions,
@@ -254,7 +254,7 @@ export class DrizzleAccountStore implements AccountStore {
       }
 
       const [current] = await tx
-        .select({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId })
+        .select({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role })
         .from(users)
         .where(eq(users.id, subject.userId))
         .limit(1);
@@ -277,6 +277,33 @@ export class DrizzleAccountStore implements AccountStore {
       }
 
       const previousOrganizationId = current.organizationId;
+      // A departing final administrator would strand the remaining members with
+      // nobody able to manage the workspace, so refuse the move.
+      if (current.role === "admin") {
+        const [remainingMember] = await tx
+          .select({ id: users.id })
+          .from(users)
+          .where(and(
+            eq(users.organizationId, previousOrganizationId),
+            ne(users.id, subject.userId),
+          ))
+          .limit(1);
+        const [remainingAdministrator] = await tx
+          .select({ id: users.id })
+          .from(users)
+          .where(and(
+            eq(users.organizationId, previousOrganizationId),
+            ne(users.id, subject.userId),
+            eq(users.role, "admin"),
+          ))
+          .limit(1);
+        if (remainingMember !== undefined && remainingAdministrator === undefined) {
+          throw new AppError(
+            "conflict",
+            "The final administrator cannot leave a workspace while it still has members.",
+          );
+        }
+      }
       await tx.delete(projectMemberships).where(eq(projectMemberships.userId, subject.userId));
       const [moved] = await tx
         .update(users)
@@ -450,9 +477,14 @@ export class DrizzleAccountStore implements AccountStore {
           organizationId: organization.id,
           email: identity.email,
           name: identity.name,
+          role: "admin",
         })
         .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
       if (user === undefined) throw new Error("Failed to create a user for a new account.");
+
+      await tx
+        .insert(organizationAdminClaims)
+        .values({ organizationId: organization.id, userId: user.id, kind: "creator" });
 
       const [project] = await tx
         .insert(projects)
