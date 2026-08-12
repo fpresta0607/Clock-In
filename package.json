@@ -10,7 +10,7 @@
     "build": "pnpm --recursive --workspace-concurrency=1 --if-present build",
     "test": "pnpm --recursive --workspace-concurrency=1 test && pnpm test:release-workflow",
     "typecheck": "pnpm --recursive --workspace-concurrency=1 typecheck",
-    "test:release-workflow": "node --test scripts/release-tauri-config.test.mjs scripts/updater-manifest.test.mjs"
+    "test:release-workflow": "node --test scripts/release-tauri-config.test.mjs scripts/updater-manifest.test.mjs scripts/release-signing-state.test.mjs"
   },
   "devDependencies": {
     "js-yaml": "^5.2.3",

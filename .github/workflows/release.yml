@@ -2,14 +2,75 @@ name: Release desktop
 
 # Tag a release to publish installers:  git tag v0.1.0 && git push origin v0.1.0
 #
-# Production releases require installer and updater signing credentials.
+# Production releases require installer and updater signing credentials. When
+# none are configured, a version tag is not an error: the project's accepted
+# distribution today is the unsigned `unsigned-latest` release, so this
+# workflow says so and skips rather than painting every tag red forever.
+# Partially configured signing still fails hard, because a half-built signing
+# setup that silently downgraded would hide itself for as long as nobody looked.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
 jobs:
+  # Decides signed / unsigned / misconfigured before anything is built, so the
+  # build job can be *skipped* rather than failed. The logic lives in
+  # `scripts/release-signing-state.mjs` where it is unit-tested against all
+  # three states.
+  signing-preflight:
+    runs-on: ubuntu-latest
+    # `actions: write` is only for dispatching the unsigned publish below.
+    # This job builds nothing and never writes to the repository.
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      mode: ${{ steps.state.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: state
+        name: Resolve the signing state for this tag
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: node scripts/release-signing-state.mjs
+
+      # A version tag should still leave something installable behind. The
+      # unsigned workflow already publishes to the fixed `unsigned-latest`
+      # release, so this reuses it rather than building a second path. Its
+      # `publish` job is `workflow_dispatch`-only, which is exactly what this
+      # dispatch satisfies.
+      #
+      # Best-effort on purpose: the tag is not a failure just because the
+      # dispatch was refused, so this never fails the preflight.
+      - name: Publish unsigned installers for this tag
+        if: steps.state.outputs.mode == 'unsigned'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh workflow run "Unsigned test installers" --ref "${{ github.sha }}"; then
+            echo "::notice::Dispatched the unsigned installer publish for ${{ github.ref_name }}."
+          else
+            echo "::warning::Could not dispatch the unsigned installer publish; run it by hand from the Actions tab."
+          fi
+
   installers:
+    needs: signing-preflight
+    # Skipped, not failed, when this target has no signing configured. A
+    # skipped job reports neutral, which is what keeps the tag out of the red.
+    if: needs.signing-preflight.outputs.mode == 'signed'
     strategy:
       fail-fast: false
       matrix:
