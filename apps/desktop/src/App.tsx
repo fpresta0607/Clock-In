@@ -65,14 +65,14 @@ const friendlyAppName = (processName: string): string => {
     .join(" ");
 };
 
-/// Compact durations for the Today card: "2h 12m", "45m", "30s".
-const formatCompact = (seconds: number): string => {
+/// Human-readable durations: "2 hr 14 min", "14 min", "32 sec".
+const formatHuman = (seconds: number): string => {
   const total = Math.max(0, Math.floor(seconds));
   const hours = Math.floor(total / 3_600);
   const minutes = Math.floor((total % 3_600) / 60);
-  if (hours > 0) return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
-  if (minutes > 0) return `${minutes}m`;
-  return `${total}s`;
+  if (hours > 0) return minutes > 0 ? `${hours} hr ${minutes} min` : `${hours} hr`;
+  if (minutes > 0) return `${minutes} min`;
+  return `${total} sec`;
 };
 
 const elapsedSeconds = (since: string, now: number): number =>
@@ -154,33 +154,30 @@ const TODAY_EMPTY: Record<RecordingState, string> = {
   unknown: "Clock-In can't reach the recorder on this computer, so it can't say.",
 };
 
-const SESSION_EMPTY: Record<RecordingState, string> = {
-  on: "Nothing yet. The moment you use an app, it shows up here.",
-  stalled: "Nothing is being measured, because recording stopped responding.",
-  paused: "Recording is about to start.",
-  off: "Recording is off, so nothing is being measured.",
-  unknown: "Clock-In can't reach the recorder on this computer.",
-};
-
-/// One app's share of the open session, as the live surface renders it.
-type SessionRow = {
+/// One app's share of the day, as the home surface renders it.
+type MeterRow = {
   key: string;
   label: string;
   /// The agent runtime this executable belongs to, when it is one. Drives the
   /// runtime mark, and is how a CLI gets called "Claude Code" rather than
   /// "Claude.exe".
   source: string | undefined;
+  /// The executable behind the row, for the OS icon lookup. Absent on the
+  /// folded "Everything else" row.
+  processName: string | undefined;
   durationSeconds: number;
-  /// Percentage of the session, for the bar behind the row.
+  /// Percentage of the longest row, for the bar in the row.
   share: number;
 };
 
-/// Turns the host's per-app seconds into rows for the live surface. Agent CLIs
-/// keep their own row here rather than folding into one: which tool the time
-/// went to is the whole question this surface answers.
-const buildSessionRows = (apps: readonly SessionApp[]): SessionRow[] => {
+/// Turns per-app seconds into meter rows. Agent CLIs keep their own row rather
+/// than folding into one: which tool the time went to is the whole question
+/// this surface answers. Everything past the top rows folds into one.
+const buildMeterRows = (apps: readonly SessionApp[]): MeterRow[] => {
   const longest = apps.reduce((most, app) => Math.max(most, app.durationSeconds), 0);
-  return apps
+  const share = (durationSeconds: number): number =>
+    longest === 0 ? 0 : Math.round((durationSeconds / longest) * 100);
+  const rows = apps
     .filter((app) => app.durationSeconds > 0)
     .map((app) => {
       const source = agentRuntimeForBinary(app.processName);
@@ -188,10 +185,22 @@ const buildSessionRows = (apps: readonly SessionApp[]): SessionRow[] => {
         key: app.processName,
         label: source === undefined ? friendlyAppName(app.processName) : sourceLabel(source),
         source,
+        processName: app.processName,
         durationSeconds: app.durationSeconds,
-        share: longest === 0 ? 0 : Math.round((app.durationSeconds / longest) * 100),
+        share: share(app.durationSeconds),
       };
-    });
+    })
+    .sort((a, b) => b.durationSeconds - a.durationSeconds || a.label.localeCompare(b.label));
+  if (rows.length <= TOP_APP_ROWS) return rows;
+  const rest = rows.slice(TOP_APP_ROWS).reduce((sum, row) => sum + row.durationSeconds, 0);
+  return [...rows.slice(0, TOP_APP_ROWS), {
+    key: "everything-else",
+    label: "Everything else",
+    source: undefined,
+    processName: undefined,
+    durationSeconds: rest,
+    share: share(rest),
+  }];
 };
 
 type StatsRange = "today" | "week";
@@ -263,6 +272,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [mappingBusy, setMappingBusy] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [appIcons, setAppIcons] = useState<Record<string, string | null>>({});
+  const [statsTick, setStatsTick] = useState(0);
+  const [hookChoice, setHookChoice] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
   const [newProjectBusy, setNewProjectBusy] = useState(false);
   const [newProjectError, setNewProjectError] = useState<string | undefined>();
@@ -393,7 +405,39 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       },
     );
     return () => { active = false; };
-  }, [bridge, statsRange, signedIn?.user.id]);
+  }, [bridge, statsRange, signedIn?.user.id, statsTick]);
+
+  // Keeps the Today panel close to live: a slow tick refreshes the totals,
+  // and one immediate refresh follows each finished stretch.
+  useEffect(() => {
+    if (signedIn === undefined) return undefined;
+    const timer = window.setInterval(() => setStatsTick((tick) => tick + 1), 60_000);
+    return () => window.clearInterval(timer);
+  }, [signedIn?.user.id]);
+
+  // OS icons for the app rows on screen. Missing answers stay null so each
+  // executable is looked up once per launch.
+  useEffect(() => {
+    if (signedIn === undefined || stats === undefined) return undefined;
+    const wanted = stats.apps
+      .map((app) => app.processName)
+      .filter((name) => agentRuntimeForBinary(name) === undefined && !(name in appIcons));
+    if (wanted.length === 0) return undefined;
+    let active = true;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    void service.appIcons(wanted).then(
+      (icons) => {
+        if (active && isCurrent(service, generation)) {
+          setAppIcons((current) => ({ ...icons, ...current }));
+        }
+      },
+      () => undefined,
+    );
+    return () => { active = false; };
+    // appIcons is read for the dedupe only; re-running on its change would loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bridge, stats, signedIn?.user.id]);
 
   // Status poll. Failures — signed out, unsupported, offline — leave the
   // surfaces hidden rather than noisy; there is no state where recording
@@ -744,7 +788,22 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     ? 0
     : monitorStatus.segmentBacklog + monitorStatus.agentBacklog + monitorStatus.sessionBacklog;
   const appRows = stats === undefined ? [] : buildAppRows(stats.apps);
-  const sessionRows = current === null ? [] : buildSessionRows(current.apps);
+  const todayRows = stats === undefined ? [] : buildMeterRows(stats.apps);
+  const projectRows = stats === undefined ? [] : stats.projects
+    .filter((entry) => entry.durationSeconds > 0)
+    .sort((a, b) => b.durationSeconds - a.durationSeconds)
+    .map((entry) => ({
+      key: entry.project.id,
+      name: entry.project.name,
+      color: ready.projects.find((item) => item.id === entry.project.id)?.color ?? null,
+      durationSeconds: entry.durationSeconds,
+      share: stats.totalDurationSeconds === 0
+        ? 0
+        : Math.round((entry.durationSeconds / stats.totalDurationSeconds) * 100),
+    }));
+  // Finished time already on the server plus the stretch still being written.
+  const todayTotalSeconds = (stats?.totalDurationSeconds ?? 0)
+    + (current === null ? 0 : elapsedSeconds(current.since, now));
 
   return (
     <main className="app-shell">
@@ -759,7 +818,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         {monitorStatus && (
           <p className="monitor-line">
             <span className={`monitor-dot is-${state}`} aria-hidden="true" />
-            <span className="monitor-state">{MONITOR_LINE[state]}</span>
+            <span className="monitor-state">
+              {MONITOR_LINE[state]}
+              {monitorStatus.agentActive && ` · ${sourceLabel(monitorStatus.agentActive.source)} working`}
+            </span>
             <button className="monitor-explain" type="button" onClick={() => setRecordingOpen(true)}>
               What&apos;s recorded?
             </button>
@@ -773,53 +835,42 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         )}
         {accountError && !settingsOpen && <p className="form-error" role="alert">{accountError}</p>}
 
+        {/* The clock and nothing else: the stretch being written now, and the
+            day's total under it. Every explanatory sentence this card used to
+            carry lives in the "what's recorded" panel instead. */}
         <section className="hero card recording-card" aria-labelledby="recording-heading">
+          <button
+            className="hero-picker-toggle"
+            type="button"
+            data-testid="filing-change"
+            aria-expanded={projectPickerOpen}
+            aria-label={pinnedProjectName === undefined
+              ? "Choose project (picked automatically now)"
+              : `Choose project (filing under ${pinnedProjectName})`}
+            title={pinnedProjectName === undefined
+              ? "Project picked automatically"
+              : `Filing under ${pinnedProjectName}`}
+            onClick={() => setProjectPickerOpen((open) => !open)}
+          >
+            ⌄
+          </button>
           {current ? (
             <>
-              <p className="eyebrow">Recording · {currentProject?.name ?? "Unknown project"}</p>
               <h2 id="recording-heading" className="visually-hidden">Recording now</h2>
               <output className="elapsed" data-testid="elapsed-time" aria-label="Time in this stretch of work">
                 {formatDuration(elapsedSeconds(current.since, now))}
               </output>
-              <p className="started-at">since {new Date(current.since).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>
-              {current.idleSeconds > 0 && (
-                <p className="session-meta" data-testid="idle-trimmed">Quiet time taken off so far {formatDuration(current.idleSeconds)}</p>
-              )}
-              {monitorStatus?.agentActive && (
-                <p className="session-meta agent-active" data-testid="agent-active">
-                  {sourceLabel(monitorStatus.agentActive.source)} is working, so this keeps running
-                </p>
-              )}
-              <p className="session-meta">
-                {current.attribution === "agent"
-                  ? "Filed here because that is the folder your AI tool is working in."
-                  : current.attribution === "selected"
-                    ? "Filed here because you picked this project."
-                    : "Filed here because nothing else said otherwise."}
-              </p>
+              <p className="today-line" data-testid="today-line">Today · {formatHuman(todayTotalSeconds)}</p>
             </>
           ) : (
             <>
               <h2 id="recording-heading">{IDLE_HEADING[state]}</h2>
               <p className="subtle">{IDLE_BLURB[state]}</p>
+              {todayTotalSeconds > 0 && (
+                <p className="today-line" data-testid="today-line">Today · {formatHuman(todayTotalSeconds)}</p>
+              )}
             </>
           )}
-
-          {/* One quiet line instead of a permanently open dropdown; the picker
-              unfolds only while a different answer is being chosen. */}
-          <p className="filing-line">
-            {pinnedProjectName === undefined
-              ? "Project picked automatically"
-              : <>Filing under <strong>{pinnedProjectName}</strong></>}
-            <button
-              className="filing-change"
-              type="button"
-              data-testid="filing-change"
-              onClick={() => setProjectPickerOpen((open) => !open)}
-            >
-              {projectPickerOpen ? "Done" : "Change"}
-            </button>
-          </p>
           {projectPickerOpen && (
             <>
               <label className="hero-project">
@@ -847,91 +898,65 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           )}
         </section>
 
-        {/* The main surface: the record card above, then where this session's
-            time is going, and nothing else competing. Everything historical
-            lives behind "All stats" at the bottom. */}
-        <section className="session-stats card" aria-labelledby="session-stats-title">
+        {/* The main surface below the clock: where today's time went, grouped
+            by the projects the monitor filed it under, then by app. Everything
+            historical lives behind "All stats" at the bottom. */}
+        <section className="session-stats card" aria-labelledby="today-panel-title">
           <div className="panel-head">
-            <h2 id="session-stats-title">This session</h2>
-            {current && (
-              <span className="session-stats-total" data-testid="session-total">
-                {formatDuration(elapsedSeconds(current.since, now))}
-              </span>
-            )}
+            <h2 id="today-panel-title">Today</h2>
           </div>
-          {sessionRows.length === 0 ? (
-            <p className="subtle" data-testid="session-stats-empty">{SESSION_EMPTY[state]}</p>
+          {todayRows.length === 0 && projectRows.length === 0 ? (
+            <p className="subtle" data-testid="today-panel-empty">{TODAY_EMPTY[state]}</p>
           ) : (
-            <ul className="session-app-list" data-testid="session-app-list">
-              {sessionRows.map((row) => (
-                <li key={row.key} className="session-app-row">
-                  <span className="session-app-name">
-                    {row.source === undefined
-                      ? <span className="app-mark is-plain" aria-hidden="true" />
-                      : <AgentRuntimeIcon source={row.source} />}
-                    {row.label}
-                    {row.source !== undefined && monitorStatus?.agentActive?.source === row.source && (
-                      <span className="app-active"> · working now</span>
-                    )}
-                  </span>
-                  {/* Share of the session, so the split reads at a glance. */}
-                  <span
-                    className="session-app-bar"
-                    aria-hidden="true"
-                    style={{ "--share": `${row.share}%` } as React.CSSProperties}
-                  />
-                  <span className="session-app-duration">{formatCompact(row.durationSeconds)}</span>
-                </li>
-              ))}
-            </ul>
+            <>
+              {projectRows.length > 0 && (
+                <ul className="meter-list" data-testid="project-list">
+                  {projectRows.map((row) => (
+                    <li key={row.key} className="meter-row">
+                      <span
+                        className="project-dot"
+                        aria-hidden="true"
+                        style={row.color === null ? undefined : { background: row.color }}
+                      />
+                      <span className="meter-name">{row.name}</span>
+                      <span
+                        className="meter-bar"
+                        aria-hidden="true"
+                        style={{ "--share": `${row.share}%` } as React.CSSProperties}
+                      />
+                      <span className="meter-duration">{formatHuman(row.durationSeconds)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {todayRows.length > 0 && (
+                <ul className="meter-list meter-apps" data-testid="session-app-list">
+                  {todayRows.map((row) => (
+                    <li key={row.key} className="meter-row">
+                      {row.source !== undefined
+                        ? <AgentRuntimeIcon source={row.source} />
+                        : row.processName !== undefined && appIcons[row.processName] != null
+                          ? <img className="app-mark" src={appIcons[row.processName] ?? undefined} alt="" />
+                          : <span className="app-mark is-plain" aria-hidden="true" />}
+                      <span className="meter-name">
+                        {row.label}
+                        {row.source !== undefined && monitorStatus?.agentActive?.source === row.source && (
+                          <span className="app-active"> · working now</span>
+                        )}
+                      </span>
+                      <span
+                        className="meter-bar"
+                        aria-hidden="true"
+                        style={{ "--share": `${row.share}%` } as React.CSSProperties}
+                      />
+                      <span className="meter-duration">{formatHuman(row.durationSeconds)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
           )}
         </section>
-
-        {/* Two different things that both involve a code, so each gets its own
-            heading, its own sentence saying what it does, and one control.
-            The old card put a bare code beside a "JOIN A TEAM" box and left
-            you to work out which was which. */}
-        {overview && (
-          <section className="team-card card" aria-labelledby="team-title">
-            <h2 id="team-title">Your team</h2>
-            <p className="subtle">
-              You are keeping time with <strong>{overview.organization.name}</strong>.
-            </p>
-
-            <div className="team-action">
-              <h3>Invite someone</h3>
-              <p className="subtle">Send them this code and they can join {overview.organization.name}.</p>
-              <div className="team-code-row">
-                <span className="team-code" data-testid="invite-code">{overview.organization.inviteCode}</span>
-                <button className="outline-button" type="button" onClick={() => void copyInviteCode(overview.organization.inviteCode)}>
-                  {inviteCopied ? "Copied" : "Copy code"}
-                </button>
-              </div>
-            </div>
-
-            <div className="team-action">
-              <h3>Join a different team</h3>
-              <p className="subtle">If someone sent you their code, paste it here to move to their team.</p>
-              <form className="join-form" onSubmit={joinWorkspace}>
-                <label className="team-join-label">
-                  Their invite code
-                  <input
-                    value={joinCode}
-                    onChange={(event) => setJoinCode(event.target.value)}
-                    placeholder="ABCDE-FGHJK"
-                    autoComplete="off"
-                    spellCheck={false}
-                    required
-                  />
-                </label>
-                <button className="signal-button" type="submit" disabled={joinBusy || joinCode.trim() === ""}>
-                  {joinBusy ? "Joining…" : "Join this team"}
-                </button>
-              </form>
-              {overviewError && <p className="form-error" role="alert">{overviewError}</p>}
-            </div>
-          </section>
-        )}
 
         <button
           className="all-stats-trigger"
@@ -965,7 +990,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             !statsError && <p className="subtle">Loading…</p>
           ) : (
             <>
-              <p className="today-total"><strong>{formatCompact(stats.totalDurationSeconds)}</strong> recorded</p>
+              <p className="today-total"><strong>{formatHuman(stats.totalDurationSeconds)}</strong> recorded</p>
               {appRows.length === 0 ? (
                 // Derived from the same state as the timer above it. Hard-coding
                 // "turn on recording" here is what made one screen contradict
@@ -979,14 +1004,14 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                         {row.label}
                         {row.agent && monitorStatus?.agentActive && <span className="app-active"> · active now</span>}
                       </span>
-                      <span className="app-duration">{formatCompact(row.durationSeconds)}</span>
+                      <span className="app-duration">{formatHuman(row.durationSeconds)}</span>
                     </li>
                   ))}
                 </ul>
               )}
               {stats.unattributedSeconds > 0 && (
                 <p className="verified-foot" data-testid="unattributed-foot">
-                  {formatCompact(stats.unattributedSeconds)} of it landed in {defaultProject?.name ?? "your default project"},
+                  {formatHuman(stats.unattributedSeconds)} of it landed in {defaultProject?.name ?? "your default project"},
                   because nothing said which project it was for.
                 </p>
               )}
@@ -1042,28 +1067,79 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
               !settingsError && <p className="subtle">Loading…</p>
             ) : (
               <>
-                <div className="setting-rows">
-                  <label className="toggle-row">
-                    <span>Record my work time on this computer</span>
-                    <input type="checkbox" checked={settings.enabled} onChange={(event) => void applyRecordingEnabled(event.target.checked)} />
-                  </label>
-                  <label className="setting-field">
-                    <span>End a stretch after this many quiet minutes</span>
-                    <input
-                      type="number"
-                      min={1}
-                      value={quietDraft}
-                      onChange={(event) => setQuietDraft(event.target.value)}
-                      onBlur={(event) => commitQuietMinutes(event.target.value)}
-                    />
-                  </label>
-                  <label className="toggle-row">
-                    <span>Keep recording while an AI tool is working</span>
-                    <input type="checkbox" checked={settings.agentOverrideEnabled} onChange={(event) => void applySettings({ agentOverrideEnabled: event.target.checked })} />
-                  </label>
-                </div>
-                <div className="mappings">
-                  <h3>Folders and projects</h3>
+                {/* One group open at a time keeps the panel scannable; native
+                    details/summary so there is no tab machinery to maintain. */}
+                <details className="settings-group" open>
+                  <summary>Recording</summary>
+                  <div className="setting-rows">
+                    <label className="toggle-row">
+                      <span>Record my work time on this computer</span>
+                      <input type="checkbox" checked={settings.enabled} onChange={(event) => void applyRecordingEnabled(event.target.checked)} />
+                    </label>
+                    <label className="setting-field">
+                      <span>End a stretch after this many quiet minutes</span>
+                      <input
+                        type="number"
+                        min={1}
+                        value={quietDraft}
+                        onChange={(event) => setQuietDraft(event.target.value)}
+                        onBlur={(event) => commitQuietMinutes(event.target.value)}
+                      />
+                    </label>
+                    <label className="toggle-row">
+                      <span>Keep recording while an AI tool is working</span>
+                      <input type="checkbox" checked={settings.agentOverrideEnabled} onChange={(event) => void applySettings({ agentOverrideEnabled: event.target.checked })} />
+                    </label>
+                  </div>
+                  <button className="link-button privacy-open" type="button" onClick={() => setRecordingOpen(true)}>
+                    See exactly what&apos;s recorded — and what never is
+                  </button>
+                </details>
+
+                {monitorStatus !== undefined && monitorStatus.hooks.length > 0 && (
+                  <details className="settings-group">
+                    <summary>AI tools</summary>
+                    {monitorStatus.hooks.some((hook) => hook.detected) && (
+                      <ul className="hook-connected" data-testid="hook-connected">
+                        {monitorStatus.hooks.filter((hook) => hook.detected).map((hook) => (
+                          <li key={hook.source} className="hook-badge is-detected" title={hook.configPath}>
+                            {sourceLabel(hook.source)}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {monitorStatus.hooks.some((hook) => !hook.detected) && (
+                      <div className="hook-add">
+                        <label>
+                          <span className="visually-hidden">Tool to connect</span>
+                          <select value={hookChoice} onChange={(event) => setHookChoice(event.target.value)}>
+                            <option value="">Connect a tool…</option>
+                            {monitorStatus.hooks.filter((hook) => !hook.detected).map((hook) => (
+                              <option key={hook.source} value={hook.source}>{sourceLabel(hook.source)}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <button
+                          className="outline-button"
+                          type="button"
+                          disabled={hookChoice === ""}
+                          onClick={() => { void registerHook(hookChoice); setHookChoice(""); }}
+                        >
+                          Connect
+                        </button>
+                      </div>
+                    )}
+                    {Object.entries(hookSnippets).map(([source, snippet]) => (
+                      <div key={source}>
+                        <p className="subtle">{sourceLabel(source)} needs this pasted into its config:</p>
+                        <pre className="hook-snippet">{snippet}</pre>
+                      </div>
+                    ))}
+                  </details>
+                )}
+
+                <details className="settings-group">
+                  <summary>Folders and projects</summary>
                   <p className="subtle">Work your AI tools do in these folders is filed under the matching project.</p>
                   {mappings === undefined ? (
                     <p className="subtle">Loading…</p>
@@ -1094,46 +1170,40 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                     </label>
                     <button className="signal-button" type="submit" disabled={mappingBusy}>{mappingBusy ? "Adding…" : "Add folder"}</button>
                   </form>
-                </div>
-                {monitorStatus !== undefined && monitorStatus.hooks.length > 0 && (
-                  <div className="hooks-setup">
-                    <h3>Watch my AI tools</h3>
+                </details>
+
+                {overview && (
+                  <details className="settings-group">
+                    <summary>Team</summary>
                     <p className="subtle">
-                      Opt in per tool: Clock-In adds its hook to the tool&apos;s own config, and only when you ask.
+                      You are keeping time with <strong>{overview.organization.name}</strong>.
                     </p>
-                    <ul className="hook-list">
-                      {monitorStatus.hooks.map((hook) => (
-                        <li key={hook.source} className="hook-row">
-                          <span
-                            className={`hook-badge ${hook.detected ? "is-detected" : "is-missing"}`}
-                            title={hook.configPath}
-                          >
-                            {sourceLabel(hook.source)}
-                          </span>
-                          {hook.detected ? (
-                            <span className="hook-state">Connected</span>
-                          ) : (
-                            <button type="button" onClick={() => void registerHook(hook.source)}>Connect</button>
-                          )}
-                          {hookSnippets[hook.source] !== undefined && (
-                            <pre className="hook-snippet">{hookSnippets[hook.source]}</pre>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
+                    <div className="team-code-row">
+                      <span className="team-code" data-testid="invite-code">{overview.organization.inviteCode}</span>
+                      <button className="outline-button" type="button" onClick={() => void copyInviteCode(overview.organization.inviteCode)}>
+                        {inviteCopied ? "Copied" : "Copy code"}
+                      </button>
+                    </div>
+                    <form className="join-form" onSubmit={joinWorkspace}>
+                      <label className="team-join-label">
+                        Their invite code
+                        <input
+                          value={joinCode}
+                          onChange={(event) => setJoinCode(event.target.value)}
+                          placeholder="Join another team: ABCDE-FGHJK"
+                          autoComplete="off"
+                          spellCheck={false}
+                          required
+                        />
+                      </label>
+                      <button className="signal-button" type="submit" disabled={joinBusy || joinCode.trim() === ""}>
+                        {joinBusy ? "Joining…" : "Join this team"}
+                      </button>
+                    </form>
+                    {overviewError && <p className="form-error" role="alert">{overviewError}</p>}
+                  </details>
                 )}
-                <div className="privacy-note">
-                  <h3>What&apos;s recorded</h3>
-                  <p className="subtle">
-                    Clock-In notes when this computer was busy and which app was in front, by name. It never records
-                    what you type, pictures of your screen, window titles, or web addresses. Turning recording off
-                    stops all of it, and your earlier hours stay where they are.
-                  </p>
-                  <button className="outline-button privacy-open" type="button" onClick={() => setRecordingOpen(true)}>
-                    See exactly what&apos;s recorded
-                  </button>
-                </div>
+
                 <button className="link-button" type="button" disabled={logoutBusy} onClick={() => void logout()}>{logoutBusy ? "Logging out…" : "Log out"}</button>
               </>
             )}

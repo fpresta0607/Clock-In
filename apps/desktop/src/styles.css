@@ -95,12 +95,27 @@ select {
 }
 select:disabled { opacity: .55; }
 
-/* The filing target reads as one quiet sentence; the picker below it only
-   exists while a different answer is being chosen. */
-.filing-line { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: center; gap: 6px; margin: 16px 0 0; color: var(--text-secondary); font-size: .81rem; }
-.filing-line strong { color: #ffffff; font-weight: 650; }
-.filing-change { border: 0; padding: 0; background: transparent; color: var(--text-secondary); font-size: .78rem; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
-.filing-change:hover, .filing-change:focus-visible { color: #ffffff; }
+/* The clock card carries one control: a caret in the corner that unfolds the
+   project picker. Everything else on the card is the time itself. */
+.recording-card { position: relative; }
+.hero-picker-toggle {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: .9rem;
+  line-height: 1;
+}
+.hero-picker-toggle:hover, .hero-picker-toggle:focus-visible { color: #ffffff; background: rgba(163, 179, 194, 0.1); }
+.hero-picker-toggle[aria-expanded="true"] { color: var(--accent-green); }
+
+.today-line { margin: 8px 0 0; color: var(--text-secondary); font-size: .86rem; font-variant-numeric: tabular-nums; }
 
 .hero-project { display: grid; gap: 5px; margin-top: 12px; }
 
@@ -213,30 +228,26 @@ select:disabled { opacity: .55; }
 .today-total { margin: 2px 0 10px; font-size: .95rem; }
 .today-total strong { font-variant-numeric: tabular-nums; }
 
-/* The live session surface: the main page's whole point below the record
-   card. One row per app, a bar showing its share, and the duration. */
-.session-stats-total { flex: none; color: var(--accent-green); font-size: .95rem; font-variant-numeric: tabular-nums; }
-/* Rows are already capped with an "Everything else" fold, so the screen's
-   own scroll is the only scrollbar. */
-.session-app-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
-.session-app-row {
+/* The Today surface below the clock: one row per project, then one row per
+   app. Each row is a single line - icon, name, meter, duration. */
+.meter-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.meter-apps { margin-top: 10px; border-top: 1px solid rgba(163, 179, 194, 0.12); padding-top: 8px; }
+.meter-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: 18px minmax(0, 10rem) minmax(24px, 1fr) auto;
   align-items: center;
-  gap: 4px 12px;
-  padding: 7px 2px;
-  border-bottom: 1px solid rgba(163, 179, 194, 0.08);
+  gap: 10px;
+  padding: 6px 2px;
   font-size: .84rem;
 }
-.session-app-row:last-child { border-bottom: 0; }
-.session-app-name { display: flex; min-width: 0; align-items: center; gap: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-app-duration { flex: none; color: #ffffff; font-variant-numeric: tabular-nums; }
-/* The bar spans both columns on its own line, so a long app name never
-   squeezes it to nothing. */
-.session-app-bar { grid-column: 1 / -1; height: 3px; border-radius: 999px; background: rgba(163, 179, 194, 0.14); }
-.session-app-bar::before { display: block; width: var(--share, 0%); height: 100%; border-radius: inherit; background: var(--accent-green); opacity: .55; content: ""; }
+.meter-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meter-duration { flex: none; color: #ffffff; font-variant-numeric: tabular-nums; font-size: .8rem; }
+.meter-bar { height: 4px; border-radius: 999px; background: rgba(163, 179, 194, 0.14); }
+.meter-bar::before { display: block; width: var(--share, 0%); height: 100%; border-radius: inherit; background: var(--accent-green); opacity: .55; content: ""; }
+.project-dot { width: 10px; height: 10px; margin: 0 auto; border-radius: 50%; background: var(--accent-green); }
 /* Keeps a plain app's name aligned with a runtime's, which carries a mark. */
-.app-mark.is-plain { display: inline-block; flex: none; width: 18px; height: 18px; }
+.app-mark { display: block; flex: none; width: 18px; height: 18px; border-radius: 4px; }
+.app-mark.is-plain { background: rgba(163, 179, 194, 0.14); }
 
 /* Everything historical sits behind one button at the bottom, so the record
    surface has nothing competing with it. */
@@ -252,12 +263,7 @@ select:disabled { opacity: .55; }
 }
 .all-stats-trigger:hover { border-color: var(--glass-border-hover); color: #ffffff; }
 
-/* Two things that both involve a code, so each states what it does and
-   carries exactly one control. */
-.team-card { display: grid; gap: 14px; }
-.team-card h3 { margin: 0 0 2px; font-size: .84rem; }
-.team-action { display: grid; gap: 6px; }
-.team-code-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.team-code-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
 .team-code {
   flex: 1 1 auto;
   min-width: 0;
@@ -312,12 +318,33 @@ select:disabled { opacity: .55; }
 .modal { width: min(100%, 440px); max-height: calc(100vh - 60px); overflow-y: auto; text-align: left; }
 .modal-close { min-height: 30px; padding: 3px 10px; font-size: .72rem; text-transform: none; letter-spacing: normal; }
 
+/* Collapsible settings groups: native details/summary, one heading each. */
+.settings-group { border-bottom: 1px solid rgba(163, 179, 194, 0.12); padding: 4px 0 12px; }
+.settings-group > summary {
+  padding: 9px 0;
+  color: #ffffff;
+  font-size: .84rem;
+  font-weight: 650;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  list-style-position: outside;
+}
+.settings-group > summary:hover { color: var(--accent-green); }
+.settings-group > .subtle { margin-top: 2px; }
+
+/* Connected tools read as badges; adding one is a single dropdown + button. */
+.hook-connected { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; padding: 0; list-style: none; }
+.hook-add { display: flex; gap: 8px; align-items: center; }
+.hook-add label { flex: 1 1 auto; min-width: 0; margin: 0; }
+.hook-add select { width: 100%; }
+.hook-add .outline-button { flex: none; min-height: 33px; padding: 5px 14px; font-size: .72rem; }
+
 .setting-rows { display: grid; margin-top: 4px; }
 .toggle-row, .setting-field { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid rgba(163, 179, 194, 0.12); padding: 9px 0; color: #ffffff; font-size: .83rem; font-weight: 400; letter-spacing: normal; text-transform: none; }
 .toggle-row input, .setting-field input { width: auto; }
 .setting-field input { width: 82px; text-align: right; font-variant-numeric: tabular-nums; }
 
-.mappings h3, .hooks-setup h3, .privacy-note h3, .browsers-setup h3, .team-setup h3, .answers-setup h3 { margin: 19px 0 3px; color: var(--text-secondary); font-size: .74rem; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
 .hook-list { display: grid; gap: 7px; margin: 9px 0 0; padding: 0; list-style: none; }
 .hook-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: .8rem; }
 .hook-badge { border: 1px solid var(--glass-border); border-radius: var(--radius); padding: 1px 8px; color: var(--text-secondary); font-size: .67rem; letter-spacing: .04em; }
@@ -334,8 +361,7 @@ select:disabled { opacity: .55; }
 .mapping-row button:hover { color: #ffffff; }
 .mapping-form { gap: 9px; margin-top: 13px; }
 .mapping-form .signal-button { min-height: 34px; }
-.privacy-note p { line-height: 1.55; }
-.privacy-open { min-height: 34px; margin-top: 11px; padding: 6px 13px; font-size: .72rem; }
+.link-button.privacy-open { width: auto; margin-top: 10px; padding: 0; font-size: .76rem; text-align: left; }
 
 /* "What's recorded" panel: the transparency surface, stacked above settings. */
 .recording-overlay { z-index: 11; }
