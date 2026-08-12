@@ -165,8 +165,9 @@ class MemoryReports implements ReportRepository {
    */
   public async readAppTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<AppTotalRecord[]> {
     const byProcess = new Map<string, number>();
+    const member = query.userId ?? subject.userId;
     for (const segment of this.segments) {
-      if (segment.organizationId !== subject.organizationId || segment.userId !== subject.userId) continue;
+      if (segment.organizationId !== subject.organizationId || segment.userId !== member) continue;
       if (segment.kind !== "active" || segment.processName == null) continue;
       if (segment.receivedAt.getTime() > segment.endedAt.getTime() + freshnessWindowMs) continue;
       const start = query.from === undefined ? segment.startedAt : new Date(Math.max(segment.startedAt.getTime(), query.from.getTime()));
@@ -191,12 +192,13 @@ class MemoryReports implements ReportRepository {
    * exceeds actual focused wall-clock time. Empty totals return no row.
    */
   public async readSiteTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<SiteTotalRecord[]> {
+    const member = query.userId ?? subject.userId;
     const spansByRule = new Map<string, { mapping: StoredMapping; intervals: { start: number; end: number }[] }>();
     for (const span of this.agents) {
-      if (span.organizationId !== subject.organizationId || span.userId !== subject.userId) continue;
+      if (span.organizationId !== subject.organizationId || span.userId !== member) continue;
       if (span.source !== "browser" || span.ruleId === null) continue;
       const mapping = this.mappings.find((candidate) => candidate.organizationId === subject.organizationId
-        && candidate.userId === subject.userId && candidate.kind === "url_rule" && candidate.id === span.ruleId);
+        && candidate.userId === member && candidate.kind === "url_rule" && candidate.id === span.ruleId);
       if (mapping === undefined) continue;
       const spanEnd = span.endedAt ?? span.lastEventAt;
       if (span.receivedAt.getTime() > spanEnd.getTime() + freshnessWindowMs) continue;
@@ -206,7 +208,7 @@ class MemoryReports implements ReportRepository {
     }
     const activeSegments = mergeIntervals(this.segments
       .filter((segment) => segment.organizationId === subject.organizationId
-        && segment.userId === subject.userId
+        && segment.userId === member
         && segment.kind === "active"
         && segment.receivedAt.getTime() <= segment.endedAt.getTime() + freshnessWindowMs)
       .map((segment) => ({ start: segment.startedAt.getTime(), end: segment.endedAt.getTime() })));
@@ -231,8 +233,12 @@ class MemoryReports implements ReportRepository {
   public async findProjectForOrganization(): Promise<never> {
     throw new Error("not used by me/stats");
   }
-  public async findUserForOrganization(): Promise<never> {
-    throw new Error("not used by me/stats");
+  /** The membership check behind the `userId` filter, against the seeded users. */
+  public async findUserForOrganization(subject: AuthenticatedSubject, userId: string): Promise<{ id: string; name: string } | null> {
+    const found = users[userId as keyof typeof users];
+    return found !== undefined && found.organizationId === subject.organizationId
+      ? { id: found.id, name: found.name }
+      : null;
   }
   public async readPageForOrganization(): Promise<never> {
     throw new Error("not used by me/stats");
@@ -407,6 +413,49 @@ describe("me/stats routes", () => {
       apps: [],
       sites: [],
     });
+  });
+
+  it("opens a teammate's breakdown when the query names one", async () => {
+    const reports = new MemoryReports();
+    reports.sessions.push(session());
+    reports.sessions.push(session({
+      userId: ids.teammate,
+      project: { id: ids.otherProject, name: "Side" },
+      startedAt: new Date("2026-08-05T16:00:00.000Z"),
+      stoppedAt: new Date("2026-08-05T16:30:00.000Z"),
+      durationSeconds: 1_800,
+    }));
+    reports.segments.push({
+      organizationId: ids.organization, userId: ids.teammate, kind: "active", processName: "blender.exe",
+      startedAt: new Date("2026-08-05T16:00:00.000Z"), endedAt: new Date("2026-08-05T16:30:00.000Z"),
+      receivedAt: new Date("2026-08-05T16:31:00.000Z"),
+    });
+
+    const response = await createTestApp(reports).request(
+      `http://api.test/me/stats?userId=${ids.teammate}`,
+      { headers: { authorization: bearerHeader } },
+    );
+
+    expect(response.status).toBe(200);
+    // The teammate's rows, not the caller's: the filter replaces the subject.
+    await expect(response.json()).resolves.toMatchObject({
+      totalDurationSeconds: 1_800,
+      projects: [{ project: { id: ids.otherProject, name: "Side" }, durationSeconds: 1_800 }],
+      apps: [{ processName: "blender.exe", durationSeconds: 1_800 }],
+    });
+  });
+
+  it("refuses a userId from outside the caller's workspace", async () => {
+    const reports = new MemoryReports();
+    reports.sessions.push(session());
+
+    const response = await createTestApp(reports).request(
+      "http://api.test/me/stats?userId=99c7e513-b094-4d4c-ae55-21790ae019a4",
+      { headers: { authorization: bearerHeader } },
+    );
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual({ error: { code: "not_found", message: "User not found." } });
   });
 
   it("unions overlapping active evidence when corroborating a timer", async () => {

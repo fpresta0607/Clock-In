@@ -326,7 +326,7 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
     // Return the new workspace so the window updates without a reload.
     let (organization, entries) = tokio::try_join!(
         state.client.organization(&access_token),
-        state.client.leaderboard(&access_token)
+        state.client.leaderboard(&access_token, None, None)
     )?;
     Ok(OrganizationOverview {
         organization,
@@ -341,11 +341,19 @@ pub struct JoinInput {
 }
 
 #[tauri::command]
-async fn org_overview(state: State<'_, AppState>) -> ApiResult<OrganizationOverview> {
+async fn org_overview(
+    state: State<'_, AppState>,
+    from_at: Option<String>,
+    to_exclusive_at: Option<String>,
+) -> ApiResult<OrganizationOverview> {
     let access_token = state.access_token().await?;
     let (organization, entries) = tokio::try_join!(
         state.client.organization(&access_token),
-        state.client.leaderboard(&access_token)
+        state.client.leaderboard(
+            &access_token,
+            from_at.as_deref(),
+            to_exclusive_at.as_deref()
+        )
     )?;
     Ok(OrganizationOverview {
         organization,

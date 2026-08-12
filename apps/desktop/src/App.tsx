@@ -406,14 +406,23 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   // open — nobody is served by fetching a teammate's year in the background.
   // Your own "today" is the exception: the overlay reuses the main screen's
   // live reading rather than fetching a second copy of the same day.
+  //
+  // The reading is only blanked when who or what changed, so the minutely
+  // refresh tick replaces the numbers in place instead of flashing "Loading…".
+  const lastBoardKey = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (signedIn === undefined || !allStatsOpen) return undefined;
+    const boardKey = `${boardRange}|${boardMember?.id ?? ""}`;
+    if (lastBoardKey.current !== boardKey) {
+      lastBoardKey.current = boardKey;
+      setBoardStats(undefined);
+      setBoardStatsError(undefined);
+    }
     if ((boardMember === undefined || boardMember.id === signedIn.user.id) && boardRange === "today") return undefined;
     let active = true;
     const service = bridge;
     const generation = bridgeGeneration.current;
     const bounds = rangeBounds(boardRange);
-    setBoardStats(undefined);
     void service.meStats(bounds?.fromAt, bounds?.toExclusiveAt, boardMember?.id).then(
       (result) => {
         if (active && isCurrent(service, generation)) {
@@ -429,6 +438,31 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     );
     return () => { active = false; };
   }, [bridge, allStatsOpen, boardRange, boardMember?.id, signedIn?.user.id, statsTick]);
+
+  // The board itself follows the overlay's range too: hours beside a name and
+  // the breakdown under it must answer for the same days. All time sends no
+  // bounds, which is also what the masthead's one boot-time read shows.
+  useEffect(() => {
+    if (signedIn === undefined || !allStatsOpen) return undefined;
+    let active = true;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const bounds = rangeBounds(boardRange);
+    void service.orgOverview(bounds?.fromAt, bounds?.toExclusiveAt).then(
+      (result) => {
+        if (active && isCurrent(service, generation)) {
+          setOverview(result);
+          setOverviewError(undefined);
+        }
+      },
+      (error: unknown) => {
+        if (!active || !isCurrent(service, generation)) return;
+        const problem = bridgeError(error);
+        if (problem.kind !== "auth") setOverviewError(problem.message);
+      },
+    );
+    return () => { active = false; };
+  }, [bridge, allStatsOpen, boardRange, signedIn?.user.id, statsTick]);
 
   // Agent plan quota, read from this machine. Advisory and never on the
   // critical path: a failure leaves the dials unknown rather than saying so.
@@ -887,7 +921,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       // day had. Every row here measures the same thing - time this machine
       // spent with that app in front - and the row says "working" instead.
       durationSeconds: 0,
-      working: true,
       share: 0,
     }));
   // A tool gets exactly one row. The same agent can arrive twice - once as a

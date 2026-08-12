@@ -492,8 +492,25 @@ impl ApiClient {
         Ok(body.organization)
     }
 
-    pub async fn leaderboard(&self, access_token: &str) -> ApiResult<Vec<LeaderboardEntry>> {
-        let body: LeaderboardResponse = self.get_json(access_token, "/reports/leaderboard").await?;
+    /// The workspace board for a range. Bounds arrive together or not at all;
+    /// none means all time, exactly as `/reports/leaderboard` reads it.
+    pub async fn leaderboard(
+        &self,
+        access_token: &str,
+        from_at: Option<&str>,
+        to_exclusive_at: Option<&str>,
+    ) -> ApiResult<Vec<LeaderboardEntry>> {
+        // ISO-8601 UTC instants contain no characters that need escaping in a
+        // query string, so the bounds are interpolated as-is.
+        let query = match (from_at, to_exclusive_at) {
+            (Some(from_at), Some(to_exclusive_at)) => {
+                format!("?fromAt={from_at}&toExclusiveAt={to_exclusive_at}")
+            }
+            _ => String::new(),
+        };
+        let body: LeaderboardResponse = self
+            .get_json(access_token, &format!("/reports/leaderboard{query}"))
+            .await?;
         Ok(body.entries)
     }
 
@@ -630,9 +647,9 @@ impl ApiClient {
     /// west of Greenwich. The caller sends its own local midnight instead.
     /// Omitting both bounds asks for all time.
     ///
-    /// `user_id` opens a teammate's breakdown from the leaderboard. The server
-    /// scopes every underlying query to the caller's workspace, so an id from
-    /// anywhere else comes back empty rather than forbidden.
+    /// `user_id` opens a teammate's breakdown from the leaderboard. An id from
+    /// outside the caller's workspace is refused as a stable not_found, the
+    /// same answer the org report gives.
     pub async fn me_stats(
         &self,
         access_token: &str,
