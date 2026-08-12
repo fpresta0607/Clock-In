@@ -865,18 +865,54 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   // its own time is what it has been running for, and that row carries the
   // plan reading - so quota only ever appears for an agent actually in use.
   const todayRows = buildMeterRows(liveApps);
-  // One row per running session - four terminals in one editor is an ordinary
-  // day - named by the project its working directory resolved to.
-  const agentRows = (monitorStatus?.agentSessions ?? []).map((session) => ({
-    key: `agent-${session.source}-${session.externalSessionId}`,
-    label: sourceLabel(session.source),
-    detail: ready.projects.find((item) => item.id === session.projectId)?.name,
-    source: session.source,
-    processName: undefined,
-    durationSeconds: elapsedSeconds(session.since, now),
-    share: 0,
-  }));
-  const meterRows = [...agentRows, ...todayRows];
+  // One row per tool, not per terminal: five Claude Code processes are one
+  // tool that has been working since the earliest of them started. Counting
+  // them separately would read as five times the work actually done.
+  const agentRows = [...(monitorStatus?.agentSessions ?? [])
+    .reduce((bySource, session) => {
+      const existing = bySource.get(session.source);
+      const projectName = ready.projects.find((item) => item.id === session.projectId)?.name;
+      bySource.set(session.source, {
+        since: existing === undefined || session.since < existing.since ? session.since : existing.since,
+        sessions: (existing?.sessions ?? 0) + 1,
+        projects: projectName === undefined
+          ? existing?.projects ?? []
+          : [...(existing?.projects ?? []), projectName],
+      });
+      return bySource;
+    }, new Map<string, { since: string; sessions: number; projects: string[] }>())
+    .entries()]
+    .map(([source, group]) => ({
+      key: `agent-${source}`,
+      label: sourceLabel(source),
+      // Name the projects when the hooks knew them, else say how many are up.
+      detail: group.projects.length > 0
+        ? [...new Set(group.projects)].join(", ")
+        : group.sessions > 1 ? `${group.sessions} sessions` : undefined,
+      source,
+      processName: undefined,
+      // Deliberately not the time since it started. An agent runs beside the
+      // editor and the terminal it lives in, so its wall-clock overlaps
+      // theirs; counting it as its own slice would total more hours than the
+      // day had. Every row here measures the same thing - time this machine
+      // spent with that app in front - and the row says "working" instead.
+      durationSeconds: 0,
+      working: true,
+      share: 0,
+    }));
+  // A tool gets exactly one row. The same agent can arrive twice - once as a
+  // running session, once as foreground time under its own executable - and
+  // the two measure overlapping wall-clock, so the longer reading stands
+  // rather than the two being added into a total that never happened.
+  // A tool gets exactly one row: an agent that also spent time in front folds
+  // its foreground minutes into the same line rather than appearing twice.
+  const meterRows = [
+    ...agentRows.map((row) => {
+      const sameTool = todayRows.find((candidate) => candidate.source === row.source);
+      return sameTool === undefined ? row : { ...row, durationSeconds: sameTool.durationSeconds };
+    }),
+    ...todayRows.filter((row) => !agentRows.some((agent) => agent.source === row.source)),
+  ].sort((left, right) => right.durationSeconds - left.durationSeconds);
   // Finished time already on the server plus the stretch still being written.
   // The open stretch also lands on its project's row below, so the breakdown
   // ticks with the clock instead of trailing it by a whole session.
@@ -944,27 +980,16 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             and the day's total under it. Every explanatory sentence this card
             used to carry lives in the "what's recorded" panel instead. */}
         <section className="hero card recording-card" aria-labelledby="recording-heading">
-          {current ? (
-            <>
-              <h2 id="recording-heading" className="hero-title">At it since {new Date(current.since).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</h2>
-              <output className="elapsed" data-testid="elapsed-time" aria-label="Time in this stretch of work">
-                {formatDuration(elapsedSeconds(current.since, now))}
-              </output>
-              <p className="today-line" data-testid="today-line">
-                <strong>{formatHuman(todayTotalSeconds)}</strong> so far today
-              </p>
-            </>
-          ) : (
-            <>
-              <h2 id="recording-heading" className="hero-title">{IDLE_HEADING[state]}</h2>
-              <p className="subtle">{IDLE_BLURB[state]}</p>
-              {todayTotalSeconds > 0 && (
-                <p className="today-line" data-testid="today-line">
-                  <strong>{formatHuman(todayTotalSeconds)}</strong> so far today
-                </p>
-              )}
-            </>
-          )}
+          {/* One number: everything this day has accumulated, whether the app
+              was open for it or not. A separate stretch timer only ever
+              raised the question of which of the two was the real total. */}
+          <h2 id="recording-heading" className="hero-title">
+            {new Date(now).toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" })}
+          </h2>
+          <output className="elapsed" data-testid="elapsed-time" aria-label="Time recorded today">
+            {formatDuration(todayTotalSeconds)}
+          </output>
+          {current === null && <p className="subtle hero-note">{IDLE_BLURB[state]}</p>}
           {projectPickerOpen && (
             <>
               <label className="hero-project">
@@ -1051,7 +1076,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                           pending={quota === undefined || quota.status === "pending"}
                         />
                       )}
-                      <span className="meter-duration">{formatHuman(row.durationSeconds)}</span>
+                      <span className="meter-duration">
+                        {row.durationSeconds === 0 && row.source !== undefined
+                          ? <span className="app-active">working</span>
+                          : formatHuman(row.durationSeconds)}
+                      </span>
                     </li>
                   ))}
                 </ul>

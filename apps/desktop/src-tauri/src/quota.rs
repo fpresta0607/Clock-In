@@ -234,31 +234,38 @@ impl Default for QuotaAxiSource {
     }
 }
 
-fn binary_name() -> &'static str {
+/// Every spelling the tool ships under. npm writes a `.cmd` shim on Windows
+/// and no `.exe` at all, so looking only for an executable image found
+/// nothing and every dial read "unknown" on a machine that had the tool
+/// installed and working.
+fn binary_names() -> &'static [&'static str] {
     if cfg!(windows) {
-        "quota-axi.exe"
+        &["quota-axi.cmd", "quota-axi.exe", "quota-axi"]
     } else {
-        "quota-axi"
+        &["quota-axi"]
     }
 }
 
 /// Where to look for the binary: an explicit override, then whatever `PATH`
-/// resolves, then the user-local install directory the tool ships to.
+/// resolves, then the directories the tool installs into.
 fn default_candidates() -> Vec<PathBuf> {
     if let Some(explicit) = std::env::var_os("CLOCK_IN_QUOTA_AXI").filter(|v| !v.is_empty()) {
         return vec![PathBuf::from(explicit)];
     }
-    let mut candidates = vec![PathBuf::from(binary_name())];
+    let mut candidates: Vec<PathBuf> = binary_names().iter().map(PathBuf::from).collect();
     if let Some(home) = std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
     {
-        candidates.push(
-            PathBuf::from(home)
-                .join(".local")
-                .join("bin")
-                .join(binary_name()),
-        );
+        for name in binary_names() {
+            candidates.push(PathBuf::from(&home).join(".local").join("bin").join(name));
+        }
+    }
+    // npm's global prefix, which is where the tool actually lands on Windows.
+    if let Some(appdata) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
+        for name in binary_names() {
+            candidates.push(PathBuf::from(&appdata).join("npm").join(name));
+        }
     }
     candidates
 }

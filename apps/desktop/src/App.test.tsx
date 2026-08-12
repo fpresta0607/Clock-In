@@ -206,11 +206,10 @@ describe("recording", () => {
   it("shows the stretch of work in progress with nothing to press", async () => {
     render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(recording) })} />);
 
-    // The clock and the day's total: no project name, no explaining sentences.
+    // One accumulated figure for the day, under the date: a second timer for
+    // the open stretch only ever raised the question of which was the total.
     expect(await screen.findByTestId("elapsed-time")).toBeInTheDocument();
-    // The day's figure says "today" in words, so it can never be misread as
-    // more of the stretch above it.
-    expect(await screen.findByTestId("today-line")).toHaveTextContent(/so far today$/);
+    expect(screen.queryByTestId("today-line")).not.toBeInTheDocument();
     expect(screen.queryByText(/Filed here because/)).not.toBeInTheDocument();
     // Nothing in the product starts or stops time any more.
     expect(screen.queryByRole("button", { name: /start/i })).not.toBeInTheDocument();
@@ -220,8 +219,10 @@ describe("recording", () => {
   it("explains an idle machine instead of pretending to record", async () => {
     render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(status) })} />);
 
-    expect(await screen.findByRole("heading", { name: "Nothing to record yet" })).toBeInTheDocument();
-    expect(screen.getByText(/There is nothing to press/)).toBeInTheDocument();
+    // The clock still shows the day's total; the note says why nothing is
+    // being added to it right now.
+    expect(await screen.findByTestId("elapsed-time")).toBeInTheDocument();
+    expect(await screen.findByText(/There is nothing to press/)).toBeInTheDocument();
   });
 
   it("says recording is off, and never implies otherwise", async () => {
@@ -229,8 +230,10 @@ describe("recording", () => {
       monitorStatus: vi.fn().mockResolvedValue({ ...status, enabled: false, running: false, observing: false }),
     })} />);
 
+    // Recording state is a dot and a spoken label beside the project now, so
+    // the surface never has to repeat itself in a heading.
     expect(await screen.findByText("Recording off")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Recording is off" })).toBeInTheDocument();
+    expect(screen.getByText(/Turn recording on/)).toBeInTheDocument();
   });
 
   // The screenshot bug: the timer said RECORDING while the card under it said
@@ -283,11 +286,15 @@ describe("recording", () => {
     })} />);
 
     const rows = within(await screen.findByTestId("session-app-list")).getAllByRole("listitem");
-    // Each is its own row: collapsing them would hide the parallel work.
-    expect(rows[0]).toHaveTextContent(`Claude Code · ${project.name}`);
-    expect(rows[0]).toHaveTextContent("10 min");
-    expect(rows[1]).toHaveTextContent(`Claude Code · ${otherProject.name}`);
-    expect(rows[1]).toHaveTextContent("2 min");
+    const claude = rows.filter((row) => row.textContent?.includes("Claude Code"));
+    // One row for the tool, naming every project its sessions are in. Five
+    // terminals are one tool, not five slices of the day.
+    expect(claude).toHaveLength(1);
+    expect(claude[0]).toHaveTextContent(project.name);
+    expect(claude[0]).toHaveTextContent(otherProject.name);
+    // No minutes of its own: an agent runs beside the editor it lives in, so
+    // its wall-clock would double-count time already counted there.
+    expect(claude[0]).toHaveTextContent("working");
   });
 
   it("renders no recording surfaces when the host cannot report status", async () => {
@@ -295,7 +302,7 @@ describe("recording", () => {
 
     // A host that cannot answer is its own state: the screen says it is still
     // checking rather than borrowing the wording of a healthy idle machine.
-    await screen.findByRole("heading", { name: "Checking this computer…" });
+    expect(await screen.findByText(/asking this computer what it is doing/)).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByText(/^Recording (on|paused|off)$/)).not.toBeInTheDocument());
   });
 

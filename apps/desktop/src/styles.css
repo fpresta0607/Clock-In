@@ -110,6 +110,9 @@ select:disabled { opacity: .55; }
 .hero-title { margin: 0; color: var(--text-secondary); font-size: .7rem; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; }
 .today-line { margin: 10px 0 0; color: var(--text-secondary); font-size: .82rem; font-variant-numeric: tabular-nums; }
 .today-line strong { color: var(--mint); font-weight: 650; }
+.hero-note { margin: 10px 0 0; font-size: .8rem; }
+/* The day's total is the page: green, so it reads as time being kept. */
+.recording-card .elapsed { color: var(--accent-green); }
 
 .hero-project { display: grid; gap: 5px; margin-top: 12px; }
 
