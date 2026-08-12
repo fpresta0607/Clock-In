@@ -20,10 +20,22 @@ static ICON_CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::
 /// PNG data URIs (`data:image/png;base64,...`) for each requested process
 /// name, keyed exactly as asked. A name whose icon cannot be resolved maps
 /// to `None`; the batch itself never fails.
+/// The most names one call resolves. The UI asks for at most a screenful of
+/// rows; anything past this answers None instead of walking the process
+/// table on an attacker-chosen scale.
+const MAX_BATCH: usize = 64;
+
+/// The longest plausible executable name. Longer strings answer None without
+/// being probed or cached, so they cannot grow the cache unboundedly.
+const MAX_NAME_LENGTH: usize = 64;
+
 pub fn lookup(process_names: Vec<String>) -> HashMap<String, Option<String>> {
-    let mut icons = HashMap::with_capacity(process_names.len());
-    for name in process_names {
-        let icon = cached_icon(&normalize(&name));
+    let mut icons = HashMap::with_capacity(process_names.len().min(MAX_BATCH));
+    for (index, name) in process_names.into_iter().enumerate() {
+        let icon = match normalize(&name) {
+            Some(normalized) if index < MAX_BATCH => cached_icon(&normalized),
+            _ => None,
+        };
         icons.insert(name, icon);
     }
     icons
@@ -46,12 +58,22 @@ fn cached_icon(normalized: &str) -> Option<String> {
 /// Windows executable names compare case-insensitively, and callers name the
 /// same app both ways ("Code" and "code.exe"). One canonical spelling keys
 /// the cache and every OS-side comparison.
-fn normalize(name: &str) -> String {
+/// A bare executable name, or None for anything that is not one: path
+/// separators and dot-dot would otherwise flow into a registry subkey path,
+/// and oversized strings would bloat the lifetime cache.
+fn normalize(name: &str) -> Option<String> {
     let mut normalized = name.trim().to_ascii_lowercase();
-    if !normalized.is_empty() && !normalized.ends_with(".exe") {
+    if normalized.is_empty()
+        || normalized.len() > MAX_NAME_LENGTH
+        || normalized.contains(['\\', '/', ':'])
+        || normalized.contains("..")
+    {
+        return None;
+    }
+    if !normalized.ends_with(".exe") {
         normalized.push_str(".exe");
     }
-    normalized
+    Some(normalized)
 }
 
 #[cfg(windows)]
@@ -356,16 +378,35 @@ mod tests {
 
     #[test]
     fn names_normalize_case_insensitively_and_grow_an_exe_suffix() {
-        assert_eq!(normalize("chrome.exe"), "chrome.exe");
-        assert_eq!(normalize("CHROME.EXE"), "chrome.exe");
-        assert_eq!(normalize("Code"), "code.exe");
-        assert_eq!(normalize(" Code.EXE "), "code.exe");
+        assert_eq!(normalize("chrome.exe").as_deref(), Some("chrome.exe"));
+        assert_eq!(normalize("CHROME.EXE").as_deref(), Some("chrome.exe"));
+        assert_eq!(normalize("Code").as_deref(), Some("code.exe"));
+        assert_eq!(normalize(" Code.EXE ").as_deref(), Some("code.exe"));
     }
 
     #[test]
-    fn an_empty_name_stays_empty_rather_than_becoming_a_bare_suffix() {
-        assert_eq!(normalize(""), "");
-        assert_eq!(normalize("   "), "");
+    fn names_that_are_not_bare_executables_are_refused() {
+        assert_eq!(normalize(""), None);
+        assert_eq!(normalize("   "), None);
+        assert_eq!(normalize("..\\Policies\\Explorer"), None);
+        assert_eq!(normalize("tools/thing.exe"), None);
+        assert_eq!(normalize("C:autorun.exe"), None);
+        assert_eq!(normalize(&"x".repeat(65)), None);
+    }
+
+    /// Everything past the batch cap answers None without a probe, so one
+    /// call cannot walk the process table at an attacker-chosen scale.
+    #[test]
+    fn oversized_batches_answer_none_past_the_cap() {
+        let names: Vec<String> = (0..MAX_BATCH + 3)
+            .map(|index| format!("not-a-real-app-{index}"))
+            .collect();
+
+        let icons = lookup(names.clone());
+
+        assert_eq!(icons.len(), MAX_BATCH + 3);
+        assert_eq!(icons[&names[MAX_BATCH]], None);
+        assert_eq!(icons[&names[MAX_BATCH + 2]], None);
     }
 
     /// The batch contract: every requested name gets an entry under exactly

@@ -407,13 +407,24 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     return () => { active = false; };
   }, [bridge, statsRange, signedIn?.user.id, statsTick]);
 
-  // Keeps the Today panel close to live: a slow tick refreshes the totals,
-  // and one immediate refresh follows each finished stretch.
+  // Keeps the Today panel close to live: a slow tick refreshes the totals.
   useEffect(() => {
     if (signedIn === undefined) return undefined;
     const timer = window.setInterval(() => setStatsTick((tick) => tick + 1), 60_000);
     return () => window.clearInterval(timer);
   }, [signedIn?.user.id]);
+
+  // One immediate refresh follows each finished stretch, delayed a beat so
+  // the host's own upload of that session has landed before the refetch.
+  const lastSessionSince = useRef<string | null>(null);
+  useEffect(() => {
+    const since = monitorStatus?.currentSession?.since ?? null;
+    const ended = lastSessionSince.current !== null && since === null;
+    lastSessionSince.current = since;
+    if (!ended) return undefined;
+    const timer = window.setTimeout(() => setStatsTick((tick) => tick + 1), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [monitorStatus?.currentSession?.since]);
 
   // OS icons for the app rows on screen. Missing answers stay null so each
   // executable is looked up once per launch.
@@ -789,21 +800,34 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     : monitorStatus.segmentBacklog + monitorStatus.agentBacklog + monitorStatus.sessionBacklog;
   const appRows = stats === undefined ? [] : buildAppRows(stats.apps);
   const todayRows = stats === undefined ? [] : buildMeterRows(stats.apps);
-  const projectRows = stats === undefined ? [] : stats.projects
-    .filter((entry) => entry.durationSeconds > 0)
-    .sort((a, b) => b.durationSeconds - a.durationSeconds)
-    .map((entry) => ({
-      key: entry.project.id,
+  // Finished time already on the server plus the stretch still being written.
+  // The open stretch also lands on its project's row below, so the breakdown
+  // ticks with the clock instead of trailing it by a whole session. App rows
+  // need no top-up: segments upload within a poll of being recorded.
+  const liveSeconds = current === null ? 0 : elapsedSeconds(current.since, now);
+  const todayTotalSeconds = (stats?.totalDurationSeconds ?? 0) + liveSeconds;
+  const projectTotals = new Map<string, { name: string; color: string | null; durationSeconds: number }>();
+  for (const entry of stats?.projects ?? []) {
+    if (entry.durationSeconds <= 0) continue;
+    projectTotals.set(entry.project.id, {
       name: entry.project.name,
       color: ready.projects.find((item) => item.id === entry.project.id)?.color ?? null,
       durationSeconds: entry.durationSeconds,
-      share: stats.totalDurationSeconds === 0
-        ? 0
-        : Math.round((entry.durationSeconds / stats.totalDurationSeconds) * 100),
-    }));
-  // Finished time already on the server plus the stretch still being written.
-  const todayTotalSeconds = (stats?.totalDurationSeconds ?? 0)
-    + (current === null ? 0 : elapsedSeconds(current.since, now));
+    });
+  }
+  if (current !== null && liveSeconds > 0) {
+    const liveProject = ready.projects.find((item) => item.id === current.projectId);
+    const row = projectTotals.get(current.projectId)
+      ?? { name: liveProject?.name ?? "Unknown project", color: liveProject?.color ?? null, durationSeconds: 0 };
+    projectTotals.set(current.projectId, { ...row, durationSeconds: row.durationSeconds + liveSeconds });
+  }
+  const projectRows = [...projectTotals.entries()]
+    .map(([key, row]) => ({
+      key,
+      ...row,
+      share: todayTotalSeconds === 0 ? 0 : Math.round((row.durationSeconds / todayTotalSeconds) * 100),
+    }))
+    .sort((a, b) => b.durationSeconds - a.durationSeconds || a.name.localeCompare(b.name));
 
   return (
     <main className="app-shell">

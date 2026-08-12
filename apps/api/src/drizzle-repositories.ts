@@ -280,6 +280,15 @@ export class DrizzleAccountStore implements AccountStore {
       // A departing final administrator would strand the remaining members with
       // nobody able to manage the workspace, so refuse the move.
       if (current.role === "admin") {
+        // Serializes concurrent departures from one workspace: without the
+        // lock, two admins each read the other as "still here" and both
+        // leave, stranding the workspace with no self-service recovery.
+        await tx.execute(sql`
+          select ${organizations.id}
+          from ${organizations}
+          where ${organizations.id} = ${previousOrganizationId}
+          for update
+        `);
         const [remainingMember] = await tx
           .select({ id: users.id })
           .from(users)
@@ -305,9 +314,13 @@ export class DrizzleAccountStore implements AccountStore {
         }
       }
       await tx.delete(projectMemberships).where(eq(projectMemberships.userId, subject.userId));
+      // Role never travels: an administrator of the workspace being left is a
+      // plain member of the one being joined, whose admin claim is already
+      // spoken for. Carrying it over would hand out admin in any workspace an
+      // invite code reaches.
       const [moved] = await tx
         .update(users)
-        .set({ organizationId: target.id, updatedAt: new Date() })
+        .set({ organizationId: target.id, role: "member", updatedAt: new Date() })
         .where(eq(users.id, subject.userId))
         .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
       if (moved === undefined) throw new Error("Failed to move the account into its new organization.");

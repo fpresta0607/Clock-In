@@ -512,6 +512,14 @@ integration(integrationDescription, () => {
     expect(joined.status).toBe(200);
     expect((await joined.json()).user.organizationId).toBe(organization.id);
 
+    // Role never travels: the latecomer was the admin of their own solo
+    // workspace, and must arrive in the joined one as a plain member -
+    // otherwise any invite code hands out admin.
+    const movedRole = await database.client<{ role: string }[]>`
+      select role from users where id = ${latecomerId}
+    `;
+    expect(movedRole[0]?.role).toBe("member");
+
     // The move carries project access with it (the side project from the first test included).
     const projects = await latecomerApp.request("/projects", { headers });
     expect((await projects.json()).projects.map((project: { name: string }) => project.name)).toEqual(["General", "Smoke Side Project"]);

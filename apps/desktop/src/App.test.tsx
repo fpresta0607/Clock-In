@@ -242,8 +242,10 @@ describe("recording", () => {
     expect(await screen.findByText(/^Recording on/)).toBeInTheDocument();
     expect(await screen.findByTestId("elapsed-time")).toBeInTheDocument();
 
-    // The live surface on the main page.
-    expect(await screen.findByTestId("today-panel-empty")).not.toHaveTextContent(/turn (on )?recording/i);
+    // The live surface shows the open stretch on its project's row rather
+    // than an empty state telling anyone to do anything.
+    expect(await screen.findByTestId("project-list")).not.toHaveTextContent(/turn (on )?recording/i);
+    expect(screen.queryByTestId("today-panel-empty")).not.toBeInTheDocument();
 
     // And the historical one behind "All stats", which is where the
     // contradiction used to be printed.
@@ -548,8 +550,9 @@ describe("the what's-recorded panel", () => {
 describe("the today panel", () => {
   it("lays out where today's time went: projects first, then apps in one row each", async () => {
     render(<App bridge={bridgeFor({
+      // No open stretch: the rows below are exactly the server totals.
       monitorStatus: vi.fn().mockResolvedValue({
-        ...recording,
+        ...status,
         agentActive: { source: "claude_code", since: "2026-08-06T14:10:00.000Z" },
       }),
       meStats: vi.fn().mockResolvedValue({
@@ -603,6 +606,25 @@ describe("the today panel", () => {
     expect(within(list).getByText("Claude Code")).toBeInTheDocument();
     expect(within(list).getByText("Codex")).toBeInTheDocument();
     expect(within(list).queryByText("Agent CLIs")).not.toBeInTheDocument();
+  });
+
+  it("adds the open stretch to its project's row so the breakdown ticks with the clock", async () => {
+    const live = {
+      ...recording,
+      currentSession: {
+        ...recording.currentSession,
+        since: new Date(Date.now() - 30_000).toISOString(),
+      },
+    };
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(live),
+      // The server knows nothing yet; the row below exists purely live.
+      meStats: vi.fn().mockResolvedValue({ ...meStats, totalDurationSeconds: 0, apps: [], projects: [] }),
+    })} />);
+
+    const projects = within(await screen.findByTestId("project-list")).getAllByRole("listitem");
+    expect(projects[0]).toHaveTextContent("Field work");
+    expect(projects[0]).toHaveTextContent(/sec/);
   });
 
   it("shows the OS icon for an app when the host has one", async () => {
