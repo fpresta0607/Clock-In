@@ -454,9 +454,8 @@ export const meStatsFiltersSchema = z
     toExclusiveAt: timestampSchema.optional(),
     /**
      * Names a teammate in the caller's workspace, so the leaderboard can open
-     * one member's breakdown. Absent means the caller. A member of another
-     * workspace reads as empty rather than forbidden: every query underneath is
-     * scoped to the caller's organization first.
+     * one member's breakdown. Absent means the caller. An id from outside the
+     * workspace is a stable not_found, the same answer the org report gives.
      */
     userId: idSchema.optional(),
   })

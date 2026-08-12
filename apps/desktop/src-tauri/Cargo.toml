@@ -5,8 +5,7 @@ edition = "2021"
 # 1.89 for `File::try_lock`, the spool's interprocess lock.
 rust-version = "1.89"
 publish = false
-# Three bin targets exist (the app, clock-in-hook, clock-in-browser-host);
-# name the app explicitly.
+# Two bin targets exist (the app and clock-in-hook); name the app explicitly.
 default-run = "clock-in-desktop"
 
 [lib]

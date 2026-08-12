@@ -200,7 +200,9 @@ export interface TimerBridge {
   login(input: LoginInput): Promise<AccountSnapshot>;
   signup(input: SignupInput): Promise<AccountSnapshot>;
   logout(): Promise<void>;
-  orgOverview(): Promise<OrganizationOverview>;
+  /// The workspace board. Instant bounds scope the entries; both absent
+  /// means all time.
+  orgOverview(fromAt?: string, toExclusiveAt?: string): Promise<OrganizationOverview>;
   orgJoin(inviteCode: string): Promise<OrganizationOverview>;
   monitorStatus(): Promise<MonitorStatus>;
   /// Pins recording to one project, or clears the pin with `null`.
@@ -574,7 +576,7 @@ export const defaultBridge: TimerBridge = {
   login: (input) => invokeDecoded("auth_login", decodeAccountSnapshot, { input }),
   signup: (input) => invokeDecoded("auth_signup", decodeAccountSnapshot, { input }),
   logout: () => invokeDecoded("auth_logout", decodeVoid),
-  orgOverview: () => invokeDecoded("org_overview", decodeOrganizationOverview),
+  orgOverview: (fromAt, toExclusiveAt) => invokeDecoded("org_overview", decodeOrganizationOverview, { fromAt, toExclusiveAt }),
   orgJoin: (inviteCode) => invokeDecoded("org_join", decodeOrganizationOverview, { input: { inviteCode } }),
   monitorStatus: () => invokeDecoded("monitor_status", decodeMonitorStatus),
   sessionSelectProject: (projectId) => invokeDecoded("session_select_project", decodeMonitorStatus, { projectId }),
