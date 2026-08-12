@@ -171,6 +171,11 @@ export interface TimerBridge {
   pathMappingsCreate(input: PathMappingCreateInput): Promise<PathMapping>;
   pathMappingsUpdate(id: string, input: PathMappingUpdateInput): Promise<PathMapping>;
   pathMappingsDelete(id: string): Promise<void>;
+  /// OS icons for executables, as data URIs; null where the OS has none.
+  appIcons(processNames: readonly string[]): Promise<Record<string, string | null>>;
+  /// Subscribes to "an update is downloading" notices; resolves to the
+  /// unsubscribe function.
+  onUpdateAvailable(handler: (version: string) => void): Promise<() => void>;
 }
 
 type TauriInvoke = <Result>(command: string, args?: Record<string, unknown>) => Promise<Result>;
@@ -188,6 +193,16 @@ const record = (value: unknown): Record<string, unknown> => {
 const string = (value: unknown): string => {
   if (typeof value !== "string") invalidResponse();
   return value as string;
+};
+
+const decodeAppIcons = (value: unknown): Record<string, string | null> => {
+  const raw = record(value);
+  const icons: Record<string, string | null> = {};
+  for (const [name, icon] of Object.entries(raw)) {
+    if (icon !== null && typeof icon !== "string") invalidResponse();
+    icons[name] = icon as string | null;
+  }
+  return icons;
 };
 
 const uuid = (value: unknown): string => {
@@ -463,6 +478,11 @@ export const defaultBridge: TimerBridge = {
   pathMappingsCreate: (input) => invokeDecoded("path_mappings_create", decodePathMapping, { input }),
   pathMappingsUpdate: (id, input) => invokeDecoded("path_mappings_update", decodePathMapping, { id, input }),
   pathMappingsDelete: (id) => invokeDecoded("path_mappings_delete", decodeVoid, { id }),
+  appIcons: (processNames) => invokeDecoded("app_icons", decodeAppIcons, { processNames }),
+  onUpdateAvailable: async (handler) => {
+    const { listen } = await import("@tauri-apps/api/event");
+    return listen<string>("update-available", (event) => handler(event.payload));
+  },
 };
 
 export const bridgeError = (error: unknown): BridgeError => {

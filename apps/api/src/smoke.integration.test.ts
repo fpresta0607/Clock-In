@@ -41,6 +41,7 @@ integration(integrationDescription, () => {
   const authUserId = randomUUID();
   let app: ReturnType<typeof createApp>;
   let authorized: Record<string, string>;
+  let auth: Awaited<ReturnType<typeof createTestAuth>>;
 
   beforeAll(async () => {
     if (!databaseUrl) return;
@@ -53,7 +54,7 @@ integration(integrationDescription, () => {
     });
     await runMigrations(database);
 
-    const auth = await createTestAuth(config, new Date());
+    auth = await createTestAuth(config, new Date());
     authorized = {
       authorization: await auth.bearer(authUserId, { email: "smoke@clock-in.test", name: "Smoke User" }),
       "content-type": "application/json",
@@ -83,13 +84,6 @@ integration(integrationDescription, () => {
     expect(user).toMatchObject({ id: authUserId, email: "smoke@clock-in.test", name: "Smoke User" });
     expect(user.organizationId).toMatch(/^[0-9a-f-]{36}$/i);
 
-    const creatorClaims = await database.client`
-      select user_id, kind from organization_admin_claims where organization_id = ${user.organizationId}
-    `;
-    expect(creatorClaims).toEqual([{ user_id: authUserId, kind: "creator" }]);
-    const creatorClaim = await app.request("/organization/claim-admin", { method: "POST", headers: authorized });
-    expect(creatorClaim.status).toBe(409);
-
     // A second request must reuse the provisioned account rather than create another.
     const repeat = await app.request("/me", { headers: authorized });
     expect((await repeat.json()).user.organizationId).toBe(user.organizationId);
@@ -98,7 +92,7 @@ integration(integrationDescription, () => {
     expect(projects.status).toBe(200);
     const listed = (await projects.json()).projects;
     expect(listed).toHaveLength(1);
-    expect(listed[0]).toMatchObject({ name: "General Work", isArchived: false, isDefault: true });
+    expect(listed[0]).toMatchObject({ name: "General", isArchived: false });
     const projectId = listed[0].id;
 
     const created = await app.request("/projects", {
@@ -110,7 +104,7 @@ integration(integrationDescription, () => {
     const createdProject = await created.json();
     expect(createdProject).toMatchObject({ name: "Smoke Side Project", isArchived: false });
     const relisted = (await (await app.request("/projects", { headers: authorized })).json()).projects;
-    expect(relisted.map((project: { name: string }) => project.name)).toEqual(["General Work", "Smoke Side Project"]);
+    expect(relisted.map((project: { name: string }) => project.name)).toEqual(["General", "Smoke Side Project"]);
 
     const startedAt = new Date(Date.now() - 60_000).toISOString();
     const start = await app.request("/sessions", {
@@ -158,18 +152,112 @@ integration(integrationDescription, () => {
     expect(statsBody.apps).toEqual([]);
   }, 60_000);
 
-  it("repairs a legacy workspace once, keeps selections private, and replaces its default safely", async () => {
+  it("records the creator's admin claim when provisioning a workspace", async () => {
+    const creatorId = randomUUID();
+    const headers = {
+      authorization: await auth.bearer(creatorId, { email: "claim-creator@clock-in.test", name: "Claim Creator" }),
+      "content-type": "application/json",
+    };
+    const me = await app.request("/me", { headers });
+    expect(me.status).toBe(200);
+    const { user } = await me.json();
+
+    const creatorClaims = await database.client`
+      select user_id, kind from organization_admin_claims where organization_id = ${user.organizationId}
+    `;
+    expect(creatorClaims).toEqual([{ user_id: creatorId, kind: "creator" }]);
+    const creatorClaim = await app.request("/organization/claim-admin", { method: "POST", headers });
+    expect(creatorClaim.status).toBe(409);
+  }, 60_000);
+
+  // The desktop's real recording path: the monitor observes work, spools it,
+  // and the uploader replays the spool as these two batch posts. This is the
+  // wire flow that goes stale first when the schema and the app drift apart.
+  it("records an observed session with its segments and reports it in stats", async () => {
+    const observerId = randomUUID();
+    const observer = {
+      authorization: await auth.bearer(observerId, {
+        email: "observer@clock-in.test",
+        name: "Observer User",
+      }),
+      "content-type": "application/json",
+    };
+    await app.request("/me", { headers: observer });
+    const projects = (await (await app.request("/projects", { headers: observer })).json()).projects;
+    const projectId = projects[0].id;
+
+    const deviceId = randomUUID();
+    const startedAt = new Date(Date.now() - 120_000).toISOString();
+    const stoppedAt = new Date(Date.now() - 30_000).toISOString();
+
+    // Exactly what the desktop uploader puts on the wire, in its order:
+    // segments first, then the finished session.
+    const segments = await app.request("/activity/segments", {
+      method: "POST",
+      headers: observer,
+      body: JSON.stringify({
+        segments: [{
+          clientId: randomUUID(),
+          deviceId,
+          kind: "active",
+          processName: "code.exe",
+          startedAt,
+          endedAt: stoppedAt,
+        }],
+      }),
+    });
+    expect(segments.status).toBe(200);
+    expect((await segments.json()).rejected).toEqual([]);
+
+    const sessionClientId = randomUUID();
+    const observedBatch = {
+      sessions: [{
+        clientId: sessionClientId,
+        projectId,
+        attribution: "default",
+        startedAt,
+        stoppedAt,
+        idleSeconds: 0,
+      }],
+    };
+    const observed = await app.request("/sessions/observed", {
+      method: "POST",
+      headers: observer,
+      body: JSON.stringify(observedBatch),
+    });
+    expect(observed.status).toBe(200);
+    expect((await observed.json()).rejected).toEqual([]);
+
+    // The spool replays identical payloads after a failed ack; the replay
+    // must land as the same session, not a duplicate.
+    const replay = await app.request("/sessions/observed", {
+      method: "POST",
+      headers: observer,
+      body: JSON.stringify(observedBatch),
+    });
+    expect(replay.status).toBe(200);
+    expect((await replay.json()).rejected).toEqual([]);
+
+    const today = new Date().toISOString().slice(0, 10);
+    const stats = await app.request(`/me/stats?from=${today}&to=${today}`, { headers: observer });
+    if (stats.status !== 200) console.log("stats body:", await stats.clone().text());
+    expect(stats.status).toBe(200);
+    const statsBody = await stats.json();
+    expect(statsBody.totalDurationSeconds).toBe(90);
+    expect(statsBody.apps).toEqual([{ processName: "code.exe", durationSeconds: 90 }]);
+  }, 60_000);
+
+  it("bootstraps a legacy workspace with one first-admin claim and keeps a member's new project private", async () => {
     const organizationId = randomUUID();
     const firstUserId = randomUUID();
     const secondUserId = randomUUID();
     const otherOrganizationId = randomUUID();
     const otherUserId = randomUUID();
-    const otherInviteCode = "ACDEF-GHJKM";
     await database.client`
       insert into organizations (id, name, invite_code)
       values
         (${organizationId}, 'Legacy workspace', ${randomUUID().replaceAll("-", "")}),
-        (${otherOrganizationId}, 'Other workspace', ${otherInviteCode})
+        (${otherOrganizationId}, 'Other workspace', ${randomUUID().replaceAll("-", "")})
     `;
     await database.client`
       insert into users (id, organization_id, email, name)
@@ -204,23 +292,15 @@ integration(integrationDescription, () => {
       "content-type": "application/json",
     };
 
-    const firstResponses = await Promise.all([
-      legacyApp.request("/projects", { headers: firstHeaders }),
-      legacyApp.request("/projects", { headers: firstHeaders }),
-    ]);
-    const firstLists = await Promise.all(firstResponses.map((response) => response.json()));
-    const defaultIds = firstLists.map((list) => list.selectedProjectId);
-    expect(new Set(defaultIds).size).toBe(1);
-    expect(firstLists.every((list) => list.projects.length === 1 && list.projects[0].name === "General Work" && list.projects[0].isDefault)).toBe(true);
+    // The server no longer repairs legacy workspaces with a starter project:
+    // both members see an empty list, and the desktop app is what creates a
+    // default project at sign-in when the account has none.
+    const firstList = await legacyApp.request("/projects", { headers: firstHeaders });
+    expect(firstList.status).toBe(200);
+    expect((await firstList.json()).projects).toEqual([]);
+    const secondList = await secondApp.request("/projects", { headers: secondHeaders });
+    expect((await secondList.json()).projects).toEqual([]);
 
-    const defaultProjectId = defaultIds[0] as string;
-    const defaultMemberships = await database.client`
-      select user_id from project_memberships
-      where organization_id = ${organizationId} and project_id = ${defaultProjectId}
-    `;
-    expect(defaultMemberships.map((membership) => membership.user_id).sort()).toEqual(
-      [firstUserId, secondUserId].sort(),
-    );
     const legacyRoles = await database.client`
       select id, role from users where organization_id = ${organizationId} order by id
     `;
@@ -229,19 +309,6 @@ integration(integrationDescription, () => {
       { id: secondUserId, role: "member" },
     ].sort((left, right) => left.id.localeCompare(right.id)));
     await expect(legacyAccounts.claimFirstAdmin({ organizationId, userId: otherUserId })).resolves.toEqual({ kind: "not_member" });
-    const secondList = await secondApp.request("/projects", { headers: secondHeaders });
-    const secondProjectsBeforeReplacement = await secondList.json();
-    expect(secondProjectsBeforeReplacement.selectedProjectId).toBe(defaultProjectId);
-
-    const lockedRename = await legacyApp.request(`/projects/${defaultProjectId}`, {
-      method: "PATCH",
-      headers: firstHeaders,
-      body: JSON.stringify({ name: "Shared Work" }),
-    });
-    expect(lockedRename.status).toBe(403);
-    await expect(lockedRename.json()).resolves.toMatchObject({
-      error: { code: "forbidden", message: expect.stringContaining("claim the first admin role") },
-    });
 
     if (disposable === undefined) throw new Error("The disposable smoke database is required for this test.");
     const firstClaimant = createDatabase(disposable.databaseUrl, { max: 1 });
@@ -270,150 +337,31 @@ integration(integrationDescription, () => {
     }
 
     // Either concurrent active member may win the tenant-scoped first-admin
-    // claim. The winner can administer the default project immediately; the
-    // losing member remains unable to do so.
+    // claim. The winner is promoted to administrator; the losing member's
+    // later claim still refuses, because the organization's claim is spent.
     const administratorApp = firstClaimWon ? legacyApp : secondApp;
     const administratorHeaders = firstClaimWon ? firstHeaders : secondHeaders;
     const memberApp = firstClaimWon ? secondApp : legacyApp;
     const memberHeaders = firstClaimWon ? secondHeaders : firstHeaders;
     const administratorId = firstClaimWon ? firstUserId : secondUserId;
 
-    const blockedMove = await administratorApp.request("/organization/join", {
-      method: "POST",
-      headers: administratorHeaders,
-      body: JSON.stringify({ inviteCode: otherInviteCode }),
-    });
-    expect(blockedMove.status).toBe(409);
-    await expect(blockedMove.json()).resolves.toMatchObject({
-      error: { code: "conflict", message: expect.stringContaining("first administrator") },
-    });
-    const administratorAfterBlockedMove = await database.client`
+    const promoted = await database.client`
       select organization_id, role from users where id = ${administratorId}
     `;
-    expect(administratorAfterBlockedMove).toEqual([{ organization_id: organizationId, role: "admin" }]);
+    expect(promoted).toEqual([{ organization_id: organizationId, role: "admin" }]);
+    const reclaim = await memberApp.request("/organization/claim-admin", { method: "POST", headers: memberHeaders });
+    expect(reclaim.status).toBe(409);
 
-    const soloOrganizationId = randomUUID();
-    const soloUserId = randomUUID();
-    const joiningUserId = randomUUID();
-    const soloInviteCode = "JKLMN-PQRST";
-    await database.client`
-      insert into organizations (id, name, invite_code)
-      values (${soloOrganizationId}, 'Solo legacy workspace', ${soloInviteCode})
-    `;
-    await database.client`
-      insert into users (id, organization_id, email, name)
-      values (${soloUserId}, ${soloOrganizationId}, 'solo-legacy@clock-in.test', 'Solo Legacy')
-    `;
-    await expect(legacyAccounts.claimFirstAdmin({ organizationId: soloOrganizationId, userId: soloUserId }))
-      .resolves.toMatchObject({ kind: "claimed" });
-
-    if (disposable === undefined) throw new Error("The disposable smoke database is required for this test.");
-    const mover = createDatabase(disposable.databaseUrl, { max: 1 });
-    const joiner = createDatabase(disposable.databaseUrl, { max: 1 });
-    try {
-      const moverAuth = await createTestAuth(config, new Date());
-      const joinerAuth = await createTestAuth(config, new Date());
-      const moverApp = createApp({ config, keys: moverAuth.keys, accounts: new DrizzleAccountStore(mover.db) });
-      const joinerApp = createApp({ config, keys: joinerAuth.keys, accounts: new DrizzleAccountStore(joiner.db) });
-      const moverHeaders = {
-        authorization: await moverAuth.bearer(soloUserId, { email: "solo-legacy@clock-in.test", name: "Solo Legacy" }),
-        "content-type": "application/json",
-      };
-      const joinerHeaders = {
-        authorization: await joinerAuth.bearer(joiningUserId, { email: "joining@clock-in.test", name: "Joining Member" }),
-        "content-type": "application/json",
-      };
-      const [move, join] = await Promise.all([
-        moverApp.request("/organization/join", {
-          method: "POST",
-          headers: moverHeaders,
-          body: JSON.stringify({ inviteCode: otherInviteCode }),
-        }),
-        joinerApp.request("/accounts", {
-          method: "POST",
-          headers: joinerHeaders,
-          body: JSON.stringify({ inviteCode: soloInviteCode }),
-        }),
-      ]);
-
-      expect([[200, 404], [200, 409]]).toContainEqual([move.status, join.status].sort());
-      const remaining = await database.client`
-        select id, role from users where organization_id = ${soloOrganizationId} order by id
-      `;
-      if (move.status === 200) {
-        expect(join.status).toBe(404);
-        expect(remaining).toEqual([]);
-      } else {
-        expect(move.status).toBe(409);
-        expect(join.status).toBe(200);
-        expect(remaining).toEqual([
-          { id: joiningUserId, role: "member" },
-          { id: soloUserId, role: "admin" },
-        ].sort((left, right) => left.id.localeCompare(right.id)));
-      }
-    } finally {
-      await Promise.all([
-        mover.client.end({ timeout: 5 }),
-        joiner.client.end({ timeout: 5 }),
-      ]);
-    }
-
-    const defaultStart = await administratorApp.request("/sessions", {
-      method: "POST",
-      headers: administratorHeaders,
-      body: JSON.stringify({ clientId: randomUUID(), deviceId: randomUUID(), description: "Legacy default" }),
-    });
-    expect(defaultStart.status).toBe(200);
-    expect((await defaultStart.json()).session.projectId).toBe(defaultProjectId);
-
-    const renamed = await administratorApp.request(`/projects/${defaultProjectId}`, {
-      method: "PATCH",
-      headers: administratorHeaders,
-      body: JSON.stringify({ name: "Shared Work" }),
-    });
-    expect(renamed.status).toBe(200);
-    expect(await renamed.json()).toMatchObject({ id: defaultProjectId, name: "Shared Work", isDefault: true });
-
-    const memberRename = await memberApp.request(`/projects/${defaultProjectId}`, {
-      method: "PATCH",
-      headers: memberHeaders,
-      body: JSON.stringify({ name: "Member cannot rename" }),
-    });
-    expect(memberRename.status).toBe(403);
-
+    // A project one member creates stays invisible to the other member.
     const privateCreate = await administratorApp.request("/projects", {
       method: "POST",
       headers: administratorHeaders,
       body: JSON.stringify({ name: "Restricted work" }),
     });
+    expect(privateCreate.status).toBe(201);
     const privateProject = await privateCreate.json();
-    const memberBeforeReplacement = await memberApp.request("/projects", { headers: memberHeaders });
-    expect((await memberBeforeReplacement.json()).projects.map((project: { id: string }) => project.id)).not.toContain(privateProject.id);
-    const restrictedCreate = await memberApp.request("/projects", {
-      method: "POST",
-      headers: memberHeaders,
-      body: JSON.stringify({ name: "Teammate-only work" }),
-    });
-    const restrictedProject = await restrictedCreate.json();
-
-    const inaccessibleReplacement = await administratorApp.request(`/projects/${defaultProjectId}`, {
-      method: "PATCH",
-      headers: administratorHeaders,
-      body: JSON.stringify({ isArchived: true, replacementProjectId: restrictedProject.id }),
-    });
-    expect(inaccessibleReplacement.status).toBe(400);
-    const replacement = await administratorApp.request(`/projects/${defaultProjectId}`, {
-      method: "PATCH",
-      headers: administratorHeaders,
-      body: JSON.stringify({ isArchived: true, replacementProjectId: privateProject.id }),
-    });
-    expect(replacement.status).toBe(200);
-    expect((await replacement.json())).toMatchObject({ id: defaultProjectId, isArchived: true, isDefault: false });
-
-    const memberAfterReplacement = await memberApp.request("/projects", { headers: memberHeaders });
-    const memberProjects = await memberAfterReplacement.json();
-    expect(memberProjects.selectedProjectId).toBe(privateProject.id);
-    expect(memberProjects.projects).toContainEqual(expect.objectContaining({ id: privateProject.id, isDefault: true }));
+    const memberProjects = await memberApp.request("/projects", { headers: memberHeaders });
+    expect((await memberProjects.json()).projects.map((project: { id: string }) => project.id)).not.toContain(privateProject.id);
   }, 60_000);
 
   it("keeps another account's data out of this account's projects and reports", async () => {
@@ -433,7 +381,7 @@ integration(integrationDescription, () => {
     };
 
     const projects = await otherApp.request("/projects", { headers });
-    expect((await projects.json()).projects.map((project: { name: string }) => project.name)).toEqual(["General Work"]);
+    expect((await projects.json()).projects.map((project: { name: string }) => project.name)).toEqual(["General"]);
 
     const report = await otherApp.request("/reports", { headers });
     expect((await report.json()).rows).toEqual([]);
@@ -475,7 +423,7 @@ integration(integrationDescription, () => {
     // Joining grants access to the organization's existing projects.
     const teammateProjects = await teammateApp.request("/projects", { headers: teammateAuth });
     const sharedProject = (await teammateProjects.json()).projects[0];
-    expect(sharedProject.name).toBe("General Work");
+    expect(sharedProject.name).toBe("General");
 
     const teammateStart = new Date(Date.now() - 1_800_000).toISOString();
     const started = await teammateApp.request("/sessions", {
@@ -564,9 +512,17 @@ integration(integrationDescription, () => {
     expect(joined.status).toBe(200);
     expect((await joined.json()).user.organizationId).toBe(organization.id);
 
+    // Role never travels: the latecomer was the admin of their own solo
+    // workspace, and must arrive in the joined one as a plain member -
+    // otherwise any invite code hands out admin.
+    const movedRole = await database.client<{ role: string }[]>`
+      select role from users where id = ${latecomerId}
+    `;
+    expect(movedRole[0]?.role).toBe("member");
+
     // The move carries project access with it (the side project from the first test included).
     const projects = await latecomerApp.request("/projects", { headers });
-    expect((await projects.json()).projects.map((project: { name: string }) => project.name)).toEqual(["General Work", "Smoke Side Project"]);
+    expect((await projects.json()).projects.map((project: { name: string }) => project.name)).toEqual(["General", "Smoke Side Project"]);
 
     // The abandoned personal workspace is gone rather than left behind.
     const abandoned = await database.client<{ total: number }[]>`
@@ -686,7 +642,13 @@ integration(integrationDescription, () => {
 
 
 
-  it("clips completed totals at a local DST calendar boundary in SQL", async () => {
+  // Since f2cb540 a completed session is never clipped: it counts whole in the
+  // range containing its start instant. Activity-segment app totals still clip
+  // to the requested bounds in SQL. Both are locked here at the DST-shifted
+  // local day the dashboard actually sends (2026-03-08 in America/Chicago is a
+  // 23-hour day, 06:00Z to 05:00Z the next day), because those instant bounds
+  // bind through raw sql`` interpolation only against a real server.
+  it("buckets sessions by start instant at a local DST boundary while app totals clip in SQL", async () => {
     const me = await app.request("/me", { headers: authorized });
     expect(me.status).toBe(200);
     const { user } = await me.json();
@@ -699,6 +661,7 @@ integration(integrationDescription, () => {
     expect(created.status).toBe(201);
     const projectId = (await created.json()).id;
 
+    // Straddles the boundary: started on local March 7, stopped on local March 8.
     const startedAt = new Date("2026-03-08T05:30:00.000Z");
     const stoppedAt = new Date("2026-03-08T06:30:00.000Z");
     await database.client`
@@ -720,48 +683,70 @@ integration(integrationDescription, () => {
       )
     `;
 
-    const response = await app.request(
-      "/me/stats?fromAt=2026-03-08T06%3A00%3A00.000Z&toExclusiveAt=2026-03-09T05%3A00%3A00.000Z",
-      { headers: authorized },
-    );
-    expect(response.status).toBe(200);
-    const body = await response.json();
-    expect(body.projects).toContainEqual({
-      project: { id: projectId, name: "DST Boundary Project" },
-      durationSeconds: 1_800,
-      attributedSeconds: 1_800,
-      sessionCount: 1,
-    });
+    const priorDay = "fromAt=2026-03-07T06%3A00%3A00.000Z&toExclusiveAt=2026-03-08T06%3A00%3A00.000Z";
+    const dstDay = "fromAt=2026-03-08T06%3A00%3A00.000Z&toExclusiveAt=2026-03-09T05%3A00%3A00.000Z";
 
-    const reports = await app.request(
-      "/reports?fromAt=2026-03-08T06%3A00%3A00.000Z&toExclusiveAt=2026-03-09T05%3A00%3A00.000Z",
-      { headers: authorized },
-    );
-    expect(reports.status).toBe(200);
-    const reportBody = await reports.json();
-    expect(reportBody.totalDurationSeconds).toBe(1_800);
-    expect(reportBody.rows).toContainEqual(expect.objectContaining({
+    // The day the session started owns all 3600 seconds of it; the activity
+    // segment contributes only its half hour inside each day's bounds.
+    const priorStats = await app.request(`/me/stats?${priorDay}`, { headers: authorized });
+    expect(priorStats.status).toBe(200);
+    const priorStatsBody = await priorStats.json();
+    expect(priorStatsBody.totalDurationSeconds).toBe(3_600);
+    expect(priorStatsBody.projects).toEqual([{
       project: { id: projectId, name: "DST Boundary Project" },
-      durationSeconds: 1_800,
-      attributedSeconds: 1_800,
+      durationSeconds: 3_600,
+      attributedSeconds: 3_600,
+      unattributedSeconds: 0,
+      sessionCount: 1,
+    }]);
+    expect(priorStatsBody.apps).toEqual([{ processName: "clock-in.exe", durationSeconds: 1_800 }]);
+
+    const dstStats = await app.request(`/me/stats?${dstDay}`, { headers: authorized });
+    expect(dstStats.status).toBe(200);
+    const dstStatsBody = await dstStats.json();
+    expect(dstStatsBody.totalDurationSeconds).toBe(0);
+    expect(dstStatsBody.projects).toEqual([]);
+    expect(dstStatsBody.apps).toEqual([{ processName: "clock-in.exe", durationSeconds: 1_800 }]);
+
+    const priorReports = await app.request(`/reports?${priorDay}`, { headers: authorized });
+    expect(priorReports.status).toBe(200);
+    const priorReportBody = await priorReports.json();
+    expect(priorReportBody.totalDurationSeconds).toBe(3_600);
+    expect(priorReportBody.rows).toContainEqual(expect.objectContaining({
+      project: { id: projectId, name: "DST Boundary Project" },
+      durationSeconds: 3_600,
+      attributedSeconds: 3_600,
     }));
 
-    const leaderboard = await app.request(
-      "/reports/leaderboard?fromAt=2026-03-08T06%3A00%3A00.000Z&toExclusiveAt=2026-03-09T05%3A00%3A00.000Z",
-      { headers: authorized },
-    );
-    expect(leaderboard.status).toBe(200);
-    const leaderboardBody = await leaderboard.json();
-    expect(leaderboardBody.totalDurationSeconds).toBe(1_800);
-    expect(leaderboardBody.entries).toContainEqual(expect.objectContaining({
+    const dstReports = await app.request(`/reports?${dstDay}`, { headers: authorized });
+    expect(dstReports.status).toBe(200);
+    const dstReportBody = await dstReports.json();
+    expect(dstReportBody.totalDurationSeconds).toBe(0);
+    expect(dstReportBody.rows).toEqual([]);
+
+    const priorBoard = await app.request(`/reports/leaderboard?${priorDay}`, { headers: authorized });
+    expect(priorBoard.status).toBe(200);
+    const priorBoardBody = await priorBoard.json();
+    expect(priorBoardBody.totalDurationSeconds).toBe(3_600);
+    expect(priorBoardBody.entries).toEqual([expect.objectContaining({
       user: { id: user.id, name: user.name },
-      durationSeconds: 1_800,
-      attributedSeconds: 1_800,
+      durationSeconds: 3_600,
+      attributedSeconds: 3_600,
       sessionCount: 1,
-    }));
+    })]);
+
+    const dstBoard = await app.request(`/reports/leaderboard?${dstDay}`, { headers: authorized });
+    expect(dstBoard.status).toBe(200);
+    const dstBoardBody = await dstBoard.json();
+    expect(dstBoardBody.totalDurationSeconds).toBe(0);
+    expect(dstBoardBody.entries).toEqual([]);
   }, 60_000);
 
-  it("rejects clipped legacy idle time with unrelated overlapping device evidence", async () => {
+  // Since f2cb540, idle is subtracted when a session is recorded, not
+  // reconciled against device evidence at read time: a legacy row reports
+  // whole in the range containing its start, and overlapping idle segments
+  // from an unrelated device never change its totals.
+  it("reports a legacy idle session whole in its start range, untouched by overlapping idle evidence", async () => {
     const me = await app.request("/me", { headers: authorized });
     expect(me.status).toBe(200);
     const { user } = await me.json();
@@ -801,31 +786,48 @@ integration(integrationDescription, () => {
       }),
     });
     expect(activity.status).toBe(200);
+    expect((await activity.json()).rejected).toEqual([]);
 
+    // Legacy manual rows never carried a device, and still do not.
     const stored = await database.client`
       select device_id from time_sessions where id = ${sessionId}
     `;
     expect(stored).toEqual([{ device_id: null }]);
 
-    const response = await app.request(
+    const startRange = await app.request(
       `/reports?projectId=${projectId}&fromAt=2026-08-02T10%3A00%3A00.000Z&toExclusiveAt=2026-08-02T11%3A00%3A00.000Z&page=1&pageSize=50`,
       { headers: authorized },
     );
-    expect(response.status).toBe(400);
-    const body = await response.json();
-    expect(body).toEqual({
-      error: {
-        code: "validation_error",
-        message: "This range includes time without enough activity evidence to clip exactly.",
-      },
-    });
+    expect(startRange.status).toBe(200);
+    const startRangeBody = await startRange.json();
+    expect(startRangeBody.totalDurationSeconds).toBe(3_600);
+    expect(startRangeBody.rows).toEqual([expect.objectContaining({
+      id: sessionId,
+      idleSeconds: 3_600,
+      durationSeconds: 3_600,
+      attribution: "manual",
+    })]);
+
+    // The range covering the rest of the session reports nothing, because
+    // completed sessions are never split across ranges.
+    const laterRange = await app.request(
+      `/reports?projectId=${projectId}&fromAt=2026-08-02T11%3A00%3A00.000Z&toExclusiveAt=2026-08-02T12%3A00%3A00.000Z&page=1&pageSize=50`,
+      { headers: authorized },
+    );
+    expect(laterRange.status).toBe(200);
+    const laterRangeBody = await laterRange.json();
+    expect(laterRangeBody.totalDurationSeconds).toBe(0);
+    expect(laterRangeBody.rows).toEqual([]);
   }, 60_000);
 
-  it("rejects a clipped device session when its idle intervals are missing", async () => {
+  // The manual timer is retired, but README still promises an older installed
+  // build can finish and upload the work it started. Lock that the deprecated
+  // start/stop path records idle-subtracted totals and buckets by start.
+  it("still records a deprecated manual session and reports it whole in its start range", async () => {
     const created = await app.request("/projects", {
       method: "POST",
       headers: authorized,
-      body: JSON.stringify({ name: "Unreconciled Idle Range Project" }),
+      body: JSON.stringify({ name: "Deprecated Timer Project" }),
     });
     expect(created.status).toBe(201);
     const projectId = (await created.json()).id;
@@ -852,17 +854,34 @@ integration(integrationDescription, () => {
       body: JSON.stringify({ stoppedAt: stoppedAt.toISOString(), idleSeconds: 30 }),
     });
     expect(stopped.status).toBe(200);
+    expect((await stopped.json()).session).toMatchObject({
+      status: "stopped",
+      idleSeconds: 30,
+      durationSeconds: 30,
+      attribution: "manual",
+    });
 
-    const response = await app.request(
+    const startRange = await app.request(
       `/reports?projectId=${projectId}&fromAt=${encodeURIComponent(startedAt.toISOString())}&toExclusiveAt=${encodeURIComponent(new Date(startedAt.getTime() + 30_000).toISOString())}&page=1&pageSize=50`,
       { headers: authorized },
     );
-    expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: {
-        code: "validation_error",
-        message: "This range includes time without enough activity evidence to clip exactly.",
-      },
-    });
+    expect(startRange.status).toBe(200);
+    const startRangeBody = await startRange.json();
+    expect(startRangeBody.totalDurationSeconds).toBe(30);
+    expect(startRangeBody.rows).toEqual([expect.objectContaining({
+      id: sessionId,
+      idleSeconds: 30,
+      durationSeconds: 30,
+      attribution: "manual",
+    })]);
+
+    const afterRange = await app.request(
+      `/reports?projectId=${projectId}&fromAt=${encodeURIComponent(stoppedAt.toISOString())}&toExclusiveAt=${encodeURIComponent(new Date(stoppedAt.getTime() + 60_000).toISOString())}&page=1&pageSize=50`,
+      { headers: authorized },
+    );
+    expect(afterRange.status).toBe(200);
+    const afterRangeBody = await afterRange.json();
+    expect(afterRangeBody.totalDurationSeconds).toBe(0);
+    expect(afterRangeBody.rows).toEqual([]);
   }, 60_000);
 });

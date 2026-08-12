@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -124,6 +124,8 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   pathMappingsCreate: vi.fn().mockResolvedValue(mapping),
   pathMappingsUpdate: vi.fn().mockResolvedValue(mapping),
   pathMappingsDelete: vi.fn().mockResolvedValue(undefined),
+  appIcons: vi.fn().mockResolvedValue({}),
+  onUpdateAvailable: vi.fn().mockResolvedValue(() => undefined),
   ...overrides,
 });
 
@@ -201,24 +203,13 @@ describe("recording", () => {
   it("shows the stretch of work in progress with nothing to press", async () => {
     render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(recording) })} />);
 
-    expect(await screen.findByText("Recording · Field work")).toBeInTheDocument();
+    // The clock and the day's total: no project name, no explaining sentences.
     expect(await screen.findByTestId("elapsed-time")).toBeInTheDocument();
+    expect(await screen.findByTestId("today-line")).toHaveTextContent(/^Today · /);
+    expect(screen.queryByText(/Filed here because/)).not.toBeInTheDocument();
     // Nothing in the product starts or stops time any more.
     expect(screen.queryByRole("button", { name: /start/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /stop/i })).not.toBeInTheDocument();
-  });
-
-  it("says why the time is filed where it is", async () => {
-    const view = render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(recording) })} />);
-    expect(await screen.findByText(/that is the folder your AI tool is working in/)).toBeInTheDocument();
-
-    view.rerender(<App bridge={bridgeFor({
-      monitorStatus: vi.fn().mockResolvedValue({
-        ...recording,
-        currentSession: { ...recording.currentSession, attribution: "default" as const },
-      }),
-    })} />);
-    expect(await screen.findByText(/nothing else said otherwise/)).toBeInTheDocument();
   });
 
   it("explains an idle machine instead of pretending to record", async () => {
@@ -244,15 +235,17 @@ describe("recording", () => {
     render(<App bridge={bridgeFor({
       monitorStatus: vi.fn().mockResolvedValue(recording),
       // Recording is demonstrably on, but nothing has been added up yet.
-      meStats: vi.fn().mockResolvedValue({ ...meStats, totalDurationSeconds: 0, apps: [] }),
+      meStats: vi.fn().mockResolvedValue({ ...meStats, totalDurationSeconds: 0, apps: [], projects: [] }),
     })} />);
 
     const person = userEvent.setup();
-    expect(await screen.findByText("Recording on")).toBeInTheDocument();
+    expect(await screen.findByText(/^Recording on/)).toBeInTheDocument();
     expect(await screen.findByTestId("elapsed-time")).toBeInTheDocument();
 
-    // The live surface on the main page.
-    expect(await screen.findByTestId("session-stats-empty")).not.toHaveTextContent(/turn (on )?recording/i);
+    // The live surface shows the open stretch on its project's row rather
+    // than an empty state telling anyone to do anything.
+    expect(await screen.findByTestId("project-list")).not.toHaveTextContent(/turn (on )?recording/i);
+    expect(screen.queryByTestId("today-panel-empty")).not.toBeInTheDocument();
 
     // And the historical one behind "All stats", which is where the
     // contradiction used to be printed.
@@ -272,17 +265,16 @@ describe("recording", () => {
     expect(screen.queryByText("Recording on")).not.toBeInTheDocument();
   });
 
-  it("reports quiet time taken off and the AI tool holding recording open", async () => {
+  it("names the AI tool holding recording open in the status line", async () => {
     render(<App bridge={bridgeFor({
       monitorStatus: vi.fn().mockResolvedValue({
         ...recording,
         agentActive: { source: "kimi_code", since: "2026-08-06T14:10:00.000Z" },
-        currentSession: { ...recording.currentSession, idleSeconds: 240 },
       }),
     })} />);
 
-    expect(await screen.findByTestId("idle-trimmed")).toHaveTextContent("Quiet time taken off so far");
-    expect(screen.getByTestId("agent-active")).toHaveTextContent("Kimi Code is working, so this keeps running");
+    // One compact line instead of a sentence on the clock card.
+    expect(await screen.findByText("Recording on · Kimi Code working")).toBeInTheDocument();
   });
 
   it("renders no recording surfaces when the host cannot report status", async () => {
@@ -294,12 +286,30 @@ describe("recording", () => {
     await waitFor(() => expect(screen.queryByText(/^Recording (on|paused|off)$/)).not.toBeInTheDocument());
   });
 
+  it("keeps the project picker behind the corner caret", async () => {
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(recording) })} />);
+
+    // Collapsed by default: no dropdown competing with the clock. The caret
+    // still names the filing target for anyone who asks.
+    const caret = await screen.findByTestId("filing-change");
+    expect(caret).toHaveAccessibleName(/picked automatically/);
+    expect(screen.queryByLabelText("File my time under")).not.toBeInTheDocument();
+
+    await person.click(caret);
+    expect(screen.getByLabelText("File my time under")).toBeVisible();
+
+    await person.click(caret);
+    expect(screen.queryByLabelText("File my time under")).not.toBeInTheDocument();
+  });
+
   it("pins time to a project and hands the choice back to the host", async () => {
     const sessionSelectProject = vi.fn().mockResolvedValue({ ...recording, selectedProjectId: otherProject.id });
     const person = userEvent.setup();
     render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(recording), sessionSelectProject })} />);
 
-    const picker = await screen.findByLabelText("File my time under");
+    await person.click(await screen.findByTestId("filing-change"));
+    const picker = screen.getByLabelText("File my time under");
     // The default choice is "work it out for me", naming where that lands.
     expect(picker).toHaveValue("");
     expect(within(picker).getByRole("option", { name: /Work it out for me \(Field work\)/ })).toBeInTheDocument();
@@ -307,8 +317,9 @@ describe("recording", () => {
     await person.selectOptions(picker, otherProject.id);
     await waitFor(() => expect(sessionSelectProject).toHaveBeenCalledWith(otherProject.id));
 
-    await person.selectOptions(picker, "");
-    await waitFor(() => expect(sessionSelectProject).toHaveBeenLastCalledWith(null));
+    // Choosing collapses the picker and the caret names the pinned project.
+    await waitFor(() => expect(screen.queryByLabelText("File my time under")).not.toBeInTheDocument());
+    expect(screen.getByTestId("filing-change")).toHaveAccessibleName(/Client work/);
   });
 
   it("creates a project and pins recording to it", async () => {
@@ -316,12 +327,24 @@ describe("recording", () => {
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
+    await person.click(await screen.findByTestId("filing-change"));
     await person.click(await screen.findByRole("button", { name: "New project…" }));
     await person.type(screen.getByLabelText("New project name"), "Fresh");
     await person.click(screen.getByRole("button", { name: "Create project" }));
 
     await waitFor(() => expect(bridge.projectCreate).toHaveBeenCalledWith({ name: "Fresh" }));
     await waitFor(() => expect(bridge.sessionSelectProject).toHaveBeenCalledWith(newProject.id));
+  });
+
+  it("names a waiting backlog and says it syncs on its own", async () => {
+    const backlogged = { ...recording, segmentBacklog: 2, sessionBacklog: 1 };
+    render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(backlogged) })} />);
+
+    const line = await screen.findByTestId("sync-line");
+    expect(line).toHaveTextContent("3 recorded items are still on this computer");
+    expect(line).toHaveTextContent("sync on their own");
+    // Sync is automatic: nothing here to press.
+    expect(within(line).queryByRole("button")).not.toBeInTheDocument();
   });
 });
 
@@ -332,9 +355,9 @@ describe("today", () => {
 
     const panel = await openAllStats(person);
     // The card renders before the stats land, so wait for the figure itself.
-    expect(await within(panel).findByText("2h")).toBeInTheDocument();
+    expect(await within(panel).findByText("2 hr")).toBeInTheDocument();
     expect(within(panel).getByTestId("unattributed-foot")).toHaveTextContent(
-      "30m of it landed in Field work, because nothing said which project it was for.",
+      "30 min of it landed in Field work, because nothing said which project it was for.",
     );
   });
 
@@ -424,28 +447,30 @@ describe("settings", () => {
     await waitFor(() => expect(bridge.pathMappingsDelete).toHaveBeenCalledWith(mapping.id));
   });
 
-  it("lists each AI tool and connects one on request", async () => {
+  it("shows connected tools as badges and connects one through the dropdown", async () => {
     const bridge = bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(status) });
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
     const dialog = await openSettings(person);
-    expect((await within(dialog).findByText("Claude Code")).closest("li")).toHaveTextContent("Connected");
+    await person.click(await within(dialog).findByText("AI tools"));
 
+    // Connected tools are a fact, not a control; only the add needs buttons.
+    expect(within(within(dialog).getByTestId("hook-connected")).getByText("Claude Code")).toBeInTheDocument();
+    expect(within(dialog).getAllByRole("button", { name: "Connect" })).toHaveLength(1);
+
+    const picker = within(dialog).getByLabelText("Tool to connect");
+    await person.selectOptions(picker, "codex");
     await person.click(within(dialog).getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(bridge.hookRegister).toHaveBeenCalledWith("codex"));
   });
 
-  it("summarises what is recorded and opens the full panel from there", async () => {
+  it("opens the what's-recorded panel from the recording group", async () => {
     const person = userEvent.setup();
     render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(recording) })} />);
 
     const dialog = await openSettings(person);
-    const note = await within(dialog).findByText(/which app was in front, by name/);
-    expect(note).toHaveTextContent("never records what you type");
-    expect(note).not.toHaveTextContent(/unattributed|spool|process name/i);
-
-    await person.click(within(dialog).getByRole("button", { name: "See exactly what's recorded" }));
+    await person.click(within(dialog).getByRole("button", { name: /See exactly what's recorded/ }));
 
     const panel = await screen.findByRole("dialog", { name: "What Clock-In is recording" });
     expect(within(panel).getByText("Recording is on")).toBeInTheDocument();
@@ -522,46 +547,56 @@ describe("the what's-recorded panel", () => {
   });
 });
 
-describe("this session", () => {
-  it("lays out where the current session's time went, per app", async () => {
+describe("the today panel", () => {
+  it("lays out where today's time went: projects first, then apps in one row each", async () => {
     render(<App bridge={bridgeFor({
+      // No open stretch: the rows below are exactly the server totals.
       monitorStatus: vi.fn().mockResolvedValue({
-        ...recording,
+        ...status,
         agentActive: { source: "claude_code", since: "2026-08-06T14:10:00.000Z" },
-        currentSession: {
-          ...recording.currentSession,
-          apps: [
-            { processName: "claude.exe", durationSeconds: 3_600 },
-            { processName: "chrome.exe", durationSeconds: 1_800 },
-            { processName: "Code.exe", durationSeconds: 900 },
-          ],
-        },
+      }),
+      meStats: vi.fn().mockResolvedValue({
+        ...meStats,
+        projects: [
+          { project: { id: project.id, name: project.name }, durationSeconds: 5_400, attributedSeconds: 5_400, unattributedSeconds: 0, sessionCount: 2 },
+          { project: { id: otherProject.id, name: otherProject.name }, durationSeconds: 900, attributedSeconds: 0, unattributedSeconds: 900, sessionCount: 1 },
+        ],
+        apps: [
+          { processName: "claude.exe", durationSeconds: 3_600 },
+          { processName: "chrome.exe", durationSeconds: 1_800 },
+          { processName: "Code.exe", durationSeconds: 900 },
+        ],
       }),
     })} />);
 
-    const rows = within(await screen.findByTestId("session-app-list")).getAllByRole("listitem");
+    // Time consolidates under the projects the monitor filed it into.
+    const projects = within(await screen.findByTestId("project-list")).getAllByRole("listitem");
+    expect(projects[0]).toHaveTextContent("Field work");
+    expect(projects[0]).toHaveTextContent("1 hr 30 min");
+    expect(projects[1]).toHaveTextContent("Client work");
+    expect(projects[1]).toHaveTextContent("15 min");
+
+    const rows = within(screen.getByTestId("session-app-list")).getAllByRole("listitem");
     // Heaviest first, agent CLIs named by their runtime rather than their exe.
     expect(rows[0]).toHaveTextContent("Claude Code");
-    expect(rows[0]).toHaveTextContent("1h");
+    expect(rows[0]).toHaveTextContent("1 hr");
     expect(rows[1]).toHaveTextContent("Google Chrome");
-    expect(rows[1]).toHaveTextContent("30m");
+    expect(rows[1]).toHaveTextContent("30 min");
     expect(rows[2]).toHaveTextContent("VS Code");
-    expect(rows[2]).toHaveTextContent("15m");
+    expect(rows[2]).toHaveTextContent("15 min");
     // The runtime that is working right now says so on its own row.
     expect(rows[0]).toHaveTextContent("working now");
   });
 
   it("keeps agent runtimes on their own rows instead of folding them together", async () => {
     render(<App bridge={bridgeFor({
-      monitorStatus: vi.fn().mockResolvedValue({
-        ...recording,
-        currentSession: {
-          ...recording.currentSession,
-          apps: [
-            { processName: "claude.exe", durationSeconds: 3_600 },
-            { processName: "codex.exe", durationSeconds: 1_800 },
-          ],
-        },
+      monitorStatus: vi.fn().mockResolvedValue(recording),
+      meStats: vi.fn().mockResolvedValue({
+        ...meStats,
+        apps: [
+          { processName: "claude.exe", durationSeconds: 3_600 },
+          { processName: "codex.exe", durationSeconds: 1_800 },
+        ],
       }),
     })} />);
 
@@ -571,6 +606,47 @@ describe("this session", () => {
     expect(within(list).getByText("Claude Code")).toBeInTheDocument();
     expect(within(list).getByText("Codex")).toBeInTheDocument();
     expect(within(list).queryByText("Agent CLIs")).not.toBeInTheDocument();
+  });
+
+  it("adds the open stretch to its project's row so the breakdown ticks with the clock", async () => {
+    const live = {
+      ...recording,
+      currentSession: {
+        ...recording.currentSession,
+        since: new Date(Date.now() - 30_000).toISOString(),
+      },
+    };
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(live),
+      // The server knows nothing yet; the row below exists purely live.
+      meStats: vi.fn().mockResolvedValue({ ...meStats, totalDurationSeconds: 0, apps: [], projects: [] }),
+    })} />);
+
+    const projects = within(await screen.findByTestId("project-list")).getAllByRole("listitem");
+    expect(projects[0]).toHaveTextContent("Field work");
+    expect(projects[0]).toHaveTextContent(/sec/);
+  });
+
+  it("shows the OS icon for an app when the host has one", async () => {
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(recording),
+      appIcons: vi.fn().mockResolvedValue({ "chrome.exe": "data:image/png;base64,AAAA", "Code.exe": null }),
+      meStats: vi.fn().mockResolvedValue({
+        ...meStats,
+        apps: [
+          { processName: "chrome.exe", durationSeconds: 1_800 },
+          { processName: "Code.exe", durationSeconds: 900 },
+        ],
+      }),
+    })} />);
+
+    const list = await screen.findByTestId("session-app-list");
+    // The real icon when the OS offers one, a quiet placeholder when not.
+    await waitFor(() => {
+      const image = list.querySelector("img.app-mark");
+      expect(image).toHaveAttribute("src", "data:image/png;base64,AAAA");
+    });
+    expect(list.querySelector(".app-mark.is-plain")).not.toBeNull();
   });
 
   it("ships a runtime mark for every connector in the roster", async () => {
@@ -600,7 +676,7 @@ describe("the team board", () => {
     expect(within(board).getByText("you")).toBeInTheDocument();
   });
 
-  it("joins another workspace by invite code", async () => {
+  it("joins another workspace by invite code from settings", async () => {
     const bridge = bridgeFor({
       orgOverview: vi.fn().mockResolvedValue({
         organization: { id: "00000000-0000-4000-8000-000000000900", name: "SIQstack", inviteCode: "ACDEF-GHJKM" },
@@ -610,14 +686,38 @@ describe("the team board", () => {
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
+    // Team management is settings, not the record surface.
+    const dialog = await openSettings(person);
+    await person.click(within(dialog).getByText("Team"));
+
     await person.type(await screen.findByLabelText("Their invite code"), "PQRTU-VWXY3");
     await person.click(screen.getByRole("button", { name: "Join this team" }));
 
     await waitFor(() => expect(bridge.orgJoin).toHaveBeenCalledWith("PQRTU-VWXY3"));
-    // The card names the team you are now on, in a sentence rather than as a
+    // The group names the team you are now on, in a sentence rather than as a
     // bare heading beside a code.
-    const card = await screen.findByLabelText("Your team");
-    expect(await within(card).findByText("Joined Team")).toBeInTheDocument();
-    expect(within(card).getByTestId("invite-code")).toHaveTextContent("PQRTU-VWXY3");
+    expect(await screen.findByText("Joined Team")).toBeInTheDocument();
+    expect(screen.getByTestId("invite-code")).toHaveTextContent("PQRTU-VWXY3");
+  });
+});
+
+describe("the update banner", () => {
+  it("announces a downloading update and the restart that follows", async () => {
+    let announce: ((version: string) => void) | undefined;
+    const bridge = bridgeFor({
+      onUpdateAvailable: vi.fn().mockImplementation(async (handler: (version: string) => void) => {
+        announce = handler;
+        return () => undefined;
+      }),
+    });
+    render(<App bridge={bridge} />);
+    await screen.findByRole("button", { name: "Settings" });
+
+    expect(screen.queryByTestId("update-banner")).not.toBeInTheDocument();
+    act(() => announce?.("0.9.9"));
+
+    const banner = await screen.findByTestId("update-banner");
+    expect(banner).toHaveTextContent("Version 0.9.9");
+    expect(banner).toHaveTextContent("restarts itself");
   });
 });

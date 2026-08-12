@@ -6,12 +6,14 @@
 
 mod agent_runtimes;
 mod api;
+mod app_icons;
 mod monitor;
 mod recovery;
 mod uploader;
 // Shared with the `clock-in-hook` binary; the uploader drains it from here.
 pub mod spool;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -21,7 +23,7 @@ use serde::Serialize;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager, State,
+    Emitter, Manager, State,
 };
 use tokio::sync::Mutex;
 
@@ -422,6 +424,18 @@ async fn me_stats(
         .await
 }
 
+/// Real OS icons for the executables the usage meter lists, as PNG data URIs
+/// keyed by the names the caller sent. Total by design: a name that cannot be
+/// resolved maps to `None`, never an error for the batch. Extraction reads
+/// the process table, the registry, and disk, so it runs on the blocking
+/// pool; results are cached for the process lifetime.
+#[tauri::command]
+async fn app_icons(process_names: Vec<String>) -> HashMap<String, Option<String>> {
+    tauri::async_runtime::spawn_blocking(move || app_icons::lookup(process_names))
+        .await
+        .unwrap_or_default()
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectCreateInput {
@@ -514,7 +528,12 @@ fn flush_monitor_and_exit(app: &tauri::AppHandle, code: i32) {
     EXIT_FLUSH_STARTED.store(true, Ordering::SeqCst);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        app.state::<AppState>().monitor.stop().await;
+        let state = app.state::<AppState>();
+        state.monitor.stop().await;
+        // The session the flush just spooled reaches the server before the
+        // process dies; otherwise it sits invisible until the next launch.
+        // Offline, the pass gives up within its timeout and quit proceeds.
+        state.monitor.upload_flush().await;
         app.exit(code);
     });
 }
@@ -587,6 +606,10 @@ async fn install_available_update(handle: &tauri::AppHandle) -> bool {
             return false;
         }
     };
+
+    // The one visible moment: the UI shows a banner while the download and
+    // swap happen, so the restart that follows is announced, not a surprise.
+    let _ = handle.emit("update-available", update.version.clone());
 
     match update.download_and_install(|_, _| {}, || {}).await {
         Ok(()) => {
@@ -668,6 +691,7 @@ pub fn run() {
             settings_get,
             settings_update,
             me_stats,
+            app_icons,
             project_create,
             path_mappings_list,
             path_mappings_create,
