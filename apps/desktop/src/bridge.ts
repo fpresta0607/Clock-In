@@ -191,27 +191,8 @@ export type MeStatsProject = {
   sessionCount: number;
 };
 
-export type PathMapping = {
-  id: string;
-  pathPrefix: string;
-  repoUrl?: string | null | undefined;
-  projectId: string;
-};
-
-export type PathMappingCreateInput = {
-  pathPrefix: string;
-  repoUrl?: string | undefined;
-  projectId: string;
-};
-
 export type ProjectCreateInput = {
   name: string;
-};
-
-export type PathMappingUpdateInput = {
-  pathPrefix?: string | undefined;
-  repoUrl?: string | null | undefined;
-  projectId?: string | undefined;
 };
 
 export interface TimerBridge {
@@ -229,13 +210,11 @@ export interface TimerBridge {
   settingsGet(): Promise<MonitorSettings>;
   settingsUpdate(input: SettingsPatch): Promise<MonitorSettings>;
   /// Instant bounds, so "today" means the caller's local day rather than a
-  /// UTC one that rolls over mid-afternoon.
-  meStats(fromAt: string, toExclusiveAt: string): Promise<MeStats>;
+  /// UTC one that rolls over mid-afternoon. Both absent asks for all time.
+  /// `userId` names a teammate, which is how the leaderboard opens one
+  /// member's breakdown; absent means the caller.
+  meStats(fromAt?: string, toExclusiveAt?: string, userId?: string): Promise<MeStats>;
   projectCreate(input: ProjectCreateInput): Promise<TimerProject>;
-  pathMappingsList(): Promise<readonly PathMapping[]>;
-  pathMappingsCreate(input: PathMappingCreateInput): Promise<PathMapping>;
-  pathMappingsUpdate(id: string, input: PathMappingUpdateInput): Promise<PathMapping>;
-  pathMappingsDelete(id: string): Promise<void>;
   /// OS icons for executables, as data URIs; null where the OS has none.
   appIcons(processNames: readonly string[]): Promise<Record<string, string | null>>;
   /// How much of each coding agent's plan is left, read locally. Advisory:
@@ -575,21 +554,6 @@ export const decodeMeStats = (value: unknown): MeStats => {
   };
 };
 
-export const decodePathMapping = (value: unknown): PathMapping => {
-  const candidate = record(value);
-  return {
-    id: uuid(candidate.id),
-    pathPrefix: string(candidate.pathPrefix),
-    repoUrl: candidate.repoUrl === undefined ? undefined : stringOrNull(candidate.repoUrl),
-    projectId: uuid(candidate.projectId),
-  };
-};
-
-export const decodePathMappings = (value: unknown): readonly PathMapping[] => {
-  if (!Array.isArray(value)) invalidResponse();
-  return (value as unknown[]).map(decodePathMapping);
-};
-
 const decodeVoid = (value: unknown): void => {
   if (value !== undefined && value !== null) invalidResponse();
 };
@@ -618,12 +582,8 @@ export const defaultBridge: TimerBridge = {
   monitorSetEnabled: (enabled) => invokeDecoded("monitor_set_enabled", decodeMonitorSettings, { enabled }),
   settingsGet: () => invokeDecoded("settings_get", decodeMonitorSettings),
   settingsUpdate: (input) => invokeDecoded("settings_update", decodeMonitorSettings, { input }),
-  meStats: (fromAt, toExclusiveAt) => invokeDecoded("me_stats", decodeMeStats, { fromAt, toExclusiveAt }),
+  meStats: (fromAt, toExclusiveAt, userId) => invokeDecoded("me_stats", decodeMeStats, { fromAt, toExclusiveAt, userId }),
   projectCreate: (input) => invokeDecoded("project_create", decodeProject, { input }),
-  pathMappingsList: () => invokeDecoded("path_mappings_list", decodePathMappings),
-  pathMappingsCreate: (input) => invokeDecoded("path_mappings_create", decodePathMapping, { input }),
-  pathMappingsUpdate: (id, input) => invokeDecoded("path_mappings_update", decodePathMapping, { id, input }),
-  pathMappingsDelete: (id) => invokeDecoded("path_mappings_delete", decodeVoid, { id }),
   appIcons: (processNames) => invokeDecoded("app_icons", decodeAppIcons, { processNames }),
   quotaStatus: () => invokeDecoded("quota_status", decodeQuotaSnapshot),
   onUpdateAvailable: async (handler) => {

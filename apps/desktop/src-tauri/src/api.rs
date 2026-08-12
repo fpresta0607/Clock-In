@@ -98,19 +98,6 @@ pub fn classify_transport(error: &reqwest::Error) -> BridgeError {
     }
 }
 
-/// Path-mapping failures the user can act on get their own wording; the shared
-/// `classify` 409 message talks about timers, which would mislead here.
-fn classify_mapping(status: u16) -> BridgeError {
-    match status {
-        404 => BridgeError::new(ErrorKind::Validation, "That path mapping no longer exists."),
-        409 => BridgeError::new(
-            ErrorKind::Validation,
-            "That path prefix is already mapped to a project.",
-        ),
-        _ => classify(status),
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimerUser {
@@ -243,6 +230,8 @@ struct AgentEventBatchResponse {
 }
 
 /// A per-user path prefix → project mapping, as `/path-mappings` returns it.
+/// Read-only from the desktop: the host uses these to file an agent's work by
+/// the folder it ran in. There is no longer a screen for editing them by hand.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PathMapping {
@@ -256,30 +245,6 @@ pub struct PathMapping {
 #[derive(Deserialize)]
 struct PathMappingListResponse {
     mappings: Vec<PathMapping>,
-}
-
-/// What `path_mappings_create` sends. `repoUrl` is optional, never null.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PathMappingCreateInput {
-    pub path_prefix: String,
-    #[serde(default)]
-    pub repo_url: Option<String>,
-    pub project_id: String,
-}
-
-/// What `path_mappings_update` sends. Only set fields are serialized, so a
-/// missing key leaves the column alone while an explicit `repoUrl: null`
-/// clears it (the update schema treats absent and null differently).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PathMappingUpdateInput {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path_prefix: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repo_url: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
 }
 
 /// The `GET /me/stats` response: the reporting service's attribution totals
@@ -658,20 +623,30 @@ impl ApiClient {
         Ok(body.results)
     }
 
-    /// The caller's own stats for a date range (`YYYY-MM-DD`, either optional).
+    /// Stats for a range, for the caller or for a named teammate.
+    ///
     /// Instant bounds rather than calendar dates: the server reads a bare date
     /// as a UTC day, which would roll "today" over in the afternoon for anyone
     /// west of Greenwich. The caller sends its own local midnight instead.
+    /// Omitting both bounds asks for all time.
+    ///
+    /// `user_id` opens a teammate's breakdown from the leaderboard. The server
+    /// scopes every underlying query to the caller's workspace, so an id from
+    /// anywhere else comes back empty rather than forbidden.
     pub async fn me_stats(
         &self,
         access_token: &str,
         from_at: Option<&str>,
         to_exclusive_at: Option<&str>,
+        user_id: Option<&str>,
     ) -> ApiResult<MeStats> {
         let mut query: Vec<(&str, &str)> = Vec::new();
         if let (Some(from_at), Some(to_exclusive_at)) = (from_at, to_exclusive_at) {
             query.push(("fromAt", from_at));
             query.push(("toExclusiveAt", to_exclusive_at));
+        }
+        if let Some(user_id) = user_id {
+            query.push(("userId", user_id));
         }
         let response = self
             .http
@@ -694,75 +669,6 @@ impl ApiClient {
     pub async fn path_mappings(&self, access_token: &str) -> ApiResult<Vec<PathMapping>> {
         let body: PathMappingListResponse = self.get_json(access_token, "/path-mappings").await?;
         Ok(body.mappings)
-    }
-
-    pub async fn create_path_mapping(
-        &self,
-        access_token: &str,
-        input: &PathMappingCreateInput,
-    ) -> ApiResult<PathMapping> {
-        let mut body = serde_json::json!({
-            "pathPrefix": input.path_prefix,
-            "projectId": input.project_id,
-        });
-        if let Some(repo_url) = &input.repo_url {
-            body["repoUrl"] = serde_json::json!(repo_url);
-        }
-        let response = self
-            .http
-            .post(format!("{}/path-mappings", self.api_base_url))
-            .bearer_auth(access_token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|error| classify_transport(&error))?;
-
-        if !response.status().is_success() {
-            return Err(classify_mapping(response.status().as_u16()));
-        }
-        response
-            .json()
-            .await
-            .map_err(|_| BridgeError::unknown("The path mapping response could not be read."))
-    }
-
-    pub async fn update_path_mapping(
-        &self,
-        access_token: &str,
-        id: &str,
-        input: &PathMappingUpdateInput,
-    ) -> ApiResult<PathMapping> {
-        let response = self
-            .http
-            .patch(format!("{}/path-mappings/{id}", self.api_base_url))
-            .bearer_auth(access_token)
-            .json(input)
-            .send()
-            .await
-            .map_err(|error| classify_transport(&error))?;
-
-        if !response.status().is_success() {
-            return Err(classify_mapping(response.status().as_u16()));
-        }
-        response
-            .json()
-            .await
-            .map_err(|_| BridgeError::unknown("The path mapping response could not be read."))
-    }
-
-    pub async fn delete_path_mapping(&self, access_token: &str, id: &str) -> ApiResult<()> {
-        let response = self
-            .http
-            .delete(format!("{}/path-mappings/{id}", self.api_base_url))
-            .bearer_auth(access_token)
-            .send()
-            .await
-            .map_err(|error| classify_transport(&error))?;
-
-        if response.status().is_success() {
-            return Ok(());
-        }
-        Err(classify_mapping(response.status().as_u16()))
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(
@@ -938,36 +844,6 @@ mod tests {
             ErrorKind::Transient
         );
         assert_eq!(classify_signup(500, None).kind, ErrorKind::Transient);
-    }
-
-    #[test]
-    fn mapping_404_and_409_say_what_the_user_can_act_on() {
-        assert_eq!(classify_mapping(404).kind, ErrorKind::Validation);
-        assert!(classify_mapping(404).message.contains("no longer exists"));
-        assert!(classify_mapping(409).message.contains("already mapped"));
-        // Anything else keeps the shared wording.
-        assert_eq!(classify_mapping(503).kind, ErrorKind::Transient);
-        assert_eq!(classify_mapping(401).kind, ErrorKind::Auth);
-    }
-
-    #[test]
-    fn a_mapping_update_serializes_only_the_fields_the_user_set() {
-        let patch = PathMappingUpdateInput {
-            path_prefix: Some("C:/dev".to_string()),
-            ..PathMappingUpdateInput::default()
-        };
-        let json = serde_json::to_value(&patch).expect("patch serializes");
-        assert_eq!(json["pathPrefix"], "C:/dev");
-        assert!(json.get("repoUrl").is_none());
-        assert!(json.get("projectId").is_none());
-
-        // An explicit null clears the repo URL; an absent key would not.
-        let clear = PathMappingUpdateInput {
-            repo_url: Some(None),
-            ..PathMappingUpdateInput::default()
-        };
-        let json = serde_json::to_value(&clear).expect("patch serializes");
-        assert!(json["repoUrl"].is_null());
     }
 
     #[test]

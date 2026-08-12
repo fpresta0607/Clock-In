@@ -114,7 +114,29 @@ select:disabled { opacity: .55; }
 /* The day's total is the page: green, so it reads as time being kept. */
 .recording-card .elapsed { color: var(--accent-green); }
 
-.hero-project { display: grid; gap: 5px; margin-top: 12px; }
+/* Where time files: the team on top, then that team's projects as a list you
+   pick exactly one of. A tick rather than checkboxes, because a checkbox
+   column reads as "you may choose several" and you may not. */
+.filing-picker { display: grid; gap: 10px; margin-top: 12px; text-align: left; }
+.picker-team { display: grid; gap: 5px; }
+.project-picker { display: grid; gap: 2px; max-height: 11rem; overflow-y: auto; border: 1px solid var(--glass-border); border-radius: var(--radius); padding: 4px; }
+.project-choice {
+  display: grid;
+  align-items: center;
+  gap: 8px;
+  grid-template-columns: 14px minmax(0, 1fr);
+  border: 0;
+  border-radius: 6px;
+  padding: 6px 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: .82rem;
+  letter-spacing: normal;
+  text-align: left;
+}
+.project-choice:hover { background: rgba(163, 179, 194, 0.1); color: #ffffff; }
+.project-choice[aria-checked="true"] { background: rgba(0, 229, 155, .1); color: #ffffff; }
+.project-tick { color: var(--accent-green); font-size: .8rem; line-height: 1; }
 
 .new-project-trigger { margin-top: 10px; border: 0; padding: 0; background: transparent; color: var(--text-secondary); font-size: .78rem; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; justify-self: start; }
 .new-project-trigger:hover, .new-project-trigger:focus-visible { color: #ffffff; }
@@ -201,17 +223,9 @@ select:disabled { opacity: .55; }
 .quota-detail { display: grid; gap: 4px; max-width: 15rem; border: 1px solid var(--glass-border); border-radius: 6px; padding: 7px 9px; background: rgba(3, 5, 10, 0.6); font-size: .7rem; overflow-wrap: anywhere; }
 .quota-detail[hidden] { display: none; }
 .quota-windows { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; }
-.quota-windows li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; color: var(--text-secondary); }
+.quota-windows li { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .quota-windows li.is-binding { color: #ffffff; }
-.quota-windows li.is-binding .quota-window-value { color: var(--mint); }
-.quota-window-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.quota-window-value { flex: none; font-variant-numeric: tabular-nums; }
-.quota-window-reset { flex-basis: 100%; color: var(--text-secondary); font-size: .64rem; }
-/* Whose plan this is. First line of the detail, because a dial that moved
-   because the login changed must never read as work that happened. */
-.quota-account { margin: 0 0 1px; padding-bottom: 4px; border-bottom: 1px solid rgba(163, 179, 194, 0.12); color: #ffffff; font-size: .66rem; line-height: 1.45; word-break: break-word; }
-.quota-note, .quota-reason { margin: 0; color: var(--text-secondary); line-height: 1.45; }
-.quota-reason { font-family: var(--brand-mono); font-size: .64rem; word-break: break-word; }
+.quota-note { margin: 0; color: var(--text-secondary); line-height: 1.45; }
 
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 11px; }
 .panel-head h2 { font-size: .92rem; }
@@ -300,6 +314,11 @@ select:disabled { opacity: .55; }
 
 .verified-foot { margin: 10px 0 0; border-top: 1px solid rgba(163, 179, 194, 0.12); padding-top: 8px; color: var(--text-secondary); font-size: .72rem; font-variant-numeric: tabular-nums; }
 
+/* One member's breakdown, under the board that chose them. */
+.member-stats { margin-top: 14px; border-top: 1px solid rgba(163, 179, 194, 0.12); padding-top: 12px; }
+.member-stats h3 { margin: 0 0 9px; font-size: .84rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-stats .app-list + .app-list { margin-top: 10px; border-top: 1px solid rgba(163, 179, 194, 0.08); padding-top: 8px; }
+
 .board-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
 .board-head h2 { margin: 0; font-size: .92rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .board-head .invite-code { flex: none; padding: 3px 8px; font-size: .76rem; }
@@ -308,9 +327,25 @@ select:disabled { opacity: .55; }
 .join-form input { letter-spacing: .06em; text-transform: uppercase; }
 .join-form button { flex: none; min-height: 33px; border: 1px solid var(--glass-border); padding: 0 11px; background: rgba(3, 5, 10, 0.5); color: #ffffff; font-size: .76rem; text-transform: uppercase; }
 .join-form button:hover { border-color: var(--glass-border-hover); }
-.board-list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
-.board-list li { display: grid; align-items: baseline; gap: 9px; grid-template-columns: 18px 1fr auto; padding: 4px 6px; border-radius: 6px; font-size: .84rem; }
-.board-list li.is-you { background: rgba(0, 229, 155, .1); }
+/* Each row is the control that picks whose breakdown shows underneath. */
+.board-list { display: grid; gap: 4px; margin: 0; padding: 0; max-height: 11rem; overflow-y: auto; list-style: none; }
+.board-choice {
+  display: grid;
+  width: 100%;
+  align-items: baseline;
+  gap: 9px;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  border: 0;
+  border-radius: 6px;
+  padding: 5px 7px;
+  background: transparent;
+  color: inherit;
+  font-size: .84rem;
+  letter-spacing: normal;
+  text-align: left;
+}
+.board-choice:hover { background: rgba(163, 179, 194, 0.1); }
+.board-list li.is-selected .board-choice { background: rgba(0, 229, 155, .1); }
 .board-rank { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .board-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .you-tag { color: var(--text-secondary); font-size: .74rem; text-transform: uppercase; letter-spacing: .08em; }
@@ -367,14 +402,6 @@ select:disabled { opacity: .55; }
 .hook-row button { border: 0; background: transparent; color: var(--text-secondary); font-size: .72rem; text-decoration: underline; text-underline-offset: 3px; }
 .hook-row button:hover { color: #ffffff; }
 .hook-snippet { flex-basis: 100%; overflow-x: auto; margin: 2px 0 0; border: 1px solid var(--glass-border); border-radius: 6px; padding: 8px 10px; font-family: var(--brand-mono); font-size: .7rem; line-height: 1.5; }
-.mapping-list { display: grid; gap: 5px; margin: 9px 0 0; padding: 0; list-style: none; }
-.mapping-row { display: grid; align-items: center; gap: 8px; grid-template-columns: minmax(0, 1fr) auto auto; font-size: .8rem; }
-.mapping-path { overflow: hidden; font-family: var(--brand-mono); font-size: .74rem; text-overflow: ellipsis; white-space: nowrap; }
-.mapping-project { color: var(--mint); font-size: .76rem; }
-.mapping-row button { border: 0; background: transparent; color: var(--text-secondary); font-size: .72rem; text-decoration: underline; text-underline-offset: 3px; }
-.mapping-row button:hover { color: #ffffff; }
-.mapping-form { gap: 9px; margin-top: 13px; }
-.mapping-form .signal-button { min-height: 34px; }
 .link-button.privacy-open { width: auto; margin-top: 10px; padding: 0; font-size: .76rem; text-align: left; }
 
 /* "What's recorded" panel: the transparency surface, stacked above settings. */
