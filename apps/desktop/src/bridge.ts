@@ -96,7 +96,19 @@ export type MonitorStatus = {
   currentSession: CurrentSession | null;
   /// The active span still open on this machine, which no upload covers yet.
   openSpan: { processName: string; since: string } | null;
+  /// Every agent session running right now - one per terminal or window, each
+  /// with the project its working directory resolved to.
+  agentSessions: readonly AgentSessionRow[];
   selectedProjectId: string | null;
+};
+
+/// One agent session running right now. Several run side by side, so each is
+/// identified by the lifecycle the tool itself reported.
+export type AgentSessionRow = {
+  source: string;
+  externalSessionId: string;
+  projectId: string | null;
+  since: string;
 };
 
 /// One limit a coding-agent provider reports — a rolling session window, a
@@ -501,6 +513,15 @@ export const decodeMonitorStatus = (value: unknown): MonitorStatus => {
     openSpan: candidate.openSpan === null || candidate.openSpan === undefined
       ? null
       : { processName: string(record(candidate.openSpan).processName), since: timestamp(record(candidate.openSpan).since) },
+    agentSessions: (Array.isArray(candidate.agentSessions) ? candidate.agentSessions : []).map((entry) => {
+      const session = record(entry);
+      return {
+        source: string(session.source),
+        externalSessionId: string(session.externalSessionId),
+        projectId: uuidOrNull(session.projectId ?? null),
+        since: timestamp(session.since),
+      };
+    }),
     selectedProjectId: uuidOrNull(candidate.selectedProjectId),
   };
 };

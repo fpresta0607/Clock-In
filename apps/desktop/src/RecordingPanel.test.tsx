@@ -20,6 +20,7 @@ const status: MonitorStatus = {
   ],
   agentActive: null,
   openSpan: null,
+  agentSessions: [],
   currentSession: {
     projectId: "00000000-0000-4000-8000-000000000010",
     attribution: "agent",

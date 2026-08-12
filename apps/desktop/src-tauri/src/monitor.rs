@@ -1339,6 +1339,8 @@ pub struct MonitorStatus {
     pub hooks: Vec<HookRegistration>,
     /// The agent session holding the open session through quiet time, if any.
     pub agent_active: Option<AgentActive>,
+    /// Every agent session running right now, one per terminal or window.
+    pub agent_sessions: Vec<AgentSession>,
     /// The session recording right now, which exists whenever the machine is
     /// in use and recording is on.
     pub current_session: Option<CurrentSession>,
@@ -1364,6 +1366,19 @@ pub struct CurrentSession {
     /// Where this session's time has gone, per app, heaviest first. Local and
     /// live: it counts the span still open, so it ticks with the work.
     pub apps: Vec<SessionApp>,
+}
+
+/// One agent session running right now. Several run side by side - four
+/// Claude Code terminals in one editor is an ordinary day - and each carries
+/// the project its working directory resolved to, so the UI can show them
+/// apart instead of collapsing them into a single "an agent is working".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSession {
+    pub source: String,
+    pub external_session_id: String,
+    pub project_id: Option<String>,
+    pub since: String,
 }
 
 /// The active span the machine is in the middle of: which app, and since when.
@@ -1628,6 +1643,27 @@ impl Monitor {
                     })
                     .collect(),
             }),
+            // Every lifecycle still inside the activity window, newest first.
+            // Reported whether or not the override is switched on: these are
+            // what is running, not a reason to hold a session open.
+            agent_sessions: {
+                let mut sessions: Vec<AgentSession> = shared
+                    .agent
+                    .active
+                    .values()
+                    .filter(|active| {
+                        now.saturating_sub(active.last_event_at) <= AGENT_ACTIVE_WINDOW_SECONDS
+                    })
+                    .map(|active| AgentSession {
+                        source: active.source.clone(),
+                        external_session_id: active.external_session_id.clone(),
+                        project_id: active.project.clone(),
+                        since: iso8601(active.started_at),
+                    })
+                    .collect();
+                sessions.sort_by(|left, right| right.since.cmp(&left.since));
+                sessions
+            },
             open_span: shared
                 .builder
                 .open_active_app()

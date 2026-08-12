@@ -67,6 +67,7 @@ describe("defaultBridge", () => {
     apps: [],
     },
     openSpan: { processName: "WindowsTerminal.exe", since: "2026-08-06T14:58:00.000Z" },
+    agentSessions: [],
     selectedProjectId: null,
   };
 

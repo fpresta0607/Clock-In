@@ -176,6 +176,8 @@ type MeterRow = {
   /// The executable behind the row, for the OS icon lookup. Absent on the
   /// folded "Everything else" row.
   processName: string | undefined;
+  /// Extra words beside the name - the folder an agent session is working in.
+  detail?: string | undefined;
   durationSeconds: number;
   /// Percentage of the longest row, for the bar in the row.
   share: number;
@@ -863,18 +865,18 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   // its own time is what it has been running for, and that row carries the
   // plan reading - so quota only ever appears for an agent actually in use.
   const todayRows = buildMeterRows(liveApps);
-  const activeAgent = monitorStatus?.agentActive ?? null;
-  const agentRow = activeAgent === null || todayRows.some((row) => row.source === activeAgent.source)
-    ? undefined
-    : {
-        key: `agent-${activeAgent.source}`,
-        label: sourceLabel(activeAgent.source),
-        source: activeAgent.source,
-        processName: undefined,
-        durationSeconds: elapsedSeconds(activeAgent.since, now),
-        share: 0,
-      };
-  const meterRows = agentRow === undefined ? todayRows : [agentRow, ...todayRows];
+  // One row per running session - four terminals in one editor is an ordinary
+  // day - named by the project its working directory resolved to.
+  const agentRows = (monitorStatus?.agentSessions ?? []).map((session) => ({
+    key: `agent-${session.source}-${session.externalSessionId}`,
+    label: sourceLabel(session.source),
+    detail: ready.projects.find((item) => item.id === session.projectId)?.name,
+    source: session.source,
+    processName: undefined,
+    durationSeconds: elapsedSeconds(session.since, now),
+    share: 0,
+  }));
+  const meterRows = [...agentRows, ...todayRows];
   // Finished time already on the server plus the stretch still being written.
   // The open stretch also lands on its project's row below, so the breakdown
   // ticks with the clock instead of trailing it by a whole session.
@@ -913,24 +915,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             Version {updateVersion} is on its way — Clock-In restarts itself when it&apos;s ready.
           </p>
         )}
-        {monitorStatus && (
-          <p className="monitor-line">
-            <span className={`monitor-dot is-${state}`} aria-hidden="true" />
-            <span className="monitor-state">
-              {MONITOR_LINE[state]}
-              {monitorStatus.agentActive && ` · ${sourceLabel(monitorStatus.agentActive.source)} working`}
-            </span>
-            <button className="monitor-explain" type="button" onClick={() => setRecordingOpen(true)}>
-              What&apos;s recorded?
-            </button>
-          </p>
-        )}
-        {backlog > 0 && (
-          <p className="sync-banner" data-testid="sync-line" role="status">
-            {backlog === 1 ? "1 recorded item is" : `${backlog} recorded items are`} still on this
-            computer — they sync on their own as soon as the server is reachable.
-          </p>
-        )}
         {accountError && !settingsOpen && <p className="form-error" role="alert">{accountError}</p>}
 
         {/* Where the time is filing, named in words rather than hidden behind
@@ -939,7 +923,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         <div className="filing-header">
           <p className="filing-where" data-testid="filing-where">
             {overview && <span className="filing-org">{overview.organization.name}</span>}
-            <span className="filing-project">{pinnedProjectName ?? liveProjectName ?? "Picked automatically"}</span>
+            <span className="filing-project">
+              <span className={`monitor-dot is-${state}`} aria-hidden="true" />
+              {pinnedProjectName ?? liveProjectName ?? "Picked automatically"}
+            </span>
+            <span className="visually-hidden">{MONITOR_LINE[state]}</span>
           </p>
           <button
             className="filing-change"
@@ -958,18 +946,22 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         <section className="hero card recording-card" aria-labelledby="recording-heading">
           {current ? (
             <>
-              <h2 id="recording-heading" className="hero-title">This stretch</h2>
+              <h2 id="recording-heading" className="hero-title">At it since {new Date(current.since).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</h2>
               <output className="elapsed" data-testid="elapsed-time" aria-label="Time in this stretch of work">
                 {formatDuration(elapsedSeconds(current.since, now))}
               </output>
-              <p className="today-line" data-testid="today-line">Today · {formatHuman(todayTotalSeconds)}</p>
+              <p className="today-line" data-testid="today-line">
+                <strong>{formatHuman(todayTotalSeconds)}</strong> so far today
+              </p>
             </>
           ) : (
             <>
               <h2 id="recording-heading" className="hero-title">{IDLE_HEADING[state]}</h2>
               <p className="subtle">{IDLE_BLURB[state]}</p>
               {todayTotalSeconds > 0 && (
-                <p className="today-line" data-testid="today-line">Today · {formatHuman(todayTotalSeconds)}</p>
+                <p className="today-line" data-testid="today-line">
+                  <strong>{formatHuman(todayTotalSeconds)}</strong> so far today
+                </p>
               )}
             </>
           )}
@@ -1042,9 +1034,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                           : <span className="app-mark is-plain" aria-hidden="true" />}
                       <span className="meter-name">
                         {row.label}
-                        {row.source !== undefined && monitorStatus?.agentActive?.source === row.source && (
-                          <span className="app-active"> · working now</span>
-                        )}
+                        {row.detail !== undefined && <span className="meter-detail"> · {row.detail}</span>}
                       </span>
                       {row.source === undefined ? (
                         <span
@@ -1070,14 +1060,27 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           )}
         </section>
 
-        <button
-          className="all-stats-trigger"
-          type="button"
-          onClick={() => setAllStatsOpen(true)}
-          data-testid="all-stats-trigger"
-        >
-          All stats
-        </button>
+        {/* The two ways out of this screen, kept to icons at the foot of it:
+            neither is what the app is for. */}
+        <div className="screen-foot">
+          <button
+            className="foot-button"
+            type="button"
+            onClick={() => setAllStatsOpen(true)}
+            data-testid="all-stats-trigger"
+          >
+            All stats
+          </button>
+          <button
+            className="foot-button is-icon"
+            type="button"
+            aria-label="What's recorded?"
+            title="What's recorded?"
+            onClick={() => setRecordingOpen(true)}
+          >
+            ⓘ
+          </button>
+        </div>
       </div>
 
       {allStatsOpen && (

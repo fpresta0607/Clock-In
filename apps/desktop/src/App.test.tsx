@@ -56,6 +56,7 @@ const status = {
   agentActive: null,
   currentSession: null,
   openSpan: null,
+  agentSessions: [],
   selectedProjectId: null,
 };
 
@@ -207,7 +208,9 @@ describe("recording", () => {
 
     // The clock and the day's total: no project name, no explaining sentences.
     expect(await screen.findByTestId("elapsed-time")).toBeInTheDocument();
-    expect(await screen.findByTestId("today-line")).toHaveTextContent(/^Today · /);
+    // The day's figure says "today" in words, so it can never be misread as
+    // more of the stretch above it.
+    expect(await screen.findByTestId("today-line")).toHaveTextContent(/so far today$/);
     expect(screen.queryByText(/Filed here because/)).not.toBeInTheDocument();
     // Nothing in the product starts or stops time any more.
     expect(screen.queryByRole("button", { name: /start/i })).not.toBeInTheDocument();
@@ -267,16 +270,24 @@ describe("recording", () => {
     expect(screen.queryByText("Recording on")).not.toBeInTheDocument();
   });
 
-  it("names the AI tool holding recording open in the status line", async () => {
+  it("gives every running agent session its own row, named by its project", async () => {
     render(<App bridge={bridgeFor({
       monitorStatus: vi.fn().mockResolvedValue({
         ...recording,
-        agentActive: { source: "kimi_code", since: "2026-08-06T14:10:00.000Z" },
+        // Two terminals of the same tool, working in different folders.
+        agentSessions: [
+          { source: "claude_code", externalSessionId: "one", projectId: project.id, since: new Date(Date.now() - 600_000).toISOString() },
+          { source: "claude_code", externalSessionId: "two", projectId: otherProject.id, since: new Date(Date.now() - 120_000).toISOString() },
+        ],
       }),
     })} />);
 
-    // One compact line instead of a sentence on the clock card.
-    expect(await screen.findByText("Recording on · Kimi Code working")).toBeInTheDocument();
+    const rows = within(await screen.findByTestId("session-app-list")).getAllByRole("listitem");
+    // Each is its own row: collapsing them would hide the parallel work.
+    expect(rows[0]).toHaveTextContent(`Claude Code · ${project.name}`);
+    expect(rows[0]).toHaveTextContent("10 min");
+    expect(rows[1]).toHaveTextContent(`Claude Code · ${otherProject.name}`);
+    expect(rows[1]).toHaveTextContent("2 min");
   });
 
   it("renders no recording surfaces when the host cannot report status", async () => {
@@ -340,15 +351,15 @@ describe("recording", () => {
     await waitFor(() => expect(bridge.sessionSelectProject).toHaveBeenCalledWith(newProject.id));
   });
 
-  it("names a waiting backlog and says it syncs on its own", async () => {
+  it("says nothing about syncing, which happens on its own", async () => {
     const backlogged = { ...recording, segmentBacklog: 2, sessionBacklog: 1 };
     render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(backlogged) })} />);
 
-    const line = await screen.findByTestId("sync-line");
-    expect(line).toHaveTextContent("3 recorded items are still on this computer");
-    expect(line).toHaveTextContent("sync on their own");
-    // Sync is automatic: nothing here to press.
-    expect(within(line).queryByRole("button")).not.toBeInTheDocument();
+    await screen.findByTestId("elapsed-time");
+    // A backlog is the app's problem, not the reader's: it drains by itself
+    // and never earns a banner on the record surface.
+    expect(screen.queryByTestId("sync-line")).not.toBeInTheDocument();
+    expect(screen.queryByText(/still on this computer/i)).not.toBeInTheDocument();
   });
 });
 
@@ -588,8 +599,6 @@ describe("the today panel", () => {
     expect(rows[1]).toHaveTextContent("30 min");
     expect(rows[2]).toHaveTextContent("VS Code");
     expect(rows[2]).toHaveTextContent("15 min");
-    // The runtime that is working right now says so on its own row.
-    expect(rows[0]).toHaveTextContent("working now");
   });
 
   it("keeps agent runtimes on their own rows instead of folding them together", async () => {
