@@ -21,7 +21,7 @@ use serde::Serialize;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager, State,
+    Emitter, Manager, State,
 };
 use tokio::sync::Mutex;
 
@@ -599,6 +599,10 @@ async fn install_available_update(handle: &tauri::AppHandle) -> bool {
             return false;
         }
     };
+
+    // The one visible moment: the UI shows a banner while the download and
+    // swap happen, so the restart that follows is announced, not a surprise.
+    let _ = handle.emit("update-available", update.version.clone());
 
     match update.download_and_install(|_, _| {}, || {}).await {
         Ok(()) => {

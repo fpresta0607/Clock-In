@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -124,6 +124,8 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   pathMappingsCreate: vi.fn().mockResolvedValue(mapping),
   pathMappingsUpdate: vi.fn().mockResolvedValue(mapping),
   pathMappingsDelete: vi.fn().mockResolvedValue(undefined),
+  syncNow: vi.fn().mockResolvedValue(undefined),
+  onUpdateAvailable: vi.fn().mockResolvedValue(() => undefined),
   ...overrides,
 });
 
@@ -619,5 +621,26 @@ describe("the team board", () => {
     const card = await screen.findByLabelText("Your team");
     expect(await within(card).findByText("Joined Team")).toBeInTheDocument();
     expect(within(card).getByTestId("invite-code")).toHaveTextContent("PQRTU-VWXY3");
+  });
+});
+
+describe("the update banner", () => {
+  it("announces a downloading update and the restart that follows", async () => {
+    let announce: ((version: string) => void) | undefined;
+    const bridge = bridgeFor({
+      onUpdateAvailable: vi.fn().mockImplementation(async (handler: (version: string) => void) => {
+        announce = handler;
+        return () => undefined;
+      }),
+    });
+    render(<App bridge={bridge} />);
+    await screen.findByRole("button", { name: "Settings" });
+
+    expect(screen.queryByTestId("update-banner")).not.toBeInTheDocument();
+    act(() => announce?.("0.9.9"));
+
+    const banner = await screen.findByTestId("update-banner");
+    expect(banner).toHaveTextContent("Version 0.9.9");
+    expect(banner).toHaveTextContent("restarts itself");
   });
 });

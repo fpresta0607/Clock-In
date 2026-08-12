@@ -246,6 +246,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [monitorStatus, setMonitorStatus] = useState<MonitorStatus | undefined>();
+  const [updateVersion, setUpdateVersion] = useState<string | undefined>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [recordingOpen, setRecordingOpen] = useState(false);
   const [allStatsOpen, setAllStatsOpen] = useState(false);
@@ -300,6 +301,26 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
+
+  // The updater announces itself once per launch at most; the banner stays
+  // up until the install restarts the app.
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void bridge.onUpdateAvailable((version) => {
+      if (active && mounted.current) setUpdateVersion(version);
+    }).then(
+      (stop) => {
+        if (active) unlisten = stop;
+        else stop();
+      },
+      () => undefined,
+    );
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [bridge]);
 
   useEffect(() => {
     const service = bridge;
@@ -719,6 +740,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       <WebGLShader />
       <Titlebar onOpenSettings={() => setSettingsOpen(true)} />
       <div className="screen">
+        {updateVersion && (
+          <p className="update-banner" role="status" data-testid="update-banner">
+            Version {updateVersion} is on its way — Clock-In restarts itself when it&apos;s ready.
+          </p>
+        )}
         {monitorStatus && (
           <p className="monitor-line">
             <span className={`monitor-dot is-${state}`} aria-hidden="true" />

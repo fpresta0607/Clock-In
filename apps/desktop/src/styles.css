@@ -127,6 +127,7 @@ select:disabled { opacity: .55; }
 .action-stack { display: grid; gap: 10px; margin-top: 21px; }
 
 .sync-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 14px 0 2px; border: 1px solid rgba(0, 140, 255, .35); border-radius: 6px; padding: 8px 10px; background: rgba(0, 140, 255, .08); color: #9ecdff; font-size: .81rem; text-align: left; }
+.update-banner { margin: 0; border: 1px solid rgba(0, 229, 155, .35); border-radius: 6px; padding: 8px 10px; background: rgba(0, 229, 155, .08); color: #8ff0cd; font-size: .81rem; text-align: left; }
 .sync-banner button { min-height: 31px; border: 0; background: transparent; color: var(--accent-blue); padding: 2px; text-decoration: underline; text-underline-offset: 3px; text-transform: none; letter-spacing: normal; }
 
 .form-error { margin: 13px 0 0; border-left: 3px solid var(--red); padding: 8px 10px; background: rgba(221, 93, 79, .11); color: #ffb4aa; font-size: .83rem; text-align: left; }
