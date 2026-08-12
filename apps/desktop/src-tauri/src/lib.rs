@@ -414,13 +414,17 @@ async fn settings_update(
 #[tauri::command]
 async fn me_stats(
     state: State<'_, AppState>,
-    from: Option<String>,
-    to: Option<String>,
+    from_at: Option<String>,
+    to_exclusive_at: Option<String>,
 ) -> ApiResult<MeStats> {
     let access_token = state.access_token().await?;
     state
         .client
-        .me_stats(&access_token, from.as_deref(), to.as_deref())
+        .me_stats(
+            &access_token,
+            from_at.as_deref(),
+            to_exclusive_at.as_deref(),
+        )
         .await
 }
 

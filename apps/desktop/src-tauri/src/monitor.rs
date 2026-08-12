@@ -273,6 +273,19 @@ impl SegmentBuilder {
         self.open.as_ref().map(|open| (open.kind, open.started_at))
     }
 
+    /// The app in front right now and when it took over, if the open span is
+    /// active work. The UI adds the time since to that app's row, which is
+    /// what keeps the day's breakdown ticking between uploads: a span the
+    /// server has not seen yet would otherwise read as a frozen total, or as
+    /// a missing app when the current one has never closed a span.
+    pub fn open_active_app(&self) -> Option<(String, u64)> {
+        let open = self.open.as_ref()?;
+        if open.kind != SegmentKind::Active {
+            return None;
+        }
+        Some((open.process_name.clone()?, open.started_at))
+    }
+
     /// Active seconds per app between `since` and `now`, heaviest first.
     ///
     /// This is what the main page's live stats read, and it is answered from
@@ -1329,6 +1342,10 @@ pub struct MonitorStatus {
     /// The session recording right now, which exists whenever the machine is
     /// in use and recording is on.
     pub current_session: Option<CurrentSession>,
+    /// The active span still open on this machine. Uploaded evidence stops at
+    /// the last span that closed, so the UI adds this one itself rather than
+    /// showing a total that stands still while the work continues.
+    pub open_span: Option<OpenSpan>,
     /// Every project the caller could pick, so the UI can offer the override
     /// without a second round trip.
     pub selected_project_id: Option<String>,
@@ -1347,6 +1364,14 @@ pub struct CurrentSession {
     /// Where this session's time has gone, per app, heaviest first. Local and
     /// live: it counts the span still open, so it ticks with the work.
     pub apps: Vec<SessionApp>,
+}
+
+/// The active span the machine is in the middle of: which app, and since when.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenSpan {
+    pub process_name: String,
+    pub since: String,
 }
 
 /// One app's share of the open session.
@@ -1603,6 +1628,13 @@ impl Monitor {
                     })
                     .collect(),
             }),
+            open_span: shared
+                .builder
+                .open_active_app()
+                .map(|(process_name, started_at)| OpenSpan {
+                    process_name,
+                    since: iso8601(started_at),
+                }),
             selected_project_id: shared.selected_project.clone(),
         }
     }

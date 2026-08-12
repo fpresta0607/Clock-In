@@ -206,12 +206,17 @@ const buildMeterRows = (apps: readonly SessionApp[]): MeterRow[] => {
 type StatsRange = "today" | "week";
 
 /// Local midnight today, or local midnight on Monday for "this week".
-const rangeStart = (range: StatsRange): string => {
+/// The range as instants on this computer's clock: "today" runs from local
+/// midnight to the next one. Calendar dates would be read as a UTC day, which
+/// rolls over in the afternoon anywhere west of Greenwich - the day's total
+/// would reset hours before midnight and carry the previous evening's work.
+const rangeBounds = (range: StatsRange): { fromAt: string; toExclusiveAt: string } => {
   const start = new Date();
   if (range === "week") start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
   start.setHours(0, 0, 0, 0);
-  // The API reads calendar days, not timestamps: a full ISO datetime is a 400.
-  return start.toISOString().slice(0, 10);
+  const end = new Date(start);
+  end.setDate(end.getDate() + (range === "week" ? 7 : 1));
+  return { fromAt: start.toISOString(), toExclusiveAt: end.toISOString() };
 };
 
 type TitlebarProps = {
@@ -391,7 +396,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     let active = true;
     const service = bridge;
     const generation = bridgeGeneration.current;
-    void service.meStats(rangeStart(statsRange)).then(
+    const bounds = rangeBounds(statsRange);
+    void service.meStats(bounds.fromAt, bounds.toExclusiveAt).then(
       (result) => {
         if (active && isCurrent(service, generation)) {
           setStats(result);
@@ -795,16 +801,35 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const pinnedProjectName = pinnedProject === ""
     ? undefined
     : ready.projects.find((item) => item.id === pinnedProject)?.name ?? "Unknown project";
+  // With nothing pinned, the header still names where time is landing right
+  // now rather than leaving the question open.
+  const liveProjectName = currentProject?.name;
   const defaultProject = ready.projects.find((item) => item.id === ready.defaultProjectId);
   const backlog = monitorStatus === undefined
     ? 0
     : monitorStatus.segmentBacklog + monitorStatus.agentBacklog + monitorStatus.sessionBacklog;
   const appRows = stats === undefined ? [] : buildAppRows(stats.apps);
-  const todayRows = stats === undefined ? [] : buildMeterRows(stats.apps);
+  // Uploaded evidence stops at the last span that closed, so the app in front
+  // right now is either frozen at its last total or missing from the day
+  // entirely. Its open span is added here, which is what makes these rows tick
+  // with the clock instead of jumping every few minutes.
+  const openSpan = monitorStatus?.openSpan ?? null;
+  const openSpanSeconds = openSpan === null ? 0 : elapsedSeconds(openSpan.since, now);
+  const liveApps = stats === undefined ? [] : (() => {
+    if (openSpan === null || openSpanSeconds <= 0) return [...stats.apps];
+    const merged = stats.apps.map((app) => (
+      app.processName === openSpan.processName
+        ? { ...app, durationSeconds: app.durationSeconds + openSpanSeconds }
+        : app
+    ));
+    return merged.some((app) => app.processName === openSpan.processName)
+      ? merged
+      : [...merged, { processName: openSpan.processName, durationSeconds: openSpanSeconds }];
+  })();
+  const todayRows = buildMeterRows(liveApps);
   // Finished time already on the server plus the stretch still being written.
   // The open stretch also lands on its project's row below, so the breakdown
-  // ticks with the clock instead of trailing it by a whole session. App rows
-  // need no top-up: segments upload within a poll of being recorded.
+  // ticks with the clock instead of trailing it by a whole session.
   const liveSeconds = current === null ? 0 : elapsedSeconds(current.since, now);
   const todayTotalSeconds = (stats?.totalDurationSeconds ?? 0) + liveSeconds;
   const projectTotals = new Map<string, { name: string; color: string | null; durationSeconds: number }>();
@@ -860,28 +885,32 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         )}
         {accountError && !settingsOpen && <p className="form-error" role="alert">{accountError}</p>}
 
-        {/* The clock and nothing else: the stretch being written now, and the
-            day's total under it. Every explanatory sentence this card used to
-            carry lives in the "what's recorded" panel instead. */}
-        <section className="hero card recording-card" aria-labelledby="recording-heading">
+        {/* Where the time is filing, named in words rather than hidden behind
+            an icon: the workspace, then the project, then a plain link to
+            change it. */}
+        <div className="filing-header">
+          <p className="filing-where" data-testid="filing-where">
+            {overview && <span className="filing-org">{overview.organization.name}</span>}
+            <span className="filing-project">{pinnedProjectName ?? liveProjectName ?? "Picked automatically"}</span>
+          </p>
           <button
-            className="hero-picker-toggle"
+            className="filing-change"
             type="button"
             data-testid="filing-change"
             aria-expanded={projectPickerOpen}
-            aria-label={pinnedProjectName === undefined
-              ? "Choose project (picked automatically now)"
-              : `Choose project (filing under ${pinnedProjectName})`}
-            title={pinnedProjectName === undefined
-              ? "Project picked automatically"
-              : `Filing under ${pinnedProjectName}`}
             onClick={() => setProjectPickerOpen((open) => !open)}
           >
-            ⌄
+            {projectPickerOpen ? "Done" : "Change"}
           </button>
+        </div>
+
+        {/* The clock and nothing else: a label, the stretch being written now,
+            and the day's total under it. Every explanatory sentence this card
+            used to carry lives in the "what's recorded" panel instead. */}
+        <section className="hero card recording-card" aria-labelledby="recording-heading">
           {current ? (
             <>
-              <h2 id="recording-heading" className="visually-hidden">Recording now</h2>
+              <h2 id="recording-heading" className="hero-title">This stretch</h2>
               <output className="elapsed" data-testid="elapsed-time" aria-label="Time in this stretch of work">
                 {formatDuration(elapsedSeconds(current.since, now))}
               </output>
@@ -889,7 +918,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             </>
           ) : (
             <>
-              <h2 id="recording-heading">{IDLE_HEADING[state]}</h2>
+              <h2 id="recording-heading" className="hero-title">{IDLE_HEADING[state]}</h2>
               <p className="subtle">{IDLE_BLURB[state]}</p>
               {todayTotalSeconds > 0 && (
                 <p className="today-line" data-testid="today-line">Today · {formatHuman(todayTotalSeconds)}</p>

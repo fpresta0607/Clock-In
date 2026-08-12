@@ -94,6 +94,8 @@ export type MonitorStatus = {
   hooks: readonly HookRegistration[];
   agentActive: AgentActive | null;
   currentSession: CurrentSession | null;
+  /// The active span still open on this machine, which no upload covers yet.
+  openSpan: { processName: string; since: string } | null;
   selectedProjectId: string | null;
 };
 
@@ -165,7 +167,9 @@ export interface TimerBridge {
   monitorSetEnabled(enabled: boolean): Promise<MonitorSettings>;
   settingsGet(): Promise<MonitorSettings>;
   settingsUpdate(input: SettingsPatch): Promise<MonitorSettings>;
-  meStats(from?: string, to?: string): Promise<MeStats>;
+  /// Instant bounds, so "today" means the caller's local day rather than a
+  /// UTC one that rolls over mid-afternoon.
+  meStats(fromAt: string, toExclusiveAt: string): Promise<MeStats>;
   projectCreate(input: ProjectCreateInput): Promise<TimerProject>;
   pathMappingsList(): Promise<readonly PathMapping[]>;
   pathMappingsCreate(input: PathMappingCreateInput): Promise<PathMapping>;
@@ -372,6 +376,9 @@ export const decodeMonitorStatus = (value: unknown): MonitorStatus => {
     hooks: (hooks as unknown[]).map(decodeHookRegistration),
     agentActive: candidate.agentActive === null ? null : decodeAgentActive(candidate.agentActive),
     currentSession: candidate.currentSession === null ? null : decodeCurrentSession(candidate.currentSession),
+    openSpan: candidate.openSpan === null || candidate.openSpan === undefined
+      ? null
+      : { processName: string(record(candidate.openSpan).processName), since: timestamp(record(candidate.openSpan).since) },
     selectedProjectId: uuidOrNull(candidate.selectedProjectId),
   };
 };
@@ -468,11 +475,7 @@ export const defaultBridge: TimerBridge = {
   monitorSetEnabled: (enabled) => invokeDecoded("monitor_set_enabled", decodeMonitorSettings, { enabled }),
   settingsGet: () => invokeDecoded("settings_get", decodeMonitorSettings),
   settingsUpdate: (input) => invokeDecoded("settings_update", decodeMonitorSettings, { input }),
-  meStats: (from, to) =>
-    invokeDecoded("me_stats", decodeMeStats, {
-      ...(from === undefined ? {} : { from }),
-      ...(to === undefined ? {} : { to }),
-    }),
+  meStats: (fromAt, toExclusiveAt) => invokeDecoded("me_stats", decodeMeStats, { fromAt, toExclusiveAt }),
   projectCreate: (input) => invokeDecoded("project_create", decodeProject, { input }),
   pathMappingsList: () => invokeDecoded("path_mappings_list", decodePathMappings),
   pathMappingsCreate: (input) => invokeDecoded("path_mappings_create", decodePathMapping, { input }),

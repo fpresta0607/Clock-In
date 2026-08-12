@@ -55,6 +55,7 @@ const status = {
   ],
   agentActive: null,
   currentSession: null,
+  openSpan: null,
   selectedProjectId: null,
 };
 
@@ -286,20 +287,22 @@ describe("recording", () => {
     await waitFor(() => expect(screen.queryByText(/^Recording (on|paused|off)$/)).not.toBeInTheDocument());
   });
 
-  it("keeps the project picker behind the corner caret", async () => {
+  it("names the workspace and project above the clock, with the picker behind Change", async () => {
     const person = userEvent.setup();
     render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(recording) })} />);
 
-    // Collapsed by default: no dropdown competing with the clock. The caret
-    // still names the filing target for anyone who asks.
-    const caret = await screen.findByTestId("filing-change");
-    expect(caret).toHaveAccessibleName(/picked automatically/);
+    // The header says where time is landing, in words rather than an icon.
+    const where = await screen.findByTestId("filing-where");
+    await waitFor(() => expect(where).toHaveTextContent("SIQstack"));
+    expect(where).toHaveTextContent(project.name);
+
+    // Collapsed by default: no dropdown competing with the clock.
     expect(screen.queryByLabelText("File my time under")).not.toBeInTheDocument();
 
-    await person.click(caret);
+    await person.click(screen.getByTestId("filing-change"));
     expect(screen.getByLabelText("File my time under")).toBeVisible();
 
-    await person.click(caret);
+    await person.click(screen.getByTestId("filing-change"));
     expect(screen.queryByLabelText("File my time under")).not.toBeInTheDocument();
   });
 
@@ -317,9 +320,9 @@ describe("recording", () => {
     await person.selectOptions(picker, otherProject.id);
     await waitFor(() => expect(sessionSelectProject).toHaveBeenCalledWith(otherProject.id));
 
-    // Choosing collapses the picker and the caret names the pinned project.
+    // Choosing collapses the picker and the header names the pinned project.
     await waitFor(() => expect(screen.queryByLabelText("File my time under")).not.toBeInTheDocument());
-    expect(screen.getByTestId("filing-change")).toHaveAccessibleName(/Client work/);
+    expect(screen.getByTestId("filing-where")).toHaveTextContent(otherProject.name);
   });
 
   it("creates a project and pins recording to it", async () => {
@@ -627,6 +630,28 @@ describe("the today panel", () => {
     expect(projects[0]).toHaveTextContent(/sec/);
   });
 
+  it("counts the still-open span so the app in front is neither frozen nor missing", async () => {
+    const live = {
+      ...recording,
+      // In front for two minutes, and no upload covers it yet.
+      openSpan: { processName: "WindowsTerminal.exe", since: new Date(Date.now() - 120_000).toISOString() },
+    };
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(live),
+      meStats: vi.fn().mockResolvedValue({
+        ...meStats,
+        apps: [{ processName: "Code.exe", durationSeconds: 60 }],
+      }),
+    })} />);
+
+    const rows = within(await screen.findByTestId("session-app-list")).getAllByRole("listitem");
+    // The open app appears at all - the server has never heard of it - and
+    // outranks the app the server does know about.
+    expect(rows[0]).toHaveTextContent("Windows Terminal");
+    expect(rows[0]).toHaveTextContent("2 min");
+    expect(rows[1]).toHaveTextContent("VS Code");
+  });
+
   it("shows the OS icon for an app when the host has one", async () => {
     render(<App bridge={bridgeFor({
       monitorStatus: vi.fn().mockResolvedValue(recording),
@@ -695,9 +720,10 @@ describe("the team board", () => {
 
     await waitFor(() => expect(bridge.orgJoin).toHaveBeenCalledWith("PQRTU-VWXY3"));
     // The group names the team you are now on, in a sentence rather than as a
-    // bare heading beside a code.
-    expect(await screen.findByText("Joined Team")).toBeInTheDocument();
-    expect(screen.getByTestId("invite-code")).toHaveTextContent("PQRTU-VWXY3");
+    // bare heading beside a code. The home header names it too, so the
+    // assertion is scoped to the settings dialog.
+    expect(await within(dialog).findByText("Joined Team")).toBeInTheDocument();
+    expect(within(dialog).getByTestId("invite-code")).toHaveTextContent("PQRTU-VWXY3");
   });
 });
 

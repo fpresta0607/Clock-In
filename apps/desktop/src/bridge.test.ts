@@ -66,6 +66,7 @@ describe("defaultBridge", () => {
       idleSeconds: 120,
     apps: [],
     },
+    openSpan: { processName: "WindowsTerminal.exe", since: "2026-08-06T14:58:00.000Z" },
     selectedProjectId: null,
   };
 
@@ -154,16 +155,15 @@ describe("defaultBridge", () => {
     };
     invoke.mockResolvedValueOnce(stats);
 
-    await expect(defaultBridge.meStats("2026-08-06")).resolves.toEqual(stats);
-    expect(invoke).toHaveBeenLastCalledWith("me_stats", { from: "2026-08-06" });
-
-    invoke.mockResolvedValueOnce(stats);
-    await defaultBridge.meStats();
-    expect(invoke).toHaveBeenLastCalledWith("me_stats", {});
+    // Instant bounds, not calendar dates: a bare date is read as a UTC day.
+    const fromAt = "2026-08-06T05:00:00.000Z";
+    const toExclusiveAt = "2026-08-07T05:00:00.000Z";
+    await expect(defaultBridge.meStats(fromAt, toExclusiveAt)).resolves.toEqual(stats);
+    expect(invoke).toHaveBeenLastCalledWith("me_stats", { fromAt, toExclusiveAt });
 
     // Attributed time can never exceed the time it is part of.
     invoke.mockResolvedValueOnce({ ...stats, attributedSeconds: 9_000 });
-    await expect(defaultBridge.meStats()).rejects.toMatchObject({ kind: "unknown" });
+    await expect(defaultBridge.meStats(fromAt, toExclusiveAt)).rejects.toMatchObject({ kind: "unknown" });
   });
 
   it("maps path-mapping commands and rejects malformed rows", async () => {
