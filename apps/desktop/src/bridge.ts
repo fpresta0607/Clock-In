@@ -99,6 +99,55 @@ export type MonitorStatus = {
   selectedProjectId: string | null;
 };
 
+/// One limit a coding-agent provider reports — a rolling session window, a
+/// weekly window, or a per-model bound. Several apply at once; the smallest is
+/// what the dial shows.
+export type QuotaWindow = {
+  id: string;
+  label: string;
+  kind: string;
+  percentRemaining: number;
+  resetsAt: string | null;
+};
+
+/// The provider login a reading belongs to. Read from the machine's own
+/// credentials for display only; it never leaves the device.
+export type QuotaAccount = {
+  email: string | null;
+  organization: string | null;
+};
+
+/// What one provider has left, for the account signed in to it on this machine
+/// right now — not for whoever recorded a past session. `unknown` covers every
+/// way a reading can fail (no tooling installed, signed out, unreadable state)
+/// and always carries a `detail` sentence saying which.
+export type AgentQuota = {
+  provider: string;
+  label: string;
+  /// Agent-session sources this provider backs (`claude_code` → `claude`), so
+  /// an attributed row finds its dial without a second lookup table.
+  sources: readonly string[];
+  status: "known" | "unknown";
+  account: QuotaAccount | null;
+  plan: string | null;
+  percentRemaining: number | null;
+  bindingWindowId: string | null;
+  windows: readonly QuotaWindow[];
+  detail: string | null;
+  /// The provider's own error code, for the expandable detail.
+  reason: string | null;
+  stale: boolean;
+};
+
+/// `pending` is the host still reading; `unavailable` means no source answered
+/// at all. Both leave every dial in its unknown state.
+export type QuotaSnapshot = {
+  status: "pending" | "ready" | "unavailable";
+  checkedAt: string | null;
+  detail: string | null;
+  providers: readonly AgentQuota[];
+};
+
 export type MonitorSettings = {
   enabled: boolean;
   awayThresholdMinutes: number;
@@ -177,6 +226,9 @@ export interface TimerBridge {
   pathMappingsDelete(id: string): Promise<void>;
   /// OS icons for executables, as data URIs; null where the OS has none.
   appIcons(processNames: readonly string[]): Promise<Record<string, string | null>>;
+  /// How much of each coding agent's plan is left, read locally. Advisory:
+  /// unknown readings are normal and never an error.
+  quotaStatus(): Promise<QuotaSnapshot>;
   /// Subscribes to "an update is downloading" notices; resolves to the
   /// unsubscribe function.
   onUpdateAvailable(handler: (version: string) => void): Promise<() => void>;
@@ -283,6 +335,76 @@ export const decodeOrganizationOverview = (value: unknown): OrganizationOverview
 const boolean = (value: unknown): boolean => {
   if (typeof value !== "boolean") invalidResponse();
   return value as boolean;
+};
+
+const percentage = (value: unknown): number => {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 100) invalidResponse();
+  return value as number;
+};
+
+const decodeQuotaWindow = (value: unknown): QuotaWindow => {
+  const candidate = record(value);
+  return {
+    id: string(candidate.id),
+    label: string(candidate.label),
+    kind: string(candidate.kind),
+    percentRemaining: percentage(candidate.percentRemaining),
+    // Left as the provider wrote it rather than validated as a timestamp: the
+    // dial only ever prints it, and a formatting quirk from another tool is no
+    // reason to throw a whole reading away.
+    resetsAt: stringOrNull(candidate.resetsAt ?? null),
+  };
+};
+
+const decodeQuotaAccount = (value: unknown): QuotaAccount | null => {
+  if (value === null || value === undefined) return null;
+  const candidate = record(value);
+  return {
+    email: stringOrNull(candidate.email ?? null),
+    organization: stringOrNull(candidate.organization ?? null),
+  };
+};
+
+const decodeAgentQuota = (value: unknown): AgentQuota => {
+  const candidate = record(value);
+  const sources = candidate.sources;
+  const windows = candidate.windows;
+  if (!Array.isArray(sources) || !Array.isArray(windows)) invalidResponse();
+  const status = candidate.status;
+  if (status !== "known" && status !== "unknown") invalidResponse();
+  const percentRemaining = candidate.percentRemaining === null || candidate.percentRemaining === undefined
+    ? null
+    : percentage(candidate.percentRemaining);
+  // A "known" reading without a number would draw an arc over nothing.
+  if (status === "known" && percentRemaining === null) invalidResponse();
+  return {
+    provider: string(candidate.provider),
+    label: string(candidate.label),
+    sources: (sources as unknown[]).map(string),
+    status: status as "known" | "unknown",
+    account: decodeQuotaAccount(candidate.account),
+    plan: stringOrNull(candidate.plan ?? null),
+    percentRemaining,
+    bindingWindowId: stringOrNull(candidate.bindingWindowId ?? null),
+    windows: (windows as unknown[]).map(decodeQuotaWindow),
+    detail: stringOrNull(candidate.detail ?? null),
+    reason: stringOrNull(candidate.reason ?? null),
+    stale: boolean(candidate.stale),
+  };
+};
+
+export const decodeQuotaSnapshot = (value: unknown): QuotaSnapshot => {
+  const candidate = record(value);
+  const providers = candidate.providers;
+  if (!Array.isArray(providers)) invalidResponse();
+  const status = candidate.status;
+  if (status !== "pending" && status !== "ready" && status !== "unavailable") invalidResponse();
+  return {
+    status: status as "pending" | "ready" | "unavailable",
+    checkedAt: stringOrNull(candidate.checkedAt ?? null),
+    detail: stringOrNull(candidate.detail ?? null),
+    providers: (providers as unknown[]).map(decodeAgentQuota),
+  };
 };
 
 const stringOrNull = (value: unknown): string | null => {
@@ -482,6 +604,7 @@ export const defaultBridge: TimerBridge = {
   pathMappingsUpdate: (id, input) => invokeDecoded("path_mappings_update", decodePathMapping, { id, input }),
   pathMappingsDelete: (id) => invokeDecoded("path_mappings_delete", decodeVoid, { id }),
   appIcons: (processNames) => invokeDecoded("app_icons", decodeAppIcons, { processNames }),
+  quotaStatus: () => invokeDecoded("quota_status", decodeQuotaSnapshot),
   onUpdateAvailable: async (handler) => {
     const { listen } = await import("@tauri-apps/api/event");
     return listen<string>("update-available", (event) => handler(event.payload));

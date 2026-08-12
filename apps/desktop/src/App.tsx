@@ -12,11 +12,14 @@ import {
   type MonitorStatus,
   type OrganizationOverview,
   type PathMapping,
+  type AgentQuota,
+  type QuotaSnapshot,
   type SessionApp,
   type SettingsPatch,
   type TimerBridge,
 } from "./bridge.js";
 import { AgentRuntimeIcon } from "./agent-icons.js";
+import { QuotaDial } from "./QuotaDial.js";
 import { agentRuntimeForBinary, formatDuration } from "@clock-in/shared";
 import { RecordingPanel, recordingState, type RecordingState } from "./RecordingPanel.js";
 import { WebGLShader } from "./WebGLShader.js";
@@ -28,6 +31,10 @@ type AppProps = {
 /// Status polls stay well above the host's own 30-second activity tick; the
 /// latency this buys is fine for a tray utility.
 const MONITOR_POLL_MS = 15_000;
+
+/// Plan quota moves slowly and each read shells out to another tool, so it is
+/// asked for far less often than the recording status.
+const QUOTA_POLL_MS = 120_000;
 
 const FRIENDLY_APP_NAMES: Record<string, string> = {
   chrome: "Google Chrome",
@@ -74,6 +81,10 @@ const formatHuman = (seconds: number): string => {
   if (minutes > 0) return `${minutes} min`;
   return `${total} sec`;
 };
+
+/// The reading for one agent source (`claude_code` → the `claude` provider).
+const quotaFor = (snapshot: QuotaSnapshot | undefined, source: string): AgentQuota | undefined =>
+  snapshot?.providers.find((provider) => provider.sources.includes(source));
 
 const elapsedSeconds = (since: string, now: number): number =>
   Math.max(0, Math.floor((now - Date.parse(since)) / 1_000));
@@ -278,6 +289,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [appIcons, setAppIcons] = useState<Record<string, string | null>>({});
+  const [quota, setQuota] = useState<QuotaSnapshot | undefined>();
   const [statsTick, setStatsTick] = useState(0);
   const [hookChoice, setHookChoice] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
@@ -412,6 +424,26 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     );
     return () => { active = false; };
   }, [bridge, statsRange, signedIn?.user.id, statsTick]);
+
+  // Agent plan quota, read from this machine. Advisory and never on the
+  // critical path: a failure leaves the dials unknown rather than saying so.
+  useEffect(() => {
+    if (signedIn === undefined) return undefined;
+    let active = true;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const read = (): void => {
+      void service.quotaStatus().then(
+        (snapshot) => {
+          if (active && isCurrent(service, generation)) setQuota(snapshot);
+        },
+        () => undefined,
+      );
+    };
+    read();
+    const timer = window.setInterval(read, QUOTA_POLL_MS);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [bridge, signedIn?.user.id]);
 
   // Keeps the Today panel close to live: a slow tick refreshes the totals.
   useEffect(() => {
@@ -998,11 +1030,21 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                           <span className="app-active"> · working now</span>
                         )}
                       </span>
-                      <span
-                        className="meter-bar"
-                        aria-hidden="true"
-                        style={{ "--share": `${row.share}%` } as React.CSSProperties}
-                      />
+                      {row.source === undefined ? (
+                        <span
+                          className="meter-bar"
+                          aria-hidden="true"
+                          style={{ "--share": `${row.share}%` } as React.CSSProperties}
+                        />
+                      ) : (
+                        // An agent row answers a different question than a
+                        // share of the day: how much of its plan is left.
+                        <QuotaDial
+                          agentLabel={sourceLabel(row.source)}
+                          quota={quotaFor(quota, row.source)}
+                          pending={quota === undefined || quota.status === "pending"}
+                        />
+                      )}
                       <span className="meter-duration">{formatHuman(row.durationSeconds)}</span>
                     </li>
                   ))}

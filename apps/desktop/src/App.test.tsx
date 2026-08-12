@@ -126,6 +126,7 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   pathMappingsUpdate: vi.fn().mockResolvedValue(mapping),
   pathMappingsDelete: vi.fn().mockResolvedValue(undefined),
   appIcons: vi.fn().mockResolvedValue({}),
+  quotaStatus: vi.fn().mockResolvedValue({ status: "ready", checkedAt: null, detail: null, providers: [] }),
   onUpdateAvailable: vi.fn().mockResolvedValue(() => undefined),
   ...overrides,
 });
@@ -650,6 +651,42 @@ describe("the today panel", () => {
     expect(rows[0]).toHaveTextContent("Windows Terminal");
     expect(rows[0]).toHaveTextContent("2 min");
     expect(rows[1]).toHaveTextContent("VS Code");
+  });
+
+  it("puts the plan reading on an agent's row instead of a share bar", async () => {
+    const quotaStatus = vi.fn().mockResolvedValue({
+      status: "ready",
+      checkedAt: "2026-08-12T19:00:00.000Z",
+      detail: null,
+      providers: [{
+        provider: "claude",
+        label: "Claude",
+        sources: ["claude_code"],
+        status: "known",
+        account: { email: "dev@clock-in.test", organization: null },
+        plan: "max",
+        percentRemaining: 73,
+        bindingWindowId: "five_hour",
+        windows: [{ id: "five_hour", label: "session", kind: "session", percentRemaining: 73, resetsAt: null }],
+        detail: null,
+        reason: null,
+        stale: false,
+      }],
+    });
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(recording),
+      quotaStatus,
+      meStats: vi.fn().mockResolvedValue({
+        ...meStats,
+        apps: [{ processName: "claude.exe", durationSeconds: 3_600 }],
+      }),
+    })} />);
+
+    const row = (await within(await screen.findByTestId("session-app-list")).findAllByRole("listitem"))[0];
+    expect(row).toHaveTextContent("Claude Code");
+    // The dial carries the whole reading as its label, so the arc is never
+    // the only thing saying it.
+    expect(await within(row!).findByRole("button", { name: /73% remaining on the max plan/i })).toBeInTheDocument();
   });
 
   it("shows the OS icon for an app when the host has one", async () => {
