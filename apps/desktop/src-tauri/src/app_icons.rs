@@ -41,6 +41,20 @@ pub fn lookup(process_names: Vec<String>) -> HashMap<String, Option<String>> {
     icons
 }
 
+/// One process running right now: its executable name and when it started.
+pub struct RunningProcess {
+    pub process_name: String,
+    pub process_id: u32,
+    /// Unix seconds, or `None` when the OS refused the handle.
+    pub started_at: Option<u64>,
+}
+
+/// Every process on this machine. Used to find agents that work without ever
+/// owning a window, which no foreground sample can see.
+pub fn running_processes() -> Vec<RunningProcess> {
+    platform::running_processes()
+}
+
 fn cached_icon(normalized: &str) -> Option<String> {
     let cache = ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(known) = lock(cache).get(normalized) {
@@ -82,7 +96,9 @@ mod platform {
 
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine as _;
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_SUCCESS, FILETIME, INVALID_HANDLE_VALUE,
+    };
     use windows_sys::Win32::Graphics::Gdi::{
         DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
         BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
@@ -96,7 +112,7 @@ mod platform {
     };
     use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
     use windows_sys::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows_sys::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
     use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
@@ -158,6 +174,65 @@ mod platform {
             })();
             CloseHandle(snapshot);
             result
+        }
+    }
+
+    /// Every running process, with its start time where the OS allows it.
+    /// An elevated process refuses the handle; the name is still true, so the
+    /// entry stays and only its start time is unknown.
+    pub fn running_processes() -> Vec<super::RunningProcess> {
+        let mut processes = Vec::new();
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snapshot == INVALID_HANDLE_VALUE {
+                return processes;
+            }
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of_val(&entry) as u32;
+            if Process32FirstW(snapshot, &mut entry) != 0 {
+                loop {
+                    let end = entry
+                        .szExeFile
+                        .iter()
+                        .position(|unit| *unit == 0)
+                        .unwrap_or(entry.szExeFile.len());
+                    processes.push(super::RunningProcess {
+                        process_name: String::from_utf16_lossy(&entry.szExeFile[..end]),
+                        process_id: entry.th32ProcessID,
+                        started_at: process_started_at(entry.th32ProcessID),
+                    });
+                    if Process32NextW(snapshot, &mut entry) == 0 {
+                        break;
+                    }
+                }
+            }
+            CloseHandle(snapshot);
+        }
+        processes
+    }
+
+    /// When a process started, in unix seconds. `GetProcessTimes` reports
+    /// 100-nanosecond ticks since 1601, so the epoch is shifted here.
+    fn process_started_at(process_id: u32) -> Option<u64> {
+        const TICKS_PER_SECOND: u64 = 10_000_000;
+        /// Seconds between the Win32 epoch (1601-01-01) and the unix one.
+        const EPOCH_DIFFERENCE_SECONDS: u64 = 11_644_473_600;
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
+            if process.is_null() {
+                return None;
+            }
+            let mut created = std::mem::zeroed::<FILETIME>();
+            let mut exited = std::mem::zeroed::<FILETIME>();
+            let mut kernel = std::mem::zeroed::<FILETIME>();
+            let mut user = std::mem::zeroed::<FILETIME>();
+            let ok = GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user);
+            CloseHandle(process);
+            if ok == 0 {
+                return None;
+            }
+            let ticks = ((created.dwHighDateTime as u64) << 32) | u64::from(created.dwLowDateTime);
+            (ticks / TICKS_PER_SECOND).checked_sub(EPOCH_DIFFERENCE_SECONDS)
         }
     }
 
@@ -386,6 +461,10 @@ mod platform {
 
     pub fn icon_data_uri(_name: &str) -> Option<String> {
         None
+    }
+
+    pub fn running_processes() -> Vec<super::RunningProcess> {
+        Vec::new()
     }
 }
 

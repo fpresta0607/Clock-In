@@ -1661,6 +1661,26 @@ impl Monitor {
                         since: iso8601(active.started_at),
                     })
                     .collect();
+                // A hook says a session started; the process table says one is
+                // here. An agent that was already running when Clock-In
+                // started - or whose start event was uploaded and truncated
+                // long ago - leaves no event to replay, so it is found by its
+                // process instead and keyed by pid so the two never collide.
+                for process in crate::app_icons::running_processes() {
+                    let Some(runtime) = agent_runtimes::runtime_for_binary(&process.process_name)
+                    else {
+                        continue;
+                    };
+                    if sessions.iter().any(|session| session.source == runtime.id) {
+                        continue;
+                    }
+                    sessions.push(AgentSession {
+                        source: runtime.id.clone(),
+                        external_session_id: format!("pid-{}", process.process_id),
+                        project_id: None,
+                        since: iso8601(process.started_at.unwrap_or(now)),
+                    });
+                }
                 sessions.sort_by(|left, right| right.since.cmp(&left.since));
                 sessions
             },
