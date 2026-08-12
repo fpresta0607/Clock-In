@@ -80,19 +80,22 @@ describe("project routes", () => {
     });
   });
 
-  it("allows two projects to share a name", async () => {
+  it("rejects a duplicate name, case-insensitively", async () => {
     const headers = { authorization: bearerHeader, "content-type": "application/json" };
     const app = createTestApp();
 
     const first = await app.request("http://api.test/projects", {
-      method: "POST", headers, body: JSON.stringify({ name: "General" }),
+      method: "POST", headers, body: JSON.stringify({ name: "Client Work" }),
     });
     expect(first.status).toBe(201);
+    // "client work" and "Client Work" are one project to a person.
     const second = await app.request("http://api.test/projects", {
-      method: "POST", headers, body: JSON.stringify({ name: "General" }),
+      method: "POST", headers, body: JSON.stringify({ name: "client work" }),
     });
-    expect(second.status).toBe(201);
-    expect((await first.json()).id).not.toBe((await second.json()).id);
+    expect(second.status).toBe(409);
+    await expect(second.json()).resolves.toEqual({
+      error: { code: "conflict", message: "A project with that name already exists." },
+    });
   });
 
   it("validates the create body with a stable error code", async () => {

@@ -230,6 +230,48 @@ class MemoryReports implements ReportRepository {
     return totals.sort((a, b) => (b.durationSeconds as number) - (a.durationSeconds as number) || a.mapping.id.localeCompare(b.mapping.id));
   }
 
+  /** The user name every fake row answers with; ids are what the assertions read. */
+  private nameOf(userId: string): string {
+    return users[userId as keyof typeof users]?.name ?? "Unknown";
+  }
+
+  public async readPresenceIntervals(subject: AuthenticatedSubject, query: ReportQuery) {
+    return this.segments
+      .filter((segment) => segment.organizationId === subject.organizationId
+        && (query.userId === undefined || segment.userId === query.userId)
+        && segment.kind === "active"
+        && segment.receivedAt.getTime() <= segment.endedAt.getTime() + freshnessWindowMs)
+      .map((segment) => ({
+        user: { id: segment.userId, name: this.nameOf(segment.userId) },
+        startedAt: segment.startedAt,
+        endedAt: segment.endedAt,
+      }));
+  }
+
+  public async readSessionIntervals(subject: AuthenticatedSubject, query: ReportQuery) {
+    return this.filtered(subject, query).map((session) => ({
+      user: { id: session.userId, name: this.nameOf(session.userId) },
+      projectId: session.project.id,
+      attribution: session.attribution,
+      startedAt: session.startedAt,
+      stoppedAt: session.stoppedAt,
+    }));
+  }
+
+  public async readAgentIntervals(subject: AuthenticatedSubject, query: ReportQuery) {
+    return this.agents
+      .filter((agent) => agent.organizationId === subject.organizationId
+        && (query.userId === undefined || agent.userId === query.userId))
+      .map((agent) => ({
+        user: { id: agent.userId, name: this.nameOf(agent.userId) },
+        source: agent.source,
+        model: null,
+        projectId: null,
+        startedAt: agent.startedAt,
+        endedAt: agent.endedAt ?? agent.lastEventAt,
+      }));
+  }
+
   public async findProjectForOrganization(): Promise<never> {
     throw new Error("not used by me/stats");
   }
@@ -304,6 +346,13 @@ function createTestApp(reports = new MemoryReports(), agentSessions = new ReapRe
     pathMappingRepository: new PathMappings() as PathMappingRepository,
   });
 }
+
+const noMeasurement = {
+  activeSeconds: 0,
+  agentSeconds: 0,
+  concurrency: { t0Seconds: 0, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
+  byAgent: [] as never[],
+};
 
 describe("me/stats routes", () => {
   it("requires a signed bearer token", async () => {
@@ -402,6 +451,7 @@ describe("me/stats routes", () => {
     await expect(response.json()).resolves.toEqual({
       filters: {},
       totalDurationSeconds: 10_800,
+      ...noMeasurement,
       attributedSeconds: 7_200,
       unattributedSeconds: 3_600,
       projects: [
@@ -550,7 +600,7 @@ describe("me/stats routes", () => {
     });
 
     const empty = await app.request("http://api.test/me/stats?from=2026-08-01&to=2026-08-02", { headers });
-    await expect(empty.json()).resolves.toEqual({ filters: { from: "2026-08-01", to: "2026-08-02" }, totalDurationSeconds: 0, attributedSeconds: 0, unattributedSeconds: 0, projects: [], apps: [], sites: [] });
+    await expect(empty.json()).resolves.toEqual({ filters: { from: "2026-08-01", to: "2026-08-02" }, totalDurationSeconds: 0, attributedSeconds: 0, unattributedSeconds: 0, ...noMeasurement, projects: [], apps: [], sites: [] });
   });
 
   it("closes stale agent sessions on the read path before computing stats", async () => {

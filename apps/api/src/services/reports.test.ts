@@ -3,13 +3,16 @@ import type { ReportFilters } from "@clock-in/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import type {
+  AgentIntervalRecord,
   AppTotalRecord,
   LeaderboardRowRecord,
+  PresenceIntervalRecord,
   ProjectTotalRecord,
   ReportPageOptions,
   ReportQuery,
   ReportRepository,
   ReportRowRecord,
+  SessionIntervalRecord,
   SiteTotalRecord,
 } from "../repositories.js";
 import { createReportService } from "./reports.js";
@@ -62,6 +65,9 @@ class Reports implements ReportRepository {
   public projectTotals: ProjectTotalRecord[] = [];
   public appTotals: AppTotalRecord[] = [];
   public siteTotals: SiteTotalRecord[] = [];
+  public presenceIntervals: PresenceIntervalRecord[] = [];
+  public sessionIntervals: SessionIntervalRecord[] = [];
+  public agentIntervals: AgentIntervalRecord[] = [];
   public constructor(private readonly rows: ReportRowRecord[] = [], private readonly accessible = new Set([ids.project, ids.user])) {}
   public async readLeaderboardForOrganization(_subject: AuthenticatedSubject, query: ReportQuery) {
     this.lastLeaderboardQuery = query;
@@ -78,6 +84,15 @@ class Reports implements ReportRepository {
   public async readSiteTotalsForMember(_subject: AuthenticatedSubject, query: ReportQuery) {
     this.lastSiteTotalsQuery = query;
     return this.siteTotals;
+  }
+  public async readPresenceIntervals(_subject: AuthenticatedSubject, query: ReportQuery) {
+    return this.presenceIntervals.filter((row) => query.userId === undefined || row.user.id === query.userId);
+  }
+  public async readSessionIntervals(_subject: AuthenticatedSubject, query: ReportQuery) {
+    return this.sessionIntervals.filter((row) => query.userId === undefined || row.user.id === query.userId);
+  }
+  public async readAgentIntervals(_subject: AuthenticatedSubject, query: ReportQuery) {
+    return this.agentIntervals.filter((row) => query.userId === undefined || row.user.id === query.userId);
   }
   public async findProjectForOrganization(_subject: AuthenticatedSubject, projectId: string) {
     return this.accessible.has(projectId) ? { id: projectId, name: "Timer" } : null;
@@ -97,6 +112,13 @@ class Reports implements ReportRepository {
     return { summary: this.summary(), rows: this.rows };
   }
 }
+
+const noMeasurement = {
+  activeSeconds: 0,
+  agentSeconds: 0,
+  concurrency: { t0Seconds: 0, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
+  byAgent: [] as never[],
+};
 
 describe("report service", () => {
   it("scopes report queries to the authenticated organization and normalizes inclusive UTC calendar bounds", async () => {
@@ -252,10 +274,53 @@ describe("leaderboard", () => {
     const result = await service.leaderboard(subject, {});
 
     expect(result.entries).toEqual([
-      { rank: 1, user: { id: ids.user, name: "Alex" }, durationSeconds: 7_200, sessionCount: 3, attributedSeconds: 5_400, unattributedSeconds: 1_800 },
-      { rank: 2, user: { id: ids.otherUser, name: "Sam" }, durationSeconds: 3_600, sessionCount: 1, attributedSeconds: 3_600, unattributedSeconds: 0 },
+      { rank: 1, user: { id: ids.user, name: "Alex" }, durationSeconds: 7_200, sessionCount: 3, attributedSeconds: 5_400, unattributedSeconds: 1_800, ...noMeasurement },
+      { rank: 2, user: { id: ids.otherUser, name: "Sam" }, durationSeconds: 3_600, sessionCount: 1, attributedSeconds: 3_600, unattributedSeconds: 0, ...noMeasurement },
     ]);
     expect(result.totalDurationSeconds).toBe(10_800);
+    expect(result.medianSessionSeconds).toBeNull();
+  });
+
+  it("ranks by active wall-clock time and keeps agent parallelism out of the hours", async () => {
+    const hour = (h: number): Date => new Date(Date.UTC(2026, 7, 5, h));
+    const reports = new Reports();
+    reports.leaderboardRows = [
+      entry(ids.user, "Alex", 3_600, 1, 3_600),
+      entry(ids.otherUser, "Sam", 7_200, 2, 7_200),
+    ];
+    // Alex: present two hours straight, three agents in parallel for the first.
+    reports.presenceIntervals = [
+      { user: { id: ids.user, name: "Alex" }, startedAt: hour(9), endedAt: hour(11) },
+      { user: { id: ids.otherUser, name: "Sam" }, startedAt: hour(9), endedAt: hour(10) },
+    ];
+    reports.sessionIntervals = [
+      { user: { id: ids.user, name: "Alex" }, projectId: ids.project, attribution: "agent", startedAt: hour(9), stoppedAt: hour(11) },
+      { user: { id: ids.otherUser, name: "Sam" }, projectId: ids.project, attribution: "selected", startedAt: hour(9), stoppedAt: hour(10) },
+    ];
+    reports.agentIntervals = [
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
+      { user: { id: ids.user, name: "Alex" }, source: "codex", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
+    ];
+    const service = createReportService({ reports, reaper: silentReaper });
+
+    const result = await service.leaderboard(subject, {});
+
+    // Alex worked 2h of wall clock; 3h of agent runtime never inflates it.
+    const [alex, sam] = result.entries;
+    expect(alex?.user.name).toBe("Alex");
+    expect(alex?.rank).toBe(1);
+    expect(alex?.activeSeconds).toBe(7_200);
+    expect(alex?.agentSeconds).toBe(10_800);
+    expect(alex?.concurrency).toEqual({ t0Seconds: 3_600, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 3_600, awaySeconds: 0 });
+    // The by-agent split sums to agent time, never to active time.
+    expect(alex?.byAgent).toEqual([
+      { source: "claude_code", model: null, durationSeconds: 7_200 },
+      { source: "codex", model: null, durationSeconds: 3_600 },
+    ]);
+    expect(sam?.rank).toBe(2);
+    expect(sam?.activeSeconds).toBe(3_600);
+    expect(result.medianSessionSeconds).toBe(5_400);
   });
 
   it("shares a rank between members with identical totals", async () => {
@@ -320,6 +385,7 @@ describe("leaderboard", () => {
     await expect(service.leaderboard(subject, {})).resolves.toEqual({
       filters: {},
       totalDurationSeconds: 0,
+      medianSessionSeconds: null,
       entries: [],
     });
   });
@@ -349,6 +415,7 @@ describe("me/stats", () => {
       totalDurationSeconds: 7_800,
       attributedSeconds: 6_000,
       unattributedSeconds: 1_800,
+      ...noMeasurement,
       projects: [
         { project: { id: ids.project, name: "Timer" }, durationSeconds: 7_200, attributedSeconds: 5_400, unattributedSeconds: 1_800, sessionCount: 2 },
         { project: { id: ids.otherProject, name: "Side" }, durationSeconds: 600, attributedSeconds: 600, unattributedSeconds: 0, sessionCount: 1 },
@@ -375,7 +442,7 @@ describe("me/stats", () => {
   it("returns an empty stats response when the caller recorded nothing", async () => {
     const result = await createReportService({ reports: new Reports(), reaper: silentReaper }).meStats(subject, {});
 
-    expect(result).toEqual({ filters: {}, totalDurationSeconds: 0, attributedSeconds: 0, unattributedSeconds: 0, projects: [], apps: [], sites: [] });
+    expect(result).toEqual({ filters: {}, totalDurationSeconds: 0, attributedSeconds: 0, unattributedSeconds: 0, ...noMeasurement, projects: [], apps: [], sites: [] });
   });
 
   it("reads a named teammate's stats instead of the caller's when asked", async () => {

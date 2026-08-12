@@ -25,11 +25,13 @@ import type {
   ProjectRepository,
   ReportRepository,
   SessionRepository,
+  ViewPreferencesRepository,
 } from "./repositories.js";
 import { createActivityRoutes } from "./routes/activity.js";
 import { createAgentSessionRoutes } from "./routes/agent-sessions.js";
 import { createMeStatsRoutes } from "./routes/me-stats.js";
 import { createPathMappingRoutes } from "./routes/path-mappings.js";
+import { createPreferencesRoutes } from "./routes/preferences.js";
 import { createProjectRoutes } from "./routes/projects.js";
 import { createReportRoutes } from "./routes/reports.js";
 import { createSessionRoutes } from "./routes/sessions.js";
@@ -60,6 +62,7 @@ export interface CreateAppDependencies {
   activitySegmentRepository?: ActivitySegmentRepository;
   agentSessionRepository?: AgentSessionRepository;
   pathMappingRepository?: PathMappingRepository;
+  viewPreferencesRepository?: ViewPreferencesRepository;
 }
 
 function addSecurityHeaders(context: Context): void {
@@ -256,6 +259,13 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
     app.use("/projects", authenticate);
     app.use("/projects/*", authenticate);
     app.route("/projects", createProjectRoutes(dependencies.projectRepository));
+  }
+  if (dependencies.viewPreferencesRepository !== undefined) {
+    if (dependencies.projectRepository === undefined) {
+      throw new Error("A project repository is required for view-preference routes.");
+    }
+    app.use("/me/preferences", authenticate);
+    app.route("/me/preferences", createPreferencesRoutes(dependencies.viewPreferencesRepository, dependencies.projectRepository));
   }
   if (dependencies.sessionRepository !== undefined) {
     if (dependencies.projectRepository === undefined) {

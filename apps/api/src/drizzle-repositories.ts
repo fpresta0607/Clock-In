@@ -11,7 +11,9 @@ import {
   projectPathMappings,
   projects,
   timeSessions,
+  userProjectSelections,
   users,
+  userViewPreferences,
   type DatabaseConnection,
 } from "@clock-in/database";
 
@@ -29,9 +31,15 @@ import {
   SessionRepositoryError,
   type ActivitySegmentInsert,
   type ActivitySegmentRepository,
+  type AgentIntervalRecord,
   type AgentSessionRecord,
   type AgentSessionRepository,
   type AppTotalRecord,
+  type PresenceIntervalRecord,
+  type ProjectUsageRecord,
+  type SessionIntervalRecord,
+  type ViewPreferencesRecord,
+  type ViewPreferencesRepository,
   type CreatePathMapping,
   type CreateRunningSession,
   type InsertEndedAgentSession,
@@ -93,7 +101,7 @@ export class DrizzleProjectRepository implements ProjectRepository {
 
   public async listForMember(subject: AuthenticatedSubject): Promise<ProjectRecord[]> {
     return this.db
-      .select({ id: projects.id, organizationId: projects.organizationId, name: projects.name, archived: projects.archived, createdAt: projects.createdAt })
+      .select({ id: projects.id, organizationId: projects.organizationId, name: projects.name, archived: projects.archived, isDefault: projects.isDefault, createdAt: projects.createdAt })
       .from(projects)
       .innerJoin(projectMemberships, and(
         eq(projectMemberships.organizationId, projects.organizationId),
@@ -110,7 +118,7 @@ export class DrizzleProjectRepository implements ProjectRepository {
 
   public async findForMember(subject: AuthenticatedSubject, projectId: string): Promise<ProjectRecord | null> {
     const rows = await this.db
-      .select({ id: projects.id, organizationId: projects.organizationId, name: projects.name, archived: projects.archived, createdAt: projects.createdAt })
+      .select({ id: projects.id, organizationId: projects.organizationId, name: projects.name, archived: projects.archived, isDefault: projects.isDefault, createdAt: projects.createdAt })
       .from(projects)
       .innerJoin(projectMemberships, and(
         eq(projectMemberships.organizationId, projects.organizationId),
@@ -131,13 +139,131 @@ export class DrizzleProjectRepository implements ProjectRepository {
       const [project] = await tx
         .insert(projects)
         .values({ organizationId: subject.organizationId, name })
-        .returning({ id: projects.id, organizationId: projects.organizationId, name: projects.name, archived: projects.archived, createdAt: projects.createdAt });
+        .returning({ id: projects.id, organizationId: projects.organizationId, name: projects.name, archived: projects.archived, isDefault: projects.isDefault, createdAt: projects.createdAt });
       if (project === undefined) throw new Error("Failed to create the project.");
       await tx
         .insert(projectMemberships)
         .values({ organizationId: subject.organizationId, projectId: project.id, userId: subject.userId });
       return project;
     });
+  }
+
+  public async updateForMember(
+    subject: AuthenticatedSubject,
+    projectId: string,
+    patch: { name?: string; archived?: boolean },
+  ): Promise<ProjectRecord | null> {
+    const existing = await this.findForMember(subject, projectId);
+    if (existing === null) return null;
+    const rows = await this.db
+      .update(projects)
+      .set({
+        ...(patch.name === undefined ? {} : { name: patch.name }),
+        ...(patch.archived === undefined ? {} : { archived: patch.archived }),
+      })
+      .where(and(eq(projects.id, projectId), eq(projects.organizationId, subject.organizationId)))
+      .returning({ id: projects.id, organizationId: projects.organizationId, name: projects.name, archived: projects.archived, isDefault: projects.isDefault, createdAt: projects.createdAt });
+    return rows[0] ?? null;
+  }
+
+  public async usageForOrganization(subject: AuthenticatedSubject, projectId: string): Promise<ProjectUsageRecord> {
+    const [sessions] = await this.db
+      .select({ sessionCount: count(timeSessions.id), durationSeconds: sum(timeSessions.durationSeconds) })
+      .from(timeSessions)
+      .where(and(eq(timeSessions.organizationId, subject.organizationId), eq(timeSessions.projectId, projectId)));
+    const [agents] = await this.db
+      .select({ agentSessionCount: count(agentSessions.id) })
+      .from(agentSessions)
+      .where(and(eq(agentSessions.organizationId, subject.organizationId), eq(agentSessions.projectId, projectId)));
+    const durationSeconds = sessions?.durationSeconds;
+    return {
+      sessionCount: Number(sessions?.sessionCount ?? 0),
+      durationSeconds: durationSeconds === null || durationSeconds === undefined ? 0 : Number(durationSeconds),
+      agentSessionCount: Number(agents?.agentSessionCount ?? 0),
+    };
+  }
+
+  public async deleteForOrganization(subject: AuthenticatedSubject, projectId: string, reassignTo: string | null): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      if (reassignTo !== null) {
+        // Sessions carry a composite FK through project_memberships, so every
+        // user being moved needs a membership in the target project first.
+        await tx.execute(sql`
+          insert into project_memberships (organization_id, project_id, user_id)
+          select distinct ${subject.organizationId}::uuid, ${reassignTo}::uuid, user_id
+          from time_sessions
+          where organization_id = ${subject.organizationId} and project_id = ${projectId}
+          on conflict do nothing
+        `);
+        await tx
+          .update(timeSessions)
+          .set({ projectId: reassignTo })
+          .where(and(eq(timeSessions.organizationId, subject.organizationId), eq(timeSessions.projectId, projectId)));
+        await tx
+          .update(agentSessions)
+          .set({ projectId: reassignTo })
+          .where(and(eq(agentSessions.organizationId, subject.organizationId), eq(agentSessions.projectId, projectId)));
+      } else {
+        await tx
+          .delete(timeSessions)
+          .where(and(eq(timeSessions.organizationId, subject.organizationId), eq(timeSessions.projectId, projectId)));
+        await tx
+          .delete(agentSessions)
+          .where(and(eq(agentSessions.organizationId, subject.organizationId), eq(agentSessions.projectId, projectId)));
+      }
+      await tx
+        .delete(projectPathMappings)
+        .where(and(eq(projectPathMappings.organizationId, subject.organizationId), eq(projectPathMappings.projectId, projectId)));
+      await tx
+        .delete(userProjectSelections)
+        .where(and(eq(userProjectSelections.organizationId, subject.organizationId), eq(userProjectSelections.projectId, projectId)));
+      await tx
+        .delete(projectMemberships)
+        .where(and(eq(projectMemberships.organizationId, subject.organizationId), eq(projectMemberships.projectId, projectId)));
+      await tx
+        .delete(projects)
+        .where(and(eq(projects.organizationId, subject.organizationId), eq(projects.id, projectId)));
+    });
+  }
+}
+
+/** Upsert-per-member view state; the unique (organization, user) key makes last write win. */
+export class DrizzleViewPreferencesRepository implements ViewPreferencesRepository {
+  public constructor(private readonly db: DatabaseConnection["db"]) {}
+
+  public async readForMember(subject: AuthenticatedSubject): Promise<ViewPreferencesRecord | null> {
+    const rows = await this.db
+      .select({ scope: userViewPreferences.scope, range: userViewPreferences.range })
+      .from(userViewPreferences)
+      .where(and(
+        eq(userViewPreferences.organizationId, subject.organizationId),
+        eq(userViewPreferences.userId, subject.userId),
+      ))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  public async writeForMember(subject: AuthenticatedSubject, patch: { scope?: string | undefined; range?: string | undefined }): Promise<ViewPreferencesRecord> {
+    const rows = await this.db
+      .insert(userViewPreferences)
+      .values({
+        organizationId: subject.organizationId,
+        userId: subject.userId,
+        ...(patch.scope === undefined ? {} : { scope: patch.scope }),
+        ...(patch.range === undefined ? {} : { range: patch.range }),
+      })
+      .onConflictDoUpdate({
+        target: [userViewPreferences.organizationId, userViewPreferences.userId],
+        set: {
+          ...(patch.scope === undefined ? {} : { scope: patch.scope }),
+          ...(patch.range === undefined ? {} : { range: patch.range }),
+          updatedAt: sql`now()`,
+        },
+      })
+      .returning({ scope: userViewPreferences.scope, range: userViewPreferences.range });
+    const row = rows[0];
+    if (row === undefined) throw new Error("Failed to save view preferences.");
+    return row;
   }
 }
 
@@ -558,7 +684,114 @@ export class DrizzleReportRepository implements ReportRepository {
     if (query.toExclusive !== undefined) conditions.push(lt(timeSessions.startedAt, query.toExclusive));
     if (query.projectId !== undefined) conditions.push(eq(timeSessions.projectId, query.projectId));
     if (query.userId !== undefined) conditions.push(eq(timeSessions.userId, query.userId));
+    if (query.unassignedOnly === true) conditions.push(eq(timeSessions.attribution, "default"));
     return conditions;
+  }
+
+  /**
+   * Active-kind OS segments overlapping the range: the person at the machine.
+   * Range overlap rather than containment, so a segment crossing a boundary is
+   * returned whole and the service clips it. The same freshness window as the
+   * app breakdown applies. Presence has no project, so no project predicate.
+   */
+  public async readPresenceIntervals(subject: AuthenticatedSubject, query: ReportQuery): Promise<PresenceIntervalRecord[]> {
+    const rows = await this.db
+      .select({ userId: users.id, userName: users.name, startedAt: activitySegments.startedAt, endedAt: activitySegments.endedAt })
+      .from(activitySegments)
+      .innerJoin(users, and(
+        eq(users.organizationId, activitySegments.organizationId),
+        eq(users.id, activitySegments.userId),
+      ))
+      .where(and(
+        eq(activitySegments.organizationId, subject.organizationId),
+        eq(activitySegments.kind, "active"),
+        ...(query.userId === undefined ? [] : [eq(activitySegments.userId, query.userId)]),
+        ...(query.from === undefined ? [] : [gt(activitySegments.endedAt, query.from)]),
+        ...(query.toExclusive === undefined ? [] : [lt(activitySegments.startedAt, query.toExclusive)]),
+        sql`${activitySegments.receivedAt} <= ${activitySegments.endedAt} + interval '7 days'`,
+      ));
+    return rows.map((row) => ({
+      user: { id: row.userId, name: row.userName },
+      startedAt: row.startedAt,
+      endedAt: row.endedAt,
+    }));
+  }
+
+  /** Completed sessions overlapping the range, with the scope predicates applied. */
+  public async readSessionIntervals(subject: AuthenticatedSubject, query: ReportQuery): Promise<SessionIntervalRecord[]> {
+    // The shared predicates bound startedAt inside the range; interval reads
+    // want overlap instead, so the range conditions are stated directly.
+    const rows = await this.db
+      .select({
+        userId: users.id,
+        userName: users.name,
+        projectId: timeSessions.projectId,
+        attribution: timeSessions.attribution,
+        startedAt: timeSessions.startedAt,
+        stoppedAt: timeSessions.stoppedAt,
+      })
+      .from(timeSessions)
+      .innerJoin(users, and(
+        eq(users.organizationId, timeSessions.organizationId),
+        eq(users.id, timeSessions.userId),
+      ))
+      .where(and(
+        eq(timeSessions.organizationId, subject.organizationId),
+        or(eq(timeSessions.status, "stopped"), eq(timeSessions.status, "needs_review")),
+        isNotNull(timeSessions.stoppedAt),
+        ...(query.userId === undefined ? [] : [eq(timeSessions.userId, query.userId)]),
+        ...(query.projectId === undefined ? [] : [eq(timeSessions.projectId, query.projectId)]),
+        ...(query.unassignedOnly === true ? [eq(timeSessions.attribution, "default")] : []),
+        ...(query.from === undefined ? [] : [gt(timeSessions.stoppedAt, query.from)]),
+        ...(query.toExclusive === undefined ? [] : [lt(timeSessions.startedAt, query.toExclusive)]),
+      ));
+    return rows.flatMap((row) => (row.stoppedAt === null ? [] : [{
+      user: { id: row.userId, name: row.userName },
+      projectId: row.projectId,
+      attribution: row.attribution,
+      startedAt: row.startedAt,
+      stoppedAt: row.stoppedAt,
+    }]));
+  }
+
+  /**
+   * Agent-session runtimes overlapping the range. A running session's interval
+   * ends at its last event — the evidence in hand, not a promise about now.
+   * The Unassigned scope reads agent sessions whose project nothing resolved.
+   */
+  public async readAgentIntervals(subject: AuthenticatedSubject, query: ReportQuery): Promise<AgentIntervalRecord[]> {
+    const intervalEnd = sql<Date>`coalesce(${agentSessions.endedAt}, ${agentSessions.lastEventAt})`;
+    const rows = await this.db
+      .select({
+        userId: users.id,
+        userName: users.name,
+        source: agentSessions.source,
+        model: agentSessions.model,
+        projectId: agentSessions.projectId,
+        startedAt: agentSessions.startedAt,
+        endedAt: intervalEnd,
+      })
+      .from(agentSessions)
+      .innerJoin(users, and(
+        eq(users.organizationId, agentSessions.organizationId),
+        eq(users.id, agentSessions.userId),
+      ))
+      .where(and(
+        eq(agentSessions.organizationId, subject.organizationId),
+        ...(query.userId === undefined ? [] : [eq(agentSessions.userId, query.userId)]),
+        ...(query.projectId === undefined ? [] : [eq(agentSessions.projectId, query.projectId)]),
+        ...(query.unassignedOnly === true ? [sql`${agentSessions.projectId} is null`] : []),
+        ...(query.from === undefined ? [] : [gt(intervalEnd, query.from)]),
+        ...(query.toExclusive === undefined ? [] : [lt(agentSessions.startedAt, query.toExclusive)]),
+      ));
+    return rows.map((row) => ({
+      user: { id: row.userId, name: row.userName },
+      source: row.source,
+      model: row.model,
+      projectId: row.projectId,
+      startedAt: row.startedAt,
+      endedAt: row.endedAt instanceof Date ? row.endedAt : new Date(row.endedAt as unknown as string),
+    }));
   }
 
   private async summaryFor(db: Pick<DatabaseConnection["db"], "select">, subject: AuthenticatedSubject, query: ReportQuery): Promise<ReportSummaryRecord> {

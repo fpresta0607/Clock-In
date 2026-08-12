@@ -64,6 +64,13 @@
       "when": 1786420380388,
       "tag": "0008_agent_runtime_roster",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786576586887,
+      "tag": "0009_user-view-preferences",
+      "breakpoints": true
     }
   ]
 }

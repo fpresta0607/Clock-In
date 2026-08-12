@@ -15,4 +15,5 @@ export {
   timeSessions,
   userProjectSelections,
   users,
+  userViewPreferences,
 } from "./schema.js";
