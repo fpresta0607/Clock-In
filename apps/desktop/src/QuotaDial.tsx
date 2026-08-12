@@ -5,18 +5,14 @@ import type { AgentQuota, QuotaWindow } from "./bridge.js";
 /// A compact radial gauge for how much of a coding agent's plan is left,
 /// sized to sit inside an activity row without changing its height.
 ///
-/// What it measures is the account signed in to that provider on this machine
-/// *now*, not the account that recorded the row it sits beside. The detail
-/// says so in as many words and names the login, so a dial that moved because
-/// someone switched accounts never reads as a dial that moved because work
-/// happened.
+/// The row says two things and no more: the plan, and when the window that
+/// binds runs out. Everything else - how much is left in each window a
+/// provider reports - is one click away, one plain line each.
 ///
-/// Three more things are load-bearing. The arc never carries meaning alone —
-/// the percentage is printed inside it and the whole control has a spoken
-/// label. Unknown is a first-class face, drawn as a dashed ring with an em
-/// dash, so "we could not read this" never looks like "you have none left".
-/// And the dial shows only the window that actually binds; a provider's other
-/// windows live one click away rather than crowding the row.
+/// Two things are load-bearing. The arc never carries meaning alone: the
+/// percentage is printed inside it and the whole control has a spoken label.
+/// And unknown is a first-class face, drawn as a dashed ring with an em dash,
+/// so "we could not read this" never looks like "you have none left".
 
 const DIAL = 36;
 const STROKE = 4;
@@ -41,28 +37,22 @@ export const planLabel = (plan: string): string => {
 };
 
 /// A reset time in the user's locale. Providers write these in their own
-/// dialects, so anything unparseable is simply not shown.
+/// dialects, so anything unparseable is simply not shown. The time stays in
+/// alongside the date: a session window can run out this afternoon, and a bare
+/// date would read as a whole day of headroom that is not there.
 const resetLabel = (resetsAt: string | null): string | undefined => {
   if (resetsAt === null) return undefined;
   const parsed = Date.parse(resetsAt);
   if (Number.isNaN(parsed)) return undefined;
-  return new Date(parsed).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return new Date(parsed).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 };
+
+/// One window as the detail prints it: "27% left the week".
+export const windowLine = (window: QuotaWindow): string =>
+  `${window.percentRemaining}% left the ${window.label}`;
 
 const bindingWindow = (quota: AgentQuota): QuotaWindow | undefined =>
   quota.windows.find((window) => window.id === quota.bindingWindowId);
-
-/// Names the login the reading belongs to, and says plainly that it is the one
-/// live on this machine — the row beside it may well have been recorded by a
-/// different account.
-export const signInNote = (quota: AgentQuota | undefined): string => {
-  const email = quota?.account?.email ?? undefined;
-  const organization = quota?.account?.organization ?? undefined;
-  const who = email ?? organization;
-  if (who === undefined) return "Shows whichever account is signed in on this machine now.";
-  const qualifier = organization !== undefined && organization !== who ? ` (${organization})` : "";
-  return `Signed in as ${who}${qualifier} on this machine now.`;
-};
 
 export type QuotaDialProps = {
   /// The agent the surrounding row is attributed to, spoken in the label.
@@ -103,11 +93,19 @@ export const QuotaDial = ({ agentLabel, quota, pending = false }: QuotaDialProps
   const metaLabel = plan
     ?? (reading !== undefined ? "Plan unknown" : pending ? "Checking…" : "Quota unknown");
 
+  // The second line under the plan: when the window that binds runs out. A
+  // provider that gave no reset time falls back to naming the window, which is
+  // all it told us.
+  const resets = reading?.binding === undefined ? undefined : resetLabel(reading.binding.resetsAt);
+  const untilLine = reading?.binding === undefined
+    ? undefined
+    : resets === undefined ? reading.binding.label : `left until ${resets}`;
+
   const label = reading === undefined
     ? `${agentLabel} quota unknown. ${detail} Show quota detail.`
     : `${agentLabel} quota: ${reading.remaining}% remaining`
       + (plan === undefined ? "" : ` on the ${plan} plan`)
-      + (reading.binding === undefined ? "" : `, ${reading.binding.label} window`)
+      + (untilLine === undefined ? "" : `, ${untilLine}`)
       + ". Show quota detail.";
 
   const classes = ["quota"];
@@ -146,32 +144,22 @@ export const QuotaDial = ({ agentLabel, quota, pending = false }: QuotaDialProps
         </svg>
         <span className="quota-meta">
           <span className="quota-plan">{metaLabel}</span>
-          {reading?.binding !== undefined && <span className="quota-window">{reading.binding.label}</span>}
+          {untilLine !== undefined && <span className="quota-window">{untilLine}</span>}
         </span>
       </button>
+      {/* One line per window and nothing else. Anything the provider says
+          about why a reading failed belongs to the unknown face, not here. */}
       <div id={detailId} ref={detailPanel} className="quota-detail" hidden={!open}>
-        <p className="quota-account">{signInNote(quota)}</p>
         {reading === undefined ? (
-          <>
-            <p className="quota-note">{detail}</p>
-            {quota?.reason !== undefined && quota.reason !== null && <p className="quota-reason">{quota.reason}</p>}
-          </>
+          <p className="quota-note">{detail}</p>
         ) : (
-          <>
-            <ul className="quota-windows">
-              {reading.quota.windows.map((window) => {
-                const resets = resetLabel(window.resetsAt);
-                return (
-                  <li key={window.id} className={window.id === reading.quota.bindingWindowId ? "is-binding" : undefined}>
-                    <span className="quota-window-label">{window.label}</span>
-                    <span className="quota-window-value">{window.percentRemaining}% left</span>
-                    {resets !== undefined && <span className="quota-window-reset">resets {resets}</span>}
-                  </li>
-                );
-              })}
-            </ul>
-            {reading.quota.stale && <p className="quota-note">This reading may be out of date.</p>}
-          </>
+          <ul className="quota-windows">
+            {reading.quota.windows.map((window) => (
+              <li key={window.id} className={window.id === reading.quota.bindingWindowId ? "is-binding" : undefined}>
+                {windowLine(window)}
+              </li>
+            ))}
+          </ul>
         )}
       </div>
     </div>

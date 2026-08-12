@@ -11,7 +11,6 @@ import {
   type MonitorSettings,
   type MonitorStatus,
   type OrganizationOverview,
-  type PathMapping,
   type AgentQuota,
   type QuotaSnapshot,
   type SessionApp,
@@ -20,7 +19,7 @@ import {
 } from "./bridge.js";
 import { AgentRuntimeIcon } from "./agent-icons.js";
 import { QuotaDial } from "./QuotaDial.js";
-import { agentRuntimeForBinary, formatDuration } from "@clock-in/shared";
+import { agentRuntimeForBinary, formatDuration, formatHumanDuration as formatHuman, friendlyAppName } from "@clock-in/shared";
 import { RecordingPanel, recordingState, type RecordingState } from "./RecordingPanel.js";
 import { WebGLShader } from "./WebGLShader.js";
 
@@ -41,52 +40,6 @@ const QUOTA_POLL_MS = 120_000;
 /// poll would leave the dial saying "checking" for two minutes on every
 /// launch, so a pending answer is followed up promptly.
 const QUOTA_PENDING_POLL_MS = 3_000;
-
-const FRIENDLY_APP_NAMES: Record<string, string> = {
-  chrome: "Google Chrome",
-  msedge: "Microsoft Edge",
-  firefox: "Firefox",
-  brave: "Brave",
-  arc: "Arc",
-  code: "VS Code",
-  cursor: "Cursor",
-  windowsterminal: "Windows Terminal",
-  pwsh: "PowerShell",
-  powershell: "Windows PowerShell",
-  cmd: "Command Prompt",
-  explorer: "File Explorer",
-  slack: "Slack",
-  discord: "Discord",
-  teams: "Microsoft Teams",
-  zoom: "Zoom",
-  notion: "Notion",
-  obsidian: "Obsidian",
-  figma: "Figma",
-  spotify: "Spotify",
-};
-
-/// "chrome.exe" -> "Google Chrome"; unknown processes lose the extension and
-/// get title-cased ("app-09.exe" -> "App 09").
-const friendlyAppName = (processName: string): string => {
-  const base = processName.replace(/\.exe$/i, "");
-  const known = FRIENDLY_APP_NAMES[base.toLowerCase()];
-  if (known !== undefined) return known;
-  return base
-    .split(/[-_\s]+/)
-    .filter((part) => part.length > 0)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-};
-
-/// Human-readable durations: "2 hr 14 min", "14 min", "32 sec".
-const formatHuman = (seconds: number): string => {
-  const total = Math.max(0, Math.floor(seconds));
-  const hours = Math.floor(total / 3_600);
-  const minutes = Math.floor((total % 3_600) / 60);
-  if (hours > 0) return minutes > 0 ? `${hours} hr ${minutes} min` : `${hours} hr`;
-  if (minutes > 0) return `${minutes} min`;
-  return `${total} sec`;
-};
 
 /// The reading for one agent source (`claude_code` → the `claude` provider).
 const quotaFor = (snapshot: QuotaSnapshot | undefined, source: string): AgentQuota | undefined =>
@@ -222,14 +175,22 @@ const buildMeterRows = (apps: readonly SessionApp[]): MeterRow[] => {
   }];
 };
 
-type StatsRange = "today" | "week";
+type StatsRange = "today" | "week" | "all";
 
-/// Local midnight today, or local midnight on Monday for "this week".
+const RANGE_LABEL: Record<StatsRange, string> = {
+  today: "Today",
+  week: "This week",
+  all: "All time",
+};
+
 /// The range as instants on this computer's clock: "today" runs from local
-/// midnight to the next one. Calendar dates would be read as a UTC day, which
-/// rolls over in the afternoon anywhere west of Greenwich - the day's total
-/// would reset hours before midnight and carry the previous evening's work.
-const rangeBounds = (range: StatsRange): { fromAt: string; toExclusiveAt: string } => {
+/// midnight to the next one, "week" from local midnight on Monday. Calendar
+/// dates would be read as a UTC day, which rolls over in the afternoon
+/// anywhere west of Greenwich - the day's total would reset hours before
+/// midnight and carry the previous evening's work. "All time" sends no bounds
+/// at all, which is how the server reads "everything".
+const rangeBounds = (range: StatsRange): { fromAt: string; toExclusiveAt: string } | undefined => {
+  if (range === "all") return undefined;
   const start = new Date();
   if (range === "week") start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
   start.setHours(0, 0, 0, 0);
@@ -284,16 +245,18 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [recordingOpen, setRecordingOpen] = useState(false);
   const [allStatsOpen, setAllStatsOpen] = useState(false);
   const [inviteCopied, setInviteCopied] = useState(false);
-  const [statsRange, setStatsRange] = useState<StatsRange>("today");
   const [stats, setStats] = useState<MeStats | undefined>();
   const [statsError, setStatsError] = useState<string | undefined>();
+  /// The All stats overlay keeps its own range and its own reading, so opening
+  /// someone's week there never rewrites the day the main screen is showing.
+  const [boardRange, setBoardRange] = useState<StatsRange>("today");
+  const [boardMember, setBoardMember] = useState<{ id: string; name: string } | undefined>();
+  const [boardStats, setBoardStats] = useState<MeStats | undefined>();
+  const [boardStatsError, setBoardStatsError] = useState<string | undefined>();
+  const [activeTeamId, setActiveTeamId] = useState("");
   const [settings, setSettings] = useState<MonitorSettings | undefined>();
   const [settingsError, setSettingsError] = useState<string | undefined>();
   const [quietDraft, setQuietDraft] = useState("");
-  const [mappings, setMappings] = useState<readonly PathMapping[] | undefined>();
-  const [mappingPrefix, setMappingPrefix] = useState("");
-  const [mappingProjectId, setMappingProjectId] = useState("");
-  const [mappingBusy, setMappingBusy] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [appIcons, setAppIcons] = useState<Record<string, string | null>>({});
@@ -325,11 +288,12 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setMonitorStatus(undefined);
     setStats(undefined);
     setStatsError(undefined);
+    setBoardMember(undefined);
+    setBoardStats(undefined);
+    setBoardStatsError(undefined);
+    setActiveTeamId("");
     setSettings(undefined);
     setSettingsError(undefined);
-    setMappings(undefined);
-    setMappingPrefix("");
-    setMappingProjectId("");
     setHookSnippets({});
     setSettingsOpen(false);
     setRecordingOpen(false);
@@ -397,6 +361,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       (result) => {
         if (active && isCurrent(service, generation)) {
           setOverview(result);
+          setActiveTeamId(result.organization.id);
           setOverviewError(undefined);
         }
       },
@@ -416,8 +381,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     let active = true;
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const bounds = rangeBounds(statsRange);
-    void service.meStats(bounds.fromAt, bounds.toExclusiveAt).then(
+    // The main screen is a day, always. It used to follow the All stats range
+    // picker, so choosing "this week" over there quietly turned the heading's
+    // own date into a week's total.
+    const bounds = rangeBounds("today");
+    void service.meStats(bounds?.fromAt, bounds?.toExclusiveAt).then(
       (result) => {
         if (active && isCurrent(service, generation)) {
           setStats(result);
@@ -431,7 +399,36 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       },
     );
     return () => { active = false; };
-  }, [bridge, statsRange, signedIn?.user.id, statsTick]);
+  }, [bridge, signedIn?.user.id, statsTick]);
+
+  // The All stats overlay reads on its own account: whichever member is being
+  // looked at, over whichever range that overlay is set to. Only while it is
+  // open — nobody is served by fetching a teammate's year in the background.
+  // Your own "today" is the exception: the overlay reuses the main screen's
+  // live reading rather than fetching a second copy of the same day.
+  useEffect(() => {
+    if (signedIn === undefined || !allStatsOpen) return undefined;
+    if ((boardMember === undefined || boardMember.id === signedIn.user.id) && boardRange === "today") return undefined;
+    let active = true;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const bounds = rangeBounds(boardRange);
+    setBoardStats(undefined);
+    void service.meStats(bounds?.fromAt, bounds?.toExclusiveAt, boardMember?.id).then(
+      (result) => {
+        if (active && isCurrent(service, generation)) {
+          setBoardStats(result);
+          setBoardStatsError(undefined);
+        }
+      },
+      (error: unknown) => {
+        if (!active || !isCurrent(service, generation)) return;
+        const problem = bridgeError(error);
+        if (problem.kind !== "auth") setBoardStatsError(problem.message);
+      },
+    );
+    return () => { active = false; };
+  }, [bridge, allStatsOpen, boardRange, boardMember?.id, signedIn?.user.id, statsTick]);
 
   // Agent plan quota, read from this machine. Advisory and never on the
   // critical path: a failure leaves the dials unknown rather than saying so.
@@ -527,27 +524,25 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     return () => { active = false; window.clearInterval(timer); };
   }, [bridge, signedIn?.user.id]);
 
-  // Settings and path mappings only load while the settings overlay is open.
+  // Settings only load while the settings overlay is open.
   useEffect(() => {
     if (!settingsOpen) return undefined;
     let active = true;
     const service = bridge;
     const generation = bridgeGeneration.current;
-    const isRequestCurrent = (): boolean => active && isCurrent(service, generation);
-    const fail = (error: unknown): void => {
-      if (!isRequestCurrent()) return;
-      const problem = bridgeError(error);
-      if (problem.kind !== "auth") setSettingsError(problem.message);
-    };
-    void service.settingsGet().then((result) => {
-      if (!isRequestCurrent()) return;
-      setSettings(result);
-      setQuietDraft(String(result.awayThresholdMinutes));
-      setSettingsError(undefined);
-    }, fail);
-    void service.pathMappingsList().then((result) => {
-      if (isRequestCurrent()) setMappings(result);
-    }, fail);
+    void service.settingsGet().then(
+      (result) => {
+        if (!active || !isCurrent(service, generation)) return;
+        setSettings(result);
+        setQuietDraft(String(result.awayThresholdMinutes));
+        setSettingsError(undefined);
+      },
+      (error: unknown) => {
+        if (!active || !isCurrent(service, generation)) return;
+        const problem = bridgeError(error);
+        if (problem.kind !== "auth") setSettingsError(problem.message);
+      },
+    );
     return () => { active = false; };
   }, [bridge, settingsOpen]);
 
@@ -704,38 +699,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     void applySettings({ awayThresholdMinutes: minutes });
   };
 
-  const addMapping = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
-    event.preventDefault();
-    if (mappingBusy || mappingProjectId === "") return;
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    setMappingBusy(true);
-    setSettingsError(undefined);
-    try {
-      const created = await service.pathMappingsCreate({ pathPrefix: mappingPrefix.trim(), projectId: mappingProjectId });
-      if (isCurrent(service, generation)) {
-        setMappings((current) => [...(current ?? []), created]);
-        setMappingPrefix("");
-      }
-    } catch (error: unknown) {
-      if (isCurrent(service, generation)) setSettingsError(bridgeError(error).message);
-    } finally {
-      if (isCurrent(service, generation)) setMappingBusy(false);
-    }
-  };
-
-  const deleteMapping = async (id: string): Promise<void> => {
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    setSettingsError(undefined);
-    try {
-      await service.pathMappingsDelete(id);
-      if (isCurrent(service, generation)) setMappings((current) => current?.filter((mapping) => mapping.id !== id));
-    } catch (error: unknown) {
-      if (isCurrent(service, generation)) setSettingsError(bridgeError(error).message);
-    }
-  };
-
   const joinWorkspace = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     if (joinBusy) return;
@@ -855,10 +818,21 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   // now rather than leaving the question open.
   const liveProjectName = currentProject?.name;
   const defaultProject = ready.projects.find((item) => item.id === ready.defaultProjectId);
+  // ponytail: one login belongs to one workspace today, so this list holds a
+  // single entry and the picker's team row has nothing to switch to. Projects
+  // are read through the chosen team rather than straight off the account, so
+  // a second membership needs a server that reports one - not new UI here.
+  const teams = overview === undefined ? [] : [overview.organization];
+  const teamProjects = teams.length === 0 || teams.some((team) => team.id === activeTeamId)
+    ? ready.projects
+    : [];
   const backlog = monitorStatus === undefined
     ? 0
     : monitorStatus.segmentBacklog + monitorStatus.agentBacklog + monitorStatus.sessionBacklog;
-  const appRows = stats === undefined ? [] : buildAppRows(stats.apps);
+  // Whose breakdown the All stats overlay is showing. It opens on you, and
+  // follows whichever row of the board gets picked.
+  const viewedMember = boardMember ?? { id: ready.user.id, name: ready.user.name };
+  const viewingSelf = viewedMember.id === ready.user.id;
   // Uploaded evidence stops at the last span that closed, so the app in front
   // right now is either frozen at its last total or missing from the day
   // entirely. Its open span is added here, which is what makes these rows tick
@@ -956,6 +930,26 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       share: todayTotalSeconds === 0 ? 0 : Math.round((row.durationSeconds / todayTotalSeconds) * 100),
     }))
     .sort((a, b) => b.durationSeconds - a.durationSeconds || a.name.localeCompare(b.name));
+  // The app rows measure time spent in front of something; the day's total is
+  // session wall-clock, which also counts the gaps too short to end a stretch.
+  // The two were never going to be equal, so the difference gets a row of its
+  // own rather than reading as a column that quietly does not add up.
+  const foregroundSeconds = meterRows.reduce((sum, row) => sum + row.durationSeconds, 0);
+  const quietSeconds = Math.max(0, todayTotalSeconds - foregroundSeconds);
+
+  // Your own "today" in the overlay is the very day the clock above is
+  // counting, live stretch and all: it reuses those rows rather than
+  // re-deriving them, because two numbers for one day is the whole confusion.
+  const showingLiveDay = viewingSelf && boardRange === "today";
+  const boardLoading = showingLiveDay ? stats === undefined : boardStats === undefined;
+  const boardTotalSeconds = showingLiveDay ? todayTotalSeconds : boardStats?.totalDurationSeconds ?? 0;
+  const boardUnattributedSeconds = (showingLiveDay ? stats : boardStats)?.unattributedSeconds ?? 0;
+  const boardAppRows = buildAppRows(showingLiveDay ? liveApps : boardStats?.apps ?? []);
+  const boardProjectRows = showingLiveDay
+    ? projectRows.map((row) => ({ id: row.key, name: row.name, durationSeconds: row.durationSeconds }))
+    : (boardStats?.projects ?? [])
+        .filter((entry) => entry.durationSeconds > 0)
+        .map((entry) => ({ id: entry.project.id, name: entry.project.name, durationSeconds: entry.durationSeconds }));
 
   return (
     <main className="app-shell">
@@ -1007,16 +1001,42 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           </output>
           {current === null && <p className="subtle hero-note">{IDLE_BLURB[state]}</p>}
           {projectPickerOpen && (
-            <>
-              <label className="hero-project">
-                File my time under
-                <select value={pinnedProject} onChange={(event) => void selectProject(event.target.value)}>
-                  <option value="">
-                    {defaultProject ? `Work it out for me (${defaultProject.name})` : "Work it out for me"}
-                  </option>
-                  {ready.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                </select>
-              </label>
+            <div className="filing-picker">
+              {teams.length > 0 && (
+                <label className="picker-team">
+                  Team
+                  <select value={activeTeamId} onChange={(event) => setActiveTeamId(event.target.value)}>
+                    {teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
+                  </select>
+                </label>
+              )}
+              {/* One project at a time, so this is a radio group wearing a
+                  tick rather than a row of checkboxes that could imply two. */}
+              <div className="project-picker" role="radiogroup" aria-label="File my time under" data-testid="project-picker">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={pinnedProject === ""}
+                  className="project-choice"
+                  onClick={() => void selectProject("")}
+                >
+                  <span className="project-tick" aria-hidden="true">{pinnedProject === "" ? "✓" : ""}</span>
+                  {defaultProject ? `Work it out for me (${defaultProject.name})` : "Work it out for me"}
+                </button>
+                {teamProjects.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={pinnedProject === item.id}
+                    className="project-choice"
+                    onClick={() => void selectProject(item.id)}
+                  >
+                    <span className="project-tick" aria-hidden="true">{pinnedProject === item.id ? "✓" : ""}</span>
+                    {item.name}
+                  </button>
+                ))}
+              </div>
               {newProjectOpen ? (
                 <form className="new-project-form" onSubmit={createProject}>
                   <label>New project name<input value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} maxLength={80} placeholder="e.g. Client work" autoComplete="off" required /></label>
@@ -1029,7 +1049,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
               ) : (
                 <button className="new-project-trigger" type="button" onClick={() => setNewProjectOpen(true)}>New project…</button>
               )}
-            </>
+            </div>
           )}
         </section>
 
@@ -1093,12 +1113,23 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                         />
                       )}
                       <span className="meter-duration">
+                        {/* "connected", not "working": the row exists because
+                            the tool registered a session, which is not the
+                            same as it having done anything yet. */}
                         {row.durationSeconds === 0 && row.source !== undefined
-                          ? <span className="app-active">working</span>
+                          ? <span className="app-active">connected</span>
                           : formatHuman(row.durationSeconds)}
                       </span>
                     </li>
                   ))}
+                  {quietSeconds >= 60 && (
+                    <li className="meter-row" data-testid="quiet-row">
+                      <span className="app-mark is-plain" aria-hidden="true" />
+                      <span className="meter-name">Quiet time</span>
+                      <span aria-hidden="true" />
+                      <span className="meter-duration">{formatHuman(quietSeconds)}</span>
+                    </li>
+                  )}
                 </ul>
               )}
             </>
@@ -1138,72 +1169,100 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           onClick={(event) => event.stopPropagation()}
         >
           <div className="panel-head">
-            <h2 id="today-title">{statsRange === "today" ? "Today so far" : "This week"}</h2>
+            <h2 id="today-title">{overview?.organization.name ?? "All stats"}</h2>
             <div className="range-toggle" role="group" aria-label="Date range">
-              <button type="button" className={statsRange === "today" ? "is-active" : undefined} onClick={() => setStatsRange("today")}>Today</button>
-              <button type="button" className={statsRange === "week" ? "is-active" : undefined} onClick={() => setStatsRange("week")}>This week</button>
+              {(["today", "week", "all"] as const).map((range) => (
+                <button
+                  key={range}
+                  type="button"
+                  className={boardRange === range ? "is-active" : undefined}
+                  onClick={() => setBoardRange(range)}
+                >
+                  {RANGE_LABEL[range]}
+                </button>
+              ))}
             </div>
             <button className="outline-button modal-close" type="button" aria-label="Close all stats" onClick={() => setAllStatsOpen(false)}>✕</button>
           </div>
-          {statsError && <p className="form-error" role="alert">{statsError}</p>}
-          {stats === undefined ? (
-            !statsError && <p className="subtle">Loading…</p>
-          ) : (
+
+          {/* The board is the selector, not just a scoreboard: whoever is
+              picked here is whose breakdown the panel underneath shows. It
+              opens on you, and every member's is open to the whole team. */}
+          {overview && (
             <>
-              <p className="today-total"><strong>{formatHuman(stats.totalDurationSeconds)}</strong> recorded</p>
-              {appRows.length === 0 ? (
-                // Derived from the same state as the timer above it. Hard-coding
-                // "turn on recording" here is what made one screen contradict
-                // itself while recording was demonstrably on.
-                <p className="subtle" data-testid="today-empty">{TODAY_EMPTY[state]}</p>
+              {overviewError && <p className="form-error" role="alert">{overviewError}</p>}
+              {overview.entries.length === 0 ? (
+                <p className="subtle">No recorded time yet.</p>
               ) : (
-                <ul className="app-list">
-                  {appRows.map((row) => (
-                    <li key={row.key} className="app-row">
-                      <span className="app-name">
-                        {row.label}
-                        {row.agent && monitorStatus?.agentActive && <span className="app-active"> · active now</span>}
-                      </span>
-                      <span className="app-duration">{formatHuman(row.durationSeconds)}</span>
+                <ol className="board-list" data-testid="board-list">
+                  {overview.entries.map((entry) => (
+                    <li key={entry.user.id} className={entry.user.id === viewedMember.id ? "is-selected" : undefined}>
+                      <button
+                        type="button"
+                        className="board-choice"
+                        aria-pressed={entry.user.id === viewedMember.id}
+                        onClick={() => setBoardMember({ id: entry.user.id, name: entry.user.name })}
+                      >
+                        <span className="board-rank">{entry.rank}</span>
+                        <span className="board-name">
+                          {entry.user.name}
+                          {entry.user.id === ready.user.id && <span className="you-tag"> you</span>}
+                        </span>
+                        <span className="board-hours">{formatHuman(entry.durationSeconds)}</span>
+                      </button>
                     </li>
                   ))}
-                </ul>
-              )}
-              {stats.unattributedSeconds > 0 && (
-                <p className="verified-foot" data-testid="unattributed-foot">
-                  {formatHuman(stats.unattributedSeconds)} of it landed in {defaultProject?.name ?? "your default project"},
-                  because nothing said which project it was for.
-                </p>
+                </ol>
               )}
             </>
           )}
 
-        {/* The workspace board is history too, so it belongs behind the same
-            button rather than on the record surface. */}
-        {overview && (
-          <section className="board-panel" aria-labelledby="board-title">
-            <div className="board-head">
-              <h2 id="board-title">{overview.organization.name}</h2>
-            </div>
-            {overviewError && <p className="form-error" role="alert">{overviewError}</p>}
-            {overview.entries.length === 0 ? (
-              <p className="subtle">No recorded time yet.</p>
+          <section className="member-stats" aria-labelledby="member-stats-title" data-testid="member-stats">
+            <h3 id="member-stats-title">{viewedMember.name} · {RANGE_LABEL[boardRange]}</h3>
+            {boardStatsError && <p className="form-error" role="alert">{boardStatsError}</p>}
+            {boardLoading ? (
+              !boardStatsError && <p className="subtle">Loading…</p>
             ) : (
-              <ol className="board-list">
-                {overview.entries.slice(0, 5).map((entry) => (
-                  <li key={entry.user.id} className={entry.user.id === ready.user.id ? "is-you" : undefined}>
-                    <span className="board-rank">{entry.rank}</span>
-                    <span className="board-name">
-                      {entry.user.name}
-                      {entry.user.id === ready.user.id && <span className="you-tag"> you</span>}
-                    </span>
-                    <span className="board-hours">{formatDuration(entry.durationSeconds)}</span>
-                  </li>
-                ))}
-              </ol>
+              <>
+                <p className="today-total"><strong>{formatHuman(boardTotalSeconds)}</strong> recorded</p>
+                {boardProjectRows.length > 0 && (
+                  <ul className="app-list" data-testid="member-project-list">
+                    {boardProjectRows.map((entry) => (
+                      <li key={entry.id} className="app-row">
+                        <span className="app-name">{entry.name}</span>
+                        <span className="app-duration">{formatHuman(entry.durationSeconds)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {boardAppRows.length === 0 ? (
+                  // Only the caller's own emptiness can be explained by this
+                  // machine's recording state; a teammate's is just empty.
+                  <p className="subtle" data-testid="today-empty">
+                    {viewingSelf ? TODAY_EMPTY[state] : "No recorded time in this range."}
+                  </p>
+                ) : (
+                  <ul className="app-list" data-testid="member-app-list">
+                    {boardAppRows.map((row) => (
+                      <li key={row.key} className="app-row">
+                        <span className="app-name">
+                          {row.label}
+                          {row.agent && viewingSelf && monitorStatus?.agentActive && <span className="app-active"> · active now</span>}
+                        </span>
+                        <span className="app-duration">{formatHuman(row.durationSeconds)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {boardUnattributedSeconds > 0 && (
+                  <p className="verified-foot" data-testid="unattributed-foot">
+                    {formatHuman(boardUnattributedSeconds)} of that landed in the default project,
+                    because nothing said which project it was for.
+                  </p>
+                )}
+              </>
             )}
           </section>
-        )}
         </section>
         </div>
       )}
@@ -1297,40 +1356,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                     ))}
                   </details>
                 )}
-
-                <details className="settings-group">
-                  <summary>Folders and projects</summary>
-                  <p className="subtle">Work your AI tools do in these folders is filed under the matching project.</p>
-                  {mappings === undefined ? (
-                    <p className="subtle">Loading…</p>
-                  ) : mappings.length === 0 ? (
-                    <p className="subtle">No folders yet.</p>
-                  ) : (
-                    <ul className="mapping-list">
-                      {mappings.map((mapping) => (
-                        <li key={mapping.id} className="mapping-row">
-                          <span className="mapping-path" title={mapping.pathPrefix}>{mapping.pathPrefix}</span>
-                          <span className="mapping-project">{ready.projects.find((item) => item.id === mapping.projectId)?.name ?? "Unknown project"}</span>
-                          <button type="button" onClick={() => void deleteMapping(mapping.id)}>Delete</button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  <form className="mapping-form" onSubmit={addMapping}>
-                    <label>
-                      Folder
-                      <input value={mappingPrefix} onChange={(event) => setMappingPrefix(event.target.value)} placeholder="C:/dev/project" spellCheck={false} autoComplete="off" required />
-                    </label>
-                    <label>
-                      Project
-                      <select value={mappingProjectId} onChange={(event) => setMappingProjectId(event.target.value)} required>
-                        <option value="">Select project</option>
-                        {ready.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                      </select>
-                    </label>
-                    <button className="signal-button" type="submit" disabled={mappingBusy}>{mappingBusy ? "Adding…" : "Add folder"}</button>
-                  </form>
-                </details>
 
                 {overview && (
                   <details className="settings-group">

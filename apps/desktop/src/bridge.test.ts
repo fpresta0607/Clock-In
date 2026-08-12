@@ -10,7 +10,6 @@ const ids = {
   user: "00000000-0000-4000-8000-000000000001",
   project: "00000000-0000-4000-8000-000000000010",
   other: "00000000-0000-4000-8000-000000000011",
-  mapping: "00000000-0000-4000-8000-000000000400",
 };
 
 describe("defaultBridge", () => {
@@ -160,25 +159,28 @@ describe("defaultBridge", () => {
     const fromAt = "2026-08-06T05:00:00.000Z";
     const toExclusiveAt = "2026-08-07T05:00:00.000Z";
     await expect(defaultBridge.meStats(fromAt, toExclusiveAt)).resolves.toEqual(stats);
-    expect(invoke).toHaveBeenLastCalledWith("me_stats", { fromAt, toExclusiveAt });
+    expect(invoke).toHaveBeenLastCalledWith("me_stats", { fromAt, toExclusiveAt, userId: undefined });
 
     // Attributed time can never exceed the time it is part of.
     invoke.mockResolvedValueOnce({ ...stats, attributedSeconds: 9_000 });
     await expect(defaultBridge.meStats(fromAt, toExclusiveAt)).rejects.toMatchObject({ kind: "unknown" });
   });
 
-  it("maps path-mapping commands and rejects malformed rows", async () => {
-    const mapping = { id: ids.mapping, pathPrefix: "C:/dev/Clock-In", repoUrl: null, projectId: ids.project };
-    invoke.mockResolvedValueOnce([mapping]);
-    await expect(defaultBridge.pathMappingsList()).resolves.toEqual([mapping]);
-
-    invoke.mockResolvedValueOnce(mapping);
-    await defaultBridge.pathMappingsCreate({ pathPrefix: "C:/dev/Clock-In", projectId: ids.project });
-    expect(invoke).toHaveBeenLastCalledWith("path_mappings_create", {
-      input: { pathPrefix: "C:/dev/Clock-In", projectId: ids.project },
+  it("asks for a teammate's stats, and for all time, by leaving bounds off", async () => {
+    const empty = {
+      filters: {},
+      totalDurationSeconds: 0,
+      attributedSeconds: 0,
+      unattributedSeconds: 0,
+      projects: [],
+      apps: [],
+    };
+    invoke.mockResolvedValueOnce(empty);
+    await expect(defaultBridge.meStats(undefined, undefined, ids.user)).resolves.toEqual(empty);
+    expect(invoke).toHaveBeenLastCalledWith("me_stats", {
+      fromAt: undefined,
+      toExclusiveAt: undefined,
+      userId: ids.user,
     });
-
-    invoke.mockResolvedValueOnce([{ ...mapping, projectId: "not-a-uuid" }]);
-    await expect(defaultBridge.pathMappingsList()).rejects.toMatchObject({ kind: "unknown" });
   });
 });

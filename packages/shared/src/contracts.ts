@@ -452,6 +452,13 @@ export const meStatsFiltersSchema = z
     to: dateSchema.optional(),
     fromAt: timestampSchema.optional(),
     toExclusiveAt: timestampSchema.optional(),
+    /**
+     * Names a teammate in the caller's workspace, so the leaderboard can open
+     * one member's breakdown. Absent means the caller. A member of another
+     * workspace reads as empty rather than forbidden: every query underneath is
+     * scoped to the caller's organization first.
+     */
+    userId: idSchema.optional(),
   })
   .strict()
   .superRefine(validateCalendarAndInstantBounds);

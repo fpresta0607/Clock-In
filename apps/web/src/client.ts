@@ -1,4 +1,4 @@
-import type { LeaderboardResponse, OrganizationResponse, ReportResponse } from "@clock-in/shared";
+import type { LeaderboardResponse, MeResponse, MeStatsResponse, OrganizationResponse, ReportResponse } from "@clock-in/shared";
 
 /**
  * Talks to Neon Auth and the Clock-In API from the browser.
@@ -214,6 +214,9 @@ export function createClient(config: ClientConfig) {
 
     leaderboard: (query = "") => json<LeaderboardResponse>(`/reports/leaderboard${query}`),
     report: (query = "") => json<ReportResponse>(`/reports${query}`),
+    me: () => json<MeResponse>("/me"),
+    /** One member's breakdown; `userId` in the query names a teammate. */
+    meStats: (query = "") => json<MeStatsResponse>(`/me/stats${query}`),
   };
 }
 
