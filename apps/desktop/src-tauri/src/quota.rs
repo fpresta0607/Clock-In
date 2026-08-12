@@ -561,8 +561,10 @@ impl QuotaMonitor {
             .unwrap_or_else(QuotaSnapshot::pending)
     }
 
-    /// Reads every source on this thread and caches the result. Used by tests
-    /// and by anything that would rather wait than see a pending snapshot.
+    /// Reads every source on this thread and caches the result. The app never
+    /// waits on a provider read - `snapshot` refreshes behind the UI - so this
+    /// exists for the tests that need a settled answer.
+    #[cfg(test)]
     pub fn refresh_blocking(&self) -> QuotaSnapshot {
         let next = read_sources(&self.sources);
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);

@@ -1850,6 +1850,10 @@ fn append_segment_line(path: &Path, segment: &Segment, device_id: &str) {
 /// The 30-second poll task: drain pushed session events, poll the OS, fold
 /// signals into segments, spool transitions, enforce the auto-stop policy.
 #[cfg_attr(not(windows), allow(dead_code))]
+// The task's inputs are each a distinct handle or path it owns for the
+// process's lifetime; bundling them into a struct would name the same things
+// twice without making the task any easier to read.
+#[allow(clippy::too_many_arguments)]
 async fn poll_loop(
     shared: Arc<Mutex<MonitorShared>>,
     events: Arc<PlatformEvents>,
