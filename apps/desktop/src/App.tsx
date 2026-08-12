@@ -859,6 +859,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       : [...merged, { processName: openSpan.processName, durationSeconds: openSpanSeconds }];
   })();
   const todayRows = buildMeterRows(liveApps);
+  // One row per agent this machine actually has connected, so the plan
+  // reading is there whether or not the CLI ever owned a window.
+  const agentRows = (monitorStatus?.hooks ?? [])
+    .filter((hook) => hook.detected)
+    .map((hook) => ({ source: hook.source, quota: quotaFor(quota, hook.source) }));
   // Finished time already on the server plus the stretch still being written.
   // The open stretch also lands on its project's row below, so the breakdown
   // ticks with the clock instead of trailing it by a whole session.
@@ -1011,6 +1016,29 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                         style={{ "--share": `${row.share}%` } as React.CSSProperties}
                       />
                       <span className="meter-duration">{formatHuman(row.durationSeconds)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {/* Agents are found by their hooks, not by a window in front:
+                  a CLI running inside an editor's terminal never owns the
+                  foreground, so its plan would otherwise never be shown. */}
+              {agentRows.length > 0 && (
+                <ul className="meter-list meter-agents" data-testid="agent-quota-list">
+                  {agentRows.map((row) => (
+                    <li key={row.source} className="agent-quota-row">
+                      <AgentRuntimeIcon source={row.source} />
+                      <span className="meter-name">
+                        {sourceLabel(row.source)}
+                        {monitorStatus?.agentActive?.source === row.source && (
+                          <span className="app-active"> · working now</span>
+                        )}
+                      </span>
+                      <QuotaDial
+                        agentLabel={sourceLabel(row.source)}
+                        quota={row.quota}
+                        pending={quota === undefined || quota.status === "pending"}
+                      />
                     </li>
                   ))}
                 </ul>

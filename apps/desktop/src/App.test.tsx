@@ -682,7 +682,10 @@ describe("the today panel", () => {
       }),
     })} />);
 
-    const row = (await within(await screen.findByTestId("session-app-list")).findAllByRole("listitem"))[0];
+    // The row comes from the connected hook, not from a window in front: an
+    // agent running inside an editor's terminal never owns the foreground.
+    const agents = await screen.findByTestId("agent-quota-list");
+    const row = within(agents).getAllByRole("listitem")[0];
     expect(row).toHaveTextContent("Claude Code");
     // The dial carries the whole reading as its label, so the arc is never
     // the only thing saying it.
