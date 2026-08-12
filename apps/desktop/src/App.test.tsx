@@ -708,6 +708,44 @@ describe("the today panel", () => {
     expect(await within(row!).findByRole("button", { name: /73% remaining on the max plan/i })).toBeInTheDocument();
   });
 
+  it("asks again while the plan reading is still pending", async () => {
+    const pending = { status: "pending" as const, checkedAt: null, detail: null, providers: [] };
+    const ready = {
+      status: "ready" as const,
+      checkedAt: "2026-08-12T19:00:00.000Z",
+      detail: null,
+      providers: [{
+        provider: "claude",
+        label: "Claude",
+        sources: ["claude_code"],
+        status: "known" as const,
+        account: null,
+        plan: "max",
+        percentRemaining: 73,
+        bindingWindowId: "five_hour",
+        windows: [{ id: "five_hour", label: "session", kind: "session", percentRemaining: 73, resetsAt: null }],
+        detail: null,
+        reason: null,
+        stale: false,
+      }],
+    };
+    // The host answers the first call from an empty cache while it reads the
+    // providers behind it; the dial must not sit on "checking" until the slow
+    // poll comes round.
+    const quotaStatus = vi.fn().mockResolvedValueOnce(pending).mockResolvedValue(ready);
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue({
+        ...recording,
+        agentSessions: [{ source: "claude_code", externalSessionId: "one", projectId: project.id, since: new Date().toISOString() }],
+      }),
+      quotaStatus,
+    })} />);
+
+    await screen.findByTestId("session-app-list");
+    await waitFor(() => expect(quotaStatus.mock.calls.length).toBeGreaterThan(1), { timeout: 5_000 });
+    expect(await screen.findByRole("button", { name: /73% remaining/i })).toBeInTheDocument();
+  }, 10_000);
+
   it("shows the OS icon for an app when the host has one", async () => {
     render(<App bridge={bridgeFor({
       monitorStatus: vi.fn().mockResolvedValue(recording),

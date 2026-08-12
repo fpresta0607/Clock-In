@@ -18,6 +18,8 @@
 //! Tauri command hands back whatever the cache holds and refreshes behind the
 //! UI, so a slow provider read cannot delay a timer or a session row.
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -27,6 +29,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::spool::now_iso8601;
+
+/// `CREATE_NO_WINDOW`: run a console child without giving it a console.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// How long a reading counts as current. Plans move over minutes, not seconds,
 /// and every refresh spawns a process — this is the honest middle.
@@ -287,13 +293,19 @@ impl QuotaSource for QuotaAxiSource {
             // without it the dial could not say whose quota it is showing.
             // A non-zero exit still carries a usable report when only some
             // providers failed, so the output is judged on its content.
-            match Command::new(candidate)
+            let mut command = Command::new(candidate);
+            command
                 .arg("--json")
                 .arg("--full")
                 .arg("--provider")
-                .arg(&providers)
-                .output()
-            {
+                .arg(&providers);
+            // The tool ships as a batch shim, which Windows runs through a
+            // console - and a console gets a window unless one is refused.
+            // Reading a quota is invisible plumbing; it must never flash a
+            // command prompt over whatever the person is doing.
+            #[cfg(windows)]
+            command.creation_flags(CREATE_NO_WINDOW);
+            match command.output() {
                 Ok(output) => match String::from_utf8(output.stdout) {
                     Ok(stdout) => match parse_quota_axi(&stdout) {
                         Ok(readings) => return Ok(readings),
