@@ -124,7 +124,6 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   pathMappingsCreate: vi.fn().mockResolvedValue(mapping),
   pathMappingsUpdate: vi.fn().mockResolvedValue(mapping),
   pathMappingsDelete: vi.fn().mockResolvedValue(undefined),
-  syncNow: vi.fn().mockResolvedValue(undefined),
   onUpdateAvailable: vi.fn().mockResolvedValue(() => undefined),
   ...overrides,
 });
@@ -344,22 +343,15 @@ describe("recording", () => {
     await waitFor(() => expect(bridge.sessionSelectProject).toHaveBeenCalledWith(newProject.id));
   });
 
-  it("surfaces a waiting backlog and sends it on demand", async () => {
+  it("names a waiting backlog and says it syncs on its own", async () => {
     const backlogged = { ...recording, segmentBacklog: 2, sessionBacklog: 1 };
-    const syncNow = vi.fn().mockResolvedValue(undefined);
-    const monitorStatus = vi.fn().mockResolvedValue(backlogged);
-    const person = userEvent.setup();
-    render(<App bridge={bridgeFor({ monitorStatus, syncNow })} />);
+    render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(backlogged) })} />);
 
     const line = await screen.findByTestId("sync-line");
     expect(line).toHaveTextContent("3 recorded items are still on this computer");
-
-    monitorStatus.mockResolvedValue(recording);
-    await person.click(within(line).getByRole("button", { name: "Send now" }));
-
-    await waitFor(() => expect(syncNow).toHaveBeenCalled());
-    // The drained backlog takes the line with it.
-    await waitFor(() => expect(screen.queryByTestId("sync-line")).not.toBeInTheDocument());
+    expect(line).toHaveTextContent("sync on their own");
+    // Sync is automatic: nothing here to press.
+    expect(within(line).queryByRole("button")).not.toBeInTheDocument();
   });
 });
 

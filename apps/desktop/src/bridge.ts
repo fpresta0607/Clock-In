@@ -171,8 +171,6 @@ export interface TimerBridge {
   pathMappingsCreate(input: PathMappingCreateInput): Promise<PathMapping>;
   pathMappingsUpdate(id: string, input: PathMappingUpdateInput): Promise<PathMapping>;
   pathMappingsDelete(id: string): Promise<void>;
-  /// Wakes the uploader now instead of at the next five-minute pass.
-  syncNow(): Promise<void>;
   /// Subscribes to "an update is downloading" notices; resolves to the
   /// unsubscribe function.
   onUpdateAvailable(handler: (version: string) => void): Promise<() => void>;
@@ -468,7 +466,6 @@ export const defaultBridge: TimerBridge = {
   pathMappingsCreate: (input) => invokeDecoded("path_mappings_create", decodePathMapping, { input }),
   pathMappingsUpdate: (id, input) => invokeDecoded("path_mappings_update", decodePathMapping, { id, input }),
   pathMappingsDelete: (id) => invokeDecoded("path_mappings_delete", decodeVoid, { id }),
-  syncNow: () => invokeDecoded("monitor_sync_now", decodeVoid),
   onUpdateAvailable: async (handler) => {
     const { listen } = await import("@tauri-apps/api/event");
     return listen<string>("update-available", (event) => handler(event.payload));

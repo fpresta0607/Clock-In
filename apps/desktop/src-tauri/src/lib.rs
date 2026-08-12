@@ -374,13 +374,6 @@ async fn monitor_status(state: State<'_, AppState>) -> ApiResult<MonitorStatus> 
     Ok(state.monitor.status().await)
 }
 
-/// The UI's "Sync now": wakes the uploader instead of waiting out the
-/// five-minute tick. Fire-and-forget; the status poll reports the result.
-#[tauri::command]
-fn monitor_sync_now(state: State<'_, AppState>) {
-    state.monitor.request_upload();
-}
-
 /// Opt-in hook registration for one agent CLI, triggered from the settings
 /// UI. Never silent: the user clicks, and the result says whether the CLI's
 /// config was merged or a paste-it-yourself snippet came back.
@@ -679,7 +672,6 @@ pub fn run() {
             org_join,
             session_select_project,
             monitor_status,
-            monitor_sync_now,
             hook_register,
             monitor_set_enabled,
             settings_get,

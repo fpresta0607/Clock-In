@@ -1661,7 +1661,7 @@ impl Monitor {
     /// Wakes the uploader now instead of at the next five-minute tick. A
     /// notify with no task listening stores a permit, so calling this before
     /// `start` still triggers the first pass.
-    pub fn request_upload(&self) {
+    fn request_upload(&self) {
         self.upload_now.notify_one();
     }
 
@@ -1810,9 +1810,10 @@ async fn poll_loop(
                 append_session_line(&sessions_path, session);
             }
         }
-        if account_id.is_some() && !finished.is_empty() {
-            // A finished session uploads now, not at the next five-minute
-            // tick: quitting soon after stopping work must not strand it.
+        if account_id.is_some() && (!finished.is_empty() || !closed.is_empty()) {
+            // Anything spooled uploads now, not at the next five-minute tick:
+            // the server stays live within one poll of the work happening,
+            // and quitting soon after stopping work strands nothing.
             upload_now.notify_one();
         }
         // The open session goes to disk every tick: a crash then costs the gap

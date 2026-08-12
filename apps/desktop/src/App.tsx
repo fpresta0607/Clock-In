@@ -509,20 +509,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     }
   };
 
-  /// Wakes the uploader; the regular status poll reports the drained backlog.
-  const syncNow = async (): Promise<void> => {
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    setAccountError(undefined);
-    try {
-      await service.syncNow();
-      const status = await service.monitorStatus();
-      if (isCurrent(service, generation)) applyStatus(status);
-    } catch (error: unknown) {
-      if (isCurrent(service, generation)) setAccountError(bridgeError(error).message);
-    }
-  };
-
   /// Creates a project and pins recording to it, which is the only reason to
   /// make one from this screen.
   const createProject = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
@@ -780,12 +766,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           </p>
         )}
         {backlog > 0 && (
-          <p className="sync-banner" data-testid="sync-line">
-            <span>
-              {backlog === 1 ? "1 recorded item is" : `${backlog} recorded items are`} still on this
-              computer, waiting to reach the server.
-            </span>
-            <button type="button" onClick={() => void syncNow()}>Send now</button>
+          <p className="sync-banner" data-testid="sync-line" role="status">
+            {backlog === 1 ? "1 recorded item is" : `${backlog} recorded items are`} still on this
+            computer — they sync on their own as soon as the server is reachable.
           </p>
         )}
         {accountError && !settingsOpen && <p className="form-error" role="alert">{accountError}</p>}
