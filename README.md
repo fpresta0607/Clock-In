@@ -322,9 +322,13 @@ the batch still lands.
 
 ## Agent hooks
 
-Registration is explicit and opt-in from the desktop app's settings; Clock-In never rewrites
-another tool's config silently. Where a config can be merged safely it is, with a backup and
-an atomic write; where it can't, you get a snippet to paste.
+At startup, Clock-In auto-discovers which agent CLIs are installed (by checking for their
+config directories) and silently wires up every one whose hook shape it knows how to merge:
+today Claude Code, Codex, and Cursor. Where a config can be merged safely it is, with a
+backup and an atomic write; where it can't (Kimi Code, Pi, opencode, Grok, Muse, GitHub
+Copilot), the "what's switched on" panel carries the exact snippet to paste. A runtime that
+is not installed on this machine reports as absent rather than offering a button that cannot
+work.
 
 ### The roster is not an allowlist
 
@@ -351,9 +355,11 @@ hook that names no model records none rather than a guess.
 | anything else | — | call `clock-in-hook --source <runtime> --event …` yourself | manual |
 
 Runtimes are listed whether or not they are installed, so a machine that later grows one lights
-it up without a code change. Only opencode ships with its own mark in the UI: its logo is
-published in its MIT-licensed repository. No official, redistributable asset could be sourced
-for the others, so they use the generic agent badge rather than a lookalike.
+it up without a code change. Every runtime in the roster has a mark in the UI: opencode uses
+its genuine MIT-licensed logo, and the other nine carry original monochrome glyphs drawn for
+Clock-In on one coherent grid. Those are deliberately *not* imitations of anyone's brand asset
+(which cannot be redistributed in a third-party app); they are Clock-In's own marks naming a
+runtime inside its own UI, and need no licence from anyone.
 
 Because `session-end` is never guaranteed (a crash, a `kill -9`), the server reaps agent
 sessions with no event for 6 hours and closes them at their last-seen timestamp. An `end` that

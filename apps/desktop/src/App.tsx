@@ -12,11 +12,13 @@ import {
   type MonitorStatus,
   type OrganizationOverview,
   type PathMapping,
+  type SessionApp,
   type SettingsPatch,
   type TimerBridge,
 } from "./bridge.js";
+import { AgentRuntimeIcon } from "./agent-icons.js";
 import { agentRuntimeForBinary, formatDuration } from "@clock-in/shared";
-import { RecordingPanel } from "./RecordingPanel.js";
+import { RecordingPanel, recordingState, type RecordingState } from "./RecordingPanel.js";
 import { WebGLShader } from "./WebGLShader.js";
 
 type AppProps = {
@@ -117,6 +119,81 @@ const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
   return [...rows.slice(0, TOP_APP_ROWS), { key: "everything-else", label: "Everything else", durationSeconds: rest, agent: false }];
 };
 
+/// Every sentence the main page says about recording, keyed by the one shared
+/// recording state. Keeping them in tables rather than inline conditionals is
+/// what stops a surface from asserting something the state never claimed.
+const MONITOR_LINE: Record<RecordingState, string> = {
+  on: "Recording on",
+  stalled: "Recording stopped responding",
+  paused: "Recording paused",
+  off: "Recording off",
+  unknown: "Checking this computer…",
+};
+
+const IDLE_HEADING: Record<RecordingState, string> = {
+  on: "Nothing to record yet",
+  stalled: "Recording stopped responding",
+  paused: "Recording is starting",
+  off: "Recording is off",
+  unknown: "Checking this computer…",
+};
+
+const IDLE_BLURB: Record<RecordingState, string> = {
+  on: "Clock-In starts writing your hours down as soon as you use this computer. There is nothing to press.",
+  stalled: "Clock-In has not looked at this computer for a while. Restarting the app starts it again.",
+  paused: "It starts on its own in a moment.",
+  off: "Turn recording on and Clock-In keeps your hours without you doing anything.",
+  unknown: "Clock-In is asking this computer what it is doing.",
+};
+
+const TODAY_EMPTY: Record<RecordingState, string> = {
+  on: "Nothing has been added up yet. Your hours appear here as they are sent to your workspace.",
+  stalled: "Nothing new is being written down, because recording stopped responding.",
+  paused: "Nothing yet. Recording is about to start.",
+  off: "Nothing yet. Turn recording on to see where your time goes.",
+  unknown: "Clock-In can't reach the recorder on this computer, so it can't say.",
+};
+
+const SESSION_EMPTY: Record<RecordingState, string> = {
+  on: "Nothing yet. The moment you use an app, it shows up here.",
+  stalled: "Nothing is being measured, because recording stopped responding.",
+  paused: "Recording is about to start.",
+  off: "Recording is off, so nothing is being measured.",
+  unknown: "Clock-In can't reach the recorder on this computer.",
+};
+
+/// One app's share of the open session, as the live surface renders it.
+type SessionRow = {
+  key: string;
+  label: string;
+  /// The agent runtime this executable belongs to, when it is one. Drives the
+  /// runtime mark, and is how a CLI gets called "Claude Code" rather than
+  /// "Claude.exe".
+  source: string | undefined;
+  durationSeconds: number;
+  /// Percentage of the session, for the bar behind the row.
+  share: number;
+};
+
+/// Turns the host's per-app seconds into rows for the live surface. Agent CLIs
+/// keep their own row here rather than folding into one: which tool the time
+/// went to is the whole question this surface answers.
+const buildSessionRows = (apps: readonly SessionApp[]): SessionRow[] => {
+  const longest = apps.reduce((most, app) => Math.max(most, app.durationSeconds), 0);
+  return apps
+    .filter((app) => app.durationSeconds > 0)
+    .map((app) => {
+      const source = agentRuntimeForBinary(app.processName);
+      return {
+        key: app.processName,
+        label: source === undefined ? friendlyAppName(app.processName) : sourceLabel(source),
+        source,
+        durationSeconds: app.durationSeconds,
+        share: longest === 0 ? 0 : Math.round((app.durationSeconds / longest) * 100),
+      };
+    });
+};
+
 type StatsRange = "today" | "week";
 
 /// Local midnight today, or local midnight on Monday for "this week".
@@ -171,6 +248,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [monitorStatus, setMonitorStatus] = useState<MonitorStatus | undefined>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [recordingOpen, setRecordingOpen] = useState(false);
+  const [allStatsOpen, setAllStatsOpen] = useState(false);
+  const [inviteCopied, setInviteCopied] = useState(false);
   const [statsRange, setStatsRange] = useState<StatsRange>("today");
   const [stats, setStats] = useState<MeStats | undefined>();
   const [statsError, setStatsError] = useState<string | undefined>();
@@ -377,6 +456,20 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   };
 
   const applyStatus = (status: MonitorStatus): void => setMonitorStatus(status);
+
+  /// Copies the invite code and says so on the button itself, which is the
+  /// only confirmation a copy needs.
+  const copyInviteCode = async (code: string): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setInviteCopied(true);
+      window.setTimeout(() => setInviteCopied(false), 2_000);
+    } catch {
+      // A refused clipboard is not worth an error banner: the code is on
+      // screen and can be typed.
+      setInviteCopied(false);
+    }
+  };
 
   const selectProject = async (projectId: string): Promise<void> => {
     const service = bridge;
@@ -610,28 +703,26 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   }
 
   const ready: SignedInAccount = account;
-  const recordingState = monitorStatus === undefined
-    ? undefined
-    : monitorStatus.enabled
-      ? monitorStatus.running ? "on" : "paused"
-      : "off";
+  // One derivation, shared with the recording panel. The main page used to
+  // decide this for itself, which is how the timer could say it was recording
+  // while the card under it said recording was off.
+  const state = recordingState(monitorStatus);
   const current = monitorStatus?.currentSession ?? null;
   const currentProject = current ? ready.projects.find((item) => item.id === current.projectId) : undefined;
   const pinnedProject = monitorStatus?.selectedProjectId ?? ready.selectedProjectId ?? "";
   const defaultProject = ready.projects.find((item) => item.id === ready.defaultProjectId);
   const appRows = stats === undefined ? [] : buildAppRows(stats.apps);
+  const sessionRows = current === null ? [] : buildSessionRows(current.apps);
 
   return (
     <main className="app-shell">
       <WebGLShader />
       <Titlebar onOpenSettings={() => setSettingsOpen(true)} />
       <div className="screen">
-        {monitorStatus && recordingState && (
+        {monitorStatus && (
           <p className="monitor-line">
-            <span className={`monitor-dot is-${recordingState}`} aria-hidden="true" />
-            <span className="monitor-state">
-              {recordingState === "on" ? "Recording on" : recordingState === "paused" ? "Recording paused" : "Recording off"}
-            </span>
+            <span className={`monitor-dot is-${state}`} aria-hidden="true" />
+            <span className="monitor-state">{MONITOR_LINE[state]}</span>
             <button className="monitor-explain" type="button" onClick={() => setRecordingOpen(true)}>
               What&apos;s recorded?
             </button>
@@ -666,12 +757,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             </>
           ) : (
             <>
-              <h2 id="recording-heading">{recordingState === "off" ? "Recording is off" : "Nothing to record yet"}</h2>
-              <p className="subtle">
-                {recordingState === "off"
-                  ? "Turn recording on and Clock-In keeps your hours without you doing anything."
-                  : "Clock-In starts writing your hours down as soon as you use this computer. There is nothing to press."}
-              </p>
+              <h2 id="recording-heading">{IDLE_HEADING[state]}</h2>
+              <p className="subtle">{IDLE_BLURB[state]}</p>
             </>
           )}
 
@@ -698,13 +785,118 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           )}
         </section>
 
-        <section className="today-card card" aria-labelledby="today-title">
+        {/* The main surface: the record card above, then where this session's
+            time is going, and nothing else competing. Everything historical
+            lives behind "All stats" at the bottom. */}
+        <section className="session-stats card" aria-labelledby="session-stats-title">
+          <div className="panel-head">
+            <h2 id="session-stats-title">This session</h2>
+            {current && (
+              <span className="session-stats-total" data-testid="session-total">
+                {formatDuration(elapsedSeconds(current.since, now))}
+              </span>
+            )}
+          </div>
+          {sessionRows.length === 0 ? (
+            <p className="subtle" data-testid="session-stats-empty">{SESSION_EMPTY[state]}</p>
+          ) : (
+            <ul className="session-app-list" data-testid="session-app-list">
+              {sessionRows.map((row) => (
+                <li key={row.key} className="session-app-row">
+                  <span className="session-app-name">
+                    {row.source === undefined
+                      ? <span className="app-mark is-plain" aria-hidden="true" />
+                      : <AgentRuntimeIcon source={row.source} />}
+                    {row.label}
+                    {row.source !== undefined && monitorStatus?.agentActive?.source === row.source && (
+                      <span className="app-active"> · working now</span>
+                    )}
+                  </span>
+                  {/* Share of the session, so the split reads at a glance. */}
+                  <span
+                    className="session-app-bar"
+                    aria-hidden="true"
+                    style={{ "--share": `${row.share}%` } as React.CSSProperties}
+                  />
+                  <span className="session-app-duration">{formatCompact(row.durationSeconds)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        {/* Two different things that both involve a code, so each gets its own
+            heading, its own sentence saying what it does, and one control.
+            The old card put a bare code beside a "JOIN A TEAM" box and left
+            you to work out which was which. */}
+        {overview && (
+          <section className="team-card card" aria-labelledby="team-title">
+            <h2 id="team-title">Your team</h2>
+            <p className="subtle">
+              You are keeping time with <strong>{overview.organization.name}</strong>.
+            </p>
+
+            <div className="team-action">
+              <h3>Invite someone</h3>
+              <p className="subtle">Send them this code and they can join {overview.organization.name}.</p>
+              <div className="team-code-row">
+                <span className="team-code" data-testid="invite-code">{overview.organization.inviteCode}</span>
+                <button className="outline-button" type="button" onClick={() => void copyInviteCode(overview.organization.inviteCode)}>
+                  {inviteCopied ? "Copied" : "Copy code"}
+                </button>
+              </div>
+            </div>
+
+            <div className="team-action">
+              <h3>Join a different team</h3>
+              <p className="subtle">If someone sent you their code, paste it here to move to their team.</p>
+              <form className="join-form" onSubmit={joinWorkspace}>
+                <label className="team-join-label">
+                  Their invite code
+                  <input
+                    value={joinCode}
+                    onChange={(event) => setJoinCode(event.target.value)}
+                    placeholder="ABCDE-FGHJK"
+                    autoComplete="off"
+                    spellCheck={false}
+                    required
+                  />
+                </label>
+                <button className="signal-button" type="submit" disabled={joinBusy || joinCode.trim() === ""}>
+                  {joinBusy ? "Joining…" : "Join this team"}
+                </button>
+              </form>
+              {overviewError && <p className="form-error" role="alert">{overviewError}</p>}
+            </div>
+          </section>
+        )}
+
+        <button
+          className="all-stats-trigger"
+          type="button"
+          onClick={() => setAllStatsOpen(true)}
+          data-testid="all-stats-trigger"
+        >
+          All stats
+        </button>
+      </div>
+
+      {allStatsOpen && (
+        <div className="modal-overlay" onClick={() => setAllStatsOpen(false)}>
+        <section
+          className="today-card card modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="today-title"
+          onClick={(event) => event.stopPropagation()}
+        >
           <div className="panel-head">
             <h2 id="today-title">{statsRange === "today" ? "Today so far" : "This week"}</h2>
             <div className="range-toggle" role="group" aria-label="Date range">
               <button type="button" className={statsRange === "today" ? "is-active" : undefined} onClick={() => setStatsRange("today")}>Today</button>
               <button type="button" className={statsRange === "week" ? "is-active" : undefined} onClick={() => setStatsRange("week")}>This week</button>
             </div>
+            <button className="outline-button modal-close" type="button" aria-label="Close all stats" onClick={() => setAllStatsOpen(false)}>✕</button>
           </div>
           {statsError && <p className="form-error" role="alert">{statsError}</p>}
           {stats === undefined ? (
@@ -713,7 +905,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             <>
               <p className="today-total"><strong>{formatCompact(stats.totalDurationSeconds)}</strong> recorded</p>
               {appRows.length === 0 ? (
-                <p className="subtle">Nothing yet. Turn on recording in settings to see where your time goes.</p>
+                // Derived from the same state as the timer above it. Hard-coding
+                // "turn on recording" here is what made one screen contradict
+                // itself while recording was demonstrably on.
+                <p className="subtle" data-testid="today-empty">{TODAY_EMPTY[state]}</p>
               ) : (
                 <ul className="app-list">
                   {appRows.map((row) => (
@@ -735,26 +930,15 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
               )}
             </>
           )}
-        </section>
 
+        {/* The workspace board is history too, so it belongs behind the same
+            button rather than on the record surface. */}
         {overview && (
-          <section className="board-panel card" aria-labelledby="board-title">
+          <section className="board-panel" aria-labelledby="board-title">
             <div className="board-head">
               <h2 id="board-title">{overview.organization.name}</h2>
-              <span className="invite-code" title="Share this code so teammates join this workspace">
-                {overview.organization.inviteCode}
-              </span>
             </div>
             {overviewError && <p className="form-error" role="alert">{overviewError}</p>}
-            {overview.entries.length <= 1 && (
-              <form className="join-form" onSubmit={joinWorkspace}>
-                <label>
-                  <span className="visually-hidden">Invite code to join a teammate</span>
-                  <input value={joinCode} onChange={(event) => setJoinCode(event.target.value)} placeholder="Join a team: ABCDE-FGHJK" autoComplete="off" spellCheck={false} required />
-                </label>
-                <button type="submit" disabled={joinBusy}>{joinBusy ? "Joining…" : "Join"}</button>
-              </form>
-            )}
             {overview.entries.length === 0 ? (
               <p className="subtle">No recorded time yet.</p>
             ) : (
@@ -773,7 +957,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             )}
           </section>
         )}
-      </div>
+        </section>
+        </div>
+      )}
 
       {settingsOpen && (
         <div className="modal-overlay" onClick={() => setSettingsOpen(false)}>

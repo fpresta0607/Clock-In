@@ -51,17 +51,20 @@ describe("defaultBridge", () => {
   const statusPayload = {
     enabled: true,
     running: true,
+    observing: true,
+    lastPollAgeSeconds: 12,
     lastUploadAt: "2026-08-06T15:00:00.000Z",
     segmentBacklog: 3,
     agentBacklog: 1,
     sessionBacklog: 2,
-    hooks: [{ source: "claude_code", detected: true, configPath: "C:/Users/dev/.claude/settings.json" }],
+    hooks: [{ source: "claude_code", detected: true, installed: true, needsYou: false, configPath: "C:/Users/dev/.claude/settings.json" }],
     agentActive: { source: "kimi_code", since: "2026-08-06T14:40:00.000Z" },
     currentSession: {
       projectId: ids.project,
       attribution: "agent",
       since: "2026-08-06T14:30:00.000Z",
       idleSeconds: 120,
+    apps: [],
     },
     selectedProjectId: null,
   };

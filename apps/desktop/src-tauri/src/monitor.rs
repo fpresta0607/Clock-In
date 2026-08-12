@@ -54,10 +54,30 @@ const IDLE_THRESHOLD_SECONDS: u32 = POLL_INTERVAL_SECONDS as u32;
 /// active for the away override. Matches the server's staleness window.
 pub const AGENT_ACTIVE_WINDOW_SECONDS: u64 = 6 * 3_600;
 
+/// How stale the last poll may be before the monitor stops claiming it is
+/// watching this machine. Three intervals, so one late tick is not an alarm.
+///
+/// This exists because "the tasks were started" and "the machine is being
+/// sampled" are different facts: a poll task that panics leaves its
+/// `JoinHandle` in place, and without this the UI would go on saying
+/// "Recording on" forever while nothing was being recorded.
+pub const STALE_POLL_SECONDS: u64 = 3 * POLL_INTERVAL_SECONDS;
+
 /// Closed segments stay in memory so stop-time idle math and the live session
 /// view work offline; the cap bounds a process that runs for months. Spooled
 /// segments are already on disk, so dropping the oldest here loses nothing.
 const MAX_BUFFERED_SEGMENTS: usize = 10_000;
+
+/// The longest an active span may stay open before it is closed where it
+/// stands and a fresh one opens in its place.
+///
+/// Without this, an active span only ever closed on a *state* change, so a
+/// machine in continuous use held one span in memory indefinitely and spooled
+/// nothing - the failure that left `activity_segments` empty. A ceiling means
+/// evidence reaches disk on a schedule no matter how long one app stays in
+/// front. Five minutes matches the uploader's pass, so a closed span waits at
+/// most one pass to leave the machine.
+const MAX_OPEN_ACTIVE_SECONDS: u64 = 300;
 
 /// What the OS reports. `Locked` and `Suspended` are pushed by the event
 /// thread; `Active` and `Idle` come from the 30-second poll.
@@ -120,6 +140,29 @@ fn signal_process_name(signal: &ActivitySignal) -> Option<String> {
     }
 }
 
+/// Whether the open span keeps running for this signal, given the signal does
+/// not change the state. It ends early when the app in front changed or when
+/// it has been open for `MAX_OPEN_ACTIVE_SECONDS`.
+///
+/// Only *active* spans are ever split. An idle, locked, or suspended span's
+/// start is what the session tracker measures quiet time from, so splitting
+/// one would restart the away threshold on every poll and no session would
+/// ever close.
+fn continues_open_span(open: &OpenSegment, signal: &ActivitySignal, now: u64) -> bool {
+    let ActivitySignal::Active { process_name } = signal else {
+        return true;
+    };
+    if now.saturating_sub(open.started_at) >= MAX_OPEN_ACTIVE_SECONDS {
+        return false;
+    }
+    match (process_name, &open.process_name) {
+        (Some(name), Some(current)) => name == current,
+        // A poll that could not name the foreground process says nothing about
+        // whether the app changed, so it never forces a boundary.
+        _ => true,
+    }
+}
+
 /// Folds a timestamped signal stream into transition-based segments.
 /// Transitions close the open span and open a new one; repeats coalesce.
 #[derive(Default)]
@@ -137,6 +180,13 @@ impl SegmentBuilder {
     /// segments the transition closed, for the caller to spool. An `Idle`
     /// signal backdates the transition: the active span ended when the last
     /// input happened (`now - idle_seconds`), not when the poll noticed.
+    ///
+    /// Three things close an active span: a change of state, a change of the
+    /// app in front, and `MAX_OPEN_ACTIVE_SECONDS` of the same app. The last
+    /// two matter as much as the first - while only state changes closed
+    /// spans, per-app time was "whichever app happened to be in front when the
+    /// machine went idle", and a machine in continuous use spooled nothing at
+    /// all.
     pub fn apply(&mut self, now: u64, signal: &ActivitySignal) -> Vec<Segment> {
         let kind = signal_kind(signal);
         let transition_at = match signal {
@@ -146,8 +196,30 @@ impl SegmentBuilder {
 
         let mut closed_now = Vec::new();
         match &mut self.open {
+            Some(open) if open.kind == kind && !continues_open_span(open, signal, now) => {
+                // Still the same state, but this span has to end: either the
+                // app in front changed, or it has been open long enough that
+                // holding it any longer would keep evidence off disk.
+                if now > open.started_at {
+                    closed_now.push(Segment {
+                        kind: open.kind,
+                        process_name: open.process_name.take(),
+                        started_at: open.started_at,
+                        ended_at: now,
+                    });
+                    *open = OpenSegment {
+                        kind,
+                        process_name: signal_process_name(signal),
+                        started_at: now,
+                    };
+                } else {
+                    // Zero-length: nothing worth recording, so just adopt the
+                    // new foreground name.
+                    open.process_name = signal_process_name(signal);
+                }
+            }
             Some(open) if open.kind == kind => {
-                // Same state continues; remember the latest foreground process.
+                // Same state, same app, still within the ceiling.
                 if let ActivitySignal::Active {
                     process_name: Some(name),
                 } = signal
@@ -195,6 +267,44 @@ impl SegmentBuilder {
     /// The open span's kind and start, for the lock-aware auto-stop check.
     pub fn open_span(&self) -> Option<(SegmentKind, u64)> {
         self.open.as_ref().map(|open| (open.kind, open.started_at))
+    }
+
+    /// Active seconds per app between `since` and `now`, heaviest first.
+    ///
+    /// This is what the main page's live stats read, and it is answered from
+    /// the fold's own memory rather than from the server: the numbers have to
+    /// tick while the work is happening, and the server only ever learns about
+    /// a span once it has closed and been uploaded. Spans are clipped to the
+    /// window, so a span straddling the start of the session contributes only
+    /// the part that belongs to it. The still-open span counts up to `now`,
+    /// which is what makes the reading live.
+    pub fn app_totals(&self, since: u64, now: u64) -> Vec<(String, u64)> {
+        let mut totals: BTreeMap<String, u64> = BTreeMap::new();
+        let mut add = |process_name: &Option<String>, started_at: u64, ended_at: u64| {
+            let Some(name) = process_name else { return };
+            let start = started_at.max(since);
+            let end = ended_at.min(now);
+            if end > start {
+                *totals.entry(name.clone()).or_default() += end - start;
+            }
+        };
+
+        for segment in &self.closed {
+            if segment.kind == SegmentKind::Active {
+                add(&segment.process_name, segment.started_at, segment.ended_at);
+            }
+        }
+        if let Some(open) = &self.open {
+            if open.kind == SegmentKind::Active {
+                add(&open.process_name, open.started_at, now);
+            }
+        }
+
+        let mut rows: Vec<(String, u64)> = totals.into_iter().collect();
+        // Heaviest first; ties by name so the list never reshuffles under a
+        // reader who is watching it tick.
+        rows.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        rows
     }
 
     /// Everything recorded so far, with the open span closed at `now`. The
@@ -701,6 +811,9 @@ pub struct MonitorShared {
     pub mappings: Vec<PathMapping>,
     pub agent: AgentTracking,
     pub last_upload_at: Option<String>,
+    /// Unix seconds of the last completed poll. `None` until the first one,
+    /// and the only evidence that the poll task is still alive.
+    pub last_poll_at: Option<u64>,
     /// Turns activity boundaries into sessions; the whole recording model.
     pub tracker: SessionTracker,
     /// The user's fallback project, resolved once per sign-in.
@@ -781,6 +894,13 @@ impl PlatformEvents {
 pub struct HookRegistration {
     pub source: String,
     pub detected: bool,
+    /// Whether this CLI looks present on this machine at all, so the panel can
+    /// say "not installed" instead of offering to connect something that is
+    /// not there.
+    pub installed: bool,
+    /// Installed, not connected, and not something Clock-In can wire up on its
+    /// own - the only rows that should ask a person for anything.
+    pub needs_you: bool,
     pub config_path: String,
 }
 
@@ -817,6 +937,18 @@ pub fn default_hook_probes() -> Vec<HookProbe> {
         .collect()
 }
 
+/// Whether this CLI looks installed on this machine, judged by its own config
+/// directory existing. Deliberately a filesystem question and never a spawn: a
+/// GUI app that shells out to `where claude` flashes a console window at the
+/// user, which is the bug that made this app open a terminal in the first
+/// place.
+pub fn runtime_is_installed(probe: &HookProbe) -> bool {
+    probe
+        .config_path
+        .parent()
+        .is_some_and(|directory| directory.is_dir())
+}
+
 pub fn detect_hooks(probes: &[HookProbe]) -> Vec<HookRegistration> {
     probes
         .iter()
@@ -824,13 +956,54 @@ pub fn detect_hooks(probes: &[HookProbe]) -> Vec<HookRegistration> {
             let detected = std::fs::read_to_string(&probe.config_path)
                 .map(|content| content.contains(HOOK_BINARY_NAME))
                 .unwrap_or(false);
+            let installed = runtime_is_installed(probe);
             HookRegistration {
                 source: probe.source.to_string(),
                 detected,
+                installed,
+                // The only rows worth a person's attention: the tool is here,
+                // it is not connected, and Clock-In cannot connect it itself.
+                needs_you: installed
+                    && !detected
+                    && probe.registration == agent_runtimes::Registration::Manual,
                 config_path: probe.config_path.to_string_lossy().into_owned(),
             }
         })
         .collect()
+}
+
+/// Connects every installed CLI that Clock-In can wire up by itself, and
+/// reports which ones it connected.
+///
+/// This is what makes the connector list report state instead of asking for
+/// clicks. It is deliberately narrow: a runtime is touched only when its own
+/// config directory already exists, so Clock-In never creates configuration
+/// for a tool that is not installed, and only when its hook mechanism is a
+/// config shape the host knows how to merge. Anything else - Kimi, Pi,
+/// opencode, Grok, Muse, Copilot - stays a `needs_you` row carrying the exact
+/// text to paste, because guessing a rewrite of a file Clock-In does not own
+/// is worse than asking.
+pub fn auto_connect_hooks(probes: &[HookProbe]) -> Vec<String> {
+    let mut connected = Vec::new();
+    for probe in probes {
+        if probe.registration == agent_runtimes::Registration::Manual
+            || !runtime_is_installed(probe)
+        {
+            continue;
+        }
+        let already = std::fs::read_to_string(&probe.config_path)
+            .map(|content| content.contains(HOOK_BINARY_NAME))
+            .unwrap_or(false);
+        if already {
+            continue;
+        }
+        // A failure here is not worth interrupting startup over: the row stays
+        // "not connected" and the panel's own button still works.
+        if let Ok(HookRegisterResult::Registered { .. }) = register_hook(probe.source) {
+            connected.push(probe.source.to_string());
+        }
+    }
+    connected
 }
 
 /// The outcome of an opt-in `hook_register` call. Claude Code's settings.json
@@ -1133,6 +1306,15 @@ pub struct AgentActive {
 pub struct MonitorStatus {
     pub enabled: bool,
     pub running: bool,
+    /// Whether this machine is actually being sampled right now, which is a
+    /// different fact from `running`: a poll task that panicked leaves its
+    /// handle in place, so `running` alone would keep claiming the machine is
+    /// watched long after the last sample. `false` also covers platforms with
+    /// no poll source at all.
+    pub observing: bool,
+    /// Seconds since the last completed poll, for the diagnostics readout.
+    /// `None` when no poll has ever completed on this run.
+    pub last_poll_age_seconds: Option<u32>,
     pub last_upload_at: Option<String>,
     pub segment_backlog: u32,
     pub agent_backlog: u32,
@@ -1158,6 +1340,18 @@ pub struct CurrentSession {
     /// Quiet time already sitting inside this session, which the server
     /// subtracts from its duration.
     pub idle_seconds: u32,
+    /// Where this session's time has gone, per app, heaviest first. Local and
+    /// live: it counts the span still open, so it ticks with the work.
+    pub apps: Vec<SessionApp>,
+}
+
+/// One app's share of the open session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionApp {
+    /// The executable name only, exactly as segments record it.
+    pub process_name: String,
+    pub duration_seconds: u32,
 }
 
 /// Lines (≈ pending rows) in a spool file, for the backlog counters.
@@ -1216,6 +1410,7 @@ impl Monitor {
                 mappings: Vec::new(),
                 agent: AgentTracking::default(),
                 last_upload_at: None,
+                last_poll_at: None,
                 tracker: SessionTracker::new(),
                 default_project: None,
                 account_id: None,
@@ -1317,6 +1512,14 @@ impl Monitor {
     /// machine's evidence to whoever signs in next, so setup never starts it.
     pub async fn ensure_running(&self) {
         if self.is_enabled() {
+            // Discovery before the first poll, so an installed CLI is already
+            // wired by the time the panel is opened. Silent by design: a
+            // connector Clock-In can switch on by itself is not a decision
+            // worth putting in front of somebody.
+            let connected = auto_connect_hooks(&default_hook_probes());
+            if !connected.is_empty() {
+                eprintln!("clock-in: connected {} agent CLI(s)", connected.len());
+            }
             self.start().await;
         }
     }
@@ -1363,9 +1566,17 @@ impl Monitor {
             None
         };
 
+        let last_poll_age = shared
+            .last_poll_at
+            .map(|at| now.saturating_sub(at))
+            .map(|age| u32::try_from(age).unwrap_or(u32::MAX));
+
         MonitorStatus {
             enabled: shared.settings.enabled,
             running,
+            observing: running
+                && last_poll_age.is_some_and(|age| u64::from(age) <= STALE_POLL_SECONDS),
+            last_poll_age_seconds: last_poll_age,
             last_upload_at: shared.last_upload_at.clone(),
             segment_backlog: count_lines(&self.segments_path),
             agent_backlog: count_lines(&self.agent_path),
@@ -1377,6 +1588,15 @@ impl Monitor {
                 attribution: open.project.attribution,
                 since: iso8601(open.started_at),
                 idle_seconds: open.idle_seconds as u32,
+                apps: shared
+                    .builder
+                    .app_totals(open.started_at, now)
+                    .into_iter()
+                    .map(|(process_name, seconds)| SessionApp {
+                        process_name,
+                        duration_seconds: u32::try_from(seconds).unwrap_or(u32::MAX),
+                    })
+                    .collect(),
             }),
             selected_project_id: shared.selected_project.clone(),
         }
@@ -1542,6 +1762,9 @@ async fn poll_loop(
             let signal = source.poll();
             closed.extend(shared.builder.apply(now, &signal));
             let device_id = shared.settings.device_id.clone();
+            // Stamped only once the tick has actually sampled the OS, so a
+            // task that dies mid-poll stops refreshing its own liveness.
+            shared.last_poll_at = Some(now);
             let mut finished = replayed;
             finished.extend(advance_sessions(&mut shared, now));
             let account_id = shared.account_id.clone();
@@ -1934,19 +2157,347 @@ mod tests {
         }
     }
 
+    /// The regression behind an empty `activity_segments`: a machine in
+    /// continuous use never changes state, so while only state changes closed
+    /// a span, the fold held one span in memory for as long as the app ran and
+    /// handed the spool nothing to write.
+    #[test]
+    fn a_machine_in_continuous_use_spools_segments_without_ever_going_idle() {
+        let mut builder = SegmentBuilder::new();
+        let mut spooled = Vec::new();
+        // Eight hours of "active, same app", one poll every interval.
+        let start = 1_000;
+        let mut now = start;
+        while now < start + 8 * 3_600 {
+            spooled.extend(builder.apply(now, &active("code.exe")));
+            now += POLL_INTERVAL_SECONDS;
+        }
+
+        assert!(
+            !spooled.is_empty(),
+            "continuous use has to reach the spool, not sit in memory"
+        );
+        assert!(
+            spooled
+                .iter()
+                .all(|segment| segment.kind == SegmentKind::Active),
+            "every span of continuous use is active"
+        );
+        assert!(
+            spooled
+                .iter()
+                .all(|segment| segment.ended_at - segment.started_at <= MAX_OPEN_ACTIVE_SECONDS),
+            "no span outlives the ceiling"
+        );
+        let recorded: u64 = spooled
+            .iter()
+            .map(|segment| segment.ended_at - segment.started_at)
+            .sum();
+        assert!(
+            recorded >= 8 * 3_600 - MAX_OPEN_ACTIVE_SECONDS,
+            "the spooled spans account for the whole stretch, less the span still open"
+        );
+    }
+
+    /// A probe set rooted in a scratch directory, so discovery can be driven
+    /// without touching a real CLI's configuration.
+    fn probe_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "clock-in-probe-{name}-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the scratch directory is creatable");
+        dir
+    }
+
+    fn probe(
+        root: &Path,
+        source: &'static str,
+        registration: agent_runtimes::Registration,
+    ) -> HookProbe {
+        HookProbe {
+            source,
+            config_path: root.join(source).join("settings.json"),
+            registration,
+        }
+    }
+
+    /// "Installed" is the config directory existing. Creating it is how a test
+    /// says a CLI is on this machine.
+    fn install(probe: &HookProbe) {
+        std::fs::create_dir_all(probe.config_path.parent().expect("a parent"))
+            .expect("the config directory is creatable");
+    }
+
+    /// A CLI that is not installed must never be touched: Clock-In does not
+    /// create configuration for tools that are not there.
+    #[test]
+    fn discovery_leaves_uninstalled_runtimes_alone() {
+        let root = probe_dir("uninstalled");
+        let probes = vec![probe(
+            &root,
+            "claude_code",
+            agent_runtimes::Registration::ClaudeJson,
+        )];
+
+        assert!(auto_connect_hooks(&probes).is_empty(), "nothing to connect");
+        assert!(
+            !probes[0].config_path.parent().expect("a parent").exists(),
+            "discovery did not invent a config directory"
+        );
+
+        let detected = detect_hooks(&probes);
+        assert!(!detected[0].installed, "reported as not installed");
+        assert!(
+            !detected[0].needs_you,
+            "a tool that is not here asks nothing of anybody"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A CLI whose hooks Clock-In cannot write stays a row that reports what
+    /// it needs, rather than a guessed rewrite of somebody else's file.
+    #[test]
+    fn discovery_surfaces_only_the_runtimes_that_genuinely_need_a_person() {
+        let root = probe_dir("manual");
+        let manual = probe(&root, "kimi_code", agent_runtimes::Registration::Manual);
+        install(&manual);
+        let probes = vec![manual];
+
+        assert!(
+            auto_connect_hooks(&probes).is_empty(),
+            "a manual runtime is never silently rewritten"
+        );
+
+        let detected = detect_hooks(&probes);
+        assert!(detected[0].installed, "it is on this machine");
+        assert!(!detected[0].detected, "and not connected");
+        assert!(
+            detected[0].needs_you,
+            "so this is the one row worth asking about"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Discovery has to be idempotent: every app start runs it, and a second
+    /// pass must not report work it did not do.
+    #[test]
+    fn discovery_reports_nothing_the_second_time_around() {
+        let root = probe_dir("idempotent");
+        let claude = probe(
+            &root,
+            "claude_code",
+            agent_runtimes::Registration::ClaudeJson,
+        );
+        install(&claude);
+        std::fs::write(&claude.config_path, "{}").expect("a config file");
+        let probes = vec![claude];
+
+        // The hook binary has to exist beside the test runner for a real
+        // registration to succeed, which it does not here; either way the
+        // contract is the same: whatever the first pass did, the second does
+        // nothing new and never reports a connection it did not make.
+        let first = auto_connect_hooks(&probes);
+        let second = auto_connect_hooks(&probes);
+        assert!(
+            second.is_empty(),
+            "a second pass connects nothing again: first={first:?}"
+        );
+        assert!(
+            !detect_hooks(&probes)[0].needs_you,
+            "a runtime Clock-In can wire itself never asks a person"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The main page's live stats: per-app time for the open session, counted
+    /// locally so it ticks with the work instead of waiting for an upload.
+    #[test]
+    fn app_totals_split_the_session_between_the_apps_that_earned_it() {
+        let mut builder = SegmentBuilder::new();
+        builder.apply(1_000, &active("code.exe"));
+        builder.apply(1_060, &active("chrome.exe")); // code 1000..1060
+        builder.apply(1_150, &active("code.exe")); // chrome 1060..1150
+        builder.apply(1_200, &active("code.exe"));
+
+        // The open span counts up to `now`, which is what makes it live.
+        assert_eq!(
+            builder.app_totals(1_000, 1_200),
+            vec![
+                ("code.exe".to_string(), 110),
+                ("chrome.exe".to_string(), 90)
+            ],
+            "heaviest first, and the open span counts to now"
+        );
+        assert_eq!(
+            builder.app_totals(1_000, 1_400),
+            vec![
+                ("code.exe".to_string(), 310),
+                ("chrome.exe".to_string(), 90)
+            ],
+            "the open span keeps counting as time passes"
+        );
+    }
+
+    /// A session starting mid-span must not inherit the part of that span that
+    /// belonged to the session before it.
+    #[test]
+    fn app_totals_clip_to_the_session_window() {
+        let mut builder = SegmentBuilder::new();
+        builder.apply(1_000, &active("code.exe"));
+        builder.apply(1_200, &active("chrome.exe"));
+
+        // Equal totals tie-break by name, so a reader watching the list tick
+        // never sees two equal rows swap places.
+        assert_eq!(
+            builder.app_totals(1_100, 1_300),
+            vec![
+                ("chrome.exe".to_string(), 100),
+                ("code.exe".to_string(), 100)
+            ],
+            "only the part of each span inside the window counts"
+        );
+    }
+
+    /// Quiet time is not work, and a span nobody could name is not an app.
+    #[test]
+    fn app_totals_ignore_quiet_time_and_unnamed_spans() {
+        let mut builder = SegmentBuilder::new();
+        builder.apply(1_000, &active("code.exe"));
+        builder.apply(1_060, &idle(60));
+        builder.apply(1_200, &ActivitySignal::Active { process_name: None });
+        builder.apply(1_260, &active("code.exe"));
+
+        let totals = builder.app_totals(1_000, 1_300);
+        assert!(
+            totals.iter().all(|(name, _)| name == "code.exe"),
+            "idle spans and unnamed spans contribute no app row: {totals:?}"
+        );
+    }
+
+    /// Spans must not overlap or leave gaps: the server sums them, so a split
+    /// that double-counts a second inflates everyone's hours.
+    #[test]
+    fn split_active_spans_tile_the_stretch_without_gaps_or_overlap() {
+        let mut builder = SegmentBuilder::new();
+        let mut spooled = Vec::new();
+        let mut now = 1_000;
+        while now < 1_000 + 2_000 {
+            spooled.extend(builder.apply(now, &active("code.exe")));
+            now += POLL_INTERVAL_SECONDS;
+        }
+
+        for pair in spooled.windows(2) {
+            assert_eq!(
+                pair[0].ended_at, pair[1].started_at,
+                "one span ends exactly where the next begins"
+            );
+        }
+        assert_eq!(
+            spooled.first().map(|segment| segment.started_at),
+            Some(1_000),
+            "the first span starts where the fold did"
+        );
+    }
+
+    /// Per-app time is the point of the stats surface, so the app in front
+    /// changing is a boundary in its own right.
+    #[test]
+    fn a_foreground_change_closes_the_span_and_names_the_app_that_earned_it() {
+        let mut builder = SegmentBuilder::new();
+        assert!(builder.apply(1_000, &active("code.exe")).is_empty());
+        assert!(builder.apply(1_030, &active("code.exe")).is_empty());
+
+        let closed = builder.apply(1_060, &active("chrome.exe"));
+        assert_eq!(
+            closed,
+            vec![Segment {
+                kind: SegmentKind::Active,
+                process_name: Some("code.exe".to_string()),
+                started_at: 1_000,
+                ended_at: 1_060,
+            }],
+            "the closed span belongs to the app that was actually in front"
+        );
+
+        let closed = builder.apply(1_090, &active("code.exe"));
+        assert_eq!(
+            closed,
+            vec![Segment {
+                kind: SegmentKind::Active,
+                process_name: Some("chrome.exe".to_string()),
+                started_at: 1_060,
+                ended_at: 1_090,
+            }],
+            "switching back closes the browser's span at the switch"
+        );
+    }
+
+    /// A poll that cannot name the foreground process must not manufacture a
+    /// boundary, or an unreadable window would shred the day into fragments.
+    #[test]
+    fn an_unnamed_foreground_process_does_not_split_the_span() {
+        let mut builder = SegmentBuilder::new();
+        builder.apply(1_000, &active("code.exe"));
+        assert!(
+            builder
+                .apply(1_030, &ActivitySignal::Active { process_name: None })
+                .is_empty(),
+            "an unreadable foreground window is not a change of app"
+        );
+    }
+
+    /// Splitting active spans must not touch how quiet time is measured: the
+    /// away threshold reads the open *idle* span's start, so idle spans stay
+    /// whole however long they run.
+    #[test]
+    fn idle_spans_are_never_split_so_the_away_threshold_still_fires() {
+        let mut builder = SegmentBuilder::new();
+        builder.apply(1_000, &active("code.exe"));
+        builder.apply(1_060, &idle(60));
+
+        let mut now = 1_090;
+        while now < 1_000 + 4 * MAX_OPEN_ACTIVE_SECONDS {
+            assert!(
+                builder.apply(now, &idle(now as u32 - 1_000)).is_empty(),
+                "a long quiet stretch stays one span"
+            );
+            now += POLL_INTERVAL_SECONDS;
+        }
+        assert_eq!(
+            builder.open_span().map(|(kind, _)| kind),
+            Some(SegmentKind::Idle),
+            "the quiet span is still the open one"
+        );
+        assert_eq!(
+            builder.open_span().map(|(_, started_at)| started_at),
+            Some(1_000),
+            "and it still starts where the machine actually went quiet"
+        );
+    }
+
     #[test]
     fn active_idle_active_folds_into_transition_segments() {
         let mut builder = SegmentBuilder::new();
 
         assert!(builder.apply(1_000, &active("code.exe")).is_empty());
-        // Same kind coalesces; the latest foreground process is remembered.
-        assert!(builder.apply(1_060, &active("msedge.exe")).is_empty());
+        // The app in front changed, so the editor's span ends at the switch
+        // instead of being relabelled to whatever came next.
+        let closed = builder.apply(1_060, &active("msedge.exe"));
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].process_name.as_deref(), Some("code.exe"));
+        assert_eq!((closed[0].started_at, closed[0].ended_at), (1_000, 1_060));
         // Idle for 120s at t=1300: the active span ended at the last input.
         let closed = builder.apply(1_300, &idle(120));
         assert_eq!(closed.len(), 1);
         assert_eq!(closed[0].kind, SegmentKind::Active);
         assert_eq!(closed[0].process_name.as_deref(), Some("msedge.exe"));
-        assert_eq!((closed[0].started_at, closed[0].ended_at), (1_000, 1_180));
+        assert_eq!((closed[0].started_at, closed[0].ended_at), (1_060, 1_180));
         // Idle continues: no new segment.
         assert!(builder.apply(1_360, &idle(300)).is_empty());
         // Back to work: the idle span closes at the transition.
@@ -2586,6 +3137,7 @@ mod tests {
             mappings: Vec::new(),
             agent: AgentTracking::default(),
             last_upload_at: None,
+            last_poll_at: None,
             tracker: SessionTracker::new(),
             default_project: Some("default".to_string()),
             account_id: None,

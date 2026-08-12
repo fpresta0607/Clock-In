@@ -393,7 +393,174 @@ pub fn resolve_project(cwd: &str, mappings: &[PathMapping]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
+    use crate::monitor::SegmentKind;
+
+    /// A scratch directory per test; spool paths must not collide.
+    fn temp_dir(name: &str) -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "clock-in-uploader-{name}-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the scratch directory is creatable");
+        dir
+    }
+
+    /// A loopback HTTP stub that serves exactly one request. The join handle
+    /// yields the raw request, so a test can assert on the bytes the desktop
+    /// actually put on the wire rather than on what it meant to send.
+    async fn stub_server(
+        status: u16,
+        body: &'static str,
+    ) -> (u16, tokio::task::JoinHandle<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the loopback stub binds");
+        let port = listener
+            .local_addr()
+            .expect("the stub has an address")
+            .port();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("the stub accepts");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4_096];
+            loop {
+                let read = stream.read(&mut buffer).await.expect("the stub reads");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                // Stop at the end of the body rather than at EOF: reqwest keeps
+                // the connection open, so waiting for a close would hang.
+                if let Some(head_end) = find_head_end(&request) {
+                    let length = content_length(&request[..head_end]);
+                    if request.len() >= head_end + length {
+                        break;
+                    }
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 {status} STUB\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("the stub answers");
+            stream.flush().await.expect("the stub flushes");
+            String::from_utf8_lossy(&request).into_owned()
+        });
+        (port, handle)
+    }
+
+    /// Byte offset just past the blank line that ends the request head.
+    fn find_head_end(request: &[u8]) -> Option<usize> {
+        request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|index| index + 4)
+    }
+
+    fn content_length(head: &[u8]) -> usize {
+        String::from_utf8_lossy(head)
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())?
+            })
+            .unwrap_or(0)
+    }
+
+    fn stub_client(port: u16) -> ApiClient {
+        ApiClient::new(
+            format!("http://127.0.0.1:{port}/auth"),
+            format!("http://127.0.0.1:{port}"),
+        )
+        .expect("the stub client builds")
+    }
+
+    /// One spooled segment, exactly as `append_segment_line` writes it.
+    fn spool_one_segment(path: &Path) {
+        let record = SegmentRecord {
+            client_id: "3f2504e0-4f89-41d3-9a0c-0305e82c3301".to_string(),
+            device_id: "7c9e6679-7425-40de-944b-e07fc1f90ae7".to_string(),
+            kind: SegmentKind::Active,
+            process_name: Some("chrome.exe".to_string()),
+            started_at: "2026-08-11T15:38:00Z".to_string(),
+            ended_at: "2026-08-11T15:40:00Z".to_string(),
+        };
+        let mut line = serde_json::to_vec(&record).expect("the record encodes");
+        line.push(b'\n');
+        spool::append_line(path, &line, spool::MAX_SPOOL_BYTES).expect("the spool accepts a line");
+    }
+
+    /// The link nothing covered: a spooled segment has to reach
+    /// `/activity/segments` in the shape the contract accepts, and leave the
+    /// spool only once the server has taken it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_accepted_segment_reaches_the_activity_endpoint_and_leaves_the_spool() {
+        let dir = temp_dir("accepted");
+        let path = dir.join("segments-spool.jsonl");
+        spool_one_segment(&path);
+
+        let (port, server) = stub_server(200, r#"{"accepted":1,"rejected":[]}"#).await;
+        assert!(
+            upload_segments(&stub_client(port), "token", &path).await,
+            "an accepted batch reports success"
+        );
+
+        let request = server.await.expect("the stub finishes");
+        assert!(
+            request.starts_with("POST /activity/segments "),
+            "the batch goes to the segment endpoint: {request}"
+        );
+        assert!(
+            request.contains("\"deviceId\":\"7c9e6679-7425-40de-944b-e07fc1f90ae7\""),
+            "the wire payload carries the device id: {request}"
+        );
+        assert!(
+            request.contains("\"kind\":\"active\"")
+                && request.contains("\"processName\":\"chrome.exe\""),
+            "the wire payload carries the contract's field names: {request}"
+        );
+
+        let (pending, _) =
+            spool::read_pending_lines::<SegmentRecord>(&path).expect("the spool reads");
+        assert!(pending.is_empty(), "an accepted batch leaves the spool");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A refusal must keep the evidence. This is also the shape of the silent
+    /// stall: the spool grows, nothing reaches the server, and the only
+    /// outward sign is the backlog counter.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_batch_keeps_every_segment_for_the_next_pass() {
+        let dir = temp_dir("refused");
+        let path = dir.join("segments-spool.jsonl");
+        spool_one_segment(&path);
+
+        let (port, server) = stub_server(400, r#"{"code":"validation_error"}"#).await;
+        assert!(
+            !upload_segments(&stub_client(port), "token", &path).await,
+            "a refused batch reports failure"
+        );
+        let _ = server.await;
+
+        let (pending, _) =
+            spool::read_pending_lines::<SegmentRecord>(&path).expect("the spool reads");
+        assert_eq!(pending.len(), 1, "a refused batch stays spooled");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn source(id: &str) -> spool::AgentSource {
         spool::AgentSource::parse(id).expect("the test names a well-shaped runtime")
@@ -642,6 +809,7 @@ mod tests {
             mappings: vec![mapping("m1", "C:/clock", "p-clock")],
             agent: AgentTracking::default(),
             last_upload_at: None,
+            last_poll_at: None,
             tracker: crate::monitor::SessionTracker::new(),
             default_project: Some("p-default".to_string()),
             account_id: Some("u1".to_string()),

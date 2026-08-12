@@ -3,23 +3,26 @@ import type { ReactElement } from "react";
 import { findAgentRuntime } from "@clock-in/shared";
 
 /**
- * Runtime marks for the "what's switched on" list.
+ * Runtime marks for the "what's switched on" list and the live session stats.
  *
- * A mark only ships here when the official asset can be sourced cleanly, which
- * means a real asset published by the project under a licence that lets
- * Clock-In redistribute it. Today that is opencode alone: its mark ships in
- * `sst/opencode` under the MIT licence the rest of that repository carries, and
- * showing it to name opencode is what the mark is for.
+ * Two kinds of mark ship here, and the difference matters legally.
  *
- * No such asset could be found for Claude Code, Codex, Cursor, Kimi Code, Pi,
- * pi-signed, Grok, Muse, or GitHub Copilot — their installed packages ship no
- * logo, and their marks are not published as reusable assets. Those runtimes
- * therefore get the generic badge below. Clock-In does not draw a lookalike
- * from memory: a wrong mark misrepresents somebody else's product, and a plain
- * monogram is honest about what Clock-In actually has.
+ * An **official asset** ships only when the project publishes one under a
+ * licence that lets Clock-In redistribute it. Today that is opencode alone: its
+ * mark ships in `sst/opencode` under the MIT licence the rest of that
+ * repository carries.
  *
- * The roster's `icon` field is what selects a mark, so a runtime gains one by
- * gaining an asset here and a name there.
+ * Every other runtime gets a **Clock-In mark**: an original monochrome glyph
+ * drawn for this app, from one coherent set, in `currentColor` on a 24×24 grid.
+ * These are deliberately *not* imitations of anybody's logo. Anthropic, OpenAI,
+ * Cursor, Moonshot, xAI, and GitHub all publish brand assets under terms that
+ * do not permit redistribution in a third-party app, and drawing a lookalike
+ * from memory would misrepresent somebody else's product while infringing the
+ * same trademark. An original glyph naming a runtime inside Clock-In's own UI
+ * is honest about whose drawing it is and needs no licence from anyone.
+ *
+ * The roster's `icon` field selects the mark, so a runtime gains one by naming
+ * it there and adding it below.
  */
 
 /**
@@ -57,8 +60,118 @@ const OpencodeMark = () => (
   </svg>
 );
 
+/**
+ * The Clock-In mark set: one original monochrome glyph per runtime, all on the
+ * same 24×24 grid with the same 2px stroke, so a list of them reads as one
+ * family rather than as scavenged logos. Each is a distinct silhouette, which
+ * is what makes a row identifiable at a glance.
+ */
+const ClockInMark = ({ children }: { children: ReactElement | ReactElement[] }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    xmlns="http://www.w3.org/2000/svg"
+    aria-hidden="true"
+  >
+    {children}
+  </svg>
+);
+
+/// A command prompt: the CLI that started all of this.
+const ClaudeCodeMark = () => (
+  <ClockInMark>
+    <rect x="3" y="4" width="18" height="16" rx="3" />
+    <path d="M7.5 10 10 12.5 7.5 15" />
+    <path d="M13 15h4" />
+  </ClockInMark>
+);
+
+/// Nested brackets: code inside code.
+const CodexMark = () => (
+  <ClockInMark>
+    <path d="M9 5 4 12l5 7" />
+    <path d="M15 5l5 7-5 7" />
+    <path d="M12.5 8.5 11.5 15.5" />
+  </ClockInMark>
+);
+
+/// A pointer, for the editor that follows one.
+const CursorMark = () => (
+  <ClockInMark>
+    <path d="M5 3.5 18.5 11 12 12.5 9.5 19z" />
+  </ClockInMark>
+);
+
+/// A crescent, for Kimi.
+const KimiMark = () => (
+  <ClockInMark>
+    <path d="M18 15.5A7.5 7.5 0 0 1 8.5 6a7.5 7.5 0 1 0 9.5 9.5z" />
+  </ClockInMark>
+);
+
+/// The letter the runtime is named after, drawn rather than set in type so it
+/// keeps the same weight as the rest of the set.
+const PiMark = () => (
+  <ClockInMark>
+    <path d="M4 7h16" />
+    <path d="M9 7v10" />
+    <path d="M16 7v8a2 2 0 0 0 2 2" />
+  </ClockInMark>
+);
+
+/// Pi, with the seal that tells the signed build apart.
+const PiSignedMark = () => (
+  <ClockInMark>
+    <path d="M3 6h12" />
+    <path d="M7 6v11" />
+    <path d="M12.5 6v7" />
+    <path d="M15 17.5l2.5 2.5 4.5-5.5" />
+  </ClockInMark>
+);
+
+/// A spark.
+const GrokMark = () => (
+  <ClockInMark>
+    <path d="M12 2v6" />
+    <path d="M12 16v6" />
+    <path d="M4.2 6.2 8.5 10.5" />
+    <path d="M15.5 13.5l4.3 4.3" />
+    <path d="M2 12h6" />
+    <path d="M16 12h6" />
+  </ClockInMark>
+);
+
+/// A quill nib.
+const MuseMark = () => (
+  <ClockInMark>
+    <path d="M4 20c6-2 9-5 11-9l2.5-6.5L11 7C7 9 5 13 4 20z" />
+    <path d="M4 20 11 13" />
+  </ClockInMark>
+);
+
+/// Two marks in step: the second seat.
+const CopilotMark = () => (
+  <ClockInMark>
+    <circle cx="9" cy="12" r="5.5" />
+    <path d="M15 6.8a5.5 5.5 0 0 1 0 10.4" />
+  </ClockInMark>
+);
+
 const MARKS: Record<string, () => ReactElement> = {
   opencode: OpencodeMark,
+  claude_code: ClaudeCodeMark,
+  codex: CodexMark,
+  cursor: CursorMark,
+  kimi_code: KimiMark,
+  pi: PiMark,
+  pi_signed: PiSignedMark,
+  grok: GrokMark,
+  muse: MuseMark,
+  copilot: CopilotMark,
 };
 
 /**

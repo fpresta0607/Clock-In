@@ -32,6 +32,11 @@ export type OrganizationOverview = {
 export type HookRegistration = {
   source: string;
   detected: boolean;
+  /// Whether the CLI looks present on this machine at all.
+  installed: boolean;
+  /// Installed, not connected, and not something the host can wire up itself.
+  /// The only rows that should ask a person for anything.
+  needsYou: boolean;
   configPath: string;
 };
 
@@ -53,6 +58,13 @@ export type AgentActive = {
 /// `default` means something named the project on purpose.
 export type Attribution = "selected" | "agent" | "default";
 
+/// One app's share of the open session, as the host counts it locally.
+export type SessionApp = {
+  /// The executable name only, exactly as segments record it.
+  processName: string;
+  durationSeconds: number;
+};
+
 /// The session recording right now. It exists whenever the machine is in use
 /// and recording is on; nobody starts or stops it.
 export type CurrentSession = {
@@ -60,11 +72,21 @@ export type CurrentSession = {
   attribution: Attribution;
   since: string;
   idleSeconds: number;
+  /// Where this session's time has gone, heaviest first. Local and live: the
+  /// host counts the span still open, so these tick with the work rather than
+  /// waiting for an upload.
+  apps: readonly SessionApp[];
 };
 
 export type MonitorStatus = {
   enabled: boolean;
   running: boolean;
+  /// Whether this machine is actually being sampled, as opposed to the tasks
+  /// merely having been started. A poll task that dies leaves `running` true,
+  /// so this is what the recording state is allowed to claim "on" from.
+  observing: boolean;
+  /// Seconds since the last completed poll; `null` before the first one.
+  lastPollAgeSeconds: number | null;
   lastUploadAt: string | null;
   segmentBacklog: number;
   agentBacklog: number;
@@ -264,6 +286,8 @@ const decodeHookRegistration = (value: unknown): HookRegistration => {
   return {
     source: string(candidate.source),
     detected: boolean(candidate.detected),
+    installed: boolean(candidate.installed),
+    needsYou: boolean(candidate.needsYou),
     configPath: string(candidate.configPath),
   };
 };
@@ -293,13 +317,24 @@ const decodeAttribution = (value: unknown): Attribution => {
   return value as Attribution;
 };
 
+const decodeSessionApp = (value: unknown): SessionApp => {
+  const candidate = record(value);
+  return {
+    processName: string(candidate.processName),
+    durationSeconds: nonnegativeInteger(candidate.durationSeconds),
+  };
+};
+
 const decodeCurrentSession = (value: unknown): CurrentSession => {
   const candidate = record(value);
+  const apps = candidate.apps;
+  if (!Array.isArray(apps)) invalidResponse();
   return {
     projectId: uuid(candidate.projectId),
     attribution: decodeAttribution(candidate.attribution),
     since: timestamp(candidate.since),
     idleSeconds: nonnegativeInteger(candidate.idleSeconds),
+    apps: (apps as unknown[]).map(decodeSessionApp),
   };
 };
 
@@ -310,6 +345,11 @@ export const decodeMonitorStatus = (value: unknown): MonitorStatus => {
   return {
     enabled: boolean(candidate.enabled),
     running: boolean(candidate.running),
+    observing: boolean(candidate.observing),
+    lastPollAgeSeconds:
+      candidate.lastPollAgeSeconds === null || candidate.lastPollAgeSeconds === undefined
+        ? null
+        : nonnegativeInteger(candidate.lastPollAgeSeconds),
     lastUploadAt: timestampOrNull(candidate.lastUploadAt),
     segmentBacklog: nonnegativeInteger(candidate.segmentBacklog),
     agentBacklog: nonnegativeInteger(candidate.agentBacklog),

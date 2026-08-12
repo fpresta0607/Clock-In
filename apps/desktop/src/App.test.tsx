@@ -43,13 +43,15 @@ const settings = {
 const status = {
   enabled: true,
   running: true,
+  observing: true,
+  lastPollAgeSeconds: 12,
   lastUploadAt: "2026-08-06T14:55:00.000Z",
   segmentBacklog: 0,
   agentBacklog: 0,
   sessionBacklog: 0,
   hooks: [
-    { source: "claude_code", detected: true, configPath: "C:/Users/dev/.claude/settings.json" },
-    { source: "codex", detected: false, configPath: "C:/Users/dev/.codex/config.toml" },
+    { source: "claude_code", detected: true, installed: true, needsYou: false, configPath: "C:/Users/dev/.claude/settings.json" },
+    { source: "codex", detected: false, installed: true, needsYou: false, configPath: "C:/Users/dev/.codex/config.toml" },
   ],
   agentActive: null,
   currentSession: null,
@@ -63,6 +65,7 @@ const recording = {
     attribution: "agent" as const,
     since: "2026-08-06T14:00:00.000Z",
     idleSeconds: 0,
+    apps: [],
   },
 };
 
@@ -123,6 +126,13 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   pathMappingsDelete: vi.fn().mockResolvedValue(undefined),
   ...overrides,
 });
+
+/// Opens the "All stats" overlay, where everything historical now lives: the
+/// main surface is the record card and this session, and nothing else.
+const openAllStats = async (person: ReturnType<typeof userEvent.setup>): Promise<HTMLElement> => {
+  await person.click(await screen.findByTestId("all-stats-trigger"));
+  return screen.getByRole("dialog", { name: /Today so far|This week/ });
+};
 
 /// Opens the settings overlay from the titlebar gear and returns the dialog.
 const openSettings = async (person: ReturnType<typeof userEvent.setup>): Promise<HTMLElement> => {
@@ -220,11 +230,46 @@ describe("recording", () => {
 
   it("says recording is off, and never implies otherwise", async () => {
     render(<App bridge={bridgeFor({
-      monitorStatus: vi.fn().mockResolvedValue({ ...status, enabled: false, running: false }),
+      monitorStatus: vi.fn().mockResolvedValue({ ...status, enabled: false, running: false, observing: false }),
     })} />);
 
     expect(await screen.findByText("Recording off")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Recording is off" })).toBeInTheDocument();
+  });
+
+  // The screenshot bug: the timer said RECORDING while the card under it said
+  // "Turn on recording in settings". Both now read the one shared state, so no
+  // arrangement of props can make them disagree.
+  it("never tells you to turn recording on while it is recording", async () => {
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(recording),
+      // Recording is demonstrably on, but nothing has been added up yet.
+      meStats: vi.fn().mockResolvedValue({ ...meStats, totalDurationSeconds: 0, apps: [] }),
+    })} />);
+
+    const person = userEvent.setup();
+    expect(await screen.findByText("Recording on")).toBeInTheDocument();
+    expect(await screen.findByTestId("elapsed-time")).toBeInTheDocument();
+
+    // The live surface on the main page.
+    expect(await screen.findByTestId("session-stats-empty")).not.toHaveTextContent(/turn (on )?recording/i);
+
+    // And the historical one behind "All stats", which is where the
+    // contradiction used to be printed.
+    const empty = within(await openAllStats(person)).getByTestId("today-empty");
+    expect(empty).not.toHaveTextContent(/turn (on )?recording/i);
+    expect(empty).toHaveTextContent("Nothing has been added up yet.");
+  });
+
+  // A poll task that dies leaves `running` true. Reading "on" from that alone
+  // is what let the app look healthy while it recorded nothing for days.
+  it("says recording stopped responding when the machine is no longer sampled", async () => {
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue({ ...recording, observing: false, lastPollAgeSeconds: 900 }),
+    })} />);
+
+    expect(await screen.findByText("Recording stopped responding")).toBeInTheDocument();
+    expect(screen.queryByText("Recording on")).not.toBeInTheDocument();
   });
 
   it("reports quiet time taken off and the AI tool holding recording open", async () => {
@@ -243,7 +288,9 @@ describe("recording", () => {
   it("renders no recording surfaces when the host cannot report status", async () => {
     render(<App bridge={bridgeFor()} />);
 
-    await screen.findByRole("heading", { name: "Nothing to record yet" });
+    // A host that cannot answer is its own state: the screen says it is still
+    // checking rather than borrowing the wording of a healthy idle machine.
+    await screen.findByRole("heading", { name: "Checking this computer…" });
     await waitFor(() => expect(screen.queryByText(/^Recording (on|paused|off)$/)).not.toBeInTheDocument());
   });
 
@@ -280,9 +327,10 @@ describe("recording", () => {
 
 describe("today", () => {
   it("totals the range and names where unattributed time landed", async () => {
+    const person = userEvent.setup();
     render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(status) })} />);
 
-    const panel = await screen.findByLabelText("Today so far");
+    const panel = await openAllStats(person);
     // The card renders before the stats land, so wait for the figure itself.
     expect(await within(panel).findByText("2h")).toBeInTheDocument();
     expect(within(panel).getByTestId("unattributed-foot")).toHaveTextContent(
@@ -295,7 +343,7 @@ describe("today", () => {
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
-    const panel = await screen.findByLabelText("Today so far");
+    const panel = await openAllStats(person);
     await person.click(await within(panel).findByRole("button", { name: "This week" }));
 
     await waitFor(() => expect(bridge.meStats).toHaveBeenCalledTimes(2));
@@ -303,6 +351,7 @@ describe("today", () => {
   });
 
   it("folds agent CLI processes into one friendly row", async () => {
+    const person = userEvent.setup();
     render(<App bridge={bridgeFor({
       meStats: vi.fn().mockResolvedValue({
         ...meStats,
@@ -313,7 +362,7 @@ describe("today", () => {
       }),
     })} />);
 
-    const panel = await screen.findByLabelText("Today so far");
+    const panel = await openAllStats(person);
     expect(await within(panel).findByText("Claude Code")).toBeInTheDocument();
     expect(within(panel).getByText("VS Code")).toBeInTheDocument();
   });
@@ -437,7 +486,7 @@ describe("the what's-recorded panel", () => {
 
   it("turns recording on from the panel when it is off", async () => {
     const bridge = bridgeFor({
-      monitorStatus: vi.fn().mockResolvedValue({ ...status, enabled: false, running: false }),
+      monitorStatus: vi.fn().mockResolvedValue({ ...status, enabled: false, running: false, observing: false }),
       monitorSetEnabled: vi.fn().mockResolvedValue({ ...settings, enabled: true }),
     });
     const person = userEvent.setup();
@@ -473,11 +522,80 @@ describe("the what's-recorded panel", () => {
   });
 });
 
+describe("this session", () => {
+  it("lays out where the current session's time went, per app", async () => {
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue({
+        ...recording,
+        agentActive: { source: "claude_code", since: "2026-08-06T14:10:00.000Z" },
+        currentSession: {
+          ...recording.currentSession,
+          apps: [
+            { processName: "claude.exe", durationSeconds: 3_600 },
+            { processName: "chrome.exe", durationSeconds: 1_800 },
+            { processName: "Code.exe", durationSeconds: 900 },
+          ],
+        },
+      }),
+    })} />);
+
+    const rows = within(await screen.findByTestId("session-app-list")).getAllByRole("listitem");
+    // Heaviest first, agent CLIs named by their runtime rather than their exe.
+    expect(rows[0]).toHaveTextContent("Claude Code");
+    expect(rows[0]).toHaveTextContent("1h");
+    expect(rows[1]).toHaveTextContent("Google Chrome");
+    expect(rows[1]).toHaveTextContent("30m");
+    expect(rows[2]).toHaveTextContent("VS Code");
+    expect(rows[2]).toHaveTextContent("15m");
+    // The runtime that is working right now says so on its own row.
+    expect(rows[0]).toHaveTextContent("working now");
+  });
+
+  it("keeps agent runtimes on their own rows instead of folding them together", async () => {
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue({
+        ...recording,
+        currentSession: {
+          ...recording.currentSession,
+          apps: [
+            { processName: "claude.exe", durationSeconds: 3_600 },
+            { processName: "codex.exe", durationSeconds: 1_800 },
+          ],
+        },
+      }),
+    })} />);
+
+    const list = await screen.findByTestId("session-app-list");
+    // Which tool the time went to is the question this surface answers, so
+    // "Agent CLIs" as one row would defeat the point.
+    expect(within(list).getByText("Claude Code")).toBeInTheDocument();
+    expect(within(list).getByText("Codex")).toBeInTheDocument();
+    expect(within(list).queryByText("Agent CLIs")).not.toBeInTheDocument();
+  });
+
+  it("ships a runtime mark for every connector in the roster", async () => {
+    render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(recording) })} />);
+
+    await screen.findByText("Recording on");
+    await userEvent.setup().click(screen.getByRole("button", { name: "What's recorded?" }));
+
+    const panel = await screen.findByRole("dialog", { name: "What Clock-In is recording" });
+    for (const source of ["claude_code", "codex"]) {
+      const mark = within(panel).getByTestId(`agent-mark-${source}`);
+      // A real mark, not a letter tile standing in for one.
+      expect(mark.querySelector("svg")).not.toBeNull();
+      expect(mark).not.toHaveClass("is-generic");
+    }
+  });
+});
+
 describe("the team board", () => {
   it("ranks the workspace and marks the signed-in member", async () => {
+    const person = userEvent.setup();
     render(<App bridge={bridgeFor()} />);
 
-    const board = await screen.findByLabelText("SIQstack");
+    // The board is history, so it sits behind "All stats" with the rest of it.
+    const board = within(await openAllStats(person)).getByLabelText("SIQstack");
     expect(within(board).getByText("Sam")).toBeInTheDocument();
     expect(within(board).getByText("you")).toBeInTheDocument();
   });
@@ -492,10 +610,14 @@ describe("the team board", () => {
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
-    await person.type(await screen.findByLabelText("Invite code to join a teammate"), "PQRTU-VWXY3");
-    await person.click(screen.getByRole("button", { name: "Join" }));
+    await person.type(await screen.findByLabelText("Their invite code"), "PQRTU-VWXY3");
+    await person.click(screen.getByRole("button", { name: "Join this team" }));
 
     await waitFor(() => expect(bridge.orgJoin).toHaveBeenCalledWith("PQRTU-VWXY3"));
-    expect(await screen.findByRole("heading", { name: "Joined Team" })).toBeInTheDocument();
+    // The card names the team you are now on, in a sentence rather than as a
+    // bare heading beside a code.
+    const card = await screen.findByLabelText("Your team");
+    expect(await within(card).findByText("Joined Team")).toBeInTheDocument();
+    expect(within(card).getByTestId("invite-code")).toHaveTextContent("PQRTU-VWXY3");
   });
 });
