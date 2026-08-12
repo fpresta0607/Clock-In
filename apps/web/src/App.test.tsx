@@ -332,6 +332,17 @@ describe("dashboard", () => {
     expect(query.get("fromAt")).not.toBeNull();
   });
 
+  it("offers a way back to your own breakdown after picking a teammate", async () => {
+    const person = await signIn(clientFor());
+
+    const board = within(await screen.findByRole("region", { name: "Leaderboard" }));
+    await person.click(await board.findByRole("button", { name: /Sam/ }));
+    await screen.findByRole("region", { name: /Sam · Today/ });
+
+    await person.click(screen.getByRole("button", { name: "Show my own" }));
+    expect(await screen.findByRole("region", { name: /Alex · Today/ })).toBeInTheDocument();
+  });
+
   it("lets a stranded account join a teammate's workspace and reloads", async () => {
     const joinOrganization = vi.fn().mockResolvedValue(undefined);
     const organizationCall = vi.fn().mockResolvedValue({ organization });

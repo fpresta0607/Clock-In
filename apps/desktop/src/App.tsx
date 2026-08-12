@@ -975,6 +975,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   // re-deriving them, because two numbers for one day is the whole confusion.
   const showingLiveDay = viewingSelf && boardRange === "today";
   const boardLoading = showingLiveDay ? stats === undefined : boardStats === undefined;
+  const boardError = showingLiveDay ? statsError : boardStatsError;
   const boardTotalSeconds = showingLiveDay ? todayTotalSeconds : boardStats?.totalDurationSeconds ?? 0;
   const boardUnattributedSeconds = (showingLiveDay ? stats : boardStats)?.unattributedSeconds ?? 0;
   const boardAppRows = buildAppRows(showingLiveDay ? liveApps : boardStats?.apps ?? []);
@@ -1093,7 +1094,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           <div className="panel-head">
             <h2 id="today-panel-title">Today</h2>
           </div>
-          {meterRows.length === 0 && projectRows.length === 0 ? (
+          {statsError && <p className="form-error" role="alert">{statsError}</p>}
+          {meterRows.length === 0 && projectRows.length === 0 && statsError === undefined ? (
             <p className="subtle" data-testid="today-panel-empty">{TODAY_EMPTY[state]}</p>
           ) : (
             <>
@@ -1251,10 +1253,17 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           )}
 
           <section className="member-stats" aria-labelledby="member-stats-title" data-testid="member-stats">
-            <h3 id="member-stats-title">{viewedMember.name} · {RANGE_LABEL[boardRange]}</h3>
-            {boardStatsError && <p className="form-error" role="alert">{boardStatsError}</p>}
+            <div className="member-stats-head">
+              <h3 id="member-stats-title">{viewedMember.name} · {RANGE_LABEL[boardRange]}</h3>
+              {!viewingSelf && (
+                <button type="button" className="member-self" onClick={() => setBoardMember(undefined)}>
+                  Show my own
+                </button>
+              )}
+            </div>
+            {boardError && <p className="form-error" role="alert">{boardError}</p>}
             {boardLoading ? (
-              !boardStatsError && <p className="subtle">Loading…</p>
+              !boardError && <p className="subtle">Loading…</p>
             ) : (
               <>
                 <p className="today-total"><strong>{formatHuman(boardTotalSeconds)}</strong> recorded</p>

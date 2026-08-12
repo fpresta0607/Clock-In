@@ -448,11 +448,18 @@ export const App = ({ client }: AppProps) => {
 
         {viewedId !== undefined && (
           <section className="member-stats" aria-labelledby="member-stats-title">
-            <h3 id="member-stats-title">
-              {(member?.name ?? entries.find((entry) => entry.user.id === selfId)?.user.name ?? "You")}
-              {" · "}
-              {rangeLabels[range]}
-            </h3>
+            <div className="member-stats-head">
+              <h3 id="member-stats-title">
+                {(member?.name ?? entries.find((entry) => entry.user.id === selfId)?.user.name ?? "You")}
+                {" · "}
+                {rangeLabels[range]}
+              </h3>
+              {viewedId !== selfId && (
+                <button type="button" className="member-self" onClick={() => setMember(undefined)}>
+                  Show my own
+                </button>
+              )}
+            </div>
             {memberFailed ? (
               <p className="subtle">Could not load this member's breakdown.</p>
             ) : memberStats === undefined ? (

@@ -833,6 +833,44 @@ describe("the team board", () => {
     expect(await within(stats).findByText("Blender")).toBeInTheDocument();
   });
 
+  it("offers a way back to your own breakdown after picking a teammate", async () => {
+    const samStats = {
+      ...meStats,
+      totalDurationSeconds: 5_400,
+      apps: [{ processName: "blender.exe", durationSeconds: 5_400 }],
+    };
+    const bridge = bridgeFor({
+      meStats: vi.fn().mockImplementation((_fromAt?: string, _toExclusiveAt?: string, userId?: string) =>
+        Promise.resolve(userId === undefined ? meStats : samStats)),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const panel = await openAllStats(person);
+    const stats = within(panel).getByTestId("member-stats");
+    await person.click(within(panel).getByRole("button", { name: /Sam/ }));
+    expect(await within(stats).findByRole("heading", { name: /Sam · Today/ })).toBeInTheDocument();
+
+    await person.click(within(stats).getByRole("button", { name: "Show my own" }));
+    expect(await within(stats).findByRole("heading", { name: /Timer User · Today/ })).toBeInTheDocument();
+  });
+
+  it("surfaces a failed self/today read instead of a blank or endless state", async () => {
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(status),
+      meStats: vi.fn().mockRejectedValue({ kind: "transient", message: "The stats service is unavailable." }),
+    })} />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("The stats service is unavailable.");
+    expect(screen.queryByTestId("today-panel-empty")).not.toBeInTheDocument();
+
+    const panel = await openAllStats(person);
+    const stats = within(panel).getByTestId("member-stats");
+    expect(within(stats).getByRole("alert")).toHaveTextContent("The stats service is unavailable.");
+    expect(within(stats).queryByText("Loading…")).not.toBeInTheDocument();
+  });
+
   it("joins another workspace by invite code from settings", async () => {
     const bridge = bridgeFor({
       orgOverview: vi.fn().mockResolvedValue({

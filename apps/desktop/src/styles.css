@@ -317,6 +317,10 @@ select:disabled { opacity: .55; }
 /* One member's breakdown, under the board that chose them. */
 .member-stats { margin-top: 14px; border-top: 1px solid rgba(163, 179, 194, 0.12); padding-top: 12px; }
 .member-stats h3 { margin: 0 0 9px; font-size: .84rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-stats-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
+.member-stats-head h3 { flex: 1 1 auto; min-width: 0; margin: 0; }
+.member-self { flex: none; border: 0; padding: 0; background: transparent; color: var(--mint); font-size: .74rem; letter-spacing: .04em; cursor: pointer; }
+.member-self:hover, .member-self:focus-visible { color: #ffffff; }
 .member-stats .app-list + .app-list { margin-top: 10px; border-top: 1px solid rgba(163, 179, 194, 0.08); padding-top: 8px; }
 
 .board-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
