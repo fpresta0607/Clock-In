@@ -664,9 +664,11 @@ export class DrizzleReportRepository implements ReportRepository {
     // cannot serialize a bare Date — bind the bounds as ISO strings instead.
     const rangeStart = query.from === undefined ? sql`${activitySegments.startedAt}` : sql`${query.from.toISOString()}`;
     const rangeEnd = query.toExclusive === undefined ? sql`${activitySegments.endedAt}` : sql`${query.toExclusive.toISOString()}`;
-    const duration = sql<string | null>`sum(greatest(0, extract(epoch from
+    // floor(...)::bigint: extract(epoch ...) yields a scaled numeric
+    // ("90.000000"), which the service's safe-integer parse rejects.
+    const duration = sql<string | null>`floor(sum(greatest(0, extract(epoch from
       least(${activitySegments.endedAt}, ${rangeEnd})
-      - greatest(${activitySegments.startedAt}, ${rangeStart}))))`;
+      - greatest(${activitySegments.startedAt}, ${rangeStart})))))::bigint`;
     const rows = await this.db
       .select({
         processName: activitySegments.processName,

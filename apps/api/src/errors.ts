@@ -45,5 +45,7 @@ export function handleAppError(error: Error, context: Context): Response {
   if (error instanceof AppError) {
     return jsonError(context, error);
   }
+  // The response stays generic; the log keeps the real failure diagnosable.
+  console.error("clock-in-api: unexpected error", error);
   return jsonError(context, new AppError("internal_error", "An unexpected error occurred."));
 }

@@ -41,6 +41,7 @@ integration(integrationDescription, () => {
   const authUserId = randomUUID();
   let app: ReturnType<typeof createApp>;
   let authorized: Record<string, string>;
+  let auth: Awaited<ReturnType<typeof createTestAuth>>;
 
   beforeAll(async () => {
     if (!databaseUrl) return;
@@ -53,7 +54,7 @@ integration(integrationDescription, () => {
     });
     await runMigrations(database);
 
-    const auth = await createTestAuth(config, new Date());
+    auth = await createTestAuth(config, new Date());
     authorized = {
       authorization: await auth.bearer(authUserId, { email: "smoke@clock-in.test", name: "Smoke User" }),
       "content-type": "application/json",
@@ -156,6 +157,83 @@ integration(integrationDescription, () => {
     const statsBody = await stats.json();
     expect(statsBody.totalDurationSeconds).toBe(stopped.durationSeconds);
     expect(statsBody.apps).toEqual([]);
+  }, 60_000);
+
+  // The desktop's real recording path: the monitor observes work, spools it,
+  // and the uploader replays the spool as these two batch posts. This is the
+  // wire flow that goes stale first when the schema and the app drift apart.
+  it("records an observed session with its segments and reports it in stats", async () => {
+    const observerId = randomUUID();
+    const observer = {
+      authorization: await auth.bearer(observerId, {
+        email: "observer@clock-in.test",
+        name: "Observer User",
+      }),
+      "content-type": "application/json",
+    };
+    await app.request("/me", { headers: observer });
+    const projects = (await (await app.request("/projects", { headers: observer })).json()).projects;
+    const projectId = projects[0].id;
+
+    const deviceId = randomUUID();
+    const startedAt = new Date(Date.now() - 120_000).toISOString();
+    const stoppedAt = new Date(Date.now() - 30_000).toISOString();
+
+    // Exactly what the desktop uploader puts on the wire, in its order:
+    // segments first, then the finished session.
+    const segments = await app.request("/activity/segments", {
+      method: "POST",
+      headers: observer,
+      body: JSON.stringify({
+        segments: [{
+          clientId: randomUUID(),
+          deviceId,
+          kind: "active",
+          processName: "code.exe",
+          startedAt,
+          endedAt: stoppedAt,
+        }],
+      }),
+    });
+    expect(segments.status).toBe(200);
+    expect((await segments.json()).rejected).toEqual([]);
+
+    const sessionClientId = randomUUID();
+    const observedBatch = {
+      sessions: [{
+        clientId: sessionClientId,
+        projectId,
+        attribution: "default",
+        startedAt,
+        stoppedAt,
+        idleSeconds: 0,
+      }],
+    };
+    const observed = await app.request("/sessions/observed", {
+      method: "POST",
+      headers: observer,
+      body: JSON.stringify(observedBatch),
+    });
+    expect(observed.status).toBe(200);
+    expect((await observed.json()).rejected).toEqual([]);
+
+    // The spool replays identical payloads after a failed ack; the replay
+    // must land as the same session, not a duplicate.
+    const replay = await app.request("/sessions/observed", {
+      method: "POST",
+      headers: observer,
+      body: JSON.stringify(observedBatch),
+    });
+    expect(replay.status).toBe(200);
+    expect((await replay.json()).rejected).toEqual([]);
+
+    const today = new Date().toISOString().slice(0, 10);
+    const stats = await app.request(`/me/stats?from=${today}&to=${today}`, { headers: observer });
+    if (stats.status !== 200) console.log("stats body:", await stats.clone().text());
+    expect(stats.status).toBe(200);
+    const statsBody = await stats.json();
+    expect(statsBody.totalDurationSeconds).toBe(90);
+    expect(statsBody.apps).toEqual([{ processName: "code.exe", durationSeconds: 90 }]);
   }, 60_000);
 
   it("repairs a legacy workspace once, keeps selections private, and replaces its default safely", async () => {
