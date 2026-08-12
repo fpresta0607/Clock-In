@@ -46,10 +46,14 @@ uuid = { version = "1", features = ["v4"] }
 tauri-plugin-updater = "2"
 
 # The activity monitor's read-only Win32 calls: GetLastInputInfo,
-# GetForegroundWindow process names, and session lock/suspend events.
+# GetForegroundWindow process names, and session lock/suspend events. The
+# Gdi/Shell/Com/FileSystem features exist for `app_icons` icon extraction.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
@@ -58,8 +62,13 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
     "Win32_UI_Accessibility",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# `app_icons` PNG-encodes extracted icons into data URIs; both crates already
+# sit in the dependency tree (tauri's tray-icon links `png`, reqwest `base64`).
+png = "0.18"
+base64 = "0.22"
 
 [profile.release]
 strip = true

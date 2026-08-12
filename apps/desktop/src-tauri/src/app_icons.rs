@@ -1,0 +1,387 @@
+//! Real OS icons for the executables the usage meter lists.
+//!
+//! The webview cannot read another program's icon; only the host can ask the
+//! shell. A name resolves to an executable path by preferring a running
+//! process — a live match is the very binary being measured — and falling
+//! back to the registry's App Paths entries, so an app that is not running
+//! right now still gets its icon. Every failure is per name: the batch
+//! always answers, with `None` where nothing could be resolved.
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+use crate::monitor::lock;
+
+/// Resolved icons, kept for the process lifetime. Extraction walks the
+/// process table, the registry, and disk; an executable's icon does not
+/// change while Clock-In runs, so each name is paid for once.
+static ICON_CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+
+/// PNG data URIs (`data:image/png;base64,...`) for each requested process
+/// name, keyed exactly as asked. A name whose icon cannot be resolved maps
+/// to `None`; the batch itself never fails.
+pub fn lookup(process_names: Vec<String>) -> HashMap<String, Option<String>> {
+    let mut icons = HashMap::with_capacity(process_names.len());
+    for name in process_names {
+        let icon = cached_icon(&normalize(&name));
+        icons.insert(name, icon);
+    }
+    icons
+}
+
+fn cached_icon(normalized: &str) -> Option<String> {
+    let cache = ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(known) = lock(cache).get(normalized) {
+        return known.clone();
+    }
+    // Extracted outside the lock: the probe hits disk and the registry, and
+    // an occasional duplicate probe costs less than serializing every caller.
+    let icon = platform::icon_data_uri(normalized);
+    lock(cache)
+        .entry(normalized.to_string())
+        .or_insert(icon)
+        .clone()
+}
+
+/// Windows executable names compare case-insensitively, and callers name the
+/// same app both ways ("Code" and "code.exe"). One canonical spelling keys
+/// the cache and every OS-side comparison.
+fn normalize(name: &str) -> String {
+    let mut normalized = name.trim().to_ascii_lowercase();
+    if !normalized.is_empty() && !normalized.ends_with(".exe") {
+        normalized.push_str(".exe");
+    }
+    normalized
+}
+
+#[cfg(windows)]
+mod platform {
+    //! Shell-icon extraction, manually verified like the monitor's Win32
+    //! code: resolve a path, ask `SHGetFileInfoW` for the large icon, read
+    //! its pixels back through GDI, and encode a PNG.
+
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Graphics::Gdi::{
+        DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
+    };
+    use windows_sys::Win32::System::Com::{
+        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows_sys::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
+
+    /// An icon's pixels as RGBA rows, top to bottom.
+    struct Pixels {
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    }
+
+    /// The large shell icon of `name` (normalized: lowercase, `.exe`) as a
+    /// PNG data URI, or `None` at the first unresolvable step.
+    pub fn icon_data_uri(name: &str) -> Option<String> {
+        if name.is_empty() {
+            return None;
+        }
+        let path = running_process_path(name).or_else(|| app_paths_entry(name))?;
+        let pixels = extract_pixels(&path)?;
+        let png = encode_png(&pixels)?;
+        Some(format!("data:image/png;base64,{}", STANDARD.encode(png)))
+    }
+
+    /// The full image path of a running process whose executable name matches
+    /// `name`. Preferred over the registry so the icon shown is the binary
+    /// the meter actually measured.
+    fn running_process_path(name: &str) -> Option<String> {
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snapshot == INVALID_HANDLE_VALUE {
+                return None;
+            }
+            let result = (|| {
+                let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+                entry.dwSize = std::mem::size_of_val(&entry) as u32;
+                if Process32FirstW(snapshot, &mut entry) == 0 {
+                    return None;
+                }
+                loop {
+                    let end = entry
+                        .szExeFile
+                        .iter()
+                        .position(|unit| *unit == 0)
+                        .unwrap_or(entry.szExeFile.len());
+                    let exe_name = String::from_utf16_lossy(&entry.szExeFile[..end]);
+                    if exe_name.eq_ignore_ascii_case(name) {
+                        // An elevated process refuses the query handle; keep
+                        // scanning — another instance may allow it.
+                        if let Some(path) = process_image_path(entry.th32ProcessID) {
+                            return Some(path);
+                        }
+                    }
+                    if Process32NextW(snapshot, &mut entry) == 0 {
+                        return None;
+                    }
+                }
+            })();
+            CloseHandle(snapshot);
+            result
+        }
+    }
+
+    fn process_image_path(process_id: u32) -> Option<String> {
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
+            if process.is_null() {
+                return None;
+            }
+            let mut buffer = [0u16; 1024];
+            let mut length = buffer.len() as u32;
+            let ok = QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut length);
+            CloseHandle(process);
+            if ok == 0 || length == 0 {
+                return None;
+            }
+            Some(String::from_utf16_lossy(&buffer[..length as usize]))
+        }
+    }
+
+    /// The install path advertised under
+    /// `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\<name>`.
+    /// `RegGetValueW` expands REG_EXPAND_SZ values itself; installers
+    /// sometimes quote the path, so surrounding quotes are stripped.
+    fn app_paths_entry(name: &str) -> Option<String> {
+        let subkey: Vec<u16> =
+            format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{name}\0")
+                .encode_utf16()
+                .collect();
+        let mut buffer = [0u16; 1024];
+        let mut byte_count = (buffer.len() * std::mem::size_of::<u16>()) as u32;
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                subkey.as_ptr(),
+                // The key's default value holds the executable path.
+                std::ptr::null(),
+                RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr().cast(),
+                &mut byte_count,
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return None;
+        }
+        let units = (byte_count as usize / std::mem::size_of::<u16>()).min(buffer.len());
+        let value = String::from_utf16_lossy(&buffer[..units]);
+        let path = value.trim_end_matches('\0').trim().trim_matches('"');
+        (!path.is_empty()).then(|| path.to_string())
+    }
+
+    /// `SHGetFileInfoW` is documented to require COM on the calling thread,
+    /// and this code runs on blocking-pool threads that never initialized it.
+    /// S_OK and S_FALSE each take a reference this guard must give back; a
+    /// failed init (someone else's incompatible mode) is left untouched.
+    struct ComGuard {
+        owns_reference: bool,
+    }
+
+    impl ComGuard {
+        fn new() -> Self {
+            let result =
+                unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+            Self {
+                owns_reference: result >= 0,
+            }
+        }
+    }
+
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            if self.owns_reference {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
+    fn extract_pixels(path: &str) -> Option<Pixels> {
+        let _com = ComGuard::new();
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut info: SHFILEINFOW = unsafe { std::mem::zeroed() };
+        let listed = unsafe {
+            SHGetFileInfoW(
+                wide.as_ptr(),
+                0,
+                &mut info,
+                std::mem::size_of::<SHFILEINFOW>() as u32,
+                SHGFI_ICON | SHGFI_LARGEICON,
+            )
+        };
+        if listed == 0 || info.hIcon.is_null() {
+            return None;
+        }
+        let pixels = icon_pixels(info.hIcon);
+        unsafe { DestroyIcon(info.hIcon) };
+        pixels
+    }
+
+    /// Reads an icon's pixels. `GetIconInfo` hands over two bitmaps that are
+    /// the caller's to free, which is why the conversion is split out: the
+    /// deletes must run on every exit path after a successful `GetIconInfo`.
+    fn icon_pixels(icon: HICON) -> Option<Pixels> {
+        let mut info: ICONINFO = unsafe { std::mem::zeroed() };
+        if unsafe { GetIconInfo(icon, &mut info) } == 0 {
+            return None;
+        }
+        let pixels = color_bitmap_pixels(&info);
+        unsafe {
+            if !info.hbmColor.is_null() {
+                DeleteObject(info.hbmColor);
+            }
+            if !info.hbmMask.is_null() {
+                DeleteObject(info.hbmMask);
+            }
+        }
+        pixels
+    }
+
+    fn color_bitmap_pixels(info: &ICONINFO) -> Option<Pixels> {
+        // No color plane means a 1bpp icon. Modern executables never ship
+        // one, and rendering it would look broken next to real icons.
+        if info.hbmColor.is_null() {
+            return None;
+        }
+        let mut bitmap: BITMAP = unsafe { std::mem::zeroed() };
+        let copied = unsafe {
+            GetObjectW(
+                info.hbmColor,
+                std::mem::size_of::<BITMAP>() as i32,
+                (&mut bitmap as *mut BITMAP).cast(),
+            )
+        };
+        if copied == 0 || bitmap.bmWidth <= 0 || bitmap.bmHeight <= 0 {
+            return None;
+        }
+        let (width, height) = (bitmap.bmWidth, bitmap.bmHeight);
+        let mut bgra = bitmap_bits_32bpp(info.hbmColor, width, height)?;
+        // A color plane drawn without an alpha channel reads back all-zero
+        // alpha; its shape lives in the AND mask, where white marks the
+        // transparent pixels. With no readable mask either, fully opaque
+        // beats fully invisible.
+        if bgra.chunks_exact(4).all(|pixel| pixel[3] == 0) {
+            let mask = bitmap_bits_32bpp(info.hbmMask, width, height);
+            for (index, pixel) in bgra.chunks_exact_mut(4).enumerate() {
+                pixel[3] = match &mask {
+                    Some(mask) if mask[index * 4] != 0 => 0x00,
+                    _ => 0xFF,
+                };
+            }
+        }
+        // GDI hands out BGRA; PNG wants RGBA.
+        for pixel in bgra.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        Some(Pixels {
+            width: width as u32,
+            height: height as u32,
+            rgba: bgra,
+        })
+    }
+
+    /// The bitmap's pixels as 32bpp BGRA via `GetDIBits`. The negative height
+    /// asks GDI for top-down rows, so no flip is needed afterwards.
+    fn bitmap_bits_32bpp(bitmap: HBITMAP, width: i32, height: i32) -> Option<Vec<u8>> {
+        let mut info: BITMAPINFO = unsafe { std::mem::zeroed() };
+        info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = -height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        unsafe {
+            let screen = GetDC(std::ptr::null_mut());
+            if screen.is_null() {
+                return None;
+            }
+            let copied = GetDIBits(
+                screen,
+                bitmap,
+                0,
+                height as u32,
+                pixels.as_mut_ptr().cast(),
+                &mut info,
+                DIB_RGB_COLORS,
+            );
+            ReleaseDC(std::ptr::null_mut(), screen);
+            (copied == height).then_some(pixels)
+        }
+    }
+
+    fn encode_png(pixels: &Pixels) -> Option<Vec<u8>> {
+        let mut png = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png, pixels.width, pixels.height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().ok()?;
+        writer.write_image_data(&pixels.rgba).ok()?;
+        writer.finish().ok()?;
+        Some(png)
+    }
+}
+
+#[cfg(not(windows))]
+mod platform {
+    //! Icon extraction is a Win32 shell affair. Other platforms answer `None`
+    //! for every name and the UI keeps its fallback glyph.
+
+    pub fn icon_data_uri(_name: &str) -> Option<String> {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_normalize_case_insensitively_and_grow_an_exe_suffix() {
+        assert_eq!(normalize("chrome.exe"), "chrome.exe");
+        assert_eq!(normalize("CHROME.EXE"), "chrome.exe");
+        assert_eq!(normalize("Code"), "code.exe");
+        assert_eq!(normalize(" Code.EXE "), "code.exe");
+    }
+
+    #[test]
+    fn an_empty_name_stays_empty_rather_than_becoming_a_bare_suffix() {
+        assert_eq!(normalize(""), "");
+        assert_eq!(normalize("   "), "");
+    }
+
+    /// The batch contract: every requested name gets an entry under exactly
+    /// the key that was sent, and unresolvable names yield `None` instead of
+    /// failing the call.
+    #[test]
+    fn every_requested_name_gets_an_answer_keyed_exactly_as_it_was_asked() {
+        let names = vec![
+            String::new(),
+            "Definitely-Not-A-Real-App-98765".to_string(),
+        ];
+
+        let icons = lookup(names.clone());
+
+        assert_eq!(icons.len(), 2);
+        assert_eq!(icons[""], None);
+        assert_eq!(icons["Definitely-Not-A-Real-App-98765"], None);
+    }
+}
