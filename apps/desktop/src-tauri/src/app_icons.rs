@@ -17,9 +17,6 @@ use crate::monitor::lock;
 /// change while Clock-In runs, so each name is paid for once.
 static ICON_CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
 
-/// PNG data URIs (`data:image/png;base64,...`) for each requested process
-/// name, keyed exactly as asked. A name whose icon cannot be resolved maps
-/// to `None`; the batch itself never fails.
 /// The most names one call resolves. The UI asks for at most a screenful of
 /// rows; anything past this answers None instead of walking the process
 /// table on an attacker-chosen scale.
@@ -29,6 +26,9 @@ const MAX_BATCH: usize = 64;
 /// being probed or cached, so they cannot grow the cache unboundedly.
 const MAX_NAME_LENGTH: usize = 64;
 
+/// PNG data URIs (`data:image/png;base64,...`) for each requested process
+/// name, keyed exactly as asked. A name whose icon cannot be resolved maps
+/// to `None`; the batch itself never fails.
 pub fn lookup(process_names: Vec<String>) -> HashMap<String, Option<String>> {
     let mut icons = HashMap::with_capacity(process_names.len().min(MAX_BATCH));
     for (index, name) in process_names.into_iter().enumerate() {
@@ -55,12 +55,10 @@ fn cached_icon(normalized: &str) -> Option<String> {
         .clone()
 }
 
-/// Windows executable names compare case-insensitively, and callers name the
-/// same app both ways ("Code" and "code.exe"). One canonical spelling keys
-/// the cache and every OS-side comparison.
-/// A bare executable name, or None for anything that is not one: path
-/// separators and dot-dot would otherwise flow into a registry subkey path,
-/// and oversized strings would bloat the lifetime cache.
+/// One canonical spelling — lowercase with an `.exe` suffix — keys the cache
+/// and every OS-side comparison, or None for anything that is not a bare
+/// executable name: path separators and dot-dot would otherwise flow into a
+/// registry subkey path, and oversized strings would bloat the lifetime cache.
 fn normalize(name: &str) -> Option<String> {
     let mut normalized = name.trim().to_ascii_lowercase();
     if normalized.is_empty()
@@ -414,10 +412,7 @@ mod tests {
     /// failing the call.
     #[test]
     fn every_requested_name_gets_an_answer_keyed_exactly_as_it_was_asked() {
-        let names = vec![
-            String::new(),
-            "Definitely-Not-A-Real-App-98765".to_string(),
-        ];
+        let names = vec![String::new(), "Definitely-Not-A-Real-App-98765".to_string()];
 
         let icons = lookup(names.clone());
 
