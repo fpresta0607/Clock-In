@@ -296,12 +296,28 @@ describe("recording", () => {
     await waitFor(() => expect(screen.queryByText(/^Recording (on|paused|off)$/)).not.toBeInTheDocument());
   });
 
+  it("reads the filing target as one line until a change is asked for", async () => {
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(recording) })} />);
+
+    // Collapsed by default: no dropdown competing with the timer.
+    expect(await screen.findByText("Project picked automatically")).toBeInTheDocument();
+    expect(screen.queryByLabelText("File my time under")).not.toBeInTheDocument();
+
+    await person.click(screen.getByTestId("filing-change"));
+    expect(screen.getByLabelText("File my time under")).toBeVisible();
+
+    await person.click(screen.getByTestId("filing-change"));
+    expect(screen.queryByLabelText("File my time under")).not.toBeInTheDocument();
+  });
+
   it("pins time to a project and hands the choice back to the host", async () => {
     const sessionSelectProject = vi.fn().mockResolvedValue({ ...recording, selectedProjectId: otherProject.id });
     const person = userEvent.setup();
     render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(recording), sessionSelectProject })} />);
 
-    const picker = await screen.findByLabelText("File my time under");
+    await person.click(await screen.findByTestId("filing-change"));
+    const picker = screen.getByLabelText("File my time under");
     // The default choice is "work it out for me", naming where that lands.
     expect(picker).toHaveValue("");
     expect(within(picker).getByRole("option", { name: /Work it out for me \(Field work\)/ })).toBeInTheDocument();
@@ -309,8 +325,9 @@ describe("recording", () => {
     await person.selectOptions(picker, otherProject.id);
     await waitFor(() => expect(sessionSelectProject).toHaveBeenCalledWith(otherProject.id));
 
-    await person.selectOptions(picker, "");
-    await waitFor(() => expect(sessionSelectProject).toHaveBeenLastCalledWith(null));
+    // Choosing collapses the picker and the line names the pinned project.
+    await waitFor(() => expect(screen.queryByLabelText("File my time under")).not.toBeInTheDocument());
+    expect(screen.getByText(otherProject.name)).toBeInTheDocument();
   });
 
   it("creates a project and pins recording to it", async () => {
@@ -318,12 +335,31 @@ describe("recording", () => {
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
+    await person.click(await screen.findByTestId("filing-change"));
     await person.click(await screen.findByRole("button", { name: "New project…" }));
     await person.type(screen.getByLabelText("New project name"), "Fresh");
     await person.click(screen.getByRole("button", { name: "Create project" }));
 
     await waitFor(() => expect(bridge.projectCreate).toHaveBeenCalledWith({ name: "Fresh" }));
     await waitFor(() => expect(bridge.sessionSelectProject).toHaveBeenCalledWith(newProject.id));
+  });
+
+  it("surfaces a waiting backlog and sends it on demand", async () => {
+    const backlogged = { ...recording, segmentBacklog: 2, sessionBacklog: 1 };
+    const syncNow = vi.fn().mockResolvedValue(undefined);
+    const monitorStatus = vi.fn().mockResolvedValue(backlogged);
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor({ monitorStatus, syncNow })} />);
+
+    const line = await screen.findByTestId("sync-line");
+    expect(line).toHaveTextContent("3 recorded items are still on this computer");
+
+    monitorStatus.mockResolvedValue(recording);
+    await person.click(within(line).getByRole("button", { name: "Send now" }));
+
+    await waitFor(() => expect(syncNow).toHaveBeenCalled());
+    // The drained backlog takes the line with it.
+    await waitFor(() => expect(screen.queryByTestId("sync-line")).not.toBeInTheDocument());
   });
 });
 

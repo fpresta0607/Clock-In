@@ -262,6 +262,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [mappingProjectId, setMappingProjectId] = useState("");
   const [mappingBusy, setMappingBusy] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   const [newProjectBusy, setNewProjectBusy] = useState(false);
   const [newProjectError, setNewProjectError] = useState<string | undefined>();
@@ -498,6 +499,24 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setAccountError(undefined);
     try {
       const status = await service.sessionSelectProject(projectId === "" ? null : projectId);
+      if (isCurrent(service, generation)) {
+        applyStatus(status);
+        // Choosing collapses the picker back to the one-line reading.
+        setProjectPickerOpen(false);
+      }
+    } catch (error: unknown) {
+      if (isCurrent(service, generation)) setAccountError(bridgeError(error).message);
+    }
+  };
+
+  /// Wakes the uploader; the regular status poll reports the drained backlog.
+  const syncNow = async (): Promise<void> => {
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    setAccountError(undefined);
+    try {
+      await service.syncNow();
+      const status = await service.monitorStatus();
       if (isCurrent(service, generation)) applyStatus(status);
     } catch (error: unknown) {
       if (isCurrent(service, generation)) setAccountError(bridgeError(error).message);
@@ -731,7 +750,13 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const current = monitorStatus?.currentSession ?? null;
   const currentProject = current ? ready.projects.find((item) => item.id === current.projectId) : undefined;
   const pinnedProject = monitorStatus?.selectedProjectId ?? ready.selectedProjectId ?? "";
+  const pinnedProjectName = pinnedProject === ""
+    ? undefined
+    : ready.projects.find((item) => item.id === pinnedProject)?.name ?? "Unknown project";
   const defaultProject = ready.projects.find((item) => item.id === ready.defaultProjectId);
+  const backlog = monitorStatus === undefined
+    ? 0
+    : monitorStatus.segmentBacklog + monitorStatus.agentBacklog + monitorStatus.sessionBacklog;
   const appRows = stats === undefined ? [] : buildAppRows(stats.apps);
   const sessionRows = current === null ? [] : buildSessionRows(current.apps);
 
@@ -752,6 +777,15 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             <button className="monitor-explain" type="button" onClick={() => setRecordingOpen(true)}>
               What&apos;s recorded?
             </button>
+          </p>
+        )}
+        {backlog > 0 && (
+          <p className="sync-banner" data-testid="sync-line">
+            <span>
+              {backlog === 1 ? "1 recorded item is" : `${backlog} recorded items are`} still on this
+              computer, waiting to reach the server.
+            </span>
+            <button type="button" onClick={() => void syncNow()}>Send now</button>
           </p>
         )}
         {accountError && !settingsOpen && <p className="form-error" role="alert">{accountError}</p>}
@@ -788,26 +822,45 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             </>
           )}
 
-          <label className="hero-project">
-            File my time under
-            <select value={pinnedProject} onChange={(event) => void selectProject(event.target.value)}>
-              <option value="">
-                {defaultProject ? `Work it out for me (${defaultProject.name})` : "Work it out for me"}
-              </option>
-              {ready.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-            </select>
-          </label>
-          {newProjectOpen ? (
-            <form className="new-project-form" onSubmit={createProject}>
-              <label>New project name<input value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} maxLength={80} placeholder="e.g. Client work" autoComplete="off" required /></label>
-              {newProjectError && <p className="form-error" role="alert">{newProjectError}</p>}
-              <div className="new-project-actions">
-                <button className="signal-button" type="submit" disabled={newProjectBusy || newProjectName.trim() === ""}>{newProjectBusy ? "Creating…" : "Create project"}</button>
-                <button className="outline-button" type="button" disabled={newProjectBusy} onClick={() => { setNewProjectOpen(false); setNewProjectName(""); setNewProjectError(undefined); }}>Cancel</button>
-              </div>
-            </form>
-          ) : (
-            <button className="new-project-trigger" type="button" onClick={() => setNewProjectOpen(true)}>New project…</button>
+          {/* One quiet line instead of a permanently open dropdown; the picker
+              unfolds only while a different answer is being chosen. */}
+          <p className="filing-line">
+            {pinnedProjectName === undefined
+              ? "Project picked automatically"
+              : <>Filing under <strong>{pinnedProjectName}</strong></>}
+            <button
+              className="filing-change"
+              type="button"
+              data-testid="filing-change"
+              onClick={() => setProjectPickerOpen((open) => !open)}
+            >
+              {projectPickerOpen ? "Done" : "Change"}
+            </button>
+          </p>
+          {projectPickerOpen && (
+            <>
+              <label className="hero-project">
+                File my time under
+                <select value={pinnedProject} onChange={(event) => void selectProject(event.target.value)}>
+                  <option value="">
+                    {defaultProject ? `Work it out for me (${defaultProject.name})` : "Work it out for me"}
+                  </option>
+                  {ready.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                </select>
+              </label>
+              {newProjectOpen ? (
+                <form className="new-project-form" onSubmit={createProject}>
+                  <label>New project name<input value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} maxLength={80} placeholder="e.g. Client work" autoComplete="off" required /></label>
+                  {newProjectError && <p className="form-error" role="alert">{newProjectError}</p>}
+                  <div className="new-project-actions">
+                    <button className="signal-button" type="submit" disabled={newProjectBusy || newProjectName.trim() === ""}>{newProjectBusy ? "Creating…" : "Create project"}</button>
+                    <button className="outline-button" type="button" disabled={newProjectBusy} onClick={() => { setNewProjectOpen(false); setNewProjectName(""); setNewProjectError(undefined); }}>Cancel</button>
+                  </div>
+                </form>
+              ) : (
+                <button className="new-project-trigger" type="button" onClick={() => setNewProjectOpen(true)}>New project…</button>
+              )}
+            </>
           )}
         </section>
 

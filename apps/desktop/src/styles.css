@@ -5,7 +5,7 @@
    here. The Tauri CSP allows 'self' only, so no remote font fetch — the brand
    stack degrades to system fonts. */
 
-body { min-width: 320px; min-height: 100vh; }
+body { min-width: 320px; }
 
 /* Thin themed scrollbars: transparent track, glass-border thumb. */
 * { scrollbar-width: thin; scrollbar-color: rgba(0, 229, 155, 0.22) transparent; }
@@ -27,8 +27,6 @@ button { border-radius: var(--radius); }
 /* Frameless-window titlebar: the bar itself is the drag region (the Tauri
    drag script skips clickable elements, so the buttons stay clickable). */
 .titlebar {
-  position: sticky;
-  top: 0;
   z-index: 5;
   display: flex;
   align-items: center;
@@ -97,7 +95,14 @@ select {
 }
 select:disabled { opacity: .55; }
 
-.hero-project { display: grid; gap: 5px; margin-top: 18px; }
+/* The filing target reads as one quiet sentence; the picker below it only
+   exists while a different answer is being chosen. */
+.filing-line { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: center; gap: 6px; margin: 16px 0 0; color: var(--text-secondary); font-size: .81rem; }
+.filing-line strong { color: #ffffff; font-weight: 650; }
+.filing-change { border: 0; padding: 0; background: transparent; color: var(--text-secondary); font-size: .78rem; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.filing-change:hover, .filing-change:focus-visible { color: #ffffff; }
+
+.hero-project { display: grid; gap: 5px; margin-top: 12px; }
 
 .new-project-trigger { margin-top: 10px; border: 0; padding: 0; background: transparent; color: var(--text-secondary); font-size: .78rem; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; justify-self: start; }
 .new-project-trigger:hover, .new-project-trigger:focus-visible { color: #ffffff; }
@@ -127,6 +132,8 @@ select:disabled { opacity: .55; }
 .action-stack { display: grid; gap: 10px; margin-top: 21px; }
 
 .sync-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 14px 0 2px; border: 1px solid rgba(0, 140, 255, .35); border-radius: 6px; padding: 8px 10px; background: rgba(0, 140, 255, .08); color: #9ecdff; font-size: .81rem; text-align: left; }
+/* The screen grid already spaces its children. */
+.screen > .sync-banner { margin: 0; }
 .update-banner { margin: 0; border: 1px solid rgba(0, 229, 155, .35); border-radius: 6px; padding: 8px 10px; background: rgba(0, 229, 155, .08); color: #8ff0cd; font-size: .81rem; text-align: left; }
 .sync-banner button { min-height: 31px; border: 0; background: transparent; color: var(--accent-blue); padding: 2px; text-decoration: underline; text-underline-offset: 3px; text-transform: none; letter-spacing: normal; }
 
@@ -209,7 +216,9 @@ select:disabled { opacity: .55; }
 /* The live session surface: the main page's whole point below the record
    card. One row per app, a bar showing its share, and the duration. */
 .session-stats-total { flex: none; color: var(--accent-green); font-size: .95rem; font-variant-numeric: tabular-nums; }
-.session-app-list { display: grid; gap: 2px; max-height: 17rem; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+/* Rows are already capped with an "Everything else" fold, so the screen's
+   own scroll is the only scrollbar. */
+.session-app-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
 .session-app-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -263,9 +272,9 @@ select:disabled { opacity: .55; }
 }
 .team-join-label { display: grid; gap: 4px; flex: 1 1 12rem; min-width: 0; font-size: .78rem; color: var(--text-secondary); }
 
-/* Long activity lists scroll inside the card instead of pushing the
-   leaderboard and everything below it off the window. */
-.app-list { display: grid; gap: 2px; max-height: 15rem; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+/* Lives inside the all-stats overlay, which scrolls as a whole; rows fold
+   into "Everything else" past the cap, so no inner scrollbar. */
+.app-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
 .app-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 5px 2px; border-bottom: 1px solid rgba(163, 179, 194, 0.08); font-size: .84rem; }
 .app-row:last-child { border-bottom: 0; }
 .app-name { display: flex; min-width: 0; flex: 1 1 auto; align-items: center; gap: 8px; }
@@ -374,9 +383,10 @@ select:disabled { opacity: .55; }
 .recording-panel .help-steps strong { color: #ffffff; font-weight: 650; }
 .recording-foot { margin: 19px 0 0; border-top: 1px solid rgba(163, 179, 194, .12); padding-top: 10px; color: var(--text-secondary); font-size: .74rem; line-height: 1.5; }
 
-@media (max-width: 390px) {
-  .screen { padding: 12px 15px 22px; }
-  .running-panel .elapsed { font-size: 2.95rem; }
+/* Maximized or widescreen: the column widens and breathes instead of
+   floating as a narrow strip in the shader backdrop. */
+@media (min-width: 720px) {
+  .screen { max-width: 560px; gap: 16px; padding: 22px 26px 30px; }
 }
 
 @media (prefers-reduced-motion: no-preference) {
