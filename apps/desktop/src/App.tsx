@@ -36,6 +36,12 @@ const MONITOR_POLL_MS = 15_000;
 /// asked for far less often than the recording status.
 const QUOTA_POLL_MS = 120_000;
 
+/// The host answers the first call from an empty cache and reads the
+/// providers behind it, which takes about ten seconds. Waiting out the slow
+/// poll would leave the dial saying "checking" for two minutes on every
+/// launch, so a pending answer is followed up promptly.
+const QUOTA_PENDING_POLL_MS = 3_000;
+
 const FRIENDLY_APP_NAMES: Record<string, string> = {
   chrome: "Google Chrome",
   msedge: "Microsoft Edge",
@@ -434,17 +440,27 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     let active = true;
     const service = bridge;
     const generation = bridgeGeneration.current;
+    let timer: number | undefined;
     const read = (): void => {
       void service.quotaStatus().then(
         (snapshot) => {
-          if (active && isCurrent(service, generation)) setQuota(snapshot);
+          if (!active || !isCurrent(service, generation)) return;
+          setQuota(snapshot);
+          timer = window.setTimeout(
+            read,
+            snapshot.status === "pending" ? QUOTA_PENDING_POLL_MS : QUOTA_POLL_MS,
+          );
         },
-        () => undefined,
+        () => {
+          if (active) timer = window.setTimeout(read, QUOTA_POLL_MS);
+        },
       );
     };
     read();
-    const timer = window.setInterval(read, QUOTA_POLL_MS);
-    return () => { active = false; window.clearInterval(timer); };
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [bridge, signedIn?.user.id]);
 
   // Keeps the Today panel close to live: a slow tick refreshes the totals.

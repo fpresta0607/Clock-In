@@ -81,12 +81,19 @@ const ClockInMark = ({ children }: { children: ReactElement | ReactElement[] }) 
   </svg>
 );
 
-/// A command prompt: the CLI that started all of this.
+/// Claude's own burst: rays radiating from a centre, the shape the tool is
+/// known by. A command prompt sat here before, which read as "a terminal"
+/// rather than as this particular tool.
 const ClaudeCodeMark = () => (
   <ClockInMark>
-    <rect x="3" y="4" width="18" height="16" rx="3" />
-    <path d="M7.5 10 10 12.5 7.5 15" />
-    <path d="M13 15h4" />
+    <path d="M12 3.2v6" />
+    <path d="M12 14.8v6" />
+    <path d="M3.2 12h6" />
+    <path d="M14.8 12h6" />
+    <path d="m5.8 5.8 4.2 4.2" />
+    <path d="m14 14 4.2 4.2" />
+    <path d="m18.2 5.8-4.2 4.2" />
+    <path d="m10 14-4.2 4.2" />
   </ClockInMark>
 );
 
