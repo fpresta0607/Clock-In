@@ -110,12 +110,61 @@ jobs:
           cp "apps/desktop/src-tauri/target/debug/clock-in-hook$suffix" \
             "apps/desktop/src-tauri/binaries/clock-in-hook-$triple$suffix"
 
+      # The updater only offers a build whose semver is strictly higher than
+      # the installed one, so every run needs its own version. `run_number`
+      # only ever increases, and numeric prerelease identifiers compare
+      # numerically, so `-test.9` correctly precedes `-test.10`. A test build
+      # also loses to the eventual signed `0.1.4`, which is what we want.
+      - name: Stamp this run's version
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("node:fs");
+            const path = "apps/desktop/src-tauri/tauri.conf.json";
+            const config = JSON.parse(fs.readFileSync(path, "utf8"));
+            config.version = `${config.version}-test.${process.env.GITHUB_RUN_NUMBER}`;
+            fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+            console.log(`stamped ${config.version}`);
+          '
+
       # --debug is what keeps this build outside the production signing gate.
-      # No TAURI_CONFIG override, so `bundle.createUpdaterArtifacts` stays off
-      # and the run produces no updater manifest to mistake for a release.
+      # Still no TAURI_CONFIG override, so `bundle.createUpdaterArtifacts`
+      # stays off and `build.rs` keeps refusing updater artifacts from an
+      # unsigned build. The updater signature is produced separately below,
+      # from the finished installer, so this gate is never touched.
       - name: Build unsigned installers
         working-directory: apps/desktop
         run: pnpm exec tauri build --debug ${{ matrix.bundle_args }}
+
+      # The updater verifies a detached minisign signature over the installer
+      # bytes. `tauri signer sign` produces exactly what
+      # `bundle.createUpdaterArtifacts` would have, without asking the bundler
+      # for it, so the production signing gate stays shut. Windows only: the
+      # macOS updater wants a `.app.tar.gz`, not the `.dmg` this job builds,
+      # so offering a macOS update here would hand the updater something it
+      # cannot install.
+      - name: Sign the Windows installer for the updater
+        if: matrix.target == 'windows'
+        working-directory: apps/desktop
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY is not configured; the build would ship an unupdatable installer." >&2
+            exit 1
+          fi
+          installer="$(find src-tauri/target/debug/bundle -type f -name '*-setup.exe' -print -quit)"
+          if [ -z "$installer" ]; then
+            echo "No NSIS installer to sign" >&2
+            find src-tauri/target/debug/bundle -maxdepth 3 >&2 || true
+            exit 1
+          fi
+          pnpm exec tauri signer sign --password "" "$installer"
+          test -s "$installer.sig"
 
       - name: Collect the installers
         shell: bash
@@ -129,6 +178,11 @@ jobs:
             cp "$installer" "$out/UNSIGNED-TEST-$(basename "$installer")"
             found=1
           done < <(find "$bundle" -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' \) -print0)
+          # The updater signature travels beside its installer, under the same
+          # renamed prefix, so the publish job can pair them without guessing.
+          while IFS= read -r -d '' signature; do
+            cp "$signature" "$out/UNSIGNED-TEST-$(basename "$signature")"
+          done < <(find "$bundle" -type f -name '*.sig' -print0)
           if [ "$found" -eq 0 ]; then
             echo "No installer was produced under $bundle" >&2
             find "$bundle" -maxdepth 2 >&2 || true
@@ -144,10 +198,13 @@ jobs:
 
           What that means:
             * Windows SmartScreen will warn about an unknown publisher.
-            * There is no auto-updater. This build cannot update itself and
-              cannot be updated by a later signed release; uninstall it first.
+            * On Windows this build updates itself: it checks for a newer
+              build at launch and every six hours, installs it quietly, and
+              restarts. A copy installed before the updater shipped cannot,
+              because its binary has no updater in it.
+            * macOS still updates by hand.
             * It is a debug build, so it is larger and slower than a release
-              build, and on Windows it opens a console window beside the app.
+              build.
 
           Until code signing exists, this is what clock.siqstack.com hands out.
           Signed installers will come from the tagged release workflow only.
@@ -205,15 +262,37 @@ jobs:
           }
           take '*.exe' Clock-In-UNSIGNED-TEST-windows-x64-setup.exe
           take '*.dmg' Clock-In-UNSIGNED-TEST-macos-aarch64.dmg
+          take '*.exe.sig' Clock-In-UNSIGNED-TEST-windows-x64-setup.exe.sig
           # Both matrix legs write an identical one, so either will do.
           take 'UNSIGNED-TEST-BUILD.txt' UNSIGNED-TEST-BUILD.txt
           ls -l release-assets
+
+      # The manifest the installed app polls. It lives at the same fixed
+      # `unsigned-latest` names as the installers, so an installed build's
+      # endpoint never has to change and no API lookup is involved.
+      #
+      # Windows only, deliberately: the macOS updater installs from a
+      # `.app.tar.gz`, and this workflow ships a `.dmg`. Listing `darwin` here
+      # would advertise an update the updater cannot apply.
+      - name: Write the update manifest
+        shell: bash
+        env:
+          BASE_URL: "${{ github.server_url }}/${{ github.repository }}/releases/download/unsigned-latest"
+          INSTALLER_NAME: Clock-In-UNSIGNED-TEST-windows-x64-setup.exe
+          SIGNATURE_PATH: release-assets/Clock-In-UNSIGNED-TEST-windows-x64-setup.exe.sig
+          MANIFEST_PATH: release-assets/latest.json
+        run: |
+          set -euo pipefail
+          # This checkout carries the unstamped version, so the same `-test.N`
+          # suffix the build stamped is reapplied from the same run number.
+          export VERSION="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")-test.${{ github.run_number }}"
+          node scripts/updater-manifest.mjs
 
       - name: Write the release notes
         shell: bash
         run: |
           set -euo pipefail
-          version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")-test.${{ github.run_number }}"
           echo "VERSION=$version" >> "$GITHUB_ENV"
           cat > release-notes.md <<EOF
           Unsigned test build of Clock-In **$version**, from commit
@@ -225,8 +304,17 @@ jobs:
           \`xattr -dr com.apple.quarantine "/Applications/Clock-In.app"\`.
 
           They are debug builds, so they are larger and slower than a release
-          build and open a console window beside the app on Windows. There is no
-          auto-updater: uninstall before installing a signed release later.
+          build.
+
+          **Windows updates itself from here.** Once a build carrying the
+          updater is installed, Clock-In checks this manifest at launch and
+          every six hours, installs a newer build quietly, and restarts into
+          it. Nothing to click, and a machine that is offline simply checks
+          again later. A copy installed *before* the updater shipped cannot
+          update itself, because its binary has no updater in it: install this
+          build once by hand and every build after it is automatic. macOS still
+          updates by hand, because the updater installs from an app archive
+          rather than the `.dmg` this workflow builds.
 
           This tag and these file names never change. Every run of the *Unsigned
           test installers* workflow replaces the assets in place, so the links

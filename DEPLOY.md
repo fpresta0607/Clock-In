@@ -312,9 +312,11 @@ This is not a way around the signing gate. `release.yml` still refuses to
 publish anything unsigned, and this workflow does not touch it or the signing
 configuration. It builds with `tauri build --debug`, which
 `apps/desktop/src-tauri/build.rs` already classifies as a development build:
-signing credentials are not required, and `bundle.createUpdaterArtifacts` stays
-off, so no updater manifest is produced. Adding Azure Trusted Signing later
-changes `release.yml` only.
+signing credentials are not required. `bundle.createUpdaterArtifacts` stays
+off (`build.rs` refuses it for unsigned builds), but the workflow signs the
+finished Windows installer with `tauri signer sign` and publishes a
+`latest.json` manifest, so the updater works without touching the production
+signing gate. Adding Azure Trusted Signing later changes `release.yml` only.
 
 **To trigger it:** Actions → *Unsigned test installers* → **Run workflow**.
 Because GitHub only offers *Run workflow* for workflows already on the default
@@ -371,10 +373,17 @@ the zip → Properties → **Unblock**), otherwise the mark-of-the-web propagate
 the installer.
 
 Because these are debug builds, they are noticeably larger and slower than a
-release build, and on Windows a console window opens beside the app. That is
-expected and disappears in a signed release build. There is no auto-updater in
-these builds, and a signed release cannot upgrade one in place: uninstall the
-test build before installing a real release.
+release build. The console window that once opened beside the app on Windows
+has been fixed.
+
+**Windows auto-update.** Once a build carrying the updater is installed, it
+checks the `unsigned-latest` manifest at launch and every six hours, installs
+a newer build quietly, and restarts. A build installed *before* the updater
+shipped cannot update itself (its binary has no updater in it), so install
+this build once by hand and every build after it is automatic. A signed
+release cannot upgrade an unsigned install in place (different signing keys),
+so uninstall the test build before installing a real release. macOS updates
+are still by hand.
 
 macOS installers are built by the same workflow. They are unsigned and
 un-notarized, so Gatekeeper blocks them harder than SmartScreen does: after

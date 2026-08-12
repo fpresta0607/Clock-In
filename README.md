@@ -442,8 +442,8 @@ yet:
   DEPLOY.md). Until they arrive, the **Unsigned test installers** workflow is the
   distributable: it republishes the `unsigned-latest` prerelease under fixed asset names,
   which is what the dashboard's **Download for Windows** button links. Windows SmartScreen
-  warns, macOS needs `xattr`, and these debug builds cannot auto-update (all covered in
-  DEPLOY.md).
+  warns, macOS needs `xattr`. Windows debug builds carry the auto-updater
+  (see DEPLOY.md); macOS updates are still by hand.
 - Evidence can be forged by a determined user. Automatic recording raises the cost and the
   visibility of padding; it does not attempt cryptographic proof.
 

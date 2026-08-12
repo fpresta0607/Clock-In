@@ -15,6 +15,7 @@ pub mod spool;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{
@@ -552,10 +553,74 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// How often the app looks for a new build after the launch check. Six hours
+/// keeps a machine that is never restarted current without making the release
+/// host answer on a loop.
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 3_600);
+
+/// Looks for a newer build and installs it, returning whether one was staged.
+///
+/// Silence is the whole contract here. A laptop on a plane, a blocked release
+/// host, a half-written manifest: none of that is the person's problem, and
+/// none of it may interrupt recording. Every failure path logs and returns,
+/// because the next check is at most `UPDATE_CHECK_INTERVAL` away.
+///
+/// On Windows the NSIS installer replaces the app in place and Tauri restarts
+/// it, so the download happens quietly in the background and only the final
+/// swap is visible.
+async fn install_available_update(handle: &tauri::AppHandle) -> bool {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let updater = match handle.updater() {
+        Ok(updater) => updater,
+        Err(error) => {
+            eprintln!("clock-in: the updater is unavailable: {error}");
+            return false;
+        }
+    };
+    let update = match updater.check().await {
+        Ok(Some(update)) => update,
+        // No update, or the host could not be reached. Both are ordinary.
+        Ok(None) => return false,
+        Err(error) => {
+            eprintln!("clock-in: could not check for an update: {error}");
+            return false;
+        }
+    };
+
+    match update.download_and_install(|_, _| {}, || {}).await {
+        Ok(()) => {
+            eprintln!("clock-in: staged update {}", update.version);
+            true
+        }
+        Err(error) => {
+            eprintln!("clock-in: could not install the update: {error}");
+            false
+        }
+    }
+}
+
+/// Checks at launch and then on a timer, for the lifetime of the app.
+fn spawn_update_checks(handle: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            // A staged update ends this loop: the app is about to be replaced,
+            // and checking again from a process that is on its way out would
+            // only race the installer.
+            if install_available_update(&handle).await {
+                return;
+            }
+            tokio::time::sleep(UPDATE_CHECK_INTERVAL).await;
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            spawn_update_checks(app.handle().clone());
             let recovery_path = app
                 .path()
                 .app_data_dir()
