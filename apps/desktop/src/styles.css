@@ -224,11 +224,8 @@ select:disabled { opacity: .55; }
    app. Each row is a single line - icon, name, meter, duration. */
 .meter-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
 .meter-apps { margin-top: 10px; border-top: 1px solid rgba(163, 179, 194, 0.12); padding-top: 8px; }
-/* Agent plans: icon, name, and the dial that says how much is left. */
-.meter-agents { margin-top: 10px; border-top: 1px solid rgba(163, 179, 194, 0.12); padding-top: 8px; }
-.agent-quota-row { display: flex; align-items: center; gap: 10px; padding: 5px 2px; font-size: .84rem; }
-.agent-quota-row .meter-name { flex: 1 1 auto; }
-.agent-quota-row .quota { flex: none; justify-items: end; }
+/* An agent's row trades the share bar for its plan dial, in the same cell. */
+.meter-row .quota { min-width: 0; justify-items: start; }
 .meter-row {
   display: grid;
   grid-template-columns: 18px minmax(0, 10rem) minmax(24px, 1fr) auto;

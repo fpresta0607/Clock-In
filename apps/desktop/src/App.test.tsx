@@ -682,11 +682,11 @@ describe("the today panel", () => {
       }),
     })} />);
 
-    // The row comes from the connected hook, not from a window in front: an
-    // agent running inside an editor's terminal never owns the foreground.
-    const agents = await screen.findByTestId("agent-quota-list");
-    const row = within(agents).getAllByRole("listitem")[0];
-    expect(row).toHaveTextContent("Claude Code");
+    // One row: the agent that is working, its own running time, and its plan
+    // reading - not a separate list of every tool that could be installed.
+    const rows = within(await screen.findByTestId("session-app-list")).getAllByRole("listitem");
+    const row = rows.find((candidate) => candidate.textContent?.includes("Claude Code"));
+    expect(row).toBeDefined();
     // The dial carries the whole reading as its label, so the arc is never
     // the only thing saying it.
     expect(await within(row!).findByRole("button", { name: /73% remaining on the max plan/i })).toBeInTheDocument();

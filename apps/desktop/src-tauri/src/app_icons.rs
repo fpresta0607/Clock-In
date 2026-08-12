@@ -114,7 +114,9 @@ mod platform {
         if name.is_empty() {
             return None;
         }
-        let path = running_process_path(name).or_else(|| app_paths_entry(name))?;
+        let path = running_process_path(name)
+            .or_else(|| app_paths_entry(name))
+            .or_else(|| windows_shipped_path(name))?;
         let pixels = extract_pixels(&path)?;
         let png = encode_png(&pixels)?;
         Some(format!("data:image/png;base64,{}", STANDARD.encode(png)))
@@ -174,6 +176,23 @@ mod platform {
             }
             Some(String::from_utf16_lossy(&buffer[..length as usize]))
         }
+    }
+
+    /// Where Windows keeps the tools it ships. Task Manager and friends run
+    /// elevated, so the process handle is refused, and they carry no App Paths
+    /// entry either - without this they would draw a blank tile despite the
+    /// icon sitting in plain sight on disk. `name` is already known to be a
+    /// bare file name, so neither join can escape these directories.
+    fn windows_shipped_path(name: &str) -> Option<String> {
+        let root = std::env::var("SystemRoot").ok()?;
+        let root = std::path::Path::new(&root);
+        for directory in ["System32", "SysWOW64", ""] {
+            let candidate = root.join(directory).join(name);
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+        None
     }
 
     /// The install path advertised under

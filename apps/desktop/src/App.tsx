@@ -858,12 +858,23 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       ? merged
       : [...merged, { processName: openSpan.processName, durationSeconds: openSpanSeconds }];
   })();
+  // An agent working inside an editor's terminal never owns the foreground,
+  // so it earns no row of its own from window activity. When one is working
+  // its own time is what it has been running for, and that row carries the
+  // plan reading - so quota only ever appears for an agent actually in use.
   const todayRows = buildMeterRows(liveApps);
-  // One row per agent this machine actually has connected, so the plan
-  // reading is there whether or not the CLI ever owned a window.
-  const agentRows = (monitorStatus?.hooks ?? [])
-    .filter((hook) => hook.detected)
-    .map((hook) => ({ source: hook.source, quota: quotaFor(quota, hook.source) }));
+  const activeAgent = monitorStatus?.agentActive ?? null;
+  const agentRow = activeAgent === null || todayRows.some((row) => row.source === activeAgent.source)
+    ? undefined
+    : {
+        key: `agent-${activeAgent.source}`,
+        label: sourceLabel(activeAgent.source),
+        source: activeAgent.source,
+        processName: undefined,
+        durationSeconds: elapsedSeconds(activeAgent.since, now),
+        share: 0,
+      };
+  const meterRows = agentRow === undefined ? todayRows : [agentRow, ...todayRows];
   // Finished time already on the server plus the stretch still being written.
   // The open stretch also lands on its project's row below, so the breakdown
   // ticks with the clock instead of trailing it by a whole session.
@@ -996,7 +1007,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           <div className="panel-head">
             <h2 id="today-panel-title">Today</h2>
           </div>
-          {todayRows.length === 0 && projectRows.length === 0 ? (
+          {meterRows.length === 0 && projectRows.length === 0 ? (
             <p className="subtle" data-testid="today-panel-empty">{TODAY_EMPTY[state]}</p>
           ) : (
             <>
@@ -1020,32 +1031,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                   ))}
                 </ul>
               )}
-              {/* Agents are found by their hooks, not by a window in front:
-                  a CLI running inside an editor's terminal never owns the
-                  foreground, so its plan would otherwise never be shown. */}
-              {agentRows.length > 0 && (
-                <ul className="meter-list meter-agents" data-testid="agent-quota-list">
-                  {agentRows.map((row) => (
-                    <li key={row.source} className="agent-quota-row">
-                      <AgentRuntimeIcon source={row.source} />
-                      <span className="meter-name">
-                        {sourceLabel(row.source)}
-                        {monitorStatus?.agentActive?.source === row.source && (
-                          <span className="app-active"> · working now</span>
-                        )}
-                      </span>
-                      <QuotaDial
-                        agentLabel={sourceLabel(row.source)}
-                        quota={row.quota}
-                        pending={quota === undefined || quota.status === "pending"}
-                      />
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {todayRows.length > 0 && (
+              {meterRows.length > 0 && (
                 <ul className="meter-list meter-apps" data-testid="session-app-list">
-                  {todayRows.map((row) => (
+                  {meterRows.map((row) => (
                     <li key={row.key} className="meter-row">
                       {row.source !== undefined
                         ? <AgentRuntimeIcon source={row.source} />
