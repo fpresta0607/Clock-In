@@ -20,7 +20,7 @@ const ids = {
   archivedProject: "b1c7e513-b094-4d4c-ae55-21790ae019a4",
   mapping: "d1c7e513-b094-4d4c-ae55-21790ae019a4",
 };
-const subject: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.user };
+const subject: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.user, role: "member" };
 const now = new Date("2026-08-06T14:00:00.000Z");
 
 class MemoryProjects implements ProjectRepository {
@@ -157,7 +157,7 @@ describe("path-mapping service", () => {
   });
 
   it("lists only the caller's mappings", async () => {
-    const other: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.otherUser };
+    const other: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.otherUser, role: "member" };
     const { service } = createService([
       existingMapping(),
       existingMapping({ id: "e1c7e513-b094-4d4c-ae55-21790ae019a4", userId: ids.otherUser, pathPrefix: "C:/dev/theirs" }),
@@ -197,7 +197,7 @@ describe("path-mapping service", () => {
   });
 
   it("deletes only the caller's own mappings", async () => {
-    const other: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.otherUser };
+    const other: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.otherUser, role: "member" };
     const { pathMappings, service } = createService([existingMapping()]);
 
     await expect(service.remove(other, ids.mapping)).rejects.toMatchObject({ code: "not_found" });

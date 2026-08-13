@@ -21,7 +21,7 @@ const ids = {
   otherProject: "b1c7e513-b094-4d4c-ae55-21790ae019a4",
   timer: "d1c7e513-b094-4d4c-ae55-21790ae019a4",
 };
-const subject: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.user };
+const subject: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.user, role: "member" };
 const now = new Date("2026-08-06T14:00:00.000Z");
 
 class MemoryAgentSessions implements AgentSessionRepository {
@@ -40,7 +40,7 @@ class MemoryAgentSessions implements AgentSessionRepository {
 
   /** Mirrors the upsert: insert running; on replay refresh lastEventAt only, never reopen. */
   public async upsertStarted(input: UpsertStartedAgentSession): Promise<AgentSessionRecord> {
-    const existing = this.find({ organizationId: input.organizationId, userId: input.userId }, input.source, input.externalSessionId);
+    const existing = this.find({ organizationId: input.organizationId, userId: input.userId, role: "member" }, input.source, input.externalSessionId);
     if (existing !== undefined) {
       if (input.occurredAt > existing.lastEventAt) existing.lastEventAt = input.occurredAt;
       return existing;
@@ -74,7 +74,7 @@ class MemoryAgentSessions implements AgentSessionRepository {
 
   /** Mirrors the tolerated end-before-start insert (ON CONFLICT DO NOTHING). */
   public async insertEnded(input: InsertEndedAgentSession): Promise<void> {
-    const existing = this.find({ organizationId: input.organizationId, userId: input.userId }, input.source, input.externalSessionId);
+    const existing = this.find({ organizationId: input.organizationId, userId: input.userId, role: "member" }, input.source, input.externalSessionId);
     if (existing !== undefined) return;
     this.records.push({
       id: crypto.randomUUID(),
@@ -307,7 +307,7 @@ describe("agent-session service", () => {
 
   it("scopes sessions to the subject's organization and user", async () => {
     const { agentSessions, service } = createService();
-    const other: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.otherUser };
+    const other: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.otherUser, role: "member" };
     await service.ingest(subject, [event()]);
     await service.ingest(other, [event()]);
 

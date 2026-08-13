@@ -21,7 +21,7 @@ const ids = {
   client: "c1c7e513-b094-4d4c-ae55-21790ae019a4",
   session: "d1c7e513-b094-4d4c-ae55-21790ae019a4",
 };
-const subject: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.user };
+const subject: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.user, role: "member" };
 const now = new Date("2026-08-06T14:00:00.000Z");
 
 function running(overrides: Partial<SessionRecord> = {}): SessionRecord {

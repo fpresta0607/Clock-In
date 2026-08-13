@@ -33,8 +33,8 @@ const config = parseEnv({
 });
 const clockNow = new Date("2026-08-06T14:00:00.000Z");
 const users = {
-  [ids.user]: { id: ids.user, email: "alex@example.com", name: "Alex", organizationId: ids.organization },
-  [ids.teammate]: { id: ids.teammate, email: "blair@example.com", name: "Blair", organizationId: ids.organization },
+  [ids.user]: { id: ids.user, email: "alex@example.com", name: "Alex", organizationId: ids.organization, role: "member" as const },
+  [ids.teammate]: { id: ids.teammate, email: "blair@example.com", name: "Blair", organizationId: ids.organization, role: "member" as const },
 };
 
 let keys: Awaited<ReturnType<typeof createTestAuth>>["keys"];
