@@ -13,8 +13,9 @@ function compareOrdinal(left: string, right: string): number {
 
 /**
  * The member's projects. Archived ones are excluded by default - pickers must
- * not offer them - but the management surface asks for them with
- * `includeArchived`, which is the only way an archive can be undone.
+ * not offer them. `includeArchived` still returns them, which is the only way
+ * an archive can be undone through the API, but the dashboard's management
+ * surface no longer asks for it: it offers only create and guarded delete now.
  */
 export async function listProjects(
   repository: ProjectRepository,

@@ -58,7 +58,7 @@ a.primary { display: inline-block; text-decoration: none; }
 .board-choice {
   display: grid;
   width: 100%;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
   grid-template-columns: 22px minmax(0, 1fr) auto;
   border: 0;
@@ -79,6 +79,19 @@ a.primary { display: inline-block; text-decoration: none; }
 .you-tag { color: var(--text-secondary); font-size: .74rem; text-transform: uppercase; letter-spacing: .08em; }
 .board-hours { color: var(--mint); font-variant-numeric: tabular-nums; }
 
+/* Active time is the headline; the agent runtime rides under it, muted. */
+.board-times { display: grid; justify-items: end; gap: 1px; }
+.board-agent { color: var(--text-secondary); font-size: .74rem; font-variant-numeric: tabular-nums; }
+
+/* Scope + range: one quiet row of filters between the masthead and the cards. */
+.control-bar { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+.scope-picker select { min-width: 170px; padding: 7px 10px; font-size: .84rem; }
+
+/* The board head's total and sort, matching the range toggle's quiet weight. */
+.board-tools { display: flex; align-items: baseline; gap: 14px; }
+.board-sort select { border: 0; padding: 2px 0; background: transparent; color: var(--text-secondary); font-size: .8rem; cursor: pointer; }
+.board-sort select:hover { color: #ffffff; }
+
 /* One member's breakdown, under the board that chose them. */
 .member-stats { margin-top: 16px; border-top: 1px solid rgba(163, 179, 194, .12); padding-top: 14px; }
 .member-stats h3 { margin: 0 0 10px; font-size: .93rem; }
@@ -88,6 +101,12 @@ a.primary { display: inline-block; text-decoration: none; }
 .member-self:hover, .member-self:focus-visible { color: #ffffff; }
 .member-total { margin: 0 0 10px; font-size: .95rem; }
 .member-total strong { font-variant-numeric: tabular-nums; }
+.member-agent-total { color: var(--text-secondary); font-size: .84rem; font-variant-numeric: tabular-nums; }
+
+/* The two measurement cuts, one quiet line each: concurrency sums to active
+   time, the by-agent split sums to agent time. */
+.member-line { margin: 0 0 8px; color: var(--text-secondary); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.member-line.is-agents { color: var(--mint); }
 .stat-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
 .stat-apps { margin-top: 10px; border-top: 1px solid rgba(163, 179, 194, .08); padding-top: 8px; }
 .stat-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 5px 2px; border-bottom: 1px solid rgba(163, 179, 194, .08); font-size: .89rem; }
@@ -160,6 +179,27 @@ a.download-button:hover { background: var(--accent-green-deep); border-color: va
 .download-note { margin: 0; max-width: 32ch; color: var(--text-secondary); font-size: .72rem; line-height: 1.4; }
 a.download-secondary { color: var(--text-secondary); font-size: .72rem; text-decoration: underline; text-underline-offset: 3px; }
 a.download-secondary:hover { color: #ffffff; }
+
+/* Session history folds shut; open, the table inherits brand.css styling. */
+.sessions-card summary { cursor: pointer; color: var(--text-secondary); font-size: .87rem; letter-spacing: .04em; }
+.sessions-card summary:hover { color: #ffffff; }
+.sessions-card[open] summary { margin-bottom: 10px; color: #ffffff; }
+.sessions-card table { margin-bottom: 10px; }
+.numeric { text-align: right; }
+.hours { color: var(--mint); font-variant-numeric: tabular-nums; }
+
+/* The Projects modal: a plain list, delete on the row, create underneath. */
+.manage-list { display: grid; gap: 2px; margin: 0 0 14px; padding: 0; list-style: none; }
+.manage-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 38px; padding: 4px 2px; border-bottom: 1px solid rgba(163, 179, 194, .08); font-size: .93rem; }
+.manage-row:last-child { border-bottom: 0; }
+.manage-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.manage-create { display: flex; gap: 8px; margin: 0; }
+.manage-create label { flex: 1; }
+.manage-delete { display: grid; gap: 14px; }
+.manage-delete p { margin: 0; font-size: .93rem; line-height: 1.55; }
+.manage-actions { display: flex; gap: 8px; }
+.is-danger { border-color: rgba(221, 93, 79, .5); color: #ffb4aa; }
+.is-danger:hover:not(:disabled) { border-color: var(--red); }
 
 /* Round "?" trigger in the masthead and the dialog it opens */
 .help-button { width: 32px; height: 32px; padding: 0; font-weight: 700; }

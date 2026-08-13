@@ -47,14 +47,12 @@ const rangeDays: Record<Range, number | null> = { today: 1, "7d": 7, "30d": 30, 
 /**
  * Instant bounds on the viewer's local calendar, ending at the next local
  * midnight. Calendar-date params would be read as UTC days, which roll over
- * mid-afternoon west of Greenwich. "All time" sends no bounds. `periodsBack`
- * asks for the previous equivalent window, for the tiles' deltas.
+ * mid-afternoon west of Greenwich. "All time" sends no bounds.
  */
-export function rangeQuery(range: Range, now = new Date(), periodsBack = 0): string {
+export function rangeQuery(range: Range, now = new Date()): string {
   const days = rangeDays[range];
   if (days === null) return "";
   const toExclusive = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-  toExclusive.setDate(toExclusive.getDate() - days * periodsBack);
   const from = new Date(toExclusive);
   from.setDate(from.getDate() - days);
   return `?fromAt=${encodeURIComponent(from.toISOString())}&toExclusiveAt=${encodeURIComponent(toExclusive.toISOString())}`;
@@ -103,14 +101,6 @@ const boardSorters: Record<BoardSort, (a: LeaderboardEntry, b: LeaderboardEntry)
   leverage: (a, b) => (leverage(b) ?? 0) - (leverage(a) ?? 0),
 };
 
-/** "▲ 12%" / "▼ 8%" against the prior equivalent period; null hides the delta. */
-export function deltaLabel(current: number, prior: number | undefined): string | null {
-  if (prior === undefined || prior === 0) return null;
-  const change = Math.round(((current - prior) / prior) * 100);
-  if (change === 0) return "· flat";
-  return change > 0 ? `▲ ${change}%` : `▼ ${Math.abs(change)}%`;
-}
-
 const messageFor = (error: unknown): string =>
   error instanceof ClientError ? error.message : "Something went wrong. Try again.";
 
@@ -134,8 +124,6 @@ export const App = ({ client }: AppProps) => {
   const [selfId, setSelfId] = useState<string | undefined>();
   const [projects, setProjects] = useState<readonly ProjectListItem[]>([]);
   const [entries, setEntries] = useState<readonly LeaderboardEntry[]>([]);
-  const [priorEntries, setPriorEntries] = useState<readonly LeaderboardEntry[] | undefined>();
-  const [medianSeconds, setMedianSeconds] = useState<number | null>(null);
   const [boardSort, setBoardSort] = useState<BoardSort>("active");
   const [loading, setLoading] = useState(false);
   const [dataError, setDataError] = useState<string | undefined>();
@@ -210,18 +198,13 @@ export const App = ({ client }: AppProps) => {
     };
   }, [client, signedIn, expireSession]);
 
-  // The board and its prior period, refetched whenever scope or range move.
+  // The board, refetched whenever scope or range move.
   const reloadBoard = useCallback(async () => {
     setLoading(true);
     setBoardFailed(false);
     try {
-      const [current, prior] = await Promise.all([
-        client.leaderboard(scopeParams(rangeQuery(range))),
-        range === "all" ? Promise.resolve(undefined) : client.leaderboard(scopeParams(rangeQuery(range, new Date(), 1))),
-      ]);
-      setEntries(current.entries);
-      setMedianSeconds(current.medianSessionSeconds);
-      setPriorEntries(prior?.entries);
+      const board = await client.leaderboard(scopeParams(rangeQuery(range)));
+      setEntries(board.entries);
       setDataError(undefined);
     } catch (error: unknown) {
       if (error instanceof ClientError && error.kind === "auth") {
@@ -230,7 +213,6 @@ export const App = ({ client }: AppProps) => {
       }
       setBoardFailed(true);
       setEntries([]);
-      setPriorEntries(undefined);
       setDataError(messageFor(error));
     } finally {
       setLoading(false);
@@ -342,7 +324,6 @@ export const App = ({ client }: AppProps) => {
     setSelfId(undefined);
     setProjects([]);
     setEntries([]);
-    setPriorEntries(undefined);
     setMember(undefined);
     setMemberStats(undefined);
     setMemberFailed(false);
@@ -384,10 +365,10 @@ export const App = ({ client }: AppProps) => {
   };
 
   const refreshProjects = async (): Promise<void> => {
-    const listed = await client.projects(true);
+    const listed = await client.projects();
     setProjects(listed.projects);
     // A scope naming a project that no longer exists falls back to everything.
-    if (scope !== "all" && scope !== "unassigned" && !listed.projects.some((project) => project.id === scope && !project.isArchived)) {
+    if (scope !== "all" && scope !== "unassigned" && !listed.projects.some((project) => project.id === scope)) {
       setScope("all");
     }
   };
@@ -471,55 +452,7 @@ export const App = ({ client }: AppProps) => {
     );
   }
 
-  const activeProjects = projects.filter((project) => !project.isArchived);
-  const scopeName = scope === "all"
-    ? "All projects"
-    : scope === "unassigned"
-      ? "Unassigned"
-      : activeProjects.find((project) => project.id === scope)?.name ?? "All projects";
-  const sum = (list: readonly LeaderboardEntry[] | undefined, pick: (entry: LeaderboardEntry) => number): number =>
-    (list ?? []).reduce((total, entry) => total + pick(entry), 0);
-  const activeTotal = sum(entries, (entry) => entry.activeSeconds);
-  const agentTotal = sum(entries, (entry) => entry.agentSeconds);
-  const sessionsCount = sum(entries, (entry) => entry.sessionCount);
-  const unassistedTotal = sum(entries, (entry) => entry.concurrency.t0Seconds);
-  const teamLeverage = leverage({ activeSeconds: activeTotal, agentSeconds: agentTotal });
-  const unassistedShare = activeTotal === 0 ? null : Math.round((unassistedTotal / activeTotal) * 100);
-  const priorLabel = range === "all" ? "" : ` vs prior ${rangeSentence[range].toLowerCase().replace("last ", "")}`;
-  const tiles = [
-    {
-      key: "active",
-      label: "Active time",
-      value: formatHumanDuration(activeTotal),
-      sub: null,
-      delta: deltaLabel(activeTotal, priorEntries === undefined ? undefined : sum(priorEntries, (entry) => entry.activeSeconds)),
-      title: "The union of each person's working intervals — never more than wall clock.",
-    },
-    {
-      key: "agent",
-      label: "Agent time",
-      value: formatHumanDuration(agentTotal),
-      sub: teamLeverage === null ? null : `${teamLeverage}× leverage`,
-      delta: deltaLabel(agentTotal, priorEntries === undefined ? undefined : sum(priorEntries, (entry) => entry.agentSeconds)),
-      title: "Summed agent runtime. Parallel agents make this exceed active time; that is leverage, not double-counted hours.",
-    },
-    {
-      key: "unassisted",
-      label: "Unassisted",
-      value: unassistedShare === null ? "—" : `${unassistedShare}%`,
-      sub: unassistedShare === null ? null : `${formatHumanDuration(unassistedTotal)} with no agent`,
-      delta: null,
-      title: "The share of active time with no agent running.",
-    },
-    {
-      key: "sessions",
-      label: "Sessions",
-      value: String(sessionsCount),
-      sub: medianSeconds === null ? null : `median ${formatHumanDuration(medianSeconds)}`,
-      delta: deltaLabel(sessionsCount, priorEntries === undefined ? undefined : sum(priorEntries, (entry) => entry.sessionCount)),
-      title: "Completed sessions in this scope and range.",
-    },
-  ];
+  const activeTotal = entries.reduce((total, entry) => total + entry.activeSeconds, 0);
   // Rank follows the column being sorted by; showing the server's active-time
   // rank under an agent-time sort reads as 1, 4, 2, 3.
   const sortedEntries = [...entries]
@@ -544,7 +477,6 @@ export const App = ({ client }: AppProps) => {
         <div>
           <p className="eyebrow">Clock-In</p>
           <h1>{organization?.name ?? "Your workspace"}</h1>
-          <p className="page-qualifier">{scopeName} · {rangeSentence[range]}</p>
         </div>
         <div className="masthead-actions">
           <DownloadInstaller />
@@ -569,7 +501,7 @@ export const App = ({ client }: AppProps) => {
           <select value={scope} onChange={(event) => setScope(event.target.value as ProjectScope)}>
             <option value="all">All projects</option>
             <option value="unassigned">Unassigned</option>
-            {activeProjects.map((project) => (
+            {projects.map((project) => (
               <option key={project.id} value={project.id}>{project.name}</option>
             ))}
           </select>
@@ -589,19 +521,6 @@ export const App = ({ client }: AppProps) => {
       </div>
 
       {dataError && <p className="error" role="alert">{dataError}</p>}
-
-      <div className="tile-row">
-        {tiles.map((tile) => (
-          <section key={tile.key} className="card tile" aria-label={tile.label} title={tile.title}>
-            <p className="tile-label">{tile.label}</p>
-            <p className="tile-value">{boardFailed ? "—" : tile.value}</p>
-            <p className="tile-sub">
-              {tile.sub ?? " "}
-              {tile.delta !== null && !boardFailed && <span className="tile-delta">{tile.delta}{priorLabel}</span>}
-            </p>
-          </section>
-        ))}
-      </div>
 
       {organization && entries.length <= 1 && (
         <section className="card join-card" aria-labelledby="join-title">
@@ -623,14 +542,17 @@ export const App = ({ client }: AppProps) => {
       <section className="card" aria-labelledby="board-title">
         <div className="card-head">
           <h2 id="board-title">Leaderboard</h2>
-          <label className="board-sort">
-            <span className="visually-hidden">Sort by</span>
-            <select value={boardSort} onChange={(event) => setBoardSort(event.target.value as BoardSort)}>
-              <option value="active">By active time</option>
-              <option value="agent">By agent time</option>
-              <option value="leverage">By leverage</option>
-            </select>
-          </label>
+          <span className="board-tools">
+            <span className="total">{boardFailed ? "Not loaded" : `${formatHumanDuration(activeTotal)} total`}</span>
+            <label className="board-sort">
+              <span className="visually-hidden">Sort by</span>
+              <select value={boardSort} onChange={(event) => setBoardSort(event.target.value as BoardSort)}>
+                <option value="active">By active time</option>
+                <option value="agent">By agent time</option>
+                <option value="leverage">By leverage</option>
+              </select>
+            </label>
+          </span>
         </div>
         {boardFailed ? (
           <p className="subtle">Could not load hours for this range.</p>
@@ -691,7 +613,7 @@ export const App = ({ client }: AppProps) => {
             ) : (
               <>
                 <p className="member-total">
-                  <strong>{formatHumanDuration(memberStats.activeSeconds)}</strong> active
+                  <strong>{formatHumanDuration(memberStats.activeSeconds)}</strong> active{" "}
                   <span className="member-agent-total">
                     · Agent {formatHumanDuration(memberStats.agentSeconds)}
                     {leverage(memberStats) !== null && ` · ${leverage(memberStats)}×`}
@@ -819,12 +741,10 @@ type ManageProjectsProps = {
   onClose: () => void;
 };
 
-/** Create, rename, archive, and the guarded delete — the one management surface. */
+/** Create and the guarded delete: the whole management surface. */
 const ManageProjects = ({ client, projects, onChanged, onClose }: ManageProjectsProps) => {
   const [error, setError] = useState<string | undefined>();
   const [newName, setNewName] = useState("");
-  const [renamingId, setRenamingId] = useState<string | undefined>();
-  const [renameDraft, setRenameDraft] = useState("");
   const [deleting, setDeleting] = useState<{ project: ProjectListItem; usage: ProjectUsageResponse } | undefined>();
   const [confirmName, setConfirmName] = useState("");
   const [reassignTo, setReassignTo] = useState<string>("");
@@ -846,7 +766,7 @@ const ManageProjects = ({ client, projects, onChanged, onClose }: ManageProjects
   return (
     <div className="modal-overlay" onClick={onClose}>
       <section
-        className="card modal manage-panel"
+        className="card modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby="manage-title"
@@ -863,71 +783,33 @@ const ManageProjects = ({ client, projects, onChanged, onClose }: ManageProjects
             <ul className="manage-list">
               {projects.map((project) => (
                 <li key={project.id} className="manage-row">
-                  {renamingId === project.id ? (
-                    <form
-                      className="manage-rename"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        void act(async () => {
-                          await client.updateProject(project.id, { name: renameDraft.trim() });
-                          setRenamingId(undefined);
-                        });
+                  <span className="manage-name">{project.name}</span>
+                  {!project.isDefault && (
+                    <button
+                      className="ghost is-danger"
+                      type="button"
+                      disabled={busy}
+                      onClick={() => {
+                        // A read, not a mutation: opening the dialog must
+                        // not refetch the whole board.
+                        setBusy(true);
+                        setError(undefined);
+                        void client.projectUsage(project.id).then(
+                          (usage) => {
+                            setDeleting({ project, usage });
+                            setConfirmName("");
+                            setReassignTo("");
+                            setBusy(false);
+                          },
+                          (usageError: unknown) => {
+                            setError(messageFor(usageError));
+                            setBusy(false);
+                          },
+                        );
                       }}
                     >
-                      <label>
-                        <span className="visually-hidden">New name for {project.name}</span>
-                        <input value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} maxLength={80} required />
-                      </label>
-                      <button className="ghost" type="submit" disabled={busy}>Save</button>
-                      <button className="ghost" type="button" onClick={() => setRenamingId(undefined)}>Cancel</button>
-                    </form>
-                  ) : (
-                    <>
-                      <span className="manage-name">
-                        {project.name}
-                        {project.isArchived && <span className="you-tag"> archived</span>}
-                      </span>
-                      <span className="manage-actions">
-                        <button className="ghost" type="button" disabled={busy} onClick={() => { setRenamingId(project.id); setRenameDraft(project.name); }}>
-                          Rename
-                        </button>
-                        <button
-                          className="ghost"
-                          type="button"
-                          disabled={busy}
-                          onClick={() => void act(async () => {
-                            await client.updateProject(project.id, { isArchived: !project.isArchived });
-                          })}
-                        >
-                          {project.isArchived ? "Unarchive" : "Archive"}
-                        </button>
-                        <button
-                          className="ghost is-danger"
-                          type="button"
-                          disabled={busy}
-                          onClick={() => {
-                            // A read, not a mutation: opening the dialog must
-                            // not refetch the whole board.
-                            setBusy(true);
-                            setError(undefined);
-                            void client.projectUsage(project.id).then(
-                              (usage) => {
-                                setDeleting({ project, usage });
-                                setConfirmName("");
-                                setReassignTo("");
-                                setBusy(false);
-                              },
-                              (usageError: unknown) => {
-                                setError(messageFor(usageError));
-                                setBusy(false);
-                              },
-                            );
-                          }}
-                        >
-                          Delete
-                        </button>
-                      </span>
-                    </>
+                      Delete
+                    </button>
                   )}
                 </li>
               ))}
@@ -954,9 +836,9 @@ const ManageProjects = ({ client, projects, onChanged, onClose }: ManageProjects
             <p>
               Deleting <strong>{deleting.project.name}</strong> takes with it{" "}
               <strong>{deleting.usage.sessionCount} sessions</strong> ({formatHumanDuration(deleting.usage.durationSeconds)})
-              and {deleting.usage.agentSessionCount} agent sessions — unless they move first.
+              and {deleting.usage.agentSessionCount} agent sessions, unless they move first.
             </p>
-            <label className="manage-reassign">
+            <label>
               What happens to its sessions?
               <select value={reassignTo} onChange={(event) => setReassignTo(event.target.value)}>
                 <option value="">Delete them with the project</option>
@@ -965,7 +847,7 @@ const ManageProjects = ({ client, projects, onChanged, onClose }: ManageProjects
                 ))}
               </select>
             </label>
-            <label className="manage-confirm">
+            <label>
               Type the project's name to confirm
               <input value={confirmName} onChange={(event) => setConfirmName(event.target.value)} placeholder={deleting.project.name} autoComplete="off" />
             </label>

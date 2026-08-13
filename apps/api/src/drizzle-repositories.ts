@@ -780,7 +780,12 @@ export class DrizzleReportRepository implements ReportRepository {
         ...(query.userId === undefined ? [] : [eq(agentSessions.userId, query.userId)]),
         ...(query.projectId === undefined ? [] : [eq(agentSessions.projectId, query.projectId)]),
         ...(query.unassignedOnly === true ? [sql`${agentSessions.projectId} is null`] : []),
-        ...(query.from === undefined ? [] : [gt(intervalEnd, query.from)]),
+        // A raw fragment on the left strips drizzle's Date mapping from the
+        // right-hand parameter, and postgres-js refuses a bare Date - so the
+        // bound is passed as an ISO string, exactly like the report ranges.
+        ...(query.from === undefined
+          ? []
+          : [sql`coalesce(${agentSessions.endedAt}, ${agentSessions.lastEventAt}) > ${query.from.toISOString()}`]),
         ...(query.toExclusive === undefined ? [] : [lt(agentSessions.startedAt, query.toExclusive)]),
       ));
     return rows.map((row) => ({
