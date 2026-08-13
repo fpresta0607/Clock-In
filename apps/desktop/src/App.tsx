@@ -284,7 +284,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [boardScope, setBoardScope] = useState("all");
   const [boardStats, setBoardStats] = useState<MeStats | undefined>();
   const [boardStatsError, setBoardStatsError] = useState<string | undefined>();
-  const [activeTeamId, setActiveTeamId] = useState("");
   const [settings, setSettings] = useState<MonitorSettings | undefined>();
   const [settingsError, setSettingsError] = useState<string | undefined>();
   const [quietDraft, setQuietDraft] = useState("");
@@ -328,7 +327,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setBoardScope("all");
     setBoardStats(undefined);
     setBoardStatsError(undefined);
-    setActiveTeamId("");
     setSettings(undefined);
     setSettingsError(undefined);
     setHookSnippets({});
@@ -398,7 +396,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       (result) => {
         if (active && isCurrent(service, generation)) {
           setOverview(result);
-          setActiveTeamId(result.organization.id);
           setOverviewError(undefined);
         }
       },
@@ -942,14 +939,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     ? currentProject?.color
     : ready.projects.find((item) => item.id === pinnedProject)?.color) ?? null;
   const defaultProject = ready.projects.find((item) => item.id === ready.defaultProjectId);
-  // ponytail: one login belongs to one workspace today, so this list holds a
-  // single entry and the picker's team row has nothing to switch to. Projects
-  // are read through the chosen team rather than straight off the account, so
-  // a second membership needs a server that reports one - not new UI here.
-  const teams = overview === undefined ? [] : [overview.organization];
-  const teamProjects = teams.length === 0 || teams.some((team) => team.id === activeTeamId)
-    ? ready.projects
-    : [];
   const backlog = monitorStatus === undefined
     ? 0
     : monitorStatus.segmentBacklog + monitorStatus.agentBacklog + monitorStatus.sessionBacklog;
@@ -1168,14 +1157,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           {current === null && <p className="subtle hero-note">{IDLE_BLURB[state]}</p>}
           {projectPickerOpen && (
             <div className="filing-picker">
-              {teams.length > 0 && (
-                <label className="picker-team">
-                  Team
-                  <select value={activeTeamId} onChange={(event) => setActiveTeamId(event.target.value)}>
-                    {teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
-                  </select>
-                </label>
-              )}
               {/* One project at a time, so this is a radio group wearing a
                   tick rather than a row of checkboxes that could imply two. */}
               <div className="project-picker" role="radiogroup" aria-label="File my time under" data-testid="project-picker">
@@ -1189,7 +1170,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                   <span className="project-tick" aria-hidden="true">{pinnedProject === "" ? "✓" : ""}</span>
                   {defaultProject ? `Work it out for me (${defaultProject.name})` : "Work it out for me"}
                 </button>
-                {teamProjects.map((item) => (
+                {ready.projects.map((item) => (
                   <button
                     key={item.id}
                     type="button"

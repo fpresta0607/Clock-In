@@ -358,16 +358,13 @@ describe("recording", () => {
     expect(screen.getByTestId("filing-where")).toHaveTextContent(otherProject.name);
   });
 
-  it("offers the team above the projects, scoped to the one you are on", async () => {
+  it("lists the account's projects with no team row - one login is one team", async () => {
     const person = userEvent.setup();
     render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(recording) })} />);
 
     await person.click(await screen.findByTestId("filing-change"));
-    const team = await screen.findByLabelText("Team");
-    expect(team).toHaveValue("00000000-0000-4000-8000-000000000900");
-    expect(within(team).getByRole("option", { name: "SIQstack" })).toBeInTheDocument();
-    // The projects listed under it belong to that team.
-    const picker = screen.getByRole("radiogroup", { name: "File my time under" });
+    const picker = await screen.findByRole("radiogroup", { name: "File my time under" });
+    expect(screen.queryByLabelText("Team")).not.toBeInTheDocument();
     expect(within(picker).getByRole("radio", { name: project.name })).toBeInTheDocument();
     expect(within(picker).getByRole("radio", { name: otherProject.name })).toBeInTheDocument();
   });

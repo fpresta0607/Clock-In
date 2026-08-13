@@ -118,7 +118,6 @@ select:disabled { opacity: .55; }
    pick exactly one of. A tick rather than checkboxes, because a checkbox
    column reads as "you may choose several" and you may not. */
 .filing-picker { display: grid; gap: 10px; margin-top: 12px; text-align: left; }
-.picker-team { display: grid; gap: 5px; }
 .project-picker { display: grid; gap: 2px; max-height: 11rem; overflow-y: auto; border: 1px solid var(--glass-border); border-radius: var(--radius); padding: 4px; }
 .project-choice {
   display: grid;
