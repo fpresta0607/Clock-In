@@ -696,7 +696,30 @@ fn spawn_update_checks(handle: tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // A second launch is someone looking for the window, not asking for a
+        // second monitor: surface the running instance and let the new one die.
+        .plugin(tauri_plugin_single_instance::init(
+            |app, _arguments, _working_dir| {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            },
+        ))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--hidden"]),
+        ))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Closing the window is not quitting: hours only count while the app
+        // runs, so the X hides to the tray and recording continues. Quit lives
+        // in the tray menu; OS session end still arrives as ExitRequested.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .setup(|app| {
             spawn_update_checks(app.handle().clone());
             let recovery_path = app
@@ -731,6 +754,23 @@ pub fn run() {
                 quota: quota::QuotaMonitor::new(),
             });
             build_tray(app.handle())?;
+
+            // The app keeps the machine's hours, so it registers to start
+            // with the OS on every launch - re-enabling also repairs an entry
+            // a cleanup tool removed. The login start passes `--hidden` and
+            // stays in the tray; a person opening it by hand gets the window.
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                if let Err(error) = app.autolaunch().enable() {
+                    eprintln!("clock-in: could not register the login autostart: {error}");
+                }
+            }
+            if !std::env::args().any(|argument| argument == "--hidden") {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -43,6 +43,10 @@ keyring = { version = "3", features = ["windows-native", "apple-native", "sync-s
 # Activity-segment clientIds and the per-install device id (upload idempotency).
 uuid = { version = "1", features = ["v4"] }
 tauri-plugin-updater = "2"
+# The app lives in the tray: register with the OS login (autostart) and route
+# a second launch to the running instance instead of a duplicate monitor.
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
 
 # The activity monitor's read-only Win32 calls: GetLastInputInfo,
 # GetForegroundWindow process names, and session lock/suspend events. The
