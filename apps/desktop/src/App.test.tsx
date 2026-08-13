@@ -894,6 +894,34 @@ describe("the team board", () => {
     expect(await within(stats).findByText("Blender")).toBeInTheDocument();
   });
 
+  it("writes the concurrency line in plain words and drops empty buckets", async () => {
+    const bridge = bridgeFor({
+      meStats: vi.fn().mockResolvedValue({
+        ...meStats,
+        concurrency: { t0Seconds: 3_600, t1Seconds: 3_600, t2Seconds: 0, t3PlusSeconds: 5_400, awaySeconds: 1_800 },
+      }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const panel = await openAllStats(person);
+    const stats = within(panel).getByTestId("member-stats");
+    const line = within(stats).getByTestId("concurrency-line");
+    expect(line).toHaveTextContent("Solo 1h 00m · 1 agent 1h 00m · 3+ agents 1h 30m · Agents while away 30m");
+    expect(line).not.toHaveTextContent("Unassisted");
+    expect(line).not.toHaveTextContent("2 agents");
+    expect(line).not.toHaveTextContent("0s");
+  });
+
+  it("hides the concurrency line when every bucket is empty", async () => {
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor()} />);
+
+    const panel = await openAllStats(person);
+    const stats = within(panel).getByTestId("member-stats");
+    expect(within(stats).queryByTestId("concurrency-line")).not.toBeInTheDocument();
+  });
+
   it("offers a way back to your own breakdown after picking a teammate", async () => {
     const samStats = {
       ...meStats,

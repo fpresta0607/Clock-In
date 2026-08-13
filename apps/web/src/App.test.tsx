@@ -362,6 +362,34 @@ describe("dashboard", () => {
     expect(stats.getByText(/30m of that landed in the default project/)).toBeInTheDocument();
   });
 
+  it("labels 3+ concurrency and away time in plain words", async () => {
+    await signIn(clientFor({
+      meStats: vi.fn().mockResolvedValue({
+        ...memberStats,
+        concurrency: { t0Seconds: 0, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 5_400, awaySeconds: 1_800 },
+      }),
+    }));
+
+    const stats = within(await screen.findByRole("region", { name: /Alex · Last 30 days/ }));
+    const line = stats.getByTestId("concurrency-line");
+    expect(line).toHaveTextContent("3+ agents 1h 30m · Agents while away 30m");
+    expect(line).not.toHaveTextContent("Solo");
+    expect(line).not.toHaveTextContent("2 agents");
+    expect(line).not.toHaveTextContent("0s");
+  });
+
+  it("hides the concurrency line when every bucket is empty", async () => {
+    await signIn(clientFor({
+      meStats: vi.fn().mockResolvedValue({
+        ...memberStats,
+        concurrency: { t0Seconds: 0, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
+      }),
+    }));
+
+    const stats = within(await screen.findByRole("region", { name: /Alex · Last 30 days/ }));
+    expect(stats.queryByTestId("concurrency-line")).not.toBeInTheDocument();
+  });
+
   it("follows whichever member gets picked on the board", async () => {
     const meStats = vi.fn().mockResolvedValue(memberStats);
     const person = await signIn(clientFor({ meStats }));
