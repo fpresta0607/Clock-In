@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { App, rangeQuery } from "./App.js";
+import { App, buildAppRows, rangeQuery } from "./App.js";
 import { ClientError, type Client } from "./client.js";
 import { windowsInstallerUrl } from "./DownloadInstaller.js";
 
@@ -74,6 +74,25 @@ async function signIn(client: Client) {
   await person.click(screen.getByRole("button", { name: "Sign in" }));
   return person;
 }
+
+describe("app row folding", () => {
+  it("never folds an agent runtime into Everything else", () => {
+    // Nine heavy apps outrank a lightly-used Claude Code; the fold must not
+    // swallow the agent row that anchors its by-agent note.
+    const apps = [
+      ...Array.from({ length: 9 }, (_, index) => ({ processName: `app-${index}.exe`, durationSeconds: 9_000 - index })),
+      { processName: "claude.exe", durationSeconds: 60 },
+    ];
+
+    const rows = buildAppRows(apps);
+
+    expect(rows.map((row) => row.key)).toContain("claude_code");
+    const fold = rows.find((row) => row.key === "everything-else");
+    // The fold keeps only the non-agent tail.
+    expect(fold?.durationSeconds).toBe(9_000 - 8);
+    expect(rows.filter((row) => row.agent)).toHaveLength(1);
+  });
+});
 
 describe("dashboard", () => {
   it("ranks the team by active hours, with agent time as its own muted line", async () => {

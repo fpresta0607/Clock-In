@@ -89,8 +89,13 @@ export const buildAppRows = (apps: MeStatsResponse["apps"]): AppRowItem[] => {
   const rows = [...totals.values()]
     .sort((a, b) => b.durationSeconds - a.durationSeconds || a.label.localeCompare(b.label));
   if (rows.length <= TOP_APP_ROWS) return rows;
-  const rest = rows.slice(TOP_APP_ROWS).reduce((sum, row) => sum + row.durationSeconds, 0);
-  return [...rows.slice(0, TOP_APP_ROWS), { key: "everything-else", label: "Everything else", agent: false, durationSeconds: rest }];
+  // Agent runtimes never fold into the tail: the fold would strip the row
+  // that anchors the by-agent note and misfile the runtime as background-only.
+  const kept = [...rows.slice(0, TOP_APP_ROWS), ...rows.slice(TOP_APP_ROWS).filter((row) => row.agent)];
+  const rest = rows.slice(TOP_APP_ROWS).filter((row) => !row.agent)
+    .reduce((sum, row) => sum + row.durationSeconds, 0);
+  if (rest === 0) return kept;
+  return [...kept, { key: "everything-else", label: "Everything else", agent: false, durationSeconds: rest }];
 };
 
 type BoardSort = "active" | "agent" | "leverage";
