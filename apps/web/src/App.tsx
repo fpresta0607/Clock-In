@@ -198,7 +198,9 @@ export const App = ({ client }: AppProps) => {
         if (meResult.status === "fulfilled") setSelfId(meResult.value.user.id);
         if (projectsResult.status === "fulfilled") setProjects(projectsResult.value.projects);
         if (preferencesResult.status === "fulfilled") {
-          setScope(preferencesResult.value.scope);
+          // The unassigned scope is retired from the pickers; a stored one
+          // reads as everything rather than as a blank select.
+          setScope(preferencesResult.value.scope === "unassigned" ? "all" : preferencesResult.value.scope);
           setRange(preferencesResult.value.range);
         }
         setPreferencesReady(true);
@@ -381,7 +383,7 @@ export const App = ({ client }: AppProps) => {
     const listed = await client.projects();
     setProjects(listed.projects);
     // A scope naming a project that no longer exists falls back to everything.
-    if (scope !== "all" && scope !== "unassigned" && !listed.projects.some((project) => project.id === scope)) {
+    if (scope !== "all" && !listed.projects.some((project) => project.id === scope)) {
       setScope("all");
     }
   };
@@ -530,7 +532,6 @@ export const App = ({ client }: AppProps) => {
           <span className="visually-hidden">Project scope</span>
           <select value={scope} onChange={(event) => setScope(event.target.value as ProjectScope)}>
             <option value="all">All projects</option>
-            <option value="unassigned">Unassigned</option>
             {projects.map((project) => (
               <option key={project.id} value={project.id}>{project.name}</option>
             ))}
@@ -783,7 +784,6 @@ const ManageProjects = ({ client, projects, onChanged, onClose }: ManageProjects
   const [error, setError] = useState<string | undefined>();
   const [newName, setNewName] = useState("");
   const [deleting, setDeleting] = useState<{ project: ProjectListItem; usage: ProjectUsageResponse } | undefined>();
-  const [confirmName, setConfirmName] = useState("");
   const [reassignTo, setReassignTo] = useState<string>("");
   const [busy, setBusy] = useState(false);
 
@@ -820,7 +820,10 @@ const ManageProjects = ({ client, projects, onChanged, onClose }: ManageProjects
             <ul className="manage-list">
               {projects.map((project) => (
                 <li key={project.id} className="manage-row">
-                  <span className="manage-name">{project.name}</span>
+                  <span className="manage-name">
+                    {project.name}
+                    {project.isDefault && <span className="you-tag"> default</span>}
+                  </span>
                   {!project.isDefault && (
                     <button
                       className="ghost is-danger"
@@ -833,10 +836,15 @@ const ManageProjects = ({ client, projects, onChanged, onClose }: ManageProjects
                         setError(undefined);
                         void client.projectUsage(project.id).then(
                           (usage) => {
-                            setDeleting({ project, usage });
-                            setConfirmName("");
-                            setReassignTo("");
                             setBusy(false);
+                            // An empty project has nothing to guard: it goes
+                            // on the click. Only recorded time needs the ask.
+                            if (usage.sessionCount === 0 && usage.agentSessionCount === 0) {
+                              void act(() => client.deleteProject(project.id, { reassignTo: null }));
+                              return;
+                            }
+                            setDeleting({ project, usage });
+                            setReassignTo("");
                           },
                           (usageError: unknown) => {
                             setError(messageFor(usageError));
@@ -884,15 +892,11 @@ const ManageProjects = ({ client, projects, onChanged, onClose }: ManageProjects
                 ))}
               </select>
             </label>
-            <label>
-              Type the project's name to confirm
-              <input value={confirmName} onChange={(event) => setConfirmName(event.target.value)} placeholder={deleting.project.name} autoComplete="off" />
-            </label>
             <div className="manage-actions">
               <button
                 className="ghost is-danger"
                 type="button"
-                disabled={busy || confirmName.trim() !== deleting.project.name}
+                disabled={busy}
                 onClick={() => void act(async () => {
                   await client.deleteProject(deleting.project.id, { reassignTo: reassignTo === "" ? null : reassignTo });
                   setDeleting(undefined);

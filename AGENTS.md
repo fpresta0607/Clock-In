@@ -18,8 +18,7 @@ leaderboard headline, never exceeding wall clock), **agent time** (the summed ag
 runtime, so parallel agents legitimately exceed active time), and **leverage**
 (agent ÷ active); concurrency splits active time into t0/t1/t2/t3+ plus the agent
 runtime that fell outside the person's presence. A session is still attributed whole
-or not at all by `time_sessions.attribution`, and the dashboard's Unassigned scope is
-the `attribution = 'default'` bucket. The README's "How session tracking works"
+or not at all by `time_sessions.attribution`. The README's "How session tracking works"
 section is the authoritative prose; keep it true when you change the model.
 
 ## The agent-runtime roster is data, not code

@@ -848,8 +848,26 @@ describe("the shared scope", () => {
       otherProject.id,
     ));
 
-    await person.selectOptions(scope, "unassigned");
-    await waitFor(() => expect(bridge.preferencesSet).toHaveBeenCalledWith({ scope: "unassigned" }));
+    await person.selectOptions(scope, "all");
+    await waitFor(() => expect(bridge.preferencesSet).toHaveBeenCalledWith({ scope: "all" }));
+  });
+
+  it("reads a stored unassigned scope as everything", async () => {
+    const bridge = bridgeFor({
+      preferencesGet: vi.fn().mockResolvedValue({ scope: "unassigned", range: "30d" }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const panel = await openAllStats(person);
+    const scope = await within(panel).findByLabelText("Project scope");
+    await waitFor(() => expect(scope).toHaveValue("all"));
+    // The board fetches unscoped data rather than passing "unassigned" through.
+    await waitFor(() => expect(bridge.orgOverview).toHaveBeenLastCalledWith(
+      expect.any(String),
+      expect.any(String),
+      undefined,
+    ));
   });
 });
 
@@ -1006,5 +1024,85 @@ describe("the update banner", () => {
     const banner = await screen.findByTestId("update-banner");
     expect(banner).toHaveTextContent("Version 0.9.9");
     expect(banner).toHaveTextContent("restarts itself");
+  });
+});
+
+describe("the projects list", () => {
+  it("tags the default project and hides its delete button", async () => {
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor()} />);
+
+    const dialog = await openSettings(person);
+    await person.click(within(dialog).getByText("Projects"));
+
+    const list = within(dialog).getByTestId("project-manage-list");
+    const defaultRow = within(list).getByText("Field work").closest("li");
+    expect(defaultRow).not.toBeNull();
+    expect(within(defaultRow as HTMLElement).getByText("default")).toBeInTheDocument();
+    expect(within(defaultRow as HTMLElement).getByRole("button", { name: "Rename" })).toBeInTheDocument();
+    expect(within(defaultRow as HTMLElement).queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
+
+    const otherRow = within(list).getByText("Client work").closest("li");
+    expect(otherRow).not.toBeNull();
+    expect(within(otherRow as HTMLElement).getByRole("button", { name: "Delete" })).toBeInTheDocument();
+  });
+
+  it("counts agent sessions in the delete confirmation", async () => {
+    const bridge = bridgeFor({
+      projectUsage: vi.fn().mockResolvedValue({ sessionCount: 2, durationSeconds: 3_600, agentSessionCount: 5 }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const dialog = await openSettings(person);
+    await person.click(within(dialog).getByText("Projects"));
+
+    const list = within(dialog).getByTestId("project-manage-list");
+    const otherRow = within(list).getByText("Client work").closest("li");
+    await person.click(within(otherRow as HTMLElement).getByRole("button", { name: "Delete" }));
+
+    const confirm = await within(dialog).findByTestId("project-delete-confirm");
+    expect(confirm).toHaveTextContent("2 sessions");
+    expect(confirm).toHaveTextContent("5 agent sessions");
+  });
+
+  it("deletes an empty project on the click, with no confirmation panel", async () => {
+    const projectDelete = vi.fn().mockResolvedValue(undefined);
+    const bridge = bridgeFor({
+      projectUsage: vi.fn().mockResolvedValue({ sessionCount: 0, durationSeconds: 0, agentSessionCount: 0 }),
+      projectDelete,
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const dialog = await openSettings(person);
+    await person.click(within(dialog).getByText("Projects"));
+
+    const list = within(dialog).getByTestId("project-manage-list");
+    const otherRow = within(list).getByText("Client work").closest("li");
+    await person.click(within(otherRow as HTMLElement).getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(projectDelete).toHaveBeenCalledWith(otherProject.id, null));
+    expect(within(dialog).queryByTestId("project-delete-confirm")).not.toBeInTheDocument();
+  });
+
+  it("asks for a move-or-delete choice instead of a typed name", async () => {
+    const bridge = bridgeFor({
+      projectUsage: vi.fn().mockResolvedValue({ sessionCount: 2, durationSeconds: 3_600, agentSessionCount: 5 }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const dialog = await openSettings(person);
+    await person.click(within(dialog).getByText("Projects"));
+
+    const list = within(dialog).getByTestId("project-manage-list");
+    const otherRow = within(list).getByText("Client work").closest("li");
+    await person.click(within(otherRow as HTMLElement).getByRole("button", { name: "Delete" }));
+
+    const confirm = await within(dialog).findByTestId("project-delete-confirm");
+    expect(confirm).toHaveTextContent("What happens to its sessions?");
+    expect(within(confirm).queryByLabelText(/type the project's name to confirm/i)).not.toBeInTheDocument();
+    await waitFor(() => expect(within(confirm).getByRole("button", { name: "Delete Client work" })).toBeEnabled());
   });
 });

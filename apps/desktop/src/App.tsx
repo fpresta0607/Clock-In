@@ -292,7 +292,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [renamingProjectId, setRenamingProjectId] = useState<string | undefined>();
   const [renameDraft, setRenameDraft] = useState("");
   const [deletingProject, setDeletingProject] = useState<{ id: string; name: string; usage: ProjectUsage } | undefined>();
-  const [deleteConfirmName, setDeleteConfirmName] = useState("");
   const [deleteReassignTo, setDeleteReassignTo] = useState("");
   const [projectBusy, setProjectBusy] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
@@ -448,7 +447,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     const generation = bridgeGeneration.current;
     void service.preferencesGet().then(
       (preferences) => {
-        if (active && isCurrent(service, generation)) setBoardScope(preferences.scope);
+        if (active && isCurrent(service, generation)) setBoardScope(preferences.scope === "unassigned" ? "all" : preferences.scope);
       },
       // A missing preference row is the default view, not a problem.
       () => undefined,
@@ -1067,8 +1066,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const showingLiveDay = viewingSelf && boardRange === "today" && boardScope === "all";
   // A scope naming a project this account no longer sees renders as "all"
   // rather than a select stuck on an invisible value.
-  const scopeValue = boardScope === "all" || boardScope === "unassigned"
-    || ready.projects.some((item) => item.id === boardScope)
+  // The unassigned scope is retired from the picker; a stored one reads as
+  // everything rather than as a select stuck on an invisible value.
+  const scopeValue = boardScope === "all" || ready.projects.some((item) => item.id === boardScope)
     ? boardScope
     : "all";
   const changeBoardScope = (scope: string): void => {
@@ -1343,7 +1343,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
               <span className="visually-hidden">Project scope</span>
               <select value={scopeValue} onChange={(event) => changeBoardScope(event.target.value)}>
                 <option value="all">All projects</option>
-                <option value="unassigned">Unassigned</option>
                 {ready.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
               </select>
             </label>
@@ -1601,23 +1600,31 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                               <span className="manage-name">
                                 <span className="project-dot" aria-hidden="true" style={item.color === null ? undefined : { background: item.color }} />
                                 {item.name}
+                                {item.id === ready.defaultProjectId && <span className="you-tag"> default</span>}
                               </span>
                               <span className="manage-actions">
                                 <button type="button" disabled={projectBusy} onClick={() => { setRenamingProjectId(item.id); setRenameDraft(item.name); }}>Rename</button>
-                                <button
-                                  type="button"
-                                  disabled={projectBusy}
-                                  onClick={() => {
-                                    void manageProject(async (service) => {
-                                      const usage = await service.projectUsage(item.id);
-                                      setDeletingProject({ id: item.id, name: item.name, usage });
-                                      setDeleteConfirmName("");
-                                      setDeleteReassignTo("");
-                                    });
-                                  }}
-                                >
-                                  Delete
-                                </button>
+                                {item.id !== ready.defaultProjectId && (
+                                  <button
+                                    type="button"
+                                    disabled={projectBusy}
+                                    onClick={() => {
+                                      void manageProject(async (service) => {
+                                        const usage = await service.projectUsage(item.id);
+                                        // An empty project has nothing to guard:
+                                        // it goes on the click.
+                                        if (usage.sessionCount === 0 && usage.agentSessionCount === 0) {
+                                          await service.projectDelete(item.id, null);
+                                          return;
+                                        }
+                                        setDeletingProject({ id: item.id, name: item.name, usage });
+                                        setDeleteReassignTo("");
+                                      });
+                                    }}
+                                  >
+                                    Delete
+                                  </button>
+                                )}
                               </span>
                             </>
                           )}
@@ -1628,7 +1635,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                     <div className="manage-delete" data-testid="project-delete-confirm">
                       <p className="subtle">
                         Deleting <strong>{deletingProject.name}</strong> takes {deletingProject.usage.sessionCount} sessions
-                        ({formatHuman(deletingProject.usage.durationSeconds)}) with it - unless they move first.
+                        ({formatHuman(deletingProject.usage.durationSeconds)}) and {deletingProject.usage.agentSessionCount} agent sessions with it - unless they move first.
                       </p>
                       <label className="setting-field">
                         What happens to its sessions?
@@ -1639,14 +1646,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                           ))}
                         </select>
                       </label>
-                      <label className="setting-field">
-                        Type the project's name to confirm
-                        <input value={deleteConfirmName} onChange={(event) => setDeleteConfirmName(event.target.value)} placeholder={deletingProject.name} autoComplete="off" />
-                      </label>
                       <div className="manage-actions">
                         <button
                           type="button"
-                          disabled={projectBusy || deleteConfirmName.trim() !== deletingProject.name}
+                          disabled={projectBusy}
                           onClick={() => {
                             void manageProject(async (service) => {
                               await service.projectDelete(deletingProject.id, deleteReassignTo === "" ? null : deleteReassignTo);
