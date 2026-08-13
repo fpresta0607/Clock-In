@@ -340,6 +340,20 @@ describe("dashboard", () => {
     expect(await screen.findByText("No recorded time in this range.")).toBeInTheDocument();
   });
 
+  it("keeps the install hint beside a roster-only zero row", async () => {
+    await signIn(clientFor({
+      leaderboard: vi.fn().mockResolvedValue({
+        entries: [{ rank: 1, user: { id: "u2", name: "Alex" }, durationSeconds: 0, sessionCount: 0, attributedSeconds: 0, unattributedSeconds: 0, activeSeconds: 0, agentSeconds: 0, ...noMeasurement }],
+        totalDurationSeconds: 0,
+        filters: {},
+      }),
+    }));
+
+    const board = within(await screen.findByRole("region", { name: "Leaderboard" }));
+    expect(await board.findByText(/No recorded time in this range yet/)).toBeInTheDocument();
+    expect(board.getByRole("button", { name: /Alex/ })).toHaveTextContent("0s");
+  });
+
   it("opens on your own breakdown, with agent tools folded into named rows", async () => {
     await signIn(clientFor());
 
