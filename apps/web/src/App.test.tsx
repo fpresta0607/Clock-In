@@ -351,7 +351,18 @@ describe("dashboard", () => {
 
     const board = within(await screen.findByRole("region", { name: "Leaderboard" }));
     expect(await board.findByText(/No recorded time in this range yet/)).toBeInTheDocument();
-    expect(board.getByRole("button", { name: /Alex/ })).toHaveTextContent("0s");
+    expect(await board.findByRole("button", { name: /Alex/ })).toHaveTextContent("0s");
+  });
+
+  it("claims the first admin role once on sign-in and swallows the existing-admin refusal", async () => {
+    const claimAdmin = vi.fn().mockRejectedValue(new ClientError("validation", "A workspace administrator already exists."));
+    await signIn(clientFor({ claimAdmin }));
+
+    expect(await screen.findByRole("heading", { name: "SIQstack" })).toBeInTheDocument();
+    expect(claimAdmin).toHaveBeenCalledTimes(1);
+    // A 409 once an admin exists is a silent no-op, never an error on screen.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText(/administrator already exists/)).not.toBeInTheDocument();
   });
 
   it("opens on your own breakdown, with agent tools folded into named rows", async () => {
