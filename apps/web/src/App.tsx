@@ -387,7 +387,7 @@ export const App = ({ client }: AppProps) => {
     const listed = await client.projects(true);
     setProjects(listed.projects);
     // A scope naming a project that no longer exists falls back to everything.
-    if (scope !== "all" && scope !== "unassigned" && !listed.projects.some((project) => project.id === scope)) {
+    if (scope !== "all" && scope !== "unassigned" && !listed.projects.some((project) => project.id === scope && !project.isArchived)) {
       setScope("all");
     }
   };

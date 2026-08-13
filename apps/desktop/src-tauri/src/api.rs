@@ -68,6 +68,20 @@ pub fn classify(status: u16) -> BridgeError {
     }
 }
 
+async fn classify_api_error(response: reqwest::Response) -> BridgeError {
+    let status = response.status().as_u16();
+    let server_message = response
+        .json::<ApiErrorBody>()
+        .await
+        .ok()
+        .map(|body| body.error.message)
+        .filter(|message| !message.is_empty());
+    match server_message {
+        Some(message) => BridgeError::new(classify(status).kind, message),
+        None => classify(status),
+    }
+}
+
 /// Sign-up failures are worth naming precisely: "already registered" and "too
 /// short" are both things the user can act on, unlike a generic rejection. The
 /// code is matched from a known set rather than echoing the server's own text.
@@ -144,6 +158,8 @@ pub struct LeaderboardEntry {
     pub user: LeaderboardMember,
     pub duration_seconds: u64,
     pub session_count: u32,
+    pub active_seconds: u64,
+    pub agent_seconds: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +199,16 @@ struct ProjectListItem {
 struct AuthErrorBody {
     #[serde(default)]
     code: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ApiErrorBody {
+    error: ApiErrorBodyError,
+}
+
+#[derive(Deserialize)]
+struct ApiErrorBodyError {
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -607,7 +633,7 @@ impl ApiClient {
             .map_err(|error| classify_transport(&error))?;
 
         if !response.status().is_success() {
-            return Err(classify(response.status().as_u16()));
+            return Err(classify_api_error(response).await);
         }
         let body: ProjectListItem = response
             .json()
@@ -645,7 +671,7 @@ impl ApiClient {
             .await
             .map_err(|error| classify_transport(&error))?;
         if !response.status().is_success() {
-            return Err(classify(response.status().as_u16()));
+            return Err(classify_api_error(response).await);
         }
         let body: ProjectListItem = response
             .json()
@@ -689,7 +715,7 @@ impl ApiClient {
             .await
             .map_err(|error| classify_transport(&error))?;
         if !response.status().is_success() {
-            return Err(classify(response.status().as_u16()));
+            return Err(classify_api_error(response).await);
         }
         response
             .json()
@@ -721,7 +747,7 @@ impl ApiClient {
         if response.status().is_success() {
             return Ok(());
         }
-        Err(classify(response.status().as_u16()))
+        Err(classify_api_error(response).await)
     }
 
     /// Uploads one batch of finished sessions (at most 500 rows; the caller
@@ -865,7 +891,7 @@ impl ApiClient {
             .map_err(|error| classify_transport(&error))?;
 
         if !response.status().is_success() {
-            return Err(classify(response.status().as_u16()));
+            return Err(classify_api_error(response).await);
         }
         response
             .json()

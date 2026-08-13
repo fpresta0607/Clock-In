@@ -75,6 +75,13 @@ export async function updateProject(
 ): Promise<{ id: string; name: string; createdAt: string; isArchived: boolean; isDefault: boolean }> {
   if (repository.updateForMember === undefined) throw new AppError("not_found", "Project not found.");
   if (patch.name !== undefined) await rejectDuplicateName(repository, subject, patch.name, projectId);
+  if (patch.isArchived === true) {
+    const project = await repository.findForMember(subject, projectId);
+    if (project === null) throw new AppError("not_found", "Project not found.");
+    if (project.isDefault) {
+      throw new AppError("conflict", "The default project cannot be archived; unattributed time lands there.");
+    }
+  }
   const updated = await repository.updateForMember(subject, projectId, {
     ...(patch.name === undefined ? {} : { name: patch.name }),
     ...(patch.isArchived === undefined ? {} : { archived: patch.isArchived }),

@@ -354,6 +354,8 @@ select:disabled { opacity: .55; }
 .board-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .you-tag { color: var(--text-secondary); font-size: .74rem; text-transform: uppercase; letter-spacing: .08em; }
 .board-hours { color: var(--mint); font-variant-numeric: tabular-nums; }
+.board-times { display: grid; justify-items: end; gap: 2px; }
+.board-agent { color: var(--text-secondary); font-size: .72rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* Settings overlay, same pattern as the web app's help dialog. */
 .modal-overlay { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 20px; background: rgba(3, 5, 10, .72); }

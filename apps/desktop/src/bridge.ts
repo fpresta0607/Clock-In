@@ -22,6 +22,8 @@ export type LeaderboardEntry = {
   user: { id: string; name: string };
   durationSeconds: number;
   sessionCount: number;
+  activeSeconds: number;
+  agentSeconds: number;
 };
 
 export type OrganizationOverview = {
@@ -348,6 +350,8 @@ const decodeLeaderboardEntry = (value: unknown): LeaderboardEntry => {
     user: { id: uuid(member.id), name: string(member.name) },
     durationSeconds: nonnegativeInteger(candidate.durationSeconds),
     sessionCount: nonnegativeInteger(candidate.sessionCount),
+    activeSeconds: nonnegativeInteger(candidate.activeSeconds),
+    agentSeconds: nonnegativeInteger(candidate.agentSeconds),
   };
 };
 

@@ -114,13 +114,13 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   orgOverview: vi.fn().mockResolvedValue({
     organization: { id: "00000000-0000-4000-8000-000000000900", name: "SIQstack", inviteCode: "ACDEF-GHJKM" },
     entries: [
-      { rank: 1, user: { id: "b1c7e513-b094-4d4c-ae55-21790ae019a4", name: "Sam" }, durationSeconds: 7_200, sessionCount: 3 },
-      { rank: 2, user: { id: user.id, name: user.name }, durationSeconds: 3_600, sessionCount: 1 },
+      { rank: 1, user: { id: "b1c7e513-b094-4d4c-ae55-21790ae019a4", name: "Sam" }, durationSeconds: 7_200, sessionCount: 3, activeSeconds: 7_000, agentSeconds: 3_600 },
+      { rank: 2, user: { id: user.id, name: user.name }, durationSeconds: 3_600, sessionCount: 1, activeSeconds: 3_600, agentSeconds: 1_800 },
     ],
   }),
   orgJoin: vi.fn().mockResolvedValue({
     organization: { id: "00000000-0000-4000-8000-000000000901", name: "Joined Team", inviteCode: "PQRTU-VWXY3" },
-    entries: [{ rank: 1, user: { id: user.id, name: user.name }, durationSeconds: 0, sessionCount: 0 }],
+    entries: [{ rank: 1, user: { id: user.id, name: user.name }, durationSeconds: 0, sessionCount: 0, activeSeconds: 0, agentSeconds: 0 }],
   }),
   // The default is "the host cannot report": every recording surface stays
   // quiet rather than claiming something it cannot see.
@@ -916,7 +916,7 @@ describe("the team board", () => {
   preferencesSet: vi.fn().mockResolvedValue({ scope: "all", range: "30d" }),
   orgOverview: vi.fn().mockResolvedValue({
         organization: { id: "00000000-0000-4000-8000-000000000900", name: "SIQstack", inviteCode: "ACDEF-GHJKM" },
-        entries: [{ rank: 1, user: { id: user.id, name: user.name }, durationSeconds: 0, sessionCount: 0 }],
+        entries: [{ rank: 1, user: { id: user.id, name: user.name }, durationSeconds: 0, sessionCount: 0, activeSeconds: 0, agentSeconds: 0 }],
       }),
     });
     const person = userEvent.setup();

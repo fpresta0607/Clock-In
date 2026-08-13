@@ -1335,7 +1335,13 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                           {entry.user.name}
                           {entry.user.id === ready.user.id && <span className="you-tag"> you</span>}
                         </span>
-                        <span className="board-hours">{formatHuman(entry.durationSeconds)}</span>
+                        <span className="board-times">
+                          <span className="board-hours">{formatHuman(entry.activeSeconds)}</span>
+                          <span className="board-agent">
+                            Agent {formatHuman(entry.agentSeconds)}
+                            {leverage(entry) !== null && ` · ${leverage(entry)}×`}
+                          </span>
+                        </span>
                       </button>
                     </li>
                   ))}
