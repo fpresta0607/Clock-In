@@ -30,7 +30,7 @@ use tokio::sync::Mutex;
 
 use api::{
     ApiClient, ApiResult, BridgeError, ErrorKind, LeaderboardEntry, MeStats, Organization,
-    TimerProject, TimerUser,
+    ProjectUsage, TimerProject, TimerUser,
 };
 use monitor::{MonitorSettings, MonitorStatus, SettingsPatch};
 use recovery::RecoveryState;
@@ -485,6 +485,52 @@ async fn project_create(
     state.client.create_project(&access_token, name).await
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectUpdateInput {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    is_archived: Option<bool>,
+}
+
+#[tauri::command]
+async fn project_update(
+    state: State<'_, AppState>,
+    id: String,
+    input: ProjectUpdateInput,
+) -> ApiResult<TimerProject> {
+    let access_token = state.access_token().await?;
+    state
+        .client
+        .update_project(
+            &access_token,
+            &id,
+            input.name.as_deref().map(str::trim),
+            input.is_archived,
+        )
+        .await
+}
+
+#[tauri::command]
+async fn project_usage(state: State<'_, AppState>, id: String) -> ApiResult<ProjectUsage> {
+    let access_token = state.access_token().await?;
+    state.client.project_usage(&access_token, &id).await
+}
+
+#[tauri::command]
+async fn project_delete(
+    state: State<'_, AppState>,
+    id: String,
+    reassign_to: Option<String>,
+) -> ApiResult<()> {
+    let access_token = state.access_token().await?;
+    state
+        .client
+        .delete_project(&access_token, &id, reassign_to.as_deref())
+        .await
+}
+
 /// Set once the exit flush starts. `AppHandle::exit` itself re-triggers
 /// `RunEvent::ExitRequested`, and this is what tells that second request —
 /// ours — apart from the user's, so it is let through instead of starting
@@ -669,6 +715,9 @@ pub fn run() {
             me_stats,
             app_icons,
             project_create,
+            project_update,
+            project_usage,
+            project_delete,
         ])
         .build(tauri::generate_context!())
         .expect("the Clock-In desktop host failed to start")

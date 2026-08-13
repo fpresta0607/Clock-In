@@ -11,9 +11,14 @@ vi.mock("./WebGLShader.js", () => ({ WebGLShader: () => null }));
 
 const organization = { id: "00000000-0000-4000-8000-000000000001", name: "SIQstack", inviteCode: "ACDEF-GHJKM" };
 
+const noMeasurement = {
+  concurrency: { t0Seconds: 0, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
+  byAgent: [] as never[],
+};
+
 const entries = [
-  { rank: 1, user: { id: "u1", name: "Sam" }, durationSeconds: 7_200, sessionCount: 3, attributedSeconds: 5_400, unattributedSeconds: 1_800 },
-  { rank: 2, user: { id: "u2", name: "Alex" }, durationSeconds: 3_600, sessionCount: 1, attributedSeconds: 3_600, unattributedSeconds: 0 },
+  { rank: 1, user: { id: "u1", name: "Sam" }, durationSeconds: 7_200, sessionCount: 3, attributedSeconds: 5_400, unattributedSeconds: 1_800, activeSeconds: 8_040, agentSeconds: 10_800, ...noMeasurement },
+  { rank: 2, user: { id: "u2", name: "Alex" }, durationSeconds: 3_600, sessionCount: 1, attributedSeconds: 3_600, unattributedSeconds: 0, activeSeconds: 3_600, agentSeconds: 0, ...noMeasurement },
 ];
 
 /// The signed-in viewer is Alex, so the board highlights u2 by default.
@@ -24,6 +29,10 @@ const memberStats = {
   totalDurationSeconds: 7_200,
   attributedSeconds: 5_400,
   unattributedSeconds: 1_800,
+  activeSeconds: 7_200,
+  agentSeconds: 3_600,
+  concurrency: { t0Seconds: 3_600, t1Seconds: 3_600, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
+  byAgent: [{ source: "claude_code", model: null, durationSeconds: 3_600 }],
   projects: [
     { project: { id: "p1", name: "General" }, durationSeconds: 7_200, attributedSeconds: 5_400, unattributedSeconds: 1_800, sessionCount: 3 },
   ],
@@ -41,9 +50,13 @@ function clientFor(overrides: Partial<Client> = {}): Client {
     signUp: vi.fn().mockResolvedValue(undefined),
     signOut: vi.fn().mockResolvedValue(undefined),
     organization: vi.fn().mockResolvedValue({ organization }),
-    leaderboard: vi.fn().mockResolvedValue({ entries, totalDurationSeconds: 10_800, filters: {} }),
+    leaderboard: vi.fn().mockResolvedValue({ entries, totalDurationSeconds: 10_800, medianSessionSeconds: 1_800, filters: {} }),
     me: vi.fn().mockResolvedValue({ user: self }),
     meStats: vi.fn().mockResolvedValue(memberStats),
+    projects: vi.fn().mockResolvedValue({ projects: [{ id: "p1", name: "General", createdAt: "2026-08-10T12:00:00.000Z", isArchived: false, isDefault: true }], selectedProjectId: null }),
+    preferences: vi.fn().mockResolvedValue({ scope: "all", range: "30d" }),
+    updatePreferences: vi.fn().mockResolvedValue({ scope: "all", range: "30d" }),
+    report: vi.fn().mockResolvedValue({ rows: [], totalDurationSeconds: 0, filters: {}, pagination: { page: 1, pageSize: 25, totalRows: 0, totalPages: 0 } }),
     joinOrganization: vi.fn().mockResolvedValue(undefined),
     restoreSession: vi.fn().mockResolvedValue(false),
     ...overrides,
@@ -60,17 +73,18 @@ async function signIn(client: Client) {
 }
 
 describe("dashboard", () => {
-  it("ranks the team in human-readable hours after signing in", async () => {
+  it("ranks the team by active hours, with agent time as its own muted line", async () => {
     await signIn(clientFor());
 
     expect(await screen.findByRole("heading", { name: "SIQstack" })).toBeInTheDocument();
     const board = within(screen.getByRole("region", { name: "Leaderboard" }));
     const [first, second] = await board.findAllByRole("listitem");
     expect(first).toHaveTextContent("Sam");
-    expect(first).toHaveTextContent("2 hr");
+    expect(first).toHaveTextContent("2h 14m");
+    // Sam's 3h of agent runtime reads as leverage, never as hours worked.
+    expect(first).toHaveTextContent("Agent 3h 00m · 1.3×");
     expect(second).toHaveTextContent("Alex");
-    expect(second).toHaveTextContent("1 hr");
-    expect(board.getByText("3 hr total")).toBeInTheDocument();
+    expect(second).toHaveTextContent("1h 00m");
   });
 
   it("shows the invite code and copies it on request", async () => {
@@ -121,9 +135,10 @@ describe("dashboard", () => {
     const person = await signIn(clientFor({ leaderboard }));
     await screen.findByRole("heading", { name: "SIQstack" });
 
-    await person.click(screen.getByRole("button", { name: "This week" }));
+    const callsBefore = leaderboard.mock.calls.length;
+    await person.click(screen.getByRole("button", { name: "7d" }));
 
-    await waitFor(() => expect(leaderboard).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(leaderboard.mock.calls.length).toBeGreaterThan(callsBefore));
     const query = new URLSearchParams(leaderboard.mock.calls.at(-1)?.[0]);
     expect(query.get("fromAt")).not.toBeNull();
     expect(query.get("toExclusiveAt")).not.toBeNull();
@@ -142,7 +157,7 @@ describe("dashboard", () => {
   it("uses local calendar midnights across a daylight-saving boundary", () => {
     // 2026-03-08 is the US spring-forward Sunday; the week began Monday the 2nd.
     const now = new Date(2026, 2, 8, 12);
-    const query = new URLSearchParams(rangeQuery("week", now));
+    const query = new URLSearchParams(rangeQuery("7d", now));
     const from = new Date(query.get("fromAt")!);
     const toExclusive = new Date(query.get("toExclusiveAt")!);
 
@@ -274,8 +289,8 @@ describe("dashboard", () => {
     }));
 
     expect(await screen.findByRole("heading", { name: "SIQstack" })).toBeInTheDocument();
-    expect(screen.getByText("ACDEF-GHJKM")).toBeInTheDocument();
-    expect(screen.getByRole("alert")).toHaveTextContent("would not accept");
+    expect(await screen.findByText("ACDEF-GHJKM")).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("would not accept");
   });
 
   it("distinguishes a card that failed to load from a range with nothing in it", async () => {
@@ -288,8 +303,7 @@ describe("dashboard", () => {
     const board = within(await screen.findByRole("region", { name: "Leaderboard" }));
     expect(await board.findByText("Could not load hours for this range.")).toBeInTheDocument();
     // A zero total is a claim about the data; nothing was loaded to claim it from.
-    expect(board.queryByText("No recorded time in this range yet.")).not.toBeInTheDocument();
-    expect(board.getByText("Not loaded")).toBeInTheDocument();
+    expect(board.queryByText(/No recorded time in this range yet/)).not.toBeInTheDocument();
     expect(await board.findByText("Could not load this member's breakdown.")).toBeInTheDocument();
   });
 
@@ -299,7 +313,7 @@ describe("dashboard", () => {
       meStats: vi.fn().mockResolvedValue({ ...memberStats, totalDurationSeconds: 0, projects: [], apps: [] }),
     }));
 
-    expect(await screen.findByText("No recorded time in this range yet.")).toBeInTheDocument();
+    expect(await screen.findByText(/No recorded time in this range yet/)).toBeInTheDocument();
     expect(await screen.findByText("No recorded time in this range.")).toBeInTheDocument();
   });
 
@@ -309,14 +323,18 @@ describe("dashboard", () => {
     const board = within(await screen.findByRole("region", { name: "Leaderboard" }));
     // You are the highlighted row from the start.
     expect(await board.findByRole("button", { name: /Alex/ })).toHaveAttribute("aria-pressed", "true");
-    const stats = within(await screen.findByRole("region", { name: /Alex · Today/ }));
-    // The project row repeats the number, so pin the headline figure.
-    expect(await stats.findByText("2 hr", { selector: "strong" })).toBeInTheDocument();
+    const stats = within(await screen.findByRole("region", { name: /Alex · Last 30 days/ }));
+    // The headline is active time; the project row repeats other numbers.
+    expect(await stats.findByText("2h 00m", { selector: "strong" })).toBeInTheDocument();
+    // The two cuts stay visibly apart: concurrency sums to active time, the
+    // by-agent split sums to agent time.
+    expect(stats.getByTestId("concurrency-line")).toHaveTextContent("Unassisted 1h 00m · 1 agent 1h 00m");
+    expect(stats.getByTestId("by-agent-line")).toHaveTextContent("Claude Code 1h 00m");
     expect(stats.getByText("General")).toBeInTheDocument();
     // claude.exe reads as the tool it is, so the team sees Claude usage plainly.
     expect(stats.getByText("Claude Code")).toBeInTheDocument();
     expect(stats.getByText("VS Code")).toBeInTheDocument();
-    expect(stats.getByText(/30 min of that landed in the default project/)).toBeInTheDocument();
+    expect(stats.getByText(/30m of that landed in the default project/)).toBeInTheDocument();
   });
 
   it("follows whichever member gets picked on the board", async () => {
@@ -326,7 +344,7 @@ describe("dashboard", () => {
     const board = within(await screen.findByRole("region", { name: "Leaderboard" }));
     await person.click(await board.findByRole("button", { name: /Sam/ }));
 
-    expect(await screen.findByRole("region", { name: /Sam · Today/ })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: /Sam · Last 30 days/ })).toBeInTheDocument();
     const query = new URLSearchParams((meStats.mock.calls.at(-1)?.[0] as string).replace(/^\?/, ""));
     expect(query.get("userId")).toBe("u1");
     expect(query.get("fromAt")).not.toBeNull();
@@ -380,7 +398,10 @@ describe("dashboard", () => {
   it("hides the join prompt once the workspace has more than one member", async () => {
     await signIn(clientFor());
 
-    await screen.findByRole("heading", { name: "Leaderboard" });
+    // Wait for the board itself; before the entries land the join prompt may
+    // legitimately flash for a workspace that still looks empty.
+    const board = within(await screen.findByRole("region", { name: "Leaderboard" }));
+    await board.findByText("Sam");
     expect(screen.queryByRole("heading", { name: "Joining a teammate?" })).not.toBeInTheDocument();
   });
 });

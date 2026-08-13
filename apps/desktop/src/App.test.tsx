@@ -71,11 +71,19 @@ const recording = {
   },
 };
 
+const noMeasurement = {
+  activeSeconds: 0,
+  agentSeconds: 0,
+  concurrency: { t0Seconds: 0, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
+  byAgent: [] as never[],
+};
+
 const meStats = {
   filters: {},
   totalDurationSeconds: 7_200,
   attributedSeconds: 5_400,
   unattributedSeconds: 1_800,
+  ...noMeasurement,
   projects: [{
     project: { id: project.id, name: project.name },
     durationSeconds: 7_200,
@@ -122,6 +130,9 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   settingsUpdate: vi.fn().mockResolvedValue(settings),
   meStats: vi.fn().mockResolvedValue(meStats),
   projectCreate: vi.fn().mockResolvedValue(newProject),
+  projectUpdate: vi.fn().mockResolvedValue(project),
+  projectUsage: vi.fn().mockResolvedValue({ sessionCount: 0, durationSeconds: 0, agentSessionCount: 0 }),
+  projectDelete: vi.fn().mockResolvedValue(undefined),
   appIcons: vi.fn().mockResolvedValue({}),
   quotaStatus: vi.fn().mockResolvedValue({ status: "ready", checkedAt: null, detail: null, providers: [] }),
   onUpdateAvailable: vi.fn().mockResolvedValue(() => undefined),
@@ -393,9 +404,9 @@ describe("today", () => {
     const panel = await openAllStats(person);
     // The card renders before the stats land, so wait for the figure itself.
     // The project row underneath repeats the number, so pin the headline.
-    expect(await within(panel).findByText("2 hr", { selector: "strong" })).toBeInTheDocument();
+    expect(await within(panel).findByText("2h 00m", { selector: "strong" })).toBeInTheDocument();
     expect(within(panel).getByTestId("unattributed-foot")).toHaveTextContent(
-      "30 min of that landed in the default project, because nothing said which project it was for.",
+      "30m of that landed in the default project, because nothing said which project it was for.",
     );
   });
 
@@ -603,18 +614,18 @@ describe("the today panel", () => {
     // Time consolidates under the projects the monitor filed it into.
     const projects = within(await screen.findByTestId("project-list")).getAllByRole("listitem");
     expect(projects[0]).toHaveTextContent("Field work");
-    expect(projects[0]).toHaveTextContent("1 hr 30 min");
+    expect(projects[0]).toHaveTextContent("1h 30m");
     expect(projects[1]).toHaveTextContent("Client work");
-    expect(projects[1]).toHaveTextContent("15 min");
+    expect(projects[1]).toHaveTextContent("15m");
 
     const rows = within(screen.getByTestId("session-app-list")).getAllByRole("listitem");
     // Heaviest first, agent CLIs named by their runtime rather than their exe.
     expect(rows[0]).toHaveTextContent("Claude Code");
-    expect(rows[0]).toHaveTextContent("1 hr");
+    expect(rows[0]).toHaveTextContent("1h 00m");
     expect(rows[1]).toHaveTextContent("Google Chrome");
-    expect(rows[1]).toHaveTextContent("30 min");
+    expect(rows[1]).toHaveTextContent("30m");
     expect(rows[2]).toHaveTextContent("VS Code");
-    expect(rows[2]).toHaveTextContent("15 min");
+    expect(rows[2]).toHaveTextContent("15m");
   });
 
   it("keeps agent runtimes on their own rows instead of folding them together", async () => {
@@ -653,7 +664,7 @@ describe("the today panel", () => {
 
     const projects = within(await screen.findByTestId("project-list")).getAllByRole("listitem");
     expect(projects[0]).toHaveTextContent("Field work");
-    expect(projects[0]).toHaveTextContent(/sec/);
+    expect(projects[0]).toHaveTextContent(/\d+s/);
   });
 
   it("counts the still-open span so the app in front is neither frozen nor missing", async () => {
@@ -674,7 +685,7 @@ describe("the today panel", () => {
     // The open app appears at all - the server has never heard of it - and
     // outranks the app the server does know about.
     expect(rows[0]).toHaveTextContent("Windows Terminal");
-    expect(rows[0]).toHaveTextContent("2 min");
+    expect(rows[0]).toHaveTextContent("2m");
     expect(rows[1]).toHaveTextContent("VS Code");
   });
 

@@ -1,4 +1,17 @@
-import type { LeaderboardResponse, MeResponse, MeStatsResponse, OrganizationResponse, ReportResponse } from "@clock-in/shared";
+import type {
+  LeaderboardResponse,
+  MeResponse,
+  MeStatsResponse,
+  OrganizationResponse,
+  ProjectDeleteRequest,
+  ProjectListItem,
+  ProjectListResponse,
+  ProjectUpdateRequest,
+  ProjectUsageResponse,
+  ReportResponse,
+  ViewPreferences,
+  ViewPreferencesUpdate,
+} from "@clock-in/shared";
 
 /**
  * Talks to Neon Auth and the Clock-In API from the browser.
@@ -217,6 +230,43 @@ export function createClient(config: ClientConfig) {
     me: () => json<MeResponse>("/me"),
     /** One member's breakdown; `userId` in the query names a teammate. */
     meStats: (query = "") => json<MeStatsResponse>(`/me/stats${query}`),
+
+    /** The scope+range view state shared with the desktop app. */
+    preferences: () => json<ViewPreferences>("/me/preferences"),
+    async updatePreferences(patch: ViewPreferencesUpdate): Promise<ViewPreferences> {
+      const response = await apiRequest("/me/preferences", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      return response.json() as Promise<ViewPreferences>;
+    },
+
+    projects: () => json<ProjectListResponse>("/projects"),
+    async createProject(name: string): Promise<ProjectListItem> {
+      const response = await apiRequest("/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      return response.json() as Promise<ProjectListItem>;
+    },
+    async updateProject(id: string, patch: ProjectUpdateRequest): Promise<ProjectListItem> {
+      const response = await apiRequest(`/projects/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      return response.json() as Promise<ProjectListItem>;
+    },
+    projectUsage: (id: string) => json<ProjectUsageResponse>(`/projects/${id}/usage`),
+    async deleteProject(id: string, body: ProjectDeleteRequest): Promise<void> {
+      await apiRequest(`/projects/${id}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    },
   };
 }
 

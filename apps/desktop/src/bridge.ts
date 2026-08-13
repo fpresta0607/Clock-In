@@ -174,8 +174,35 @@ export type MeStats = {
   totalDurationSeconds: number;
   attributedSeconds: number;
   unattributedSeconds: number;
+  /// Union of the member's working intervals - never exceeds wall clock.
+  activeSeconds: number;
+  /// Summed agent runtime; exceeding activeSeconds is leverage, not an error.
+  agentSeconds: number;
+  concurrency: MeStatsConcurrency;
+  byAgent: readonly MeStatsAgentSplit[];
   projects: readonly MeStatsProject[];
   apps: readonly MeStatsApp[];
+};
+
+export type MeStatsConcurrency = {
+  t0Seconds: number;
+  t1Seconds: number;
+  t2Seconds: number;
+  t3PlusSeconds: number;
+  awaySeconds: number;
+};
+
+export type MeStatsAgentSplit = {
+  source: string;
+  model: string | null;
+  durationSeconds: number;
+};
+
+/// What deleting a project takes with it.
+export type ProjectUsage = {
+  sessionCount: number;
+  durationSeconds: number;
+  agentSessionCount: number;
 };
 
 export type MeStatsApp = {
@@ -217,6 +244,10 @@ export interface TimerBridge {
   /// member's breakdown; absent means the caller.
   meStats(fromAt?: string, toExclusiveAt?: string, userId?: string): Promise<MeStats>;
   projectCreate(input: ProjectCreateInput): Promise<TimerProject>;
+  projectUpdate(id: string, input: { name?: string; isArchived?: boolean }): Promise<TimerProject>;
+  projectUsage(id: string): Promise<ProjectUsage>;
+  /// Deletes a project; reassignTo moves its data to another project first.
+  projectDelete(id: string, reassignTo: string | null): Promise<void>;
   /// OS icons for executables, as data URIs; null where the OS has none.
   appIcons(processNames: readonly string[]): Promise<Record<string, string | null>>;
   /// How much of each coding agent's plan is left, read locally. Advisory:
@@ -537,12 +568,33 @@ const decodeMeStatsApp = (value: unknown): MeStatsApp => {
   };
 };
 
+const decodeConcurrency = (value: unknown): MeStatsConcurrency => {
+  const candidate = record(value);
+  return {
+    t0Seconds: nonnegativeInteger(candidate.t0Seconds),
+    t1Seconds: nonnegativeInteger(candidate.t1Seconds),
+    t2Seconds: nonnegativeInteger(candidate.t2Seconds),
+    t3PlusSeconds: nonnegativeInteger(candidate.t3PlusSeconds),
+    awaySeconds: nonnegativeInteger(candidate.awaySeconds),
+  };
+};
+
+const decodeAgentSplit = (value: unknown): MeStatsAgentSplit => {
+  const candidate = record(value);
+  return {
+    source: string(candidate.source),
+    model: stringOrNull(candidate.model ?? null),
+    durationSeconds: nonnegativeInteger(candidate.durationSeconds),
+  };
+};
+
 export const decodeMeStats = (value: unknown): MeStats => {
   const candidate = record(value);
   const filters = record(candidate.filters);
   const projects = candidate.projects;
   const apps = candidate.apps;
-  if (!Array.isArray(projects) || !Array.isArray(apps)) invalidResponse();
+  const byAgent = candidate.byAgent;
+  if (!Array.isArray(projects) || !Array.isArray(apps) || !Array.isArray(byAgent)) invalidResponse();
   const totalDurationSeconds = nonnegativeInteger(candidate.totalDurationSeconds);
   const attributedSeconds = nonnegativeInteger(candidate.attributedSeconds);
   if (attributedSeconds > totalDurationSeconds) invalidResponse();
@@ -551,8 +603,21 @@ export const decodeMeStats = (value: unknown): MeStats => {
     totalDurationSeconds,
     attributedSeconds,
     unattributedSeconds: nonnegativeInteger(candidate.unattributedSeconds),
+    activeSeconds: nonnegativeInteger(candidate.activeSeconds),
+    agentSeconds: nonnegativeInteger(candidate.agentSeconds),
+    concurrency: decodeConcurrency(candidate.concurrency),
+    byAgent: (byAgent as unknown[]).map(decodeAgentSplit),
     projects: (projects as unknown[]).map(decodeMeStatsProject),
     apps: (apps as unknown[]).map(decodeMeStatsApp),
+  };
+};
+
+export const decodeProjectUsage = (value: unknown): ProjectUsage => {
+  const candidate = record(value);
+  return {
+    sessionCount: nonnegativeInteger(candidate.sessionCount),
+    durationSeconds: nonnegativeInteger(candidate.durationSeconds),
+    agentSessionCount: nonnegativeInteger(candidate.agentSessionCount),
   };
 };
 
@@ -586,6 +651,9 @@ export const defaultBridge: TimerBridge = {
   settingsUpdate: (input) => invokeDecoded("settings_update", decodeMonitorSettings, { input }),
   meStats: (fromAt, toExclusiveAt, userId) => invokeDecoded("me_stats", decodeMeStats, { fromAt, toExclusiveAt, userId }),
   projectCreate: (input) => invokeDecoded("project_create", decodeProject, { input }),
+  projectUpdate: (id, input) => invokeDecoded("project_update", decodeProject, { id, input }),
+  projectUsage: (id) => invokeDecoded("project_usage", decodeProjectUsage, { id }),
+  projectDelete: (id, reassignTo) => invokeDecoded("project_delete", decodeVoid, { id, reassignTo }),
   appIcons: (processNames) => invokeDecoded("app_icons", decodeAppIcons, { processNames }),
   quotaStatus: () => invokeDecoded("quota_status", decodeQuotaSnapshot),
   onUpdateAvailable: async (handler) => {

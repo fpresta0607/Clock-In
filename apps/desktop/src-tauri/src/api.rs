@@ -247,6 +247,15 @@ struct PathMappingListResponse {
     mappings: Vec<PathMapping>,
 }
 
+/// What deleting a project takes with it, as `/projects/:id/usage` reports it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectUsage {
+    pub session_count: u64,
+    pub duration_seconds: u64,
+    pub agent_session_count: u64,
+}
+
 /// The `GET /me/stats` response: the reporting service's attribution totals
 /// scoped to the caller.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -563,6 +572,71 @@ impl ApiClient {
             color: body.color,
             created_at: body.created_at,
         })
+    }
+
+    /// Renames or archives a project via `PATCH /projects/:id`.
+    pub async fn update_project(
+        &self,
+        access_token: &str,
+        id: &str,
+        name: Option<&str>,
+        is_archived: Option<bool>,
+    ) -> ApiResult<TimerProject> {
+        let mut body = serde_json::Map::new();
+        if let Some(name) = name {
+            body.insert("name".into(), serde_json::json!(name));
+        }
+        if let Some(is_archived) = is_archived {
+            body.insert("isArchived".into(), serde_json::json!(is_archived));
+        }
+        let response = self
+            .http
+            .patch(format!("{}/projects/{id}", self.api_base_url))
+            .bearer_auth(access_token)
+            .json(&serde_json::Value::Object(body))
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+        if !response.status().is_success() {
+            return Err(classify(response.status().as_u16()));
+        }
+        let body: ProjectListItem = response
+            .json()
+            .await
+            .map_err(|_| BridgeError::unknown("The project response could not be read."))?;
+        Ok(TimerProject {
+            id: body.id,
+            name: body.name,
+            color: body.color,
+            created_at: body.created_at,
+        })
+    }
+
+    /// What deleting the project would take with it, for the confirm dialog.
+    pub async fn project_usage(&self, access_token: &str, id: &str) -> ApiResult<ProjectUsage> {
+        self.get_json(access_token, &format!("/projects/{id}/usage"))
+            .await
+    }
+
+    /// Deletes a project; `reassign_to` moves its data to another project first.
+    pub async fn delete_project(
+        &self,
+        access_token: &str,
+        id: &str,
+        reassign_to: Option<&str>,
+    ) -> ApiResult<()> {
+        let response = self
+            .http
+            .delete(format!("{}/projects/{id}", self.api_base_url))
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({ "reassignTo": reassign_to }))
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        Err(classify(response.status().as_u16()))
     }
 
     /// Uploads one batch of finished sessions (at most 500 rows; the caller

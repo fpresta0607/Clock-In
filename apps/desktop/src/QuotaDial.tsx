@@ -36,15 +36,22 @@ export const planLabel = (plan: string): string => {
     .join(" ");
 };
 
-/// A reset time in the user's locale. Providers write these in their own
-/// dialects, so anything unparseable is simply not shown. The time stays in
-/// alongside the date: a session window can run out this afternoon, and a bare
-/// date would read as a whole day of headroom that is not there.
+/// A reset time in the user's locale, kept short enough for a narrow cell:
+/// a same-day reset shows only its time ("7:00 PM"), anything later only its
+/// date ("Aug 16"). Providers write these in their own dialects, so anything
+/// unparseable is simply not shown.
 const resetLabel = (resetsAt: string | null): string | undefined => {
   if (resetsAt === null) return undefined;
   const parsed = Date.parse(resetsAt);
   if (Number.isNaN(parsed)) return undefined;
-  return new Date(parsed).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const resets = new Date(parsed);
+  const now = new Date();
+  const isToday = resets.getFullYear() === now.getFullYear()
+    && resets.getMonth() === now.getMonth()
+    && resets.getDate() === now.getDate();
+  return isToday
+    ? resets.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : resets.toLocaleDateString([], { month: "short", day: "numeric" });
 };
 
 /// One window as the detail prints it: "27% left the week".
@@ -99,7 +106,7 @@ export const QuotaDial = ({ agentLabel, quota, pending = false }: QuotaDialProps
   const resets = reading?.binding === undefined ? undefined : resetLabel(reading.binding.resetsAt);
   const untilLine = reading?.binding === undefined
     ? undefined
-    : resets === undefined ? reading.binding.label : `left until ${resets}`;
+    : resets === undefined ? reading.binding.label : `til ${resets}`;
 
   const label = reading === undefined
     ? `${agentLabel} quota unknown. ${detail} Show quota detail.`

@@ -329,6 +329,8 @@ export const reportFiltersSchema = z
     toExclusiveAt: timestampSchema.optional(),
     projectId: idSchema.optional(),
     userId: idSchema.optional(),
+    /** The dashboard scope; `projectId` remains for callers that already name one. */
+    scope: projectScopeSchema.optional(),
     page: z.coerce.number().int().min(1).max(10_000).default(1),
     pageSize: z.coerce.number().int().min(1).max(200).default(50),
   })

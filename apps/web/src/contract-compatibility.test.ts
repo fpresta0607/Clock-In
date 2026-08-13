@@ -18,7 +18,7 @@ import { rangeQuery } from "./App.js";
  * fields existed. Deploy order is what fixes a live skew, but this keeps the two
  * halves of the contract from parting company in the first place.
  */
-const boundedRanges = ["today", "week"] as const;
+const boundedRanges = ["today", "7d", "30d", "90d"] as const;
 
 /** A member id shaped like the ones the leaderboard hands the drill-down. */
 const memberId = "b1c7e513-b094-4d4c-ae55-21790ae019a4";
