@@ -1059,11 +1059,26 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   // The by-agent split rides on the folded agent row as a muted note, one
   // part per model; it sums to agent time, never to the hours beside it.
   const boardAgentSplits = boardMeasurement?.byAgent ?? [];
-  const boardAgentNote = boardAgentSplits
-    .map((split) => `${split.model ?? sourceLabel(split.source)} ${formatHuman(split.durationSeconds)}`)
+  const boardAgentNotes = new Map<string, string>();
+  for (const split of boardAgentSplits) {
+    const part = `${split.model ?? sourceLabel(split.source)} ${formatHuman(split.durationSeconds)}`;
+    const existing = boardAgentNotes.get(split.source);
+    boardAgentNotes.set(split.source, existing === undefined ? part : `${existing} · ${part}`);
+  }
+  const boardHasAgentRow = boardAppRows.some((row) => row.agent);
+  const boardForegroundAgentSources = boardHasAgentRow
+    ? new Set(
+        (showingLiveDay ? liveApps : boardStats?.apps ?? [])
+          .map((app) => agentRuntimeForBinary(app.processName))
+          .filter((source): source is string => source !== undefined),
+      )
+    : new Set<string>();
+  const boardAgentNote = [...boardAgentNotes]
+    .filter(([source]) => boardForegroundAgentSources.has(source))
+    .map(([, note]) => note)
     .join(" · ");
-  const boardAgentSources = [...new Set(boardAgentSplits.map((split) => split.source))];
-  const boardAgentLabel = boardAgentSources.length === 1 ? sourceLabel(boardAgentSources[0] ?? "") : "Agent CLIs";
+  const boardBackgroundAgents = [...boardAgentNotes]
+    .filter(([source]) => !boardForegroundAgentSources.has(source));
   const boardProjectRows = showingLiveDay
     ? projectRows.map((row) => ({ id: row.key, name: row.name, durationSeconds: row.durationSeconds }))
     : (boardStats?.projects ?? [])
@@ -1396,7 +1411,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                     ))}
                   </ul>
                 )}
-                {boardAppRows.length === 0 && boardAgentNote === "" ? (
+                {boardAppRows.length === 0 && boardBackgroundAgents.length === 0 ? (
                   // Only the caller's own emptiness can be explained by this
                   // machine's recording state; a teammate's is just empty.
                   <p className="subtle" data-testid="today-empty">
@@ -1416,14 +1431,12 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                         )}
                       </li>
                     ))}
-                    {boardAgentNote !== "" && !boardAppRows.some((row) => row.agent) && (
-                      // Agents that only ran in the background have runtime
-                      // but no focused row to carry the note.
-                      <li className="app-row is-agent">
-                        <span className="app-name">{boardAgentLabel}</span>
-                        <span className="app-note" data-testid="agent-note">{boardAgentNote}</span>
+                    {boardBackgroundAgents.map(([source, note]) => (
+                      <li key={source} className="app-row is-agent">
+                        <span className="app-name">{sourceLabel(source)}</span>
+                        <span className="app-note" data-testid="agent-note">{note}</span>
                       </li>
-                    )}
+                    ))}
                   </ul>
                 )}
                 {boardUnattributedSeconds > 0 && (
