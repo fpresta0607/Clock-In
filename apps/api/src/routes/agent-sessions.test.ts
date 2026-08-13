@@ -29,8 +29,8 @@ const config = parseEnv({
   NODE_ENV: "test",
 });
 const users = {
-  [ids.user]: { id: ids.user, email: "alex@example.com", name: "Alex", organizationId: ids.organization },
-  [ids.otherUser]: { id: ids.otherUser, email: "blair@example.com", name: "Blair", organizationId: ids.otherOrganization },
+  [ids.user]: { id: ids.user, email: "alex@example.com", name: "Alex", organizationId: ids.organization, role: "member" as const },
+  [ids.otherUser]: { id: ids.otherUser, email: "blair@example.com", name: "Blair", organizationId: ids.otherOrganization, role: "member" as const },
 };
 
 let keys: Awaited<ReturnType<typeof createTestAuth>>["keys"];

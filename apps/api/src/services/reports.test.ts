@@ -25,7 +25,7 @@ const ids = {
   otherProject: "b1c7e513-b094-4d4c-ae55-21790ae019a4",
   session: "c1c7e513-b094-4d4c-ae55-21790ae019a4",
 };
-const subject: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.user };
+const subject: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.user, role: "member" };
 
 function row(overrides: Partial<ReportRowRecord> = {}): ReportRowRecord {
   return {

@@ -10,7 +10,7 @@ const ids = {
   otherUser: "f1c7e513-b094-4d4c-ae55-21790ae019a4",
   device: "9b1c7e51-3b09-44d4-ae55-21790ae019a4",
 };
-const subject: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.user };
+const subject: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.user, role: "member" };
 const now = new Date("2026-08-06T14:00:00.000Z");
 
 class MemorySegments implements ActivitySegmentRepository {
@@ -93,7 +93,7 @@ describe("activity service", () => {
 
   it("scopes rows to the uploading subject", async () => {
     const { segments, service } = createService();
-    const other: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.otherUser };
+    const other: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.otherUser, role: "member" };
     await service.upload(subject, [segment()]);
     await service.upload(other, [segment()]);
 

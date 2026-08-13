@@ -5,6 +5,7 @@ import { createProject, listProjects, type ProjectRepository } from "./projects.
 const subject = {
   organizationId: "0e59dfd6-3d1f-4795-9420-3ab65f0df843",
   userId: "e1c7e513-b094-4d4c-ae55-21790ae019a4",
+  role: "member" as const,
 };
 
 describe("project service", () => {

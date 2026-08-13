@@ -25,7 +25,7 @@ const config = parseEnv({
   AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
   NODE_ENV: "test",
 });
-const user = { id: ids.user, email: "alex@example.com", name: "Alex", organizationId: ids.organization };
+const user = { id: ids.user, email: "alex@example.com", name: "Alex", organizationId: ids.organization, role: "member" as const };
 
 let keys: Awaited<ReturnType<typeof createTestAuth>>["keys"];
 let bearerHeader: string;
