@@ -42,7 +42,7 @@ nothing did. Neither is hidden or penalized. That's the posture: guessing isn't 
 it's labelled.
 
 The other half of the deal is that the tracked person sees everything the manager sees.
-`GET /me/stats` runs the same attribution math as the org report, scoped to the caller, and
+`GET /me/stats` runs the same attribution math as the org report, and
 the desktop app has a "what's recorded" panel. Tracking you can interrogate is a tool;
 tracking you can't is surveillance.
 
@@ -186,7 +186,7 @@ that never fires `PBT_APMSUSPEND` reads as idle rather than suspended.
 ### The symmetry rule
 
 `GET /me/stats` runs the same attribution math over the same completed-session set
-as the organization report, scoped to the caller. The desktop app's **What
+as the organization report. The desktop app's **What
 Clock-In is recording** panel (the recording line on the main screen, or *See
 exactly what's recorded* in settings) shows live recording state, which evidence
 sources are switched on, and the collected and never-collected lists below, in the
@@ -223,7 +223,7 @@ A pnpm workspace. Contracts flow down; nothing flows back up.
 | **`packages/database`** | Drizzle schema, SQL migrations, the connection factory, and the migration runner. |
 | **`apps/api`** | Hono API: env validation, Neon Auth JWT verification, services (sessions, activity, agent sessions, attribution, reports), Drizzle repositories, CSV export. |
 | **`apps/desktop`** | The tray app. React UI over a Tauri 2 Rust host: `monitor.rs` (activity), `spool.rs` (shared with the hook binary), `uploader.rs`, `recovery.rs`, and the `clock-in-hook` bin target. |
-| **`apps/web`** | The dashboard: sign-up/sign-in, team leaderboard, recent sessions, installer downloads. |
+| **`apps/web`** | The dashboard: sign-up/sign-in, clickable team leaderboard with per-member breakdowns, installer downloads. |
 
 Routes stay thin, services own the rules, repositories own SQL. Every service is tested
 against explicit fakes, so the behavior suite needs no database.
@@ -307,7 +307,7 @@ organization are derived from verified claims, never from the request body.
 | `POST` | `/agent-sessions` | batch upload of agent lifecycle events |
 | `GET` `POST` `PATCH` `DELETE` | `/path-mappings`, `/path-mappings/:id` | map a path prefix to a project |
 | `GET` | `/reports`, `/reports/leaderboard`, `/reports/export.csv` | organization reporting |
-| `GET` | `/me/stats` | the caller's own totals, per project and per app |
+| `GET` | `/me/stats` | the caller's totals per project and per app; an optional `?userId=` opens a teammate's |
 
 **Invariants the server enforces**, not the client: a session must end after it starts and
 not in the future; it must start inside the 7-day freshness window; its idle seconds cannot
