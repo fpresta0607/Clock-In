@@ -1056,6 +1056,14 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const boardUnattributedSeconds = (showingLiveDay ? stats : boardStats)?.unattributedSeconds ?? 0;
   const boardMeasurement = showingLiveDay ? stats : boardStats;
   const boardAppRows = buildAppRows(showingLiveDay ? liveApps : boardStats?.apps ?? []);
+  // The by-agent split rides on the folded agent row as a muted note, one
+  // part per model; it sums to agent time, never to the hours beside it.
+  const boardAgentSplits = boardMeasurement?.byAgent ?? [];
+  const boardAgentNote = boardAgentSplits
+    .map((split) => `${split.model ?? sourceLabel(split.source)} ${formatHuman(split.durationSeconds)}`)
+    .join(" · ");
+  const boardAgentSources = [...new Set(boardAgentSplits.map((split) => split.source))];
+  const boardAgentLabel = boardAgentSources.length === 1 ? sourceLabel(boardAgentSources[0] ?? "") : "Agent CLIs";
   const boardProjectRows = showingLiveDay
     ? projectRows.map((row) => ({ id: row.key, name: row.name, durationSeconds: row.durationSeconds }))
     : (boardStats?.projects ?? [])
@@ -1367,9 +1375,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                 <p className="today-total"><strong>{formatHuman(boardTotalSeconds)}</strong> recorded</p>
                 {boardMeasurement !== undefined && (
                   <>
-                    {/* Two different cuts, kept apart on purpose: the
-                        concurrency split sums to active time; the by-agent
-                        split sums to agent time, never to hours worked. */}
                     <p className="member-line" data-testid="measurement-line">
                       Active {formatHuman(boardMeasurement.activeSeconds)}
                       {" · Agent "}{formatHuman(boardMeasurement.agentSeconds)}
@@ -1379,12 +1384,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                       {`Unassisted ${formatHuman(boardMeasurement.concurrency.t0Seconds)} · 1 agent ${formatHuman(boardMeasurement.concurrency.t1Seconds)} · 2 agents ${formatHuman(boardMeasurement.concurrency.t2Seconds)} · 3+ ${formatHuman(boardMeasurement.concurrency.t3PlusSeconds)}`}
                       {boardMeasurement.concurrency.awaySeconds > 0 && ` · agents while away ${formatHuman(boardMeasurement.concurrency.awaySeconds)}`}
                     </p>
-                    {boardMeasurement.byAgent.length > 0 && (
-                      <p className="member-line is-agents" data-testid="by-agent-line">
-                        {boardMeasurement.byAgent.map((split) =>
-                          `${sourceLabel(split.source)}${split.model === null ? "" : ` (${split.model})`} ${formatHuman(split.durationSeconds)}`).join(" · ")}
-                      </p>
-                    )}
                   </>
                 )}
                 {boardProjectRows.length > 0 && (
@@ -1397,7 +1396,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                     ))}
                   </ul>
                 )}
-                {boardAppRows.length === 0 ? (
+                {boardAppRows.length === 0 && boardAgentNote === "" ? (
                   // Only the caller's own emptiness can be explained by this
                   // machine's recording state; a teammate's is just empty.
                   <p className="subtle" data-testid="today-empty">
@@ -1406,14 +1405,25 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                 ) : (
                   <ul className="app-list" data-testid="member-app-list">
                     {boardAppRows.map((row) => (
-                      <li key={row.key} className="app-row">
+                      <li key={row.key} className={row.agent ? "app-row is-agent" : "app-row"}>
                         <span className="app-name">
                           {row.label}
                           {row.agent && viewingSelf && monitorStatus?.agentActive && <span className="app-active"> · active now</span>}
                         </span>
                         <span className="app-duration">{formatHuman(row.durationSeconds)}</span>
+                        {row.agent && boardAgentNote !== "" && (
+                          <span className="app-note" data-testid="agent-note">{boardAgentNote}</span>
+                        )}
                       </li>
                     ))}
+                    {boardAgentNote !== "" && !boardAppRows.some((row) => row.agent) && (
+                      // Agents that only ran in the background have runtime
+                      // but no focused row to carry the note.
+                      <li className="app-row is-agent">
+                        <span className="app-name">{boardAgentLabel}</span>
+                        <span className="app-note" data-testid="agent-note">{boardAgentNote}</span>
+                      </li>
+                    )}
                   </ul>
                 )}
                 {boardUnattributedSeconds > 0 && (

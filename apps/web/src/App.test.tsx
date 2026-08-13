@@ -32,7 +32,10 @@ const memberStats = {
   activeSeconds: 7_200,
   agentSeconds: 3_600,
   concurrency: { t0Seconds: 3_600, t1Seconds: 3_600, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
-  byAgent: [{ source: "claude_code", model: null, durationSeconds: 3_600 }],
+  byAgent: [
+    { source: "claude_code", model: "claude-fable-5", durationSeconds: 3_000 },
+    { source: "claude_code", model: null, durationSeconds: 600 },
+  ],
   projects: [
     { project: { id: "p1", name: "General" }, durationSeconds: 7_200, attributedSeconds: 5_400, unattributedSeconds: 1_800, sessionCount: 3 },
   ],
@@ -310,7 +313,7 @@ describe("dashboard", () => {
   it("says so plainly when a range has no recorded time", async () => {
     await signIn(clientFor({
       leaderboard: vi.fn().mockResolvedValue({ entries: [], totalDurationSeconds: 0, filters: {} }),
-      meStats: vi.fn().mockResolvedValue({ ...memberStats, totalDurationSeconds: 0, projects: [], apps: [] }),
+      meStats: vi.fn().mockResolvedValue({ ...memberStats, totalDurationSeconds: 0, projects: [], apps: [], byAgent: [] }),
     }));
 
     expect(await screen.findByText(/No recorded time in this range yet/)).toBeInTheDocument();
@@ -327,9 +330,10 @@ describe("dashboard", () => {
     // The headline is active time; the project row repeats other numbers.
     expect(await stats.findByText("2h 00m", { selector: "strong" })).toBeInTheDocument();
     // The two cuts stay visibly apart: concurrency sums to active time, the
-    // by-agent split sums to agent time.
+    // by-agent split rides on its runtime's row and sums to agent time.
     expect(stats.getByTestId("concurrency-line")).toHaveTextContent("Unassisted 1h 00m · 1 agent 1h 00m");
-    expect(stats.getByTestId("by-agent-line")).toHaveTextContent("Claude Code 1h 00m");
+    // A model names its own runtime; a null model falls back to the source label.
+    expect(stats.getByTestId("agent-note")).toHaveTextContent("claude-fable-5 50m · Claude Code 10m");
     expect(stats.getByText("General")).toBeInTheDocument();
     // claude.exe reads as the tool it is, so the team sees Claude usage plainly.
     expect(stats.getByText("Claude Code")).toBeInTheDocument();

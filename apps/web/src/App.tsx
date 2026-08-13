@@ -459,6 +459,17 @@ export const App = ({ client }: AppProps) => {
     .sort(boardSorters[boardSort])
     .map((entry, index) => ({ ...entry, rank: boardSort === "active" ? entry.rank : index + 1 }));
   const memberAppRows = memberStats === undefined ? [] : buildAppRows(memberStats.apps);
+  // The by-agent split rides on its runtime's own app row as a muted note,
+  // one per source; it sums to agent time, never to hours worked.
+  const agentNotes = new Map<MeStatsResponse["byAgent"][number]["source"], string>();
+  for (const split of memberStats?.byAgent ?? []) {
+    const part = `${split.model ?? agentRuntimeLabel(split.source)} ${formatHumanDuration(split.durationSeconds)}`;
+    const existing = agentNotes.get(split.source);
+    agentNotes.set(split.source, existing === undefined ? part : `${existing} · ${part}`);
+  }
+  // An agent that only ran in the background has runtime but no focused app
+  // row to carry its note, so it gets a row of its own.
+  const backgroundAgents = [...agentNotes].filter(([source]) => !memberAppRows.some((row) => row.key === source));
   const concurrencyLine = (stats: MeStatsResponse): string => {
     const parts = [
       `Unassisted ${formatHumanDuration(stats.concurrency.t0Seconds)}`,
@@ -619,16 +630,7 @@ export const App = ({ client }: AppProps) => {
                     {leverage(memberStats) !== null && ` · ${leverage(memberStats)}×`}
                   </span>
                 </p>
-                {/* Two different cuts, kept visibly apart: the concurrency
-                    split sums to active time; the by-agent split sums to
-                    agent time and never to hours worked. */}
                 <p className="member-line" data-testid="concurrency-line">{concurrencyLine(memberStats)}</p>
-                {memberStats.byAgent.length > 0 && (
-                  <p className="member-line is-agents" data-testid="by-agent-line">
-                    {memberStats.byAgent.map((split) =>
-                      `${agentRuntimeLabel(split.source)}${split.model === null ? "" : ` (${split.model})`} ${formatHumanDuration(split.durationSeconds)}`).join(" · ")}
-                  </p>
-                )}
                 {memberStats.projects.length > 0 && (
                   <ul className="stat-list">
                     {memberStats.projects.filter((entry) => entry.durationSeconds > 0).map((entry) => (
@@ -639,7 +641,7 @@ export const App = ({ client }: AppProps) => {
                     ))}
                   </ul>
                 )}
-                {memberAppRows.length === 0 ? (
+                {memberAppRows.length === 0 && backgroundAgents.length === 0 ? (
                   <p className="subtle">No recorded time in this range.</p>
                 ) : (
                   <ul className="stat-list stat-apps">
@@ -647,6 +649,15 @@ export const App = ({ client }: AppProps) => {
                       <li key={row.key} className="stat-row">
                         <span className={row.agent ? "stat-name is-agent" : "stat-name"}>{row.label}</span>
                         <span className="stat-duration">{formatHumanDuration(row.durationSeconds)}</span>
+                        {row.agent && agentNotes.has(row.key) && (
+                          <span className="stat-note" data-testid="agent-note">{agentNotes.get(row.key)}</span>
+                        )}
+                      </li>
+                    ))}
+                    {backgroundAgents.map(([source, note]) => (
+                      <li key={source} className="stat-row">
+                        <span className="stat-name is-agent">{agentRuntimeLabel(source)}</span>
+                        <span className="stat-note" data-testid="agent-note">{note}</span>
                       </li>
                     ))}
                   </ul>
