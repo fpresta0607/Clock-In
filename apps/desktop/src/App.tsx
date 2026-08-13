@@ -97,6 +97,26 @@ const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
   return [...kept, { key: "everything-else", label: "Everything else", durationSeconds: rest, agent: false }];
 };
 
+/// Only the buckets with time in them, in plain words: "Solo 1h 00m · 1
+/// agent 40m". Empty buckets and jargon both make the line harder to read.
+const concurrencyLine = (concurrency: {
+  t0Seconds: number;
+  t1Seconds: number;
+  t2Seconds: number;
+  t3PlusSeconds: number;
+  awaySeconds: number;
+}): string =>
+  ([
+    ["Solo", concurrency.t0Seconds],
+    ["1 agent", concurrency.t1Seconds],
+    ["2 agents", concurrency.t2Seconds],
+    ["3+ agents", concurrency.t3PlusSeconds],
+    ["Agents while away", concurrency.awaySeconds],
+  ] as const)
+    .filter(([, seconds]) => seconds > 0)
+    .map(([label, seconds]) => `${label} ${formatHuman(seconds)}`)
+    .join(" · ");
+
 /// Every sentence the main page says about recording, keyed by the one shared
 /// recording state. Keeping them in tables rather than inline conditionals is
 /// what stops a surface from asserting something the state never claimed.
@@ -1402,10 +1422,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                       {" · Agent "}{formatHuman(boardMeasurement.agentSeconds)}
                       {leverage(boardMeasurement) !== null && ` · ${leverage(boardMeasurement)}×`}
                     </p>
-                    <p className="member-line" data-testid="concurrency-line">
-                      {`Unassisted ${formatHuman(boardMeasurement.concurrency.t0Seconds)} · 1 agent ${formatHuman(boardMeasurement.concurrency.t1Seconds)} · 2 agents ${formatHuman(boardMeasurement.concurrency.t2Seconds)} · 3+ ${formatHuman(boardMeasurement.concurrency.t3PlusSeconds)}`}
-                      {boardMeasurement.concurrency.awaySeconds > 0 && ` · agents while away ${formatHuman(boardMeasurement.concurrency.awaySeconds)}`}
-                    </p>
+                    {concurrencyLine(boardMeasurement.concurrency) !== "" && (
+                      <p className="member-line" data-testid="concurrency-line">
+                        {concurrencyLine(boardMeasurement.concurrency)}
+                      </p>
+                    )}
                   </>
                 )}
                 {boardProjectRows.length > 0 && (

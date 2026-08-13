@@ -350,7 +350,9 @@ describe("dashboard", () => {
     expect(await stats.findByText("2h 00m", { selector: "strong" })).toBeInTheDocument();
     // The two cuts stay visibly apart: concurrency sums to active time, the
     // by-agent split rides on its runtime's row and sums to agent time.
-    expect(stats.getByTestId("concurrency-line")).toHaveTextContent("Unassisted 1h 00m · 1 agent 1h 00m");
+    // Plain words, and only the buckets with time in them - no "2 agents 0s".
+    expect(stats.getByTestId("concurrency-line")).toHaveTextContent("Solo 1h 00m · 1 agent 1h 00m");
+    expect(stats.getByTestId("concurrency-line")).not.toHaveTextContent("0s");
     // A model names its own runtime; a null model falls back to the source label.
     expect(stats.getByTestId("agent-note")).toHaveTextContent("claude-fable-5 50m · Claude Code 10m");
     expect(stats.getByText("General")).toBeInTheDocument();
@@ -358,6 +360,34 @@ describe("dashboard", () => {
     expect(stats.getByText("Claude Code")).toBeInTheDocument();
     expect(stats.getByText("VS Code")).toBeInTheDocument();
     expect(stats.getByText(/30m of that landed in the default project/)).toBeInTheDocument();
+  });
+
+  it("labels 3+ concurrency and away time in plain words", async () => {
+    await signIn(clientFor({
+      meStats: vi.fn().mockResolvedValue({
+        ...memberStats,
+        concurrency: { t0Seconds: 0, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 5_400, awaySeconds: 1_800 },
+      }),
+    }));
+
+    const stats = within(await screen.findByRole("region", { name: /Alex · Last 30 days/ }));
+    const line = stats.getByTestId("concurrency-line");
+    expect(line).toHaveTextContent("3+ agents 1h 30m · Agents while away 30m");
+    expect(line).not.toHaveTextContent("Solo");
+    expect(line).not.toHaveTextContent("2 agents");
+    expect(line).not.toHaveTextContent("0s");
+  });
+
+  it("hides the concurrency line when every bucket is empty", async () => {
+    await signIn(clientFor({
+      meStats: vi.fn().mockResolvedValue({
+        ...memberStats,
+        concurrency: { t0Seconds: 0, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
+      }),
+    }));
+
+    const stats = within(await screen.findByRole("region", { name: /Alex · Last 30 days/ }));
+    expect(stats.queryByTestId("concurrency-line")).not.toBeInTheDocument();
   });
 
   it("follows whichever member gets picked on the board", async () => {
