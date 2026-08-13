@@ -53,6 +53,7 @@ function clientFor(overrides: Partial<Client> = {}): Client {
     signUp: vi.fn().mockResolvedValue(undefined),
     signOut: vi.fn().mockResolvedValue(undefined),
     organization: vi.fn().mockResolvedValue({ organization }),
+    claimAdmin: vi.fn().mockRejectedValue(new ClientError("validation", "A workspace administrator already exists.")),
     leaderboard: vi.fn().mockResolvedValue({ entries, totalDurationSeconds: 10_800, medianSessionSeconds: 1_800, filters: {} }),
     me: vi.fn().mockResolvedValue({ user: self }),
     meStats: vi.fn().mockResolvedValue(memberStats),
@@ -337,6 +338,31 @@ describe("dashboard", () => {
 
     expect(await screen.findByText(/No recorded time in this range yet/)).toBeInTheDocument();
     expect(await screen.findByText("No recorded time in this range.")).toBeInTheDocument();
+  });
+
+  it("keeps the install hint beside a roster-only zero row", async () => {
+    await signIn(clientFor({
+      leaderboard: vi.fn().mockResolvedValue({
+        entries: [{ rank: 1, user: { id: "u2", name: "Alex" }, durationSeconds: 0, sessionCount: 0, attributedSeconds: 0, unattributedSeconds: 0, activeSeconds: 0, agentSeconds: 0, ...noMeasurement }],
+        totalDurationSeconds: 0,
+        filters: {},
+      }),
+    }));
+
+    const board = within(await screen.findByRole("region", { name: "Leaderboard" }));
+    expect(await board.findByText(/No recorded time in this range yet/)).toBeInTheDocument();
+    expect(await board.findByRole("button", { name: /Alex/ })).toHaveTextContent("0s");
+  });
+
+  it("claims the first admin role once on sign-in and swallows the existing-admin refusal", async () => {
+    const claimAdmin = vi.fn().mockRejectedValue(new ClientError("validation", "A workspace administrator already exists."));
+    await signIn(clientFor({ claimAdmin }));
+
+    expect(await screen.findByRole("heading", { name: "SIQstack" })).toBeInTheDocument();
+    expect(claimAdmin).toHaveBeenCalledTimes(1);
+    // A 409 once an admin exists is a silent no-op, never an error on screen.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText(/administrator already exists/)).not.toBeInTheDocument();
   });
 
   it("opens on your own breakdown, with agent tools folded into named rows", async () => {

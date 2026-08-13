@@ -51,6 +51,19 @@ describe("web client", () => {
     expect((apiCall?.[1]?.headers as Record<string, string>).authorization).toBe("Bearer jwt-restored");
   });
 
+  it("claims first admin with an authenticated POST to the claim-admin endpoint", async () => {
+    const { client, fetchMock } = clientWith(async (url) => {
+      if (url.endsWith("/token")) return jsonResponse({ token: "jwt-1" });
+      return jsonResponse({ user: { id: "u", role: "admin" } });
+    });
+
+    await client.claimAdmin();
+
+    const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/organization/claim-admin"));
+    expect(call?.[1]?.method).toBe("POST");
+    expect((call?.[1]?.headers as Record<string, string>).authorization).toBe("Bearer jwt-1");
+  });
+
   it("reports no session when the auth host rejects the cookie", async () => {
     const { client } = clientWith(async () => jsonResponse({}, 401));
 

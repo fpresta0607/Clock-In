@@ -73,6 +73,10 @@ class Reports implements ReportRepository {
     this.lastLeaderboardQuery = query;
     return this.leaderboardRows;
   }
+  public roster: { id: string; name: string }[] = [];
+  public async readMembersForOrganization() {
+    return this.roster;
+  }
   public async readProjectTotalsForMember(_subject: AuthenticatedSubject, query: ReportQuery) {
     this.lastProjectTotalsQuery = query;
     return this.projectTotals;
@@ -337,7 +341,7 @@ describe("leaderboard", () => {
     expect(result.entries.map((row) => row.rank)).toEqual([1, 1, 3]);
   });
 
-  it("keeps a scoped board free of members who only have presence", async () => {
+  it("lists every member on a scoped board, at zero when the scope has none of their time", async () => {
     const hour = (h: number): Date => new Date(Date.UTC(2026, 7, 5, h));
     const reports = new Reports();
     // Alex worked in the scoped project; Sam only had the machine on.
@@ -352,9 +356,28 @@ describe("leaderboard", () => {
 
     const result = await service.leaderboard(subject, { scope: ids.project });
 
-    // Presence carries no project, so Sam must not appear as a zero row.
-    expect(result.entries.map((entry) => entry.user.name)).toEqual(["Alex"]);
+    // A teammate outside the scope reads as a zero row, never as missing.
+    expect(result.entries.map((entry) => [entry.user.name, entry.activeSeconds])).toEqual([
+      ["Alex", 3_600],
+      ["Sam", 0],
+    ]);
     expect(reports.lastLeaderboardQuery?.projectId).toBe(ids.project);
+  });
+
+  it("lists a roster member with no recorded time at all as a zero row", async () => {
+    const reports = new Reports();
+    reports.roster = [
+      { id: ids.user, name: "Alex" },
+      { id: ids.otherUser, name: "Sam" },
+    ];
+    const service = createReportService({ reports, reaper: silentReaper });
+
+    const result = await service.leaderboard(subject, {});
+
+    expect(result.entries.map((entry) => [entry.user.name, entry.activeSeconds, entry.agentSeconds])).toEqual([
+      ["Alex", 0, 0],
+      ["Sam", 0, 0],
+    ]);
   });
 
   it("maps the unassigned scope onto default-attributed sessions", async () => {

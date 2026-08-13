@@ -171,6 +171,14 @@ export const App = ({ client }: AppProps) => {
     };
   }, [client]);
 
+  // Workspaces that predate roles have no administrator at all, which locks
+  // everyone out of project deletion. The first signed-in member claims the
+  // role; every later call is refused by the server and ignored here.
+  useEffect(() => {
+    if (!signedIn) return;
+    void client.claimAdmin().catch(() => undefined);
+  }, [client, signedIn]);
+
   // Who and where: identity, workspace, projects, and the shared view state.
   // Preferences land BEFORE the first board fetch so the page opens where the
   // desktop app last was, with no flicker through the defaults.
@@ -458,6 +466,9 @@ export const App = ({ client }: AppProps) => {
   }
 
   const activeTotal = entries.reduce((total, entry) => total + entry.activeSeconds, 0);
+  const boardHasTime = entries.some(
+    (entry) => entry.activeSeconds > 0 || entry.agentSeconds > 0 || entry.durationSeconds > 0,
+  );
   // Rank follows the column being sorted by; showing the server's active-time
   // rank under an agent-time sort reads as 1, 4, 2, 3.
   const sortedEntries = [...entries]
@@ -577,38 +588,43 @@ export const App = ({ client }: AppProps) => {
           <p className="subtle">Could not load hours for this range.</p>
         ) : loading && entries.length === 0 ? (
           <p className="subtle" role="status">Loading hours…</p>
-        ) : entries.length === 0 ? (
-          <p className="subtle">
-            {scope === "all"
-              ? "No recorded time in this range yet. Install the desktop app and it records on its own."
-              : "Nothing recorded here in this range. Pick another range, or All projects."}
-          </p>
         ) : (
-          <ol className="board-list">
-            {sortedEntries.map((entry) => (
-              <li key={entry.user.id} className={entry.user.id === viewedId ? "is-selected" : undefined}>
-                <button
-                  type="button"
-                  className="board-choice"
-                  aria-pressed={entry.user.id === viewedId}
-                  onClick={() => setMember({ id: entry.user.id, name: entry.user.name })}
-                >
-                  <span className="board-rank">{entry.rank}</span>
-                  <span className="board-name">
-                    {entry.user.name}
-                    {entry.user.id === selfId && <span className="you-tag"> you</span>}
-                  </span>
-                  <span className="board-times">
-                    <span className="board-hours">{formatHumanDuration(entry.activeSeconds)}</span>
-                    <span className="board-agent">
-                      Agent {formatHumanDuration(entry.agentSeconds)}
-                      {leverage(entry) !== null && ` · ${leverage(entry)}×`}
-                    </span>
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ol>
+          <>
+            {!boardHasTime && (
+              <p className="subtle">
+                {scope === "all"
+                  ? "No recorded time in this range yet. Install the desktop app and it records on its own."
+                  : "Nothing recorded here in this range. Pick another range, or All projects."}
+              </p>
+            )}
+            {entries.length > 0 && (
+              <ol className="board-list">
+                {sortedEntries.map((entry) => (
+                  <li key={entry.user.id} className={entry.user.id === viewedId ? "is-selected" : undefined}>
+                    <button
+                      type="button"
+                      className="board-choice"
+                      aria-pressed={entry.user.id === viewedId}
+                      onClick={() => setMember({ id: entry.user.id, name: entry.user.name })}
+                    >
+                      <span className="board-rank">{entry.rank}</span>
+                      <span className="board-name">
+                        {entry.user.name}
+                        {entry.user.id === selfId && <span className="you-tag"> you</span>}
+                      </span>
+                      <span className="board-times">
+                        <span className="board-hours">{formatHumanDuration(entry.activeSeconds)}</span>
+                        <span className="board-agent">
+                          Agent {formatHumanDuration(entry.agentSeconds)}
+                          {leverage(entry) !== null && ` · ${leverage(entry)}×`}
+                        </span>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </>
         )}
 
         {viewedId !== undefined && (

@@ -147,6 +147,9 @@ own. The concurrency split sums to active time and keeps its own line. One share
 `packages/shared/src/intervals.ts`, computes all of it so the invariants
 (`active = t0+t1+t2+t3+`, `agent = Σ n·tn + away`) hold everywhere.
 
+The board lists every member of the workspace, not just the people with recorded time: a
+teammate whose range has no evidence reads as `0s`, never as missing.
+
 The desktop app's **What's recorded** panel and the web dashboard's **How Clock-In works**
 dialog state these rules word for word.
 
@@ -347,6 +350,7 @@ organization are derived from verified claims, never from the request body.
 | `GET` | `/me` | the signed-in user |
 | `GET` | `/organization` | workspace name and invite code |
 | `POST` | `/organization/join` | move an account into another workspace |
+| `POST` | `/organization/claim-admin` | first signed-in member claims the administrator role in a workspace that has none; refused (`409`) once one exists |
 | `GET` | `/projects` | projects the caller belongs to; `?includeArchived=true` lists archived ones so an archive can be undone |
 | `POST` | `/projects` | create a project (case-insensitive duplicate names rejected, archived names included) |
 | `PATCH` | `/projects/:id` | inline rename or archive |
@@ -371,7 +375,10 @@ the batch still lands.
 Project names are case-insensitively unique, archived names included. The default project can
 be neither archived nor deleted — unattributed time lands there — and the last active project
 refuses deletion too; deleting a project is admin-only because it moves or destroys other
-members' sessions.
+members' sessions. Workspaces created before roles existed have no administrator at all,
+so the web dashboard calls `/organization/claim-admin` once on each signed-in boot; the
+first active member to make the call becomes the admin, and every later call is refused and
+silently ignored.
 
 **Attributed seconds** are a session's whole duration when its `attribution` is anything but
 `default`, and zero when it is. History can't be backfilled: a session that arrives more than

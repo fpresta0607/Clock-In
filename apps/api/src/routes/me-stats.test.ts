@@ -291,6 +291,9 @@ class MemoryReports implements ReportRepository {
   public async readLeaderboardForOrganization(): Promise<never> {
     throw new Error("not used by me/stats");
   }
+  public async readMembersForOrganization(): Promise<never> {
+    throw new Error("not used by me/stats");
+  }
 }
 
 /** Only the reaper runs on this read path; it records every invocation. */

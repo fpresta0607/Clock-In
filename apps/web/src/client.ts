@@ -258,6 +258,15 @@ export function createClient(config: ClientConfig) {
     /** One member's breakdown; `userId` in the query names a teammate. */
     meStats: (query = "") => json<MeStatsResponse>(`/me/stats${query}`),
 
+    /**
+     * Claims the first-administrator role in a workspace that predates roles
+     * and so has no admin at all. The server refuses (409) once any admin
+     * exists, which makes calling this on every boot a safe no-op.
+     */
+    async claimAdmin(): Promise<void> {
+      await apiRequest("/organization/claim-admin", { method: "POST" });
+    },
+
     /** The scope+range view state shared with the desktop app. */
     preferences: () => json<ViewPreferences>("/me/preferences"),
     async updatePreferences(patch: ViewPreferencesUpdate): Promise<ViewPreferences> {

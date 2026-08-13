@@ -237,6 +237,8 @@ export interface ReportRepository {
   readPageForOrganization(subject: AuthenticatedSubject, query: ReportQuery, options: ReportPageOptions): Promise<ReportPageRead>;
   readExportForOrganization(subject: AuthenticatedSubject, query: ReportQuery, maxRows: number): Promise<ReportExportRead>;
   readLeaderboardForOrganization(subject: AuthenticatedSubject, query: ReportQuery): Promise<LeaderboardRowRecord[]>;
+  /** Every member of the workspace, so the board can list them all - zeros included. */
+  readMembersForOrganization(subject: AuthenticatedSubject): Promise<ReportLookupRecord[]>;
   /** Per-project totals for one member — the reporting math scoped to the caller for /me/stats. */
   readProjectTotalsForMember(subject: AuthenticatedSubject, query: ReportQuery): Promise<ProjectTotalRecord[]>;
   /** Per-foreground-process totals for one member from active segments, for the /me/stats app breakdown. */

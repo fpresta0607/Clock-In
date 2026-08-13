@@ -897,6 +897,14 @@ export class DrizzleReportRepository implements ReportRepository {
     }));
   }
 
+  public async readMembersForOrganization(subject: AuthenticatedSubject): Promise<ReportLookupRecord[]> {
+    return this.db
+      .select({ id: users.id, name: users.name })
+      .from(users)
+      .where(eq(users.organizationId, subject.organizationId))
+      .orderBy(asc(users.id));
+  }
+
   /** One row per project the member recorded time in, heaviest first. */
   public async readProjectTotalsForMember(
     subject: AuthenticatedSubject,
