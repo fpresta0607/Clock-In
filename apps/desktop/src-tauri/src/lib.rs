@@ -984,6 +984,8 @@ mod tests {
     #[test]
     fn a_hand_second_launch_surfaces_the_window() {
         assert!(second_launch_surfaces_window(&[]));
-        assert!(second_launch_surfaces_window(&["--some-other-flag".to_string()]));
+        assert!(second_launch_surfaces_window(&[
+            "--some-other-flag".to_string()
+        ]));
     }
 }
