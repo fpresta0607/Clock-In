@@ -109,6 +109,8 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   login: vi.fn().mockResolvedValue(account),
   signup: vi.fn().mockResolvedValue(account),
   logout: vi.fn().mockResolvedValue(undefined),
+  preferencesGet: vi.fn().mockResolvedValue({ scope: "all", range: "30d" }),
+  preferencesSet: vi.fn().mockResolvedValue({ scope: "all", range: "30d" }),
   orgOverview: vi.fn().mockResolvedValue({
     organization: { id: "00000000-0000-4000-8000-000000000900", name: "SIQstack", inviteCode: "ACDEF-GHJKM" },
     entries: [
@@ -804,6 +806,31 @@ describe("the today panel", () => {
   });
 });
 
+describe("the shared scope", () => {
+  it("lands where the dashboard was, and writes a change back for it", async () => {
+    const bridge = bridgeFor({
+      preferencesGet: vi.fn().mockResolvedValue({ scope: otherProject.id, range: "30d" }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const panel = await openAllStats(person);
+    // Seeded from the shared row: the select lands on the dashboard's project.
+    const scope = await within(panel).findByLabelText("Project scope");
+    await waitFor(() => expect(scope).toHaveValue(otherProject.id));
+    // A scoped view fetches scoped stats rather than reusing the live day.
+    await waitFor(() => expect(bridge.meStats).toHaveBeenLastCalledWith(
+      expect.any(String),
+      expect.any(String),
+      undefined,
+      otherProject.id,
+    ));
+
+    await person.selectOptions(scope, "unassigned");
+    await waitFor(() => expect(bridge.preferencesSet).toHaveBeenCalledWith({ scope: "unassigned" }));
+  });
+});
+
 describe("the team board", () => {
   it("ranks the workspace and marks the signed-in member", async () => {
     const person = userEvent.setup();
@@ -840,6 +867,7 @@ describe("the team board", () => {
       expect.any(String),
       expect.any(String),
       "b1c7e513-b094-4d4c-ae55-21790ae019a4",
+      undefined,
     ));
     expect(await within(stats).findByText("Blender")).toBeInTheDocument();
   });
@@ -884,7 +912,9 @@ describe("the team board", () => {
 
   it("joins another workspace by invite code from settings", async () => {
     const bridge = bridgeFor({
-      orgOverview: vi.fn().mockResolvedValue({
+      preferencesGet: vi.fn().mockResolvedValue({ scope: "all", range: "30d" }),
+  preferencesSet: vi.fn().mockResolvedValue({ scope: "all", range: "30d" }),
+  orgOverview: vi.fn().mockResolvedValue({
         organization: { id: "00000000-0000-4000-8000-000000000900", name: "SIQstack", inviteCode: "ACDEF-GHJKM" },
         entries: [{ rank: 1, user: { id: user.id, name: user.name }, durationSeconds: 0, sessionCount: 0 }],
       }),

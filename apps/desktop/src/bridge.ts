@@ -198,6 +198,13 @@ export type MeStatsAgentSplit = {
   durationSeconds: number;
 };
 
+/// The dashboard view state shared with the web app. Only `scope` is
+/// synchronised between surfaces: each offers its own ranges on purpose.
+export type ViewPreferences = {
+  scope: string;
+  range: string;
+};
+
 /// What deleting a project takes with it.
 export type ProjectUsage = {
   sessionCount: number;
@@ -228,8 +235,11 @@ export interface TimerBridge {
   signup(input: SignupInput): Promise<AccountSnapshot>;
   logout(): Promise<void>;
   /// The workspace board. Instant bounds scope the entries; both absent
-  /// means all time.
-  orgOverview(fromAt?: string, toExclusiveAt?: string): Promise<OrganizationOverview>;
+  /// means all time. `scope` narrows to one project or the unassigned bucket.
+  orgOverview(fromAt?: string, toExclusiveAt?: string, scope?: string): Promise<OrganizationOverview>;
+  /// The scope shared with the web dashboard.
+  preferencesGet(): Promise<ViewPreferences>;
+  preferencesSet(input: { scope?: string; range?: string }): Promise<ViewPreferences>;
   orgJoin(inviteCode: string): Promise<OrganizationOverview>;
   monitorStatus(): Promise<MonitorStatus>;
   /// Pins recording to one project, or clears the pin with `null`.
@@ -242,7 +252,7 @@ export interface TimerBridge {
   /// UTC one that rolls over mid-afternoon. Both absent asks for all time.
   /// `userId` names a teammate, which is how the leaderboard opens one
   /// member's breakdown; absent means the caller.
-  meStats(fromAt?: string, toExclusiveAt?: string, userId?: string): Promise<MeStats>;
+  meStats(fromAt?: string, toExclusiveAt?: string, userId?: string, scope?: string): Promise<MeStats>;
   projectCreate(input: ProjectCreateInput): Promise<TimerProject>;
   projectUpdate(id: string, input: { name?: string; isArchived?: boolean }): Promise<TimerProject>;
   projectUsage(id: string): Promise<ProjectUsage>;
@@ -612,6 +622,11 @@ export const decodeMeStats = (value: unknown): MeStats => {
   };
 };
 
+export const decodeViewPreferences = (value: unknown): ViewPreferences => {
+  const candidate = record(value);
+  return { scope: string(candidate.scope), range: string(candidate.range) };
+};
+
 export const decodeProjectUsage = (value: unknown): ProjectUsage => {
   const candidate = record(value);
   return {
@@ -641,7 +656,9 @@ export const defaultBridge: TimerBridge = {
   login: (input) => invokeDecoded("auth_login", decodeAccountSnapshot, { input }),
   signup: (input) => invokeDecoded("auth_signup", decodeAccountSnapshot, { input }),
   logout: () => invokeDecoded("auth_logout", decodeVoid),
-  orgOverview: (fromAt, toExclusiveAt) => invokeDecoded("org_overview", decodeOrganizationOverview, { fromAt, toExclusiveAt }),
+  orgOverview: (fromAt, toExclusiveAt, scope) => invokeDecoded("org_overview", decodeOrganizationOverview, { fromAt, toExclusiveAt, scope }),
+  preferencesGet: () => invokeDecoded("preferences_get", decodeViewPreferences),
+  preferencesSet: (input) => invokeDecoded("preferences_set", decodeViewPreferences, { input }),
   orgJoin: (inviteCode) => invokeDecoded("org_join", decodeOrganizationOverview, { input: { inviteCode } }),
   monitorStatus: () => invokeDecoded("monitor_status", decodeMonitorStatus),
   sessionSelectProject: (projectId) => invokeDecoded("session_select_project", decodeMonitorStatus, { projectId }),
@@ -649,7 +666,7 @@ export const defaultBridge: TimerBridge = {
   monitorSetEnabled: (enabled) => invokeDecoded("monitor_set_enabled", decodeMonitorSettings, { enabled }),
   settingsGet: () => invokeDecoded("settings_get", decodeMonitorSettings),
   settingsUpdate: (input) => invokeDecoded("settings_update", decodeMonitorSettings, { input }),
-  meStats: (fromAt, toExclusiveAt, userId) => invokeDecoded("me_stats", decodeMeStats, { fromAt, toExclusiveAt, userId }),
+  meStats: (fromAt, toExclusiveAt, userId, scope) => invokeDecoded("me_stats", decodeMeStats, { fromAt, toExclusiveAt, userId, scope }),
   projectCreate: (input) => invokeDecoded("project_create", decodeProject, { input }),
   projectUpdate: (id, input) => invokeDecoded("project_update", decodeProject, { id, input }),
   projectUsage: (id) => invokeDecoded("project_usage", decodeProjectUsage, { id }),

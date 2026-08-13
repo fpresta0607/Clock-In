@@ -269,6 +269,17 @@ pub struct MeStatsAgentSplit {
     pub duration_seconds: u64,
 }
 
+/// The dashboard view state both surfaces share. Only `scope` is synchronised:
+/// the two surfaces offer different ranges on purpose (this app's "this week"
+/// is a calendar week, the dashboard's "7d" is a rolling one), so each keeps
+/// its own while the project scope follows you between them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewPreferences {
+    pub scope: String,
+    pub range: String,
+}
+
 /// What deleting a project takes with it, as `/projects/:id/usage` reports it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -538,15 +549,21 @@ impl ApiClient {
         access_token: &str,
         from_at: Option<&str>,
         to_exclusive_at: Option<&str>,
+        scope: Option<&str>,
     ) -> ApiResult<Vec<LeaderboardEntry>> {
-        // ISO-8601 UTC instants contain no characters that need escaping in a
-        // query string, so the bounds are interpolated as-is.
-        let query = match (from_at, to_exclusive_at) {
+        // ISO-8601 UTC instants and scope values (uuid / "all" / "unassigned")
+        // contain no characters that need escaping in a query string, so they
+        // are interpolated as-is.
+        let mut query = match (from_at, to_exclusive_at) {
             (Some(from_at), Some(to_exclusive_at)) => {
                 format!("?fromAt={from_at}&toExclusiveAt={to_exclusive_at}")
             }
             _ => String::new(),
         };
+        if let Some(scope) = scope.filter(|scope| *scope != "all") {
+            query.push(if query.is_empty() { '?' } else { '&' });
+            query.push_str(&format!("scope={scope}"));
+        }
         let body: LeaderboardResponse = self
             .get_json(access_token, &format!("/reports/leaderboard{query}"))
             .await?;
@@ -640,6 +657,44 @@ impl ApiClient {
             color: body.color,
             created_at: body.created_at,
         })
+    }
+
+    /// The shared dashboard view state.
+    pub async fn view_preferences(&self, access_token: &str) -> ApiResult<ViewPreferences> {
+        self.get_json(access_token, "/me/preferences").await
+    }
+
+    /// Writes the shared view state. Absent fields are left as they were, so
+    /// this app can move the scope without claiming anything about the range
+    /// the dashboard is showing.
+    pub async fn set_view_preferences(
+        &self,
+        access_token: &str,
+        scope: Option<&str>,
+        range: Option<&str>,
+    ) -> ApiResult<ViewPreferences> {
+        let mut body = serde_json::Map::new();
+        if let Some(scope) = scope {
+            body.insert("scope".into(), serde_json::json!(scope));
+        }
+        if let Some(range) = range {
+            body.insert("range".into(), serde_json::json!(range));
+        }
+        let response = self
+            .http
+            .put(format!("{}/me/preferences", self.api_base_url))
+            .bearer_auth(access_token)
+            .json(&serde_json::Value::Object(body))
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+        if !response.status().is_success() {
+            return Err(classify(response.status().as_u16()));
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| BridgeError::unknown("The preferences response could not be read."))
     }
 
     /// What deleting the project would take with it, for the confirm dialog.
@@ -760,6 +815,7 @@ impl ApiClient {
         from_at: Option<&str>,
         to_exclusive_at: Option<&str>,
         user_id: Option<&str>,
+        scope: Option<&str>,
     ) -> ApiResult<MeStats> {
         let mut query: Vec<(&str, &str)> = Vec::new();
         if let (Some(from_at), Some(to_exclusive_at)) = (from_at, to_exclusive_at) {
@@ -768,6 +824,9 @@ impl ApiClient {
         }
         if let Some(user_id) = user_id {
             query.push(("userId", user_id));
+        }
+        if let Some(scope) = scope.filter(|scope| *scope != "all") {
+            query.push(("scope", scope));
         }
         let response = self
             .http
