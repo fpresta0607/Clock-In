@@ -311,6 +311,9 @@ select:disabled { opacity: .55; }
 .app-quotas { display: flex; flex: 0 1 auto; flex-wrap: wrap; gap: 8px; min-width: 0; }
 .app-active { color: var(--mint); font-size: .74rem; }
 .app-duration { flex: none; color: var(--mint); font-variant-numeric: tabular-nums; }
+/* The by-agent split under its runtime's row: model runtimes that sum to
+   agent time, never to the hours beside them. */
+.app-note { flex-basis: 100%; color: var(--text-secondary); font-size: .72rem; font-variant-numeric: tabular-nums; }
 
 .verified-foot { margin: 10px 0 0; border-top: 1px solid rgba(163, 179, 194, 0.12); padding-top: 8px; color: var(--text-secondary); font-size: .72rem; font-variant-numeric: tabular-nums; }
 
@@ -504,7 +507,6 @@ select:disabled { opacity: .55; }
 
 /* Project management in settings, and the measurement lines in All stats. */
 .member-line { margin: 2px 0 0; color: var(--text-secondary); font-size: .74rem; line-height: 1.5; font-variant-numeric: tabular-nums; }
-.member-line.is-agents { color: var(--mint); }
 .manage-list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
 .manage-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: .82rem; }
 .manage-name { display: inline-flex; align-items: center; gap: 7px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

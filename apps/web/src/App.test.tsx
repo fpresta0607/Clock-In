@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { App, rangeQuery } from "./App.js";
+import { App, buildAppRows, rangeQuery } from "./App.js";
 import { ClientError, type Client } from "./client.js";
 import { windowsInstallerUrl } from "./DownloadInstaller.js";
 
@@ -32,7 +32,10 @@ const memberStats = {
   activeSeconds: 7_200,
   agentSeconds: 3_600,
   concurrency: { t0Seconds: 3_600, t1Seconds: 3_600, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
-  byAgent: [{ source: "claude_code", model: null, durationSeconds: 3_600 }],
+  byAgent: [
+    { source: "claude_code", model: "claude-fable-5", durationSeconds: 3_000 },
+    { source: "claude_code", model: null, durationSeconds: 600 },
+  ],
   projects: [
     { project: { id: "p1", name: "General" }, durationSeconds: 7_200, attributedSeconds: 5_400, unattributedSeconds: 1_800, sessionCount: 3 },
   ],
@@ -71,6 +74,25 @@ async function signIn(client: Client) {
   await person.click(screen.getByRole("button", { name: "Sign in" }));
   return person;
 }
+
+describe("app row folding", () => {
+  it("never folds an agent runtime into Everything else", () => {
+    // Nine heavy apps outrank a lightly-used Claude Code; the fold must not
+    // swallow the agent row that anchors its by-agent note.
+    const apps = [
+      ...Array.from({ length: 9 }, (_, index) => ({ processName: `app-${index}.exe`, durationSeconds: 9_000 - index })),
+      { processName: "claude.exe", durationSeconds: 60 },
+    ];
+
+    const rows = buildAppRows(apps);
+
+    expect(rows.map((row) => row.key)).toContain("claude_code");
+    const fold = rows.find((row) => row.key === "everything-else");
+    // The fold keeps only the non-agent tail.
+    expect(fold?.durationSeconds).toBe(9_000 - 8);
+    expect(rows.filter((row) => row.agent)).toHaveLength(1);
+  });
+});
 
 describe("dashboard", () => {
   it("ranks the team by active hours, with agent time as its own muted line", async () => {
@@ -310,7 +332,7 @@ describe("dashboard", () => {
   it("says so plainly when a range has no recorded time", async () => {
     await signIn(clientFor({
       leaderboard: vi.fn().mockResolvedValue({ entries: [], totalDurationSeconds: 0, filters: {} }),
-      meStats: vi.fn().mockResolvedValue({ ...memberStats, totalDurationSeconds: 0, projects: [], apps: [] }),
+      meStats: vi.fn().mockResolvedValue({ ...memberStats, totalDurationSeconds: 0, projects: [], apps: [], byAgent: [] }),
     }));
 
     expect(await screen.findByText(/No recorded time in this range yet/)).toBeInTheDocument();
@@ -327,9 +349,10 @@ describe("dashboard", () => {
     // The headline is active time; the project row repeats other numbers.
     expect(await stats.findByText("2h 00m", { selector: "strong" })).toBeInTheDocument();
     // The two cuts stay visibly apart: concurrency sums to active time, the
-    // by-agent split sums to agent time.
+    // by-agent split rides on its runtime's row and sums to agent time.
     expect(stats.getByTestId("concurrency-line")).toHaveTextContent("Unassisted 1h 00m · 1 agent 1h 00m");
-    expect(stats.getByTestId("by-agent-line")).toHaveTextContent("Claude Code 1h 00m");
+    // A model names its own runtime; a null model falls back to the source label.
+    expect(stats.getByTestId("agent-note")).toHaveTextContent("claude-fable-5 50m · Claude Code 10m");
     expect(stats.getByText("General")).toBeInTheDocument();
     // claude.exe reads as the tool it is, so the team sees Claude usage plainly.
     expect(stats.getByText("Claude Code")).toBeInTheDocument();

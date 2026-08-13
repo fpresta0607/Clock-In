@@ -103,17 +103,19 @@ a.primary { display: inline-block; text-decoration: none; }
 .member-total strong { font-variant-numeric: tabular-nums; }
 .member-agent-total { color: var(--text-secondary); font-size: .84rem; font-variant-numeric: tabular-nums; }
 
-/* The two measurement cuts, one quiet line each: concurrency sums to active
-   time, the by-agent split sums to agent time. */
+/* The concurrency cut, one quiet line: it sums to active time. */
 .member-line { margin: 0 0 8px; color: var(--text-secondary); font-size: .8rem; font-variant-numeric: tabular-nums; }
-.member-line.is-agents { color: var(--mint); }
 .stat-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
 .stat-apps { margin-top: 10px; border-top: 1px solid rgba(163, 179, 194, .08); padding-top: 8px; }
-.stat-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 5px 2px; border-bottom: 1px solid rgba(163, 179, 194, .08); font-size: .89rem; }
+.stat-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 2px 12px; padding: 5px 2px; border-bottom: 1px solid rgba(163, 179, 194, .08); font-size: .89rem; }
 .stat-row:last-child { border-bottom: 0; }
 .stat-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stat-name.is-agent { color: var(--mint); }
 .stat-duration { flex: none; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+
+/* The by-agent split, tucked under its runtime's row: model runtimes that sum
+   to agent time, never to the hours in the column above. */
+.stat-note { flex-basis: 100%; color: var(--text-secondary); font-size: .74rem; font-variant-numeric: tabular-nums; }
 .member-foot { margin: 10px 0 0; border-top: 1px solid rgba(163, 179, 194, .12); padding-top: 8px; color: var(--text-secondary); font-size: .78rem; font-variant-numeric: tabular-nums; }
 
 /* The installer hand-out (DownloadInstaller.tsx), in its two shapes.

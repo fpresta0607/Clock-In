@@ -58,10 +58,12 @@ type AppRow = {
 
 const TOP_APP_ROWS = 8;
 
-/// Heaviest-first app rows for the Today card: agent CLIs fold into one row,
-/// and everything past the top rows folds into "Everything else". Which
-/// executables count as an agent comes from the shared runtime roster, so a
-/// newly declared CLI folds in without a second list to remember.
+/// Heaviest-first app rows for the Today card: agent CLIs fold into one row
+/// that never folds further into "Everything else" (its by-agent note needs
+/// the row to anchor to), and everything else past the top rows folds into
+/// "Everything else". Which executables count as an agent comes from the
+/// shared runtime roster, so a newly declared CLI folds in without a second
+/// list to remember.
 const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
   let agentSeconds = 0;
   const agentSources = new Set<string>();
@@ -86,8 +88,13 @@ const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
   }
   rows.sort((a, b) => b.durationSeconds - a.durationSeconds || a.label.localeCompare(b.label));
   if (rows.length <= TOP_APP_ROWS) return rows;
-  const rest = rows.slice(TOP_APP_ROWS).reduce((sum, row) => sum + row.durationSeconds, 0);
-  return [...rows.slice(0, TOP_APP_ROWS), { key: "everything-else", label: "Everything else", durationSeconds: rest, agent: false }];
+  // The agent row never folds into the tail: the fold would strip the row
+  // that anchors the by-agent note and misfile the runtimes as background.
+  const kept = [...rows.slice(0, TOP_APP_ROWS), ...rows.slice(TOP_APP_ROWS).filter((row) => row.agent)];
+  const rest = rows.slice(TOP_APP_ROWS).filter((row) => !row.agent)
+    .reduce((sum, row) => sum + row.durationSeconds, 0);
+  if (rest === 0) return kept;
+  return [...kept, { key: "everything-else", label: "Everything else", durationSeconds: rest, agent: false }];
 };
 
 /// Every sentence the main page says about recording, keyed by the one shared
@@ -1056,6 +1063,29 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const boardUnattributedSeconds = (showingLiveDay ? stats : boardStats)?.unattributedSeconds ?? 0;
   const boardMeasurement = showingLiveDay ? stats : boardStats;
   const boardAppRows = buildAppRows(showingLiveDay ? liveApps : boardStats?.apps ?? []);
+  // The by-agent split rides on the folded agent row as a muted note, one
+  // part per model; it sums to agent time, never to the hours beside it.
+  const boardAgentSplits = boardMeasurement?.byAgent ?? [];
+  const boardAgentNotes = new Map<string, string>();
+  for (const split of boardAgentSplits) {
+    const part = `${split.model ?? sourceLabel(split.source)} ${formatHuman(split.durationSeconds)}`;
+    const existing = boardAgentNotes.get(split.source);
+    boardAgentNotes.set(split.source, existing === undefined ? part : `${existing} · ${part}`);
+  }
+  const boardHasAgentRow = boardAppRows.some((row) => row.agent);
+  const boardForegroundAgentSources = boardHasAgentRow
+    ? new Set(
+        (showingLiveDay ? liveApps : boardStats?.apps ?? [])
+          .map((app) => agentRuntimeForBinary(app.processName))
+          .filter((source): source is string => source !== undefined),
+      )
+    : new Set<string>();
+  const boardAgentNote = [...boardAgentNotes]
+    .filter(([source]) => boardForegroundAgentSources.has(source))
+    .map(([, note]) => note)
+    .join(" · ");
+  const boardBackgroundAgents = [...boardAgentNotes]
+    .filter(([source]) => !boardForegroundAgentSources.has(source));
   const boardProjectRows = showingLiveDay
     ? projectRows.map((row) => ({ id: row.key, name: row.name, durationSeconds: row.durationSeconds }))
     : (boardStats?.projects ?? [])
@@ -1367,9 +1397,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                 <p className="today-total"><strong>{formatHuman(boardTotalSeconds)}</strong> recorded</p>
                 {boardMeasurement !== undefined && (
                   <>
-                    {/* Two different cuts, kept apart on purpose: the
-                        concurrency split sums to active time; the by-agent
-                        split sums to agent time, never to hours worked. */}
                     <p className="member-line" data-testid="measurement-line">
                       Active {formatHuman(boardMeasurement.activeSeconds)}
                       {" · Agent "}{formatHuman(boardMeasurement.agentSeconds)}
@@ -1379,12 +1406,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                       {`Unassisted ${formatHuman(boardMeasurement.concurrency.t0Seconds)} · 1 agent ${formatHuman(boardMeasurement.concurrency.t1Seconds)} · 2 agents ${formatHuman(boardMeasurement.concurrency.t2Seconds)} · 3+ ${formatHuman(boardMeasurement.concurrency.t3PlusSeconds)}`}
                       {boardMeasurement.concurrency.awaySeconds > 0 && ` · agents while away ${formatHuman(boardMeasurement.concurrency.awaySeconds)}`}
                     </p>
-                    {boardMeasurement.byAgent.length > 0 && (
-                      <p className="member-line is-agents" data-testid="by-agent-line">
-                        {boardMeasurement.byAgent.map((split) =>
-                          `${sourceLabel(split.source)}${split.model === null ? "" : ` (${split.model})`} ${formatHuman(split.durationSeconds)}`).join(" · ")}
-                      </p>
-                    )}
                   </>
                 )}
                 {boardProjectRows.length > 0 && (
@@ -1397,7 +1418,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                     ))}
                   </ul>
                 )}
-                {boardAppRows.length === 0 ? (
+                {boardAppRows.length === 0 && boardBackgroundAgents.length === 0 ? (
                   // Only the caller's own emptiness can be explained by this
                   // machine's recording state; a teammate's is just empty.
                   <p className="subtle" data-testid="today-empty">
@@ -1406,12 +1427,21 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                 ) : (
                   <ul className="app-list" data-testid="member-app-list">
                     {boardAppRows.map((row) => (
-                      <li key={row.key} className="app-row">
+                      <li key={row.key} className={row.agent ? "app-row is-agent" : "app-row"}>
                         <span className="app-name">
                           {row.label}
                           {row.agent && viewingSelf && monitorStatus?.agentActive && <span className="app-active"> · active now</span>}
                         </span>
                         <span className="app-duration">{formatHuman(row.durationSeconds)}</span>
+                        {row.agent && boardAgentNote !== "" && (
+                          <span className="app-note" data-testid="agent-note">{boardAgentNote}</span>
+                        )}
+                      </li>
+                    ))}
+                    {boardBackgroundAgents.map(([source, note]) => (
+                      <li key={source} className="app-row is-agent">
+                        <span className="app-name">{sourceLabel(source)}</span>
+                        <span className="app-note" data-testid="agent-note">{note}</span>
                       </li>
                     ))}
                   </ul>

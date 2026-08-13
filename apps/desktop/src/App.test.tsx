@@ -442,6 +442,28 @@ describe("today", () => {
     expect(await within(panel).findByText("Claude Code")).toBeInTheDocument();
     expect(within(panel).getByText("VS Code")).toBeInTheDocument();
   });
+
+  it("gives a background-only runtime its own row beside the folded agent row", async () => {
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor({
+      meStats: vi.fn().mockResolvedValue({
+        ...meStats,
+        apps: [{ processName: "claude.exe", durationSeconds: 3_600 }],
+        byAgent: [
+          { source: "claude_code", model: "claude-fable-5", durationSeconds: 3_000 },
+          { source: "codex", model: null, durationSeconds: 600 },
+        ],
+      }),
+    })} />);
+
+    const panel = await openAllStats(person);
+    const rows = within(await within(panel).findByTestId("member-app-list")).getAllByRole("listitem");
+    const claude = rows.find((row) => row.textContent?.includes("Claude Code"));
+    const codex = rows.find((row) => row.textContent?.includes("Codex"));
+    expect(claude).toHaveTextContent("claude-fable-5 50m");
+    expect(claude).not.toHaveTextContent("Codex 10m");
+    expect(codex).toHaveTextContent("Codex 10m");
+  });
 });
 
 describe("settings", () => {
