@@ -122,10 +122,6 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   settingsUpdate: vi.fn().mockResolvedValue(settings),
   meStats: vi.fn().mockResolvedValue(meStats),
   projectCreate: vi.fn().mockResolvedValue(newProject),
-  pathMappingsList: vi.fn().mockResolvedValue([mapping]),
-  pathMappingsCreate: vi.fn().mockResolvedValue(mapping),
-  pathMappingsUpdate: vi.fn().mockResolvedValue(mapping),
-  pathMappingsDelete: vi.fn().mockResolvedValue(undefined),
   appIcons: vi.fn().mockResolvedValue({}),
   quotaStatus: vi.fn().mockResolvedValue({ status: "ready", checkedAt: null, detail: null, providers: [] }),
   onUpdateAvailable: vi.fn().mockResolvedValue(() => undefined),
@@ -136,7 +132,8 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
 /// main surface is the record card and this session, and nothing else.
 const openAllStats = async (person: ReturnType<typeof userEvent.setup>): Promise<HTMLElement> => {
   await person.click(await screen.findByTestId("all-stats-trigger"));
-  return screen.getByRole("dialog", { name: /Today so far|This week/ });
+  // The overlay is titled by the workspace it shows.
+  return screen.getByRole("dialog", { name: /SIQstack|All stats/ });
 };
 
 /// Opens the settings overlay from the titlebar gear and returns the dialog.
@@ -293,8 +290,11 @@ describe("recording", () => {
     expect(claude[0]).toHaveTextContent(project.name);
     expect(claude[0]).toHaveTextContent(otherProject.name);
     // No minutes of its own: an agent runs beside the editor it lives in, so
-    // its wall-clock would double-count time already counted there.
-    expect(claude[0]).toHaveTextContent("working");
+    // its wall-clock would double-count time already counted there. And it
+    // says "connected", not "working" — a registered session is presence,
+    // not proof of activity.
+    expect(claude[0]).toHaveTextContent("connected");
+    expect(claude[0]).not.toHaveTextContent("working");
   });
 
   it("renders no recording surfaces when the host cannot report status", async () => {
@@ -331,17 +331,32 @@ describe("recording", () => {
     render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(recording), sessionSelectProject })} />);
 
     await person.click(await screen.findByTestId("filing-change"));
-    const picker = screen.getByLabelText("File my time under");
-    // The default choice is "work it out for me", naming where that lands.
-    expect(picker).toHaveValue("");
-    expect(within(picker).getByRole("option", { name: /Work it out for me \(Field work\)/ })).toBeInTheDocument();
+    const picker = screen.getByRole("radiogroup", { name: "File my time under" });
+    // The default choice is "work it out for me", naming where that lands,
+    // and exactly one row carries the tick.
+    expect(within(picker).getByRole("radio", { name: /Work it out for me \(Field work\)/ })).toHaveAttribute("aria-checked", "true");
+    expect(within(picker).getAllByRole("radio", { checked: true })).toHaveLength(1);
 
-    await person.selectOptions(picker, otherProject.id);
+    await person.click(within(picker).getByRole("radio", { name: otherProject.name }));
     await waitFor(() => expect(sessionSelectProject).toHaveBeenCalledWith(otherProject.id));
 
     // Choosing collapses the picker and the header names the pinned project.
-    await waitFor(() => expect(screen.queryByLabelText("File my time under")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("radiogroup", { name: "File my time under" })).not.toBeInTheDocument());
     expect(screen.getByTestId("filing-where")).toHaveTextContent(otherProject.name);
+  });
+
+  it("offers the team above the projects, scoped to the one you are on", async () => {
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor({ monitorStatus: vi.fn().mockResolvedValue(recording) })} />);
+
+    await person.click(await screen.findByTestId("filing-change"));
+    const team = await screen.findByLabelText("Team");
+    expect(team).toHaveValue("00000000-0000-4000-8000-000000000900");
+    expect(within(team).getByRole("option", { name: "SIQstack" })).toBeInTheDocument();
+    // The projects listed under it belong to that team.
+    const picker = screen.getByRole("radiogroup", { name: "File my time under" });
+    expect(within(picker).getByRole("radio", { name: project.name })).toBeInTheDocument();
+    expect(within(picker).getByRole("radio", { name: otherProject.name })).toBeInTheDocument();
   });
 
   it("creates a project and pins recording to it", async () => {
@@ -377,9 +392,10 @@ describe("today", () => {
 
     const panel = await openAllStats(person);
     // The card renders before the stats land, so wait for the figure itself.
-    expect(await within(panel).findByText("2 hr")).toBeInTheDocument();
+    // The project row underneath repeats the number, so pin the headline.
+    expect(await within(panel).findByText("2 hr", { selector: "strong" })).toBeInTheDocument();
     expect(within(panel).getByTestId("unattributed-foot")).toHaveTextContent(
-      "30 min of it landed in Field work, because nothing said which project it was for.",
+      "30 min of that landed in the default project, because nothing said which project it was for.",
     );
   });
 
@@ -389,10 +405,12 @@ describe("today", () => {
     render(<App bridge={bridge} />);
 
     const panel = await openAllStats(person);
+    // Opening costs nothing: your own "today" reuses the main screen's read.
+    expect(bridge.meStats).toHaveBeenCalledTimes(1);
     await person.click(await within(panel).findByRole("button", { name: "This week" }));
 
     await waitFor(() => expect(bridge.meStats).toHaveBeenCalledTimes(2));
-    expect(await screen.findByRole("heading", { name: "This week" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /This week/ })).toBeInTheDocument();
   });
 
   it("folds agent CLI processes into one friendly row", async () => {
@@ -450,23 +468,14 @@ describe("settings", () => {
     expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
   });
 
-  it("lists, adds, and deletes folder-to-project matches", async () => {
-    const created = { ...mapping, id: "00000000-0000-4000-8000-000000000401", pathPrefix: "C:/dev/other" };
-    const bridge = bridgeFor({ pathMappingsCreate: vi.fn().mockResolvedValue(created) });
+  it("has no folders-and-projects group left to configure", async () => {
     const person = userEvent.setup();
-    render(<App bridge={bridge} />);
+    render(<App bridge={bridgeFor()} />);
 
     const dialog = await openSettings(person);
-    expect(await within(dialog).findByText("C:/dev/Clock-In")).toBeInTheDocument();
-
-    await person.type(within(dialog).getByLabelText("Folder"), "C:/dev/other");
-    await person.selectOptions(within(dialog).getByLabelText("Project"), project.id);
-    await person.click(within(dialog).getByRole("button", { name: "Add folder" }));
-    await waitFor(() => expect(bridge.pathMappingsCreate).toHaveBeenCalledWith({ pathPrefix: "C:/dev/other", projectId: project.id }));
-
-    const [firstDelete] = within(dialog).getAllByRole("button", { name: "Delete" });
-    await person.click(firstDelete!);
-    await waitFor(() => expect(bridge.pathMappingsDelete).toHaveBeenCalledWith(mapping.id));
+    await within(dialog).findByText("Recording");
+    expect(within(dialog).queryByText("Folders and projects")).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("Folder")).not.toBeInTheDocument();
   });
 
   it("shows connected tools as badges and connects one through the dropdown", async () => {
@@ -790,9 +799,76 @@ describe("the team board", () => {
     render(<App bridge={bridgeFor()} />);
 
     // The board is history, so it sits behind "All stats" with the rest of it.
-    const board = within(await openAllStats(person)).getByLabelText("SIQstack");
+    const board = within(await openAllStats(person)).getByTestId("board-list");
     expect(within(board).getByText("Sam")).toBeInTheDocument();
     expect(within(board).getByText("you")).toBeInTheDocument();
+  });
+
+  it("opens on your own breakdown and follows whichever member gets picked", async () => {
+    const samStats = {
+      ...meStats,
+      totalDurationSeconds: 5_400,
+      apps: [{ processName: "blender.exe", durationSeconds: 5_400 }],
+    };
+    const bridge = bridgeFor({
+      meStats: vi.fn().mockImplementation((_fromAt?: string, _toExclusiveAt?: string, userId?: string) =>
+        Promise.resolve(userId === undefined ? meStats : samStats)),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const panel = await openAllStats(person);
+    // You are highlighted and shown by default.
+    const stats = within(panel).getByTestId("member-stats");
+    expect(within(stats).getByRole("heading", { name: /Timer User · Today/ })).toBeInTheDocument();
+
+    // Picking Sam swaps the breakdown to Sam, fetched by their id.
+    await person.click(within(panel).getByRole("button", { name: /Sam/ }));
+    expect(await within(stats).findByRole("heading", { name: /Sam · Today/ })).toBeInTheDocument();
+    await waitFor(() => expect(bridge.meStats).toHaveBeenLastCalledWith(
+      expect.any(String),
+      expect.any(String),
+      "b1c7e513-b094-4d4c-ae55-21790ae019a4",
+    ));
+    expect(await within(stats).findByText("Blender")).toBeInTheDocument();
+  });
+
+  it("offers a way back to your own breakdown after picking a teammate", async () => {
+    const samStats = {
+      ...meStats,
+      totalDurationSeconds: 5_400,
+      apps: [{ processName: "blender.exe", durationSeconds: 5_400 }],
+    };
+    const bridge = bridgeFor({
+      meStats: vi.fn().mockImplementation((_fromAt?: string, _toExclusiveAt?: string, userId?: string) =>
+        Promise.resolve(userId === undefined ? meStats : samStats)),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const panel = await openAllStats(person);
+    const stats = within(panel).getByTestId("member-stats");
+    await person.click(within(panel).getByRole("button", { name: /Sam/ }));
+    expect(await within(stats).findByRole("heading", { name: /Sam · Today/ })).toBeInTheDocument();
+
+    await person.click(within(stats).getByRole("button", { name: "Show my own" }));
+    expect(await within(stats).findByRole("heading", { name: /Timer User · Today/ })).toBeInTheDocument();
+  });
+
+  it("surfaces a failed self/today read instead of a blank or endless state", async () => {
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(status),
+      meStats: vi.fn().mockRejectedValue({ kind: "transient", message: "The stats service is unavailable." }),
+    })} />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("The stats service is unavailable.");
+    expect(screen.queryByTestId("today-panel-empty")).not.toBeInTheDocument();
+
+    const panel = await openAllStats(person);
+    const stats = within(panel).getByTestId("member-stats");
+    expect(within(stats).getByRole("alert")).toHaveTextContent("The stats service is unavailable.");
+    expect(within(stats).queryByText("Loading…")).not.toBeInTheDocument();
   });
 
   it("joins another workspace by invite code from settings", async () => {

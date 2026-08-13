@@ -681,7 +681,9 @@ export class DrizzleReportRepository implements ReportRepository {
       ))
       .where(and(
         ...this.predicates(subject, query),
-        eq(timeSessions.userId, subject.userId),
+        // Falls back to the caller when the query named nobody, so a missing
+        // filter reads as "my own" rather than as the whole workspace.
+        eq(timeSessions.userId, query.userId ?? subject.userId),
         eq(projects.organizationId, subject.organizationId),
       ))
       .groupBy(projects.id, projects.name)
@@ -722,7 +724,7 @@ export class DrizzleReportRepository implements ReportRepository {
       .from(activitySegments)
       .where(and(
         eq(activitySegments.organizationId, subject.organizationId),
-        eq(activitySegments.userId, subject.userId),
+        eq(activitySegments.userId, query.userId ?? subject.userId),
         eq(activitySegments.kind, "active"),
         isNotNull(activitySegments.processName),
         ...(query.from === undefined ? [] : [gt(activitySegments.endedAt, query.from)]),

@@ -117,4 +117,5 @@ export {
   inviteCodePattern,
   normalizeInviteCode,
 } from "./invite-code.js";
-export { formatDuration } from "./time.js";
+export { friendlyAppName } from "./app-names.js";
+export { formatDuration, formatHumanDuration } from "./time.js";

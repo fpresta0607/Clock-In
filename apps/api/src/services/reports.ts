@@ -270,7 +270,10 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
     },
 
     async meStats(subject: AuthenticatedSubject, filters: MeStatsFilters): Promise<MeStatsResponse> {
-      const query: ReportQuery = { ...normalizedMeStatsQuery(filters), userId: subject.userId };
+      // A named teammate, or the caller. The same membership check the org
+      // report runs: an id outside this workspace is a stable not_found.
+      const query: ReportQuery = { ...normalizedMeStatsQuery(filters), userId: filters.userId ?? subject.userId };
+      if (filters.userId !== undefined) await authorizeFilters(dependencies.reports, subject, { userId: filters.userId });
       await dependencies.reaper.reapStale(subject);
       const projects = (await dependencies.reports.readProjectTotalsForMember(subject, query)).map(asProjectTotal);
       const apps = (await dependencies.reports.readAppTotalsForMember(subject, query)).map(asAppTotal);

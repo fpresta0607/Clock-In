@@ -16,22 +16,23 @@ const entries = [
   { rank: 2, user: { id: "u2", name: "Alex" }, durationSeconds: 3_600, sessionCount: 1, attributedSeconds: 3_600, unattributedSeconds: 0 },
 ];
 
-const rows = [
-  {
-    id: "s1",
-    user: { id: "u1", name: "Sam" },
-    project: { id: "p1", name: "General" },
-    description: "Wiring the relay",
-    status: "stopped" as const,
-    startedAt: "2026-08-06T14:00:00.000Z",
-    stoppedAt: "2026-08-06T16:00:00.000Z",
-    idleSeconds: 0,
-    durationSeconds: 7_200,
-    attribution: "agent" as const,
-    attributedSeconds: 7_200,
-    unattributedSeconds: 0,
-  },
-];
+/// The signed-in viewer is Alex, so the board highlights u2 by default.
+const self = { id: "u2", email: "alex@example.com", name: "Alex" };
+
+const memberStats = {
+  filters: {},
+  totalDurationSeconds: 7_200,
+  attributedSeconds: 5_400,
+  unattributedSeconds: 1_800,
+  projects: [
+    { project: { id: "p1", name: "General" }, durationSeconds: 7_200, attributedSeconds: 5_400, unattributedSeconds: 1_800, sessionCount: 3 },
+  ],
+  apps: [
+    { processName: "claude.exe", durationSeconds: 3_600 },
+    { processName: "Code.exe", durationSeconds: 1_800 },
+  ],
+  sites: [],
+};
 
 function clientFor(overrides: Partial<Client> = {}): Client {
   return {
@@ -41,7 +42,8 @@ function clientFor(overrides: Partial<Client> = {}): Client {
     signOut: vi.fn().mockResolvedValue(undefined),
     organization: vi.fn().mockResolvedValue({ organization }),
     leaderboard: vi.fn().mockResolvedValue({ entries, totalDurationSeconds: 10_800, filters: {} }),
-    report: vi.fn().mockResolvedValue({ rows, totalDurationSeconds: 7_200, filters: {}, pagination: {} }),
+    me: vi.fn().mockResolvedValue({ user: self }),
+    meStats: vi.fn().mockResolvedValue(memberStats),
     joinOrganization: vi.fn().mockResolvedValue(undefined),
     restoreSession: vi.fn().mockResolvedValue(false),
     ...overrides,
@@ -58,16 +60,17 @@ async function signIn(client: Client) {
 }
 
 describe("dashboard", () => {
-  it("ranks the team and totals the range after signing in", async () => {
+  it("ranks the team in human-readable hours after signing in", async () => {
     await signIn(clientFor());
 
     expect(await screen.findByRole("heading", { name: "SIQstack" })).toBeInTheDocument();
     const board = within(screen.getByRole("region", { name: "Leaderboard" }));
-    const [first, second] = board.getAllByRole("row").slice(1);
+    const [first, second] = await board.findAllByRole("listitem");
     expect(first).toHaveTextContent("Sam");
-    expect(first).toHaveTextContent("02:00:00");
+    expect(first).toHaveTextContent("2 hr");
     expect(second).toHaveTextContent("Alex");
-    expect(board.getByText("03:00:00 total")).toBeInTheDocument();
+    expect(second).toHaveTextContent("1 hr");
+    expect(board.getByText("3 hr total")).toBeInTheDocument();
   });
 
   it("shows the invite code and copies it on request", async () => {
@@ -118,17 +121,28 @@ describe("dashboard", () => {
     const person = await signIn(clientFor({ leaderboard }));
     await screen.findByRole("heading", { name: "SIQstack" });
 
-    await person.selectOptions(screen.getByRole("combobox"), "7");
+    await person.click(screen.getByRole("button", { name: "This week" }));
 
-    await waitFor(() => expect(leaderboard).toHaveBeenCalled());
+    await waitFor(() => expect(leaderboard).toHaveBeenCalledTimes(2));
     const query = new URLSearchParams(leaderboard.mock.calls.at(-1)?.[0]);
     expect(query.get("fromAt")).not.toBeNull();
     expect(query.get("toExclusiveAt")).not.toBeNull();
   });
 
+  it("asks for everything by sending no bounds on all time", async () => {
+    const leaderboard = vi.fn().mockResolvedValue({ entries, totalDurationSeconds: 10_800, filters: {} });
+    const person = await signIn(clientFor({ leaderboard }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "All time" }));
+
+    await waitFor(() => expect(leaderboard).toHaveBeenLastCalledWith(""));
+  });
+
   it("uses local calendar midnights across a daylight-saving boundary", () => {
+    // 2026-03-08 is the US spring-forward Sunday; the week began Monday the 2nd.
     const now = new Date(2026, 2, 8, 12);
-    const query = new URLSearchParams(rangeQuery("7", now));
+    const query = new URLSearchParams(rangeQuery("week", now));
     const from = new Date(query.get("fromAt")!);
     const toExclusive = new Date(query.get("toExclusiveAt")!);
 
@@ -256,7 +270,7 @@ describe("dashboard", () => {
     const refused = () => new ClientError("validation", "The server would not accept that request.");
     await signIn(clientFor({
       leaderboard: vi.fn().mockRejectedValue(refused()),
-      report: vi.fn().mockRejectedValue(refused()),
+      meStats: vi.fn().mockRejectedValue(refused()),
     }));
 
     expect(await screen.findByRole("heading", { name: "SIQstack" })).toBeInTheDocument();
@@ -268,46 +282,65 @@ describe("dashboard", () => {
     const refused = () => new ClientError("validation", "The server would not accept that request.");
     await signIn(clientFor({
       leaderboard: vi.fn().mockRejectedValue(refused()),
-      report: vi.fn().mockRejectedValue(refused()),
+      meStats: vi.fn().mockRejectedValue(refused()),
     }));
 
     const board = within(await screen.findByRole("region", { name: "Leaderboard" }));
-    expect(board.getByText("Could not load hours for this range.")).toBeInTheDocument();
+    expect(await board.findByText("Could not load hours for this range.")).toBeInTheDocument();
     // A zero total is a claim about the data; nothing was loaded to claim it from.
     expect(board.queryByText("No recorded time in this range yet.")).not.toBeInTheDocument();
-    expect(board.queryByText("00:00:00 total")).not.toBeInTheDocument();
-
-    const sessions = within(screen.getByRole("region", { name: "Recent sessions" }));
-    expect(sessions.getByText("Could not load sessions for this range.")).toBeInTheDocument();
-    expect(sessions.queryByText("Nothing recorded in this range.")).not.toBeInTheDocument();
+    expect(board.getByText("Not loaded")).toBeInTheDocument();
+    expect(await board.findByText("Could not load this member's breakdown.")).toBeInTheDocument();
   });
 
   it("says so plainly when a range has no recorded time", async () => {
     await signIn(clientFor({
       leaderboard: vi.fn().mockResolvedValue({ entries: [], totalDurationSeconds: 0, filters: {} }),
-      report: vi.fn().mockResolvedValue({ rows: [], totalDurationSeconds: 0, filters: {}, pagination: {} }),
+      meStats: vi.fn().mockResolvedValue({ ...memberStats, totalDurationSeconds: 0, projects: [], apps: [] }),
     }));
 
     expect(await screen.findByText("No recorded time in this range yet.")).toBeInTheDocument();
-    expect(screen.getByText("Nothing recorded in this range.")).toBeInTheDocument();
+    expect(await screen.findByText("No recorded time in this range.")).toBeInTheDocument();
   });
 
-  it("lists recent sessions with their project and why they were filed there", async () => {
-    await signIn(clientFor());
-
-    const sessions = within(await screen.findByRole("region", { name: "Recent sessions" }));
-    expect(sessions.getByText("General")).toBeInTheDocument();
-    expect(sessions.getByText("AI tool's folder")).toBeInTheDocument();
-  });
-
-  it("shows each member's unattributed hours beside their total", async () => {
+  it("opens on your own breakdown, with agent tools folded into named rows", async () => {
     await signIn(clientFor());
 
     const board = within(await screen.findByRole("region", { name: "Leaderboard" }));
-    expect(board.getByRole("columnheader", { name: "Unattributed" })).toBeInTheDocument();
-    // Sam has half an hour nothing named; Alex has none, so the cell stays quiet.
-    expect(board.getByText("00:30:00")).toBeInTheDocument();
-    expect(board.getByText("—")).toBeInTheDocument();
+    // You are the highlighted row from the start.
+    expect(await board.findByRole("button", { name: /Alex/ })).toHaveAttribute("aria-pressed", "true");
+    const stats = within(await screen.findByRole("region", { name: /Alex · Today/ }));
+    // The project row repeats the number, so pin the headline figure.
+    expect(await stats.findByText("2 hr", { selector: "strong" })).toBeInTheDocument();
+    expect(stats.getByText("General")).toBeInTheDocument();
+    // claude.exe reads as the tool it is, so the team sees Claude usage plainly.
+    expect(stats.getByText("Claude Code")).toBeInTheDocument();
+    expect(stats.getByText("VS Code")).toBeInTheDocument();
+    expect(stats.getByText(/30 min of that landed in the default project/)).toBeInTheDocument();
+  });
+
+  it("follows whichever member gets picked on the board", async () => {
+    const meStats = vi.fn().mockResolvedValue(memberStats);
+    const person = await signIn(clientFor({ meStats }));
+
+    const board = within(await screen.findByRole("region", { name: "Leaderboard" }));
+    await person.click(await board.findByRole("button", { name: /Sam/ }));
+
+    expect(await screen.findByRole("region", { name: /Sam · Today/ })).toBeInTheDocument();
+    const query = new URLSearchParams((meStats.mock.calls.at(-1)?.[0] as string).replace(/^\?/, ""));
+    expect(query.get("userId")).toBe("u1");
+    expect(query.get("fromAt")).not.toBeNull();
+  });
+
+  it("offers a way back to your own breakdown after picking a teammate", async () => {
+    const person = await signIn(clientFor());
+
+    const board = within(await screen.findByRole("region", { name: "Leaderboard" }));
+    await person.click(await board.findByRole("button", { name: /Sam/ }));
+    await screen.findByRole("region", { name: /Sam · Today/ });
+
+    await person.click(screen.getByRole("button", { name: "Show my own" }));
+    expect(await screen.findByRole("region", { name: /Alex · Today/ })).toBeInTheDocument();
   });
 
   it("lets a stranded account join a teammate's workspace and reloads", async () => {

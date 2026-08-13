@@ -46,7 +46,56 @@ a.primary { display: inline-block; text-decoration: none; }
   33% { box-shadow: 0 0 22px rgba(0, 140, 255, .35); }
   66% { box-shadow: 0 0 22px rgba(168, 85, 247, .35); }
 }
-.range-picker span { position: absolute; }
+/* Range choice: the desktop's three text buttons, active one green-underlined. */
+.range-toggle { display: flex; gap: 12px; margin-right: 6px; }
+.range-toggle button { width: auto; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 2px 1px; background: transparent; color: var(--text-secondary); font-size: .8rem; letter-spacing: .04em; transition: color .15s ease, border-color .15s ease; }
+.range-toggle button:hover { color: #ffffff; }
+.range-toggle button.is-active { border-bottom-color: var(--accent-green); color: var(--accent-green); }
+
+/* The board mirrors the desktop app: each row is the control that picks whose
+   breakdown shows underneath, and the viewed member's row is highlighted. */
+.board-list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.board-choice {
+  display: grid;
+  width: 100%;
+  align-items: baseline;
+  gap: 10px;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: transparent;
+  color: inherit;
+  font-size: .93rem;
+  letter-spacing: normal;
+  text-align: left;
+  text-transform: none;
+  cursor: pointer;
+}
+.board-choice:hover { background: rgba(163, 179, 194, .1); }
+.board-list li.is-selected .board-choice { background: rgba(0, 229, 155, .1); }
+.board-rank { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.board-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.you-tag { color: var(--text-secondary); font-size: .74rem; text-transform: uppercase; letter-spacing: .08em; }
+.board-hours { color: var(--mint); font-variant-numeric: tabular-nums; }
+
+/* One member's breakdown, under the board that chose them. */
+.member-stats { margin-top: 16px; border-top: 1px solid rgba(163, 179, 194, .12); padding-top: 14px; }
+.member-stats h3 { margin: 0 0 10px; font-size: .93rem; }
+.member-stats-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.member-stats-head h3 { flex: 1 1 auto; min-width: 0; margin: 0; }
+.member-self { flex: none; border: 0; padding: 0; background: transparent; color: var(--mint); font-size: .78rem; letter-spacing: .04em; cursor: pointer; }
+.member-self:hover, .member-self:focus-visible { color: #ffffff; }
+.member-total { margin: 0 0 10px; font-size: .95rem; }
+.member-total strong { font-variant-numeric: tabular-nums; }
+.stat-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.stat-apps { margin-top: 10px; border-top: 1px solid rgba(163, 179, 194, .08); padding-top: 8px; }
+.stat-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 5px 2px; border-bottom: 1px solid rgba(163, 179, 194, .08); font-size: .89rem; }
+.stat-row:last-child { border-bottom: 0; }
+.stat-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stat-name.is-agent { color: var(--mint); }
+.stat-duration { flex: none; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.member-foot { margin: 10px 0 0; border-top: 1px solid rgba(163, 179, 194, .12); padding-top: 8px; color: var(--text-secondary); font-size: .78rem; font-variant-numeric: tabular-nums; }
 
 /* The installer hand-out (DownloadInstaller.tsx), in its two shapes.
 

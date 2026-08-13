@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
-import { QuotaDial, planLabel, signInNote } from "./QuotaDial.js";
+import { QuotaDial, planLabel, windowLine } from "./QuotaDial.js";
 import type { AgentQuota } from "./bridge.js";
 
 const claude: AgentQuota = {
@@ -38,19 +38,51 @@ const unreadable: AgentQuota = {
   stale: false,
 };
 
+/// The same locale formatting the dial uses, so the assertion does not pin the
+/// runner's time zone.
+const resetText = (resetsAt: string): string =>
+  new Date(resetsAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+
 /// The dial's own control, found by the reading it speaks rather than by class.
 const dialFor = (name: RegExp): HTMLElement => screen.getByRole("button", { name });
 
 describe("QuotaDial", () => {
-  it("shows the percentage, the plan, and the window that binds", () => {
+  it("shows the percentage, the plan, and when the binding window runs out", () => {
     render(<QuotaDial agentLabel="Claude Code" quota={claude} />);
 
     // The number is on the face, not only in the arc: colour is never the only
     // channel this reading travels on.
-    const trigger = dialFor(/Claude Code quota: 72% remaining on the Max plan, week window/);
+    const trigger = dialFor(/Claude Code quota: 72% remaining on the Max plan, left until /);
     expect(trigger).toHaveTextContent("72%");
     expect(trigger).toHaveTextContent("Max");
-    expect(trigger).toHaveTextContent("week");
+    expect(trigger).toHaveTextContent(`left until ${resetText("2026-08-13T21:00:00.000Z")}`);
+  });
+
+  it("names the window when the provider gave no reset time to count down to", () => {
+    render(
+      <QuotaDial
+        agentLabel="Claude Code"
+        quota={{ ...claude, windows: [{ id: "seven_day", label: "week", kind: "weekly", percentRemaining: 72, resetsAt: null }] }}
+      />,
+    );
+
+    expect(screen.getByText("week")).toBeInTheDocument();
+    expect(screen.queryByText(/left until/)).not.toBeInTheDocument();
+  });
+
+  it("falls back to the window name rather than printing a reset it cannot parse", () => {
+    render(
+      <QuotaDial
+        agentLabel="Claude Code"
+        quota={{
+          ...claude,
+          windows: [{ id: "seven_day", label: "week", kind: "weekly", percentRemaining: 72, resetsAt: "whenever" }],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("week")).toBeInTheDocument();
+    expect(screen.queryByText(/whenever/)).not.toBeInTheDocument();
   });
 
   it("draws an arc proportional to what is left", () => {
@@ -118,85 +150,43 @@ describe("QuotaDial", () => {
     expect(dialFor(/Kimi Code quota unknown\. No quota reading for this tool yet\./)).toBeInTheDocument();
   });
 
-  it("keeps the other windows one click away and marks the binding one", async () => {
+  it("keeps every window one click away, as one plain line each", async () => {
     const person = userEvent.setup();
     render(<QuotaDial agentLabel="Claude Code" quota={claude} />);
 
     const trigger = dialFor(/Claude Code quota: 72%/);
     expect(trigger).toHaveAttribute("aria-expanded", "false");
-    expect(screen.getByText("79% left")).not.toBeVisible();
+    expect(screen.getByText("79% left the session")).not.toBeVisible();
 
     await person.click(trigger);
 
     expect(trigger).toHaveAttribute("aria-expanded", "true");
-    const session = screen.getByText("79% left");
-    expect(session).toBeVisible();
-    expect(session.closest("li")).toHaveTextContent("session");
-    expect(screen.getByText("72% left").closest("li")).toHaveClass("is-binding");
-    expect(screen.getByText("79% left").closest("li")).not.toHaveClass("is-binding");
+    expect(screen.getByText("79% left the session")).toBeVisible();
+    expect(screen.getByText("72% left the week")).toBeVisible();
+    expect(screen.getByText("72% left the week").closest("li")).toHaveClass("is-binding");
+    expect(screen.getByText("79% left the session").closest("li")).not.toHaveClass("is-binding");
 
     await person.click(trigger);
     expect(trigger).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("puts the provider's own error code in the detail rather than the headline", async () => {
+  it("leaves the provider's own error code out of the detail entirely", async () => {
     const person = userEvent.setup();
     render(<QuotaDial agentLabel="Cursor" quota={unreadable} />);
 
-    expect(screen.getByText("sqlite3_unavailable")).not.toBeVisible();
     await person.click(dialFor(/Cursor quota unknown/));
-    expect(screen.getByText("sqlite3_unavailable")).toBeVisible();
     expect(screen.getByText("This tool's quota could not be read on this machine.")).toBeVisible();
+    expect(screen.queryByText("sqlite3_unavailable")).not.toBeInTheDocument();
   });
 
-  it("admits when a shown reading is out of date", async () => {
+  it("keeps the detail to the readings, with nothing else crowding them", async () => {
     const person = userEvent.setup();
-    render(<QuotaDial agentLabel="Claude Code" quota={{ ...claude, stale: true }} />);
+    const { container } = render(<QuotaDial agentLabel="Claude Code" quota={{ ...claude, stale: true }} />);
 
     await person.click(dialFor(/Claude Code quota: 72%/));
-    expect(screen.getByText("This reading may be out of date.")).toBeVisible();
-  });
-
-  it("skips a reset time it cannot parse instead of printing nonsense", async () => {
-    const person = userEvent.setup();
-    render(
-      <QuotaDial
-        agentLabel="Claude Code"
-        quota={{
-          ...claude,
-          windows: [{ id: "seven_day", label: "week", kind: "weekly", percentRemaining: 72, resetsAt: "whenever" }],
-        }}
-      />,
-    );
-
-    await person.click(dialFor(/Claude Code quota: 72%/));
-    expect(screen.queryByText(/resets/)).not.toBeInTheDocument();
-  });
-
-  it("names the login the reading belongs to and says it is the live one", async () => {
-    const person = userEvent.setup();
-    render(<QuotaDial agentLabel="Claude Code" quota={claude} />);
-
-    await person.click(dialFor(/Claude Code quota: 72%/));
-    expect(screen.getByText("Signed in as dev@example.com (Example Org) on this machine now.")).toBeVisible();
-  });
-
-  it("still says whose sign-in it means when the provider names nobody", async () => {
-    const person = userEvent.setup();
-    render(<QuotaDial agentLabel="Cursor" quota={unreadable} />);
-
-    await person.click(dialFor(/Cursor quota unknown/));
-    expect(screen.getByText("Shows whichever account is signed in on this machine now.")).toBeVisible();
-  });
-
-  it("reads the login from whichever field the provider filled in", () => {
-    expect(signInNote({ ...claude, account: { email: "dev@example.com", organization: null } }))
-      .toBe("Signed in as dev@example.com on this machine now.");
-    expect(signInNote({ ...claude, account: { email: null, organization: "Example Org" } }))
-      .toBe("Signed in as Example Org on this machine now.");
-    expect(signInNote({ ...claude, account: null }))
-      .toBe("Shows whichever account is signed in on this machine now.");
-    expect(signInNote(undefined)).toBe("Shows whichever account is signed in on this machine now.");
+    const lines = [...(container.querySelector(".quota-detail")?.querySelectorAll("li") ?? [])];
+    expect(lines.map((line) => line.textContent)).toEqual(["79% left the session", "72% left the week"]);
+    expect(container.querySelector(".quota-detail")?.querySelectorAll("p")).toHaveLength(0);
   });
 
   it("follows the account the host last reported rather than holding the old one", () => {
@@ -217,9 +207,7 @@ describe("QuotaDial", () => {
       />,
     );
 
-    const trigger = dialFor(/Claude Code quota: 9% remaining on the Pro plan/);
-    expect(trigger).toHaveTextContent("9%");
-    expect(screen.getByText("Signed in as someone-else@example.com on this machine now.")).toBeInTheDocument();
+    expect(dialFor(/Claude Code quota: 9% remaining on the Pro plan/)).toHaveTextContent("9%");
   });
 
   it("names a plan without a tier and one the provider already cased", () => {
@@ -229,5 +217,12 @@ describe("QuotaDial", () => {
     expect(planLabel("max")).toBe("Max");
     expect(planLabel("copilot business")).toBe("Copilot Business");
     expect(planLabel("Pro+")).toBe("Pro+");
+  });
+
+  it("spells one window the way the detail prints it", () => {
+    expect(windowLine({ id: "seven_day", label: "week", kind: "weekly", percentRemaining: 27, resetsAt: null }))
+      .toBe("27% left the week");
+    expect(windowLine({ id: "five_hour", label: "session", kind: "session", percentRemaining: 34, resetsAt: null }))
+      .toBe("34% left the session");
   });
 });

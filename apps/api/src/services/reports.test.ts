@@ -80,10 +80,10 @@ class Reports implements ReportRepository {
     return this.siteTotals;
   }
   public async findProjectForOrganization(_subject: AuthenticatedSubject, projectId: string) {
-    return this.accessible.has(projectId) && projectId === ids.project ? { id: projectId, name: "Timer" } : null;
+    return this.accessible.has(projectId) ? { id: projectId, name: "Timer" } : null;
   }
   public async findUserForOrganization(_subject: AuthenticatedSubject, userId: string) {
-    return this.accessible.has(userId) && userId === ids.user ? { id: userId, name: "Alex" } : null;
+    return this.accessible.has(userId) ? { id: userId, name: "Alex" } : null;
   }
   private summary() {
     return { totalRows: this.rows.length, totalDurationSeconds: this.rows.reduce((total, record) => total + record.durationSeconds, 0) };
@@ -361,7 +361,7 @@ describe("me/stats", () => {
         { mapping: { id: "01c7e513-b094-4d4c-ae55-21790ae019a4", pattern: "github.com/acme/*", projectId: ids.project }, durationSeconds: 900 },
       ],
     });
-    // The repository read is pinned to the caller, never to a filter argument.
+    // Without a userId filter, the repository read is pinned to the caller.
     expect(reports.lastProjectTotalsQuery).toEqual({
       from: new Date("2026-08-01T00:00:00.000Z"),
       toExclusive: new Date("2026-08-07T00:00:00.000Z"),
@@ -376,6 +376,23 @@ describe("me/stats", () => {
     const result = await createReportService({ reports: new Reports(), reaper: silentReaper }).meStats(subject, {});
 
     expect(result).toEqual({ filters: {}, totalDurationSeconds: 0, attributedSeconds: 0, unattributedSeconds: 0, projects: [], apps: [], sites: [] });
+  });
+
+  it("reads a named teammate's stats instead of the caller's when asked", async () => {
+    const reports = new Reports([], new Set([ids.user, ids.otherUser]));
+    const service = createReportService({ reports, reaper: silentReaper });
+
+    await service.meStats(subject, { userId: ids.otherUser });
+
+    expect(reports.lastProjectTotalsQuery).toEqual({ userId: ids.otherUser });
+    expect(reports.lastAppTotalsQuery).toEqual({ userId: ids.otherUser });
+  });
+
+  it("refuses a stats userId from outside the workspace, like the org report does", async () => {
+    const service = createReportService({ reports: new Reports([], new Set()), reaper: silentReaper });
+
+    await expect(service.meStats(subject, { userId: ids.otherUser }))
+      .rejects.toMatchObject({ code: "not_found", message: "User not found." });
   });
 
   it("rejects reversed or excessive date ranges like the org reports do", async () => {

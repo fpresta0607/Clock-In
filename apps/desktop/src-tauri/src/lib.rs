@@ -30,7 +30,7 @@ use tokio::sync::Mutex;
 
 use api::{
     ApiClient, ApiResult, BridgeError, ErrorKind, LeaderboardEntry, MeStats, Organization,
-    PathMapping, PathMappingCreateInput, PathMappingUpdateInput, TimerProject, TimerUser,
+    TimerProject, TimerUser,
 };
 use monitor::{MonitorSettings, MonitorStatus, SettingsPatch};
 use recovery::RecoveryState;
@@ -326,7 +326,7 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
     // Return the new workspace so the window updates without a reload.
     let (organization, entries) = tokio::try_join!(
         state.client.organization(&access_token),
-        state.client.leaderboard(&access_token)
+        state.client.leaderboard(&access_token, None, None)
     )?;
     Ok(OrganizationOverview {
         organization,
@@ -341,11 +341,19 @@ pub struct JoinInput {
 }
 
 #[tauri::command]
-async fn org_overview(state: State<'_, AppState>) -> ApiResult<OrganizationOverview> {
+async fn org_overview(
+    state: State<'_, AppState>,
+    from_at: Option<String>,
+    to_exclusive_at: Option<String>,
+) -> ApiResult<OrganizationOverview> {
     let access_token = state.access_token().await?;
     let (organization, entries) = tokio::try_join!(
         state.client.organization(&access_token),
-        state.client.leaderboard(&access_token)
+        state.client.leaderboard(
+            &access_token,
+            from_at.as_deref(),
+            to_exclusive_at.as_deref()
+        )
     )?;
     Ok(OrganizationOverview {
         organization,
@@ -421,6 +429,7 @@ async fn me_stats(
     state: State<'_, AppState>,
     from_at: Option<String>,
     to_exclusive_at: Option<String>,
+    user_id: Option<String>,
 ) -> ApiResult<MeStats> {
     let access_token = state.access_token().await?;
     state
@@ -429,6 +438,7 @@ async fn me_stats(
             &access_token,
             from_at.as_deref(),
             to_exclusive_at.as_deref(),
+            user_id.as_deref(),
         )
         .await
 }
@@ -473,59 +483,6 @@ async fn project_create(
     }
     let access_token = state.access_token().await?;
     state.client.create_project(&access_token, name).await
-}
-
-#[tauri::command]
-async fn path_mappings_list(state: State<'_, AppState>) -> ApiResult<Vec<PathMapping>> {
-    let access_token = state.access_token().await?;
-    let mappings = state.client.path_mappings(&access_token).await?;
-    state.monitor.cache_mappings(mappings.clone());
-    Ok(mappings)
-}
-
-/// Refreshes the monitor's local mapping cache after a change, so suggested
-/// starts resolve against current data without waiting for the upload tick.
-async fn refresh_mapping_cache(state: &State<'_, AppState>, access_token: &str) {
-    if let Ok(mappings) = state.client.path_mappings(access_token).await {
-        state.monitor.cache_mappings(mappings);
-    }
-}
-
-#[tauri::command]
-async fn path_mappings_create(
-    state: State<'_, AppState>,
-    input: PathMappingCreateInput,
-) -> ApiResult<PathMapping> {
-    let access_token = state.access_token().await?;
-    let mapping = state
-        .client
-        .create_path_mapping(&access_token, &input)
-        .await?;
-    refresh_mapping_cache(&state, &access_token).await;
-    Ok(mapping)
-}
-
-#[tauri::command]
-async fn path_mappings_update(
-    state: State<'_, AppState>,
-    id: String,
-    input: PathMappingUpdateInput,
-) -> ApiResult<PathMapping> {
-    let access_token = state.access_token().await?;
-    let mapping = state
-        .client
-        .update_path_mapping(&access_token, &id, &input)
-        .await?;
-    refresh_mapping_cache(&state, &access_token).await;
-    Ok(mapping)
-}
-
-#[tauri::command]
-async fn path_mappings_delete(state: State<'_, AppState>, id: String) -> ApiResult<()> {
-    let access_token = state.access_token().await?;
-    state.client.delete_path_mapping(&access_token, &id).await?;
-    refresh_mapping_cache(&state, &access_token).await;
-    Ok(())
 }
 
 /// Set once the exit flush starts. `AppHandle::exit` itself re-triggers
@@ -712,10 +669,6 @@ pub fn run() {
             me_stats,
             app_icons,
             project_create,
-            path_mappings_list,
-            path_mappings_create,
-            path_mappings_update,
-            path_mappings_delete,
         ])
         .build(tauri::generate_context!())
         .expect("the Clock-In desktop host failed to start")

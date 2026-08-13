@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 
 import {
-  formatDuration,
+  agentRuntimeForBinary,
+  agentRuntimeLabel,
+  formatHumanDuration,
+  friendlyAppName,
   type LeaderboardEntry,
+  type MeStatsResponse,
   type Organization,
-  type ReportRow,
-  type SessionAttribution,
 } from "@clock-in/shared";
 
 import { ClientError, type Client } from "./client.js";
@@ -15,28 +17,61 @@ import { WebGLShader } from "./WebGLShader.js";
 
 type AppProps = { client: Client };
 
-type Range = "7" | "30" | "365";
+/// The same three ranges the desktop app's All stats offers, measured on the
+/// viewer's own clock.
+type Range = "today" | "week" | "all";
 
 const rangeLabels: Record<Range, string> = {
-  "7": "Last 7 days",
-  "30": "Last 30 days",
-  "365": "Last year",
+  today: "Today",
+  week: "This week",
+  all: "All time",
 };
 
+/// Instant bounds on the viewer's local calendar: "today" runs midnight to
+/// midnight, "week" from Monday. Calendar-date params would be read as UTC
+/// days, which roll over mid-afternoon west of Greenwich. "All time" sends no
+/// bounds at all.
 export function rangeQuery(range: Range, now = new Date()): string {
-  const toExclusive = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-  const from = new Date(toExclusive);
-  from.setDate(from.getDate() - Number(range));
+  if (range === "all") return "";
+  const from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (range === "week") from.setDate(from.getDate() - ((from.getDay() + 6) % 7));
+  const toExclusive = new Date(from);
+  toExclusive.setDate(toExclusive.getDate() + (range === "week" ? 7 : 1));
   return `?fromAt=${encodeURIComponent(from.toISOString())}&toExclusiveAt=${encodeURIComponent(toExclusive.toISOString())}`;
 }
 
-/// Why a session is filed where it is, in the same plain words the desktop
-/// app uses. Nobody should have to learn a vocabulary to read a report.
-const attributionLabels: Record<SessionAttribution, string> = {
-  agent: "AI tool's folder",
-  selected: "Picked by hand",
-  default: "Nothing said",
-  manual: "Old timer",
+/// The member-stats query: the range bounds plus who to read.
+const statsQuery = (range: Range, userId: string): string => {
+  const bounds = rangeQuery(range);
+  return bounds === "" ? `?userId=${encodeURIComponent(userId)}` : `${bounds}&userId=${encodeURIComponent(userId)}`;
+};
+
+type AppRow = { key: string; label: string; agent: boolean; durationSeconds: number };
+
+const TOP_APP_ROWS = 8;
+
+/// The same fold the desktop's stats use: one row per agent runtime (so "how
+/// much Claude Code" is a single line), friendly names for everything else,
+/// heaviest first, and the long tail gathered into "Everything else".
+export const buildAppRows = (apps: MeStatsResponse["apps"]): AppRow[] => {
+  const totals = new Map<string, AppRow>();
+  for (const app of apps) {
+    if (app.durationSeconds <= 0) continue;
+    const source = agentRuntimeForBinary(app.processName);
+    const key = source ?? app.processName;
+    const row = totals.get(key) ?? {
+      key,
+      label: source === undefined ? friendlyAppName(app.processName) : agentRuntimeLabel(source),
+      agent: source !== undefined,
+      durationSeconds: 0,
+    };
+    totals.set(key, { ...row, durationSeconds: row.durationSeconds + app.durationSeconds });
+  }
+  const rows = [...totals.values()]
+    .sort((a, b) => b.durationSeconds - a.durationSeconds || a.label.localeCompare(b.label));
+  if (rows.length <= TOP_APP_ROWS) return rows;
+  const rest = rows.slice(TOP_APP_ROWS).reduce((sum, row) => sum + row.durationSeconds, 0);
+  return [...rows.slice(0, TOP_APP_ROWS), { key: "everything-else", label: "Everything else", agent: false, durationSeconds: rest }];
 };
 
 const messageFor = (error: unknown): string =>
@@ -55,17 +90,21 @@ export const App = ({ client }: AppProps) => {
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | undefined>();
 
-  const [range, setRange] = useState<Range>("30");
+  const [range, setRange] = useState<Range>("today");
   const [organization, setOrganization] = useState<Organization | undefined>();
+  const [selfId, setSelfId] = useState<string | undefined>();
   const [entries, setEntries] = useState<readonly LeaderboardEntry[]>([]);
-  const [rows, setRows] = useState<readonly ReportRow[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [dataError, setDataError] = useState<string | undefined>();
   // Tracked per card, because "we could not load this" and "there is nothing
   // here" are different facts and a zero total is a lie about the first.
   const [boardFailed, setBoardFailed] = useState(false);
-  const [rowsFailed, setRowsFailed] = useState(false);
+  // Whose breakdown the drill-down shows: you by default, then whoever on the
+  // board was picked last.
+  const [member, setMember] = useState<{ id: string; name: string } | undefined>();
+  const [memberStats, setMemberStats] = useState<MeStatsResponse | undefined>();
+  const [memberFailed, setMemberFailed] = useState(false);
   const [copied, setCopied] = useState(false);
   const [joinCode, setJoinCode] = useState("");
   const [joinBusy, setJoinBusy] = useState(false);
@@ -76,18 +115,17 @@ export const App = ({ client }: AppProps) => {
     setLoading(true);
     setDataError(undefined);
     setBoardFailed(false);
-    setRowsFailed(false);
     const query = rangeQuery(selected);
-    // Settled rather than all: these three calls fail independently, and one
-    // refused report must not throw away the workspace that loaded beside it.
-    // While it did, a rejected /reports blanked the masthead and the invite
-    // code too, so a server-side failure read as an empty account.
-    const [organizationResult, board, report] = await Promise.allSettled([
+    // Settled rather than all: these calls fail independently, and one refused
+    // report must not throw away the workspace that loaded beside it. While it
+    // did, a rejected report blanked the masthead and the invite code too, so
+    // a server-side failure read as an empty account.
+    const [organizationResult, board, meResult] = await Promise.allSettled([
       client.organization(),
       client.leaderboard(query),
-      client.report(`${query}&pageSize=25`),
+      client.me(),
     ]);
-    const failures = [organizationResult, board, report]
+    const failures = [organizationResult, board, meResult]
       .flatMap((result) => (result.status === "rejected" ? [result.reason as unknown] : []));
 
     if (failures.some((reason) => reason instanceof ClientError && reason.kind === "auth")) {
@@ -98,11 +136,10 @@ export const App = ({ client }: AppProps) => {
     }
 
     if (organizationResult.status === "fulfilled") setOrganization(organizationResult.value.organization);
+    if (meResult.status === "fulfilled") setSelfId(meResult.value.user.id);
     setBoardFailed(board.status === "rejected");
     setEntries(board.status === "fulfilled" ? board.value.entries : []);
     setTotal(board.status === "fulfilled" ? board.value.totalDurationSeconds : 0);
-    setRowsFailed(report.status === "rejected");
-    setRows(report.status === "fulfilled" ? report.value.rows : []);
 
     const [firstFailure] = failures;
     if (firstFailure !== undefined) setDataError(messageFor(firstFailure));
@@ -127,6 +164,34 @@ export const App = ({ client }: AppProps) => {
     if (!signedIn) return;
     void load(range);
   }, [signedIn, range, load]);
+
+  // The drill-down: one member's breakdown for the range on screen. It opens
+  // on you and follows whichever board row was picked.
+  const viewedId = member?.id ?? selfId;
+  useEffect(() => {
+    if (!signedIn || viewedId === undefined) return undefined;
+    let cancelled = false;
+    setMemberStats(undefined);
+    setMemberFailed(false);
+    client.meStats(statsQuery(range, viewedId)).then(
+      (result) => {
+        if (!cancelled) setMemberStats(result);
+      },
+      (error: unknown) => {
+        if (cancelled) return;
+        if (error instanceof ClientError && error.kind === "auth") {
+          setSignedIn(false);
+          setAuthError("Your session expired. Sign in again.");
+          return;
+        }
+        setMemberFailed(true);
+        setDataError(messageFor(error));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [client, signedIn, range, viewedId]);
 
   const submitAuth = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -164,10 +229,12 @@ export const App = ({ client }: AppProps) => {
     setSignedIn(false);
     setJustSignedUp(false);
     setOrganization(undefined);
+    setSelfId(undefined);
     setEntries([]);
-    setRows([]);
+    setMember(undefined);
+    setMemberStats(undefined);
+    setMemberFailed(false);
     setBoardFailed(false);
-    setRowsFailed(false);
     setAuthError(undefined);
   };
 
@@ -286,14 +353,18 @@ export const App = ({ client }: AppProps) => {
           <h1>{organization?.name ?? "Your workspace"}</h1>
         </div>
         <div className="masthead-actions">
-          <label className="range-picker">
-            <span className="visually-hidden">Date range</span>
-            <select value={range} onChange={(event) => setRange(event.target.value as Range)}>
-              {Object.entries(rangeLabels).map(([value, label]) => (
-                <option key={value} value={value}>{label}</option>
-              ))}
-            </select>
-          </label>
+          <div className="range-toggle" role="group" aria-label="Date range">
+            {(Object.keys(rangeLabels) as Range[]).map((value) => (
+              <button
+                key={value}
+                type="button"
+                className={range === value ? "is-active" : undefined}
+                onClick={() => setRange(value)}
+              >
+                {rangeLabels[value]}
+              </button>
+            ))}
+          </div>
           <DownloadInstaller />
           <button
             className="ghost help-button"
@@ -343,7 +414,7 @@ export const App = ({ client }: AppProps) => {
       <section className="card" aria-labelledby="board-title">
         <div className="card-head">
           <h2 id="board-title">Leaderboard</h2>
-          <span className="total">{boardFailed ? "Not loaded" : `${formatDuration(total)} total`}</span>
+          <span className="total">{boardFailed ? "Not loaded" : `${formatHumanDuration(total)} total`}</span>
         </div>
         {boardFailed ? (
           <p className="subtle">Could not load hours for this range.</p>
@@ -352,62 +423,81 @@ export const App = ({ client }: AppProps) => {
         ) : entries.length === 0 ? (
           <p className="subtle">No recorded time in this range yet.</p>
         ) : (
-          <table>
-            <thead>
-              <tr>
-                <th scope="col">#</th>
-                <th scope="col">Member</th>
-                <th scope="col">Sessions</th>
-                <th scope="col">Unattributed</th>
-                <th scope="col">Hours</th>
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map((entry) => (
-                <tr key={entry.user.id}>
-                  <td className="rank">{entry.rank}</td>
-                  <td>{entry.user.name}</td>
-                  <td className="numeric">{entry.sessionCount}</td>
-                  <td className="numeric subtle-cell" title="Hours that landed in a default project because nothing named one">
-                    {entry.unattributedSeconds === 0 ? "—" : formatDuration(entry.unattributedSeconds)}
-                  </td>
-                  <td className="numeric hours">{formatDuration(entry.durationSeconds)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          // Each row picks whose breakdown the panel underneath shows. You are
+          // highlighted from the start; picking a teammate moves the highlight.
+          <ol className="board-list">
+            {entries.map((entry) => (
+              <li key={entry.user.id} className={entry.user.id === viewedId ? "is-selected" : undefined}>
+                <button
+                  type="button"
+                  className="board-choice"
+                  aria-pressed={entry.user.id === viewedId}
+                  onClick={() => setMember({ id: entry.user.id, name: entry.user.name })}
+                >
+                  <span className="board-rank">{entry.rank}</span>
+                  <span className="board-name">
+                    {entry.user.name}
+                    {entry.user.id === selfId && <span className="you-tag"> you</span>}
+                  </span>
+                  <span className="board-hours">{formatHumanDuration(entry.durationSeconds)}</span>
+                </button>
+              </li>
+            ))}
+          </ol>
         )}
-      </section>
 
-      <section className="card" aria-labelledby="sessions-title">
-        <div className="card-head"><h2 id="sessions-title">Recent sessions</h2></div>
-        {rowsFailed ? (
-          <p className="subtle">Could not load sessions for this range.</p>
-        ) : rows.length === 0 ? (
-          <p className="subtle">Nothing recorded in this range.</p>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th scope="col">Member</th>
-                <th scope="col">Project</th>
-                <th scope="col">Filed because</th>
-                <th scope="col">Started</th>
-                <th scope="col">Duration</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.id}>
-                  <td>{row.user.name}</td>
-                  <td>{row.project.name}</td>
-                  <td className="description">{attributionLabels[row.attribution]}</td>
-                  <td>{new Date(row.startedAt).toLocaleString()}</td>
-                  <td className="numeric hours">{formatDuration(row.durationSeconds)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        {viewedId !== undefined && (
+          <section className="member-stats" aria-labelledby="member-stats-title">
+            <div className="member-stats-head">
+              <h3 id="member-stats-title">
+                {(member?.name ?? entries.find((entry) => entry.user.id === selfId)?.user.name ?? "You")}
+                {" · "}
+                {rangeLabels[range]}
+              </h3>
+              {viewedId !== selfId && (
+                <button type="button" className="member-self" onClick={() => setMember(undefined)}>
+                  Show my own
+                </button>
+              )}
+            </div>
+            {memberFailed ? (
+              <p className="subtle">Could not load this member's breakdown.</p>
+            ) : memberStats === undefined ? (
+              <p className="subtle" role="status">Loading…</p>
+            ) : (
+              <>
+                <p className="member-total"><strong>{formatHumanDuration(memberStats.totalDurationSeconds)}</strong> recorded</p>
+                {memberStats.projects.length > 0 && (
+                  <ul className="stat-list">
+                    {memberStats.projects.filter((entry) => entry.durationSeconds > 0).map((entry) => (
+                      <li key={entry.project.id} className="stat-row">
+                        <span className="stat-name">{entry.project.name}</span>
+                        <span className="stat-duration">{formatHumanDuration(entry.durationSeconds)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {buildAppRows(memberStats.apps).length === 0 ? (
+                  <p className="subtle">No recorded time in this range.</p>
+                ) : (
+                  <ul className="stat-list stat-apps">
+                    {buildAppRows(memberStats.apps).map((row) => (
+                      <li key={row.key} className="stat-row">
+                        <span className={row.agent ? "stat-name is-agent" : "stat-name"}>{row.label}</span>
+                        <span className="stat-duration">{formatHumanDuration(row.durationSeconds)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {memberStats.unattributedSeconds > 0 && (
+                  <p className="member-foot">
+                    {formatHumanDuration(memberStats.unattributedSeconds)} of that landed in the default project,
+                    because nothing said which project it was for.
+                  </p>
+                )}
+              </>
+            )}
+          </section>
         )}
       </section>
 
