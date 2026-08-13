@@ -160,12 +160,23 @@ function measureMember(member: MemberIntervals, query: ReportQuery): MemberMeasu
   const working = scoped ? intersectIntervals(member.presence, member.sessions) : member.presence;
   const range = { ...(query.from === undefined ? {} : { start: query.from.getTime() }), ...(query.toExclusive === undefined ? {} : { end: query.toExclusive.getTime() }) };
   const measurement = measureTime(working, member.agents.map((agent) => agent.interval), range);
-  const splits = new Map<string, AgentSplit>();
+  // Grouped before summing, so each split rounds once. Rounding every
+  // interval on its own drifts the splits away from the agentSeconds total
+  // they are contracted to reconstruct.
+  const grouped = new Map<string, { source: string; model: string | null; intervals: Interval[] }>();
   for (const agent of member.agents) {
     const key = `${agent.source}|${agent.model ?? ""}`;
-    const existing = splits.get(key) ?? { source: agent.source, model: agent.model, durationSeconds: 0 };
-    existing.durationSeconds += summedSeconds([agent.interval], range);
-    splits.set(key, existing);
+    const existing = grouped.get(key) ?? { source: agent.source, model: agent.model, intervals: [] };
+    existing.intervals.push(agent.interval);
+    grouped.set(key, existing);
+  }
+  const splits = new Map<string, AgentSplit>();
+  for (const [key, group] of grouped) {
+    splits.set(key, {
+      source: group.source,
+      model: group.model,
+      durationSeconds: summedSeconds(group.intervals, range),
+    });
   }
   return {
     activeSeconds: measurement.activeSeconds,
@@ -216,11 +227,8 @@ function asReportRow(record: ReportRowRecord): ReportRow {
   };
 }
 
-/**
- * Ranks by position in the already-sorted rows, but shares a rank between equal
- * totals so a tie does not read as one member ahead of another.
- */
-function asLeaderboardEntry(record: LeaderboardRowRecord, index: number, all: LeaderboardRowRecord[]): {
+/** The legacy per-member row, before the time model measures it. */
+function asLeaderboardEntry(record: LeaderboardRowRecord): {
   rank: number;
   user: { id: string; name: string };
   durationSeconds: number;
@@ -233,26 +241,15 @@ function asLeaderboardEntry(record: LeaderboardRowRecord, index: number, all: Le
     durationSeconds,
     safeInteger(record.attributedSeconds, "leaderboard attributed seconds"),
   );
-  const previous = index === 0 ? undefined : all[index - 1];
-  const isTiedWithPrevious = previous !== undefined
-    && safeInteger(previous.durationSeconds, "leaderboard duration") === durationSeconds;
+  // Rank is assigned once, after the board sorts by active time.
   return {
-    rank: isTiedWithPrevious ? sharedRank(record, index, all) : index + 1,
+    rank: 0,
     user: record.user,
     durationSeconds,
     sessionCount: safeInteger(record.sessionCount, "leaderboard session count"),
     attributedSeconds,
     unattributedSeconds: Math.max(0, durationSeconds - attributedSeconds),
   };
-}
-
-function sharedRank(record: LeaderboardRowRecord, index: number, all: LeaderboardRowRecord[]): number {
-  const duration = safeInteger(record.durationSeconds, "leaderboard duration");
-  let first = index;
-  while (first > 0 && safeInteger(all[first - 1]!.durationSeconds, "leaderboard duration") === duration) {
-    first -= 1;
-  }
-  return first + 1;
 }
 
 function safeInteger(value: number | string | bigint | null, field: string): number {
@@ -319,7 +316,7 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
   return {
     async list(subject: AuthenticatedSubject, filters: ReportFilters): Promise<ReportResponse> {
       validatePagination(filters);
-      const query = normalizedQuery(filters);
+      const query: ReportQuery = { ...normalizedQuery(filters), ...scopeQuery(filters.scope) };
       await authorizeFilters(dependencies.reports, subject, query);
       await dependencies.reaper.reapStale(subject);
       const offset = (filters.page - 1) * filters.pageSize;
@@ -341,7 +338,7 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
 
     async export(subject: AuthenticatedSubject, filters: ReportFilters): Promise<ReportExport> {
       validatePagination(filters);
-      const query = normalizedQuery(filters);
+      const query: ReportQuery = { ...normalizedQuery(filters), ...scopeQuery(filters.scope) };
       await authorizeFilters(dependencies.reports, subject, query);
       await dependencies.reaper.reapStale(subject);
       const exportRead = await dependencies.reports.readExportForOrganization(subject, query, reportExportRowCap);
@@ -370,20 +367,33 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       const members = collectMembers(presence, sessionIntervals, agentIntervals);
       const legacy = rows.map(asLeaderboardEntry);
       const legacyById = new Map(legacy.map((entry) => [entry.user.id, entry]));
-      // Everyone with any evidence in range appears: presence or agent work
-      // without a completed session must not vanish from the board.
+      // Someone with agent work but no completed session still belongs on the
+      // board. Presence alone does not qualify under a project or unassigned
+      // scope: presence carries no project, so every member of the workspace
+      // would otherwise appear as an all-zero row under every scope.
+      const scoped = query.projectId !== undefined || query.unassignedOnly === true;
+      const qualifies = (member: MemberIntervals): boolean =>
+        scoped ? member.sessions.length > 0 || member.agents.length > 0 : member.presence.length > 0 || member.agents.length > 0;
+      const synthesized = new Set<string>();
       for (const member of members.values()) {
-        if (!legacyById.has(member.user.id)) {
+        if (!legacyById.has(member.user.id) && qualifies(member)) {
           const empty = { rank: 0, user: member.user, durationSeconds: 0, sessionCount: 0, attributedSeconds: 0, unattributedSeconds: 0 };
           legacy.push(empty);
           legacyById.set(member.user.id, empty);
+          synthesized.add(member.user.id);
         }
       }
-      const measured = legacy.map((entry) => {
-        const member = members.get(entry.user.id);
-        const measurement = member === undefined ? EMPTY_MEASUREMENT : measureMember(member, query);
-        return { ...entry, ...measurement };
-      });
+      const measured = legacy
+        .map((entry) => {
+          const member = members.get(entry.user.id);
+          const measurement = member === undefined ? EMPTY_MEASUREMENT : measureMember(member, query);
+          return { ...entry, ...measurement };
+        })
+        // A member the report itself returned always stands, even at zero.
+        // A member this code invented from interval evidence has to justify
+        // the row, or a scope with nothing in it fills with phantom zeroes.
+        .filter((entry) => !synthesized.has(entry.user.id)
+          || entry.activeSeconds > 0 || entry.agentSeconds > 0 || entry.durationSeconds > 0);
       // The board ranks by active time - the human-hours number - with the
       // legacy duration as a stable tiebreak. A rank is shared only when the
       // whole ranking key ties, so equal work reads as equal and nothing else does.

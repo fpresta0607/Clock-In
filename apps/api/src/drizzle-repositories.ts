@@ -111,7 +111,6 @@ export class DrizzleProjectRepository implements ProjectRepository {
         eq(projects.organizationId, subject.organizationId),
         eq(projectMemberships.userId, subject.userId),
         eq(projectMemberships.organizationId, subject.organizationId),
-        eq(projects.archived, false),
       ))
       .orderBy(asc(projects.name), asc(projects.id));
   }

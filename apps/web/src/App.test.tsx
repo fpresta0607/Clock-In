@@ -355,10 +355,10 @@ describe("dashboard", () => {
 
     const board = within(await screen.findByRole("region", { name: "Leaderboard" }));
     await person.click(await board.findByRole("button", { name: /Sam/ }));
-    await screen.findByRole("region", { name: /Sam · Today/ });
+    await screen.findByRole("region", { name: /Sam · Last 30 days/ });
 
     await person.click(screen.getByRole("button", { name: "Show my own" }));
-    expect(await screen.findByRole("region", { name: /Alex · Today/ })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: /Alex · Last 30 days/ })).toBeInTheDocument();
   });
 
   it("lets a stranded account join a teammate's workspace and reloads", async () => {

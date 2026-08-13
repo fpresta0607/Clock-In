@@ -247,6 +247,28 @@ struct PathMappingListResponse {
     mappings: Vec<PathMapping>,
 }
 
+/// Active time split by how many agents ran at once, plus agent runtime that
+/// fell outside the member's presence entirely.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeStatsConcurrency {
+    pub t0_seconds: u64,
+    pub t1_seconds: u64,
+    pub t2_seconds: u64,
+    pub t3_plus_seconds: u64,
+    pub away_seconds: u64,
+}
+
+/// One agent runtime's share of agent time; sums to agent time, never to active time.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeStatsAgentSplit {
+    pub source: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    pub duration_seconds: u64,
+}
+
 /// What deleting a project takes with it, as `/projects/:id/usage` reports it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -262,6 +284,14 @@ pub struct ProjectUsage {
 #[serde(rename_all = "camelCase")]
 pub struct MeStats {
     pub filters: MeStatsFilters,
+    /// Union of the member's working intervals - never exceeds wall clock.
+    /// These four ride through to the webview, whose decoder requires them:
+    /// a field missing here is a hard `invalidResponse()` over there.
+    pub active_seconds: u64,
+    /// Summed agent runtime; exceeding `active_seconds` is leverage, not an error.
+    pub agent_seconds: u64,
+    pub concurrency: MeStatsConcurrency,
+    pub by_agent: Vec<MeStatsAgentSplit>,
     pub total_duration_seconds: u64,
     pub attributed_seconds: u64,
     pub unattributed_seconds: u64,
@@ -955,10 +985,37 @@ mod tests {
                 "apps": [
                     {"processName": "Code.exe", "durationSeconds": 4800},
                     {"processName": "chrome.exe", "durationSeconds": 1200}
+                ],
+                "activeSeconds": 7000,
+                "agentSeconds": 10800,
+                "concurrency": {
+                    "t0Seconds": 3400,
+                    "t1Seconds": 0,
+                    "t2Seconds": 3600,
+                    "t3PlusSeconds": 0,
+                    "awaySeconds": 3600
+                },
+                "byAgent": [
+                    {"source": "claude_code", "model": null, "durationSeconds": 7200},
+                    {"source": "codex", "model": "gpt-5", "durationSeconds": 3600}
                 ]
             }"#,
         )
         .expect("stats parse");
+
+        // The measurement block must survive the round trip: the webview's
+        // decoder rejects the whole reading if any of it is missing.
+        assert_eq!(stats.active_seconds, 7_000);
+        assert_eq!(stats.agent_seconds, 10_800);
+        assert_eq!(stats.concurrency.t2_seconds, 3_600);
+        assert_eq!(stats.concurrency.away_seconds, 3_600);
+        assert_eq!(stats.by_agent[1].source, "codex");
+        assert_eq!(stats.by_agent[1].model.as_deref(), Some("gpt-5"));
+        // Re-serialized to the webview in the camelCase the decoder reads.
+        let echoed = serde_json::to_value(&stats).expect("stats serialize");
+        assert_eq!(echoed["activeSeconds"], 7_000);
+        assert_eq!(echoed["concurrency"]["t3PlusSeconds"], 0);
+        assert_eq!(echoed["byAgent"][0]["durationSeconds"], 7_200);
 
         assert_eq!(stats.filters.from.as_deref(), Some("2026-08-01"));
         assert_eq!(stats.filters.to, None);

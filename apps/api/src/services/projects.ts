@@ -11,20 +11,37 @@ function compareOrdinal(left: string, right: string): number {
   return left < right ? -1 : 1;
 }
 
-export async function listProjects(repository: ProjectRepository, subject: AuthenticatedSubject): Promise<{
-  projects: Array<{ id: string; name: string; createdAt: string; isArchived: boolean }>;
+/**
+ * The member's projects. Archived ones are excluded by default - pickers must
+ * not offer them - but the management surface asks for them with
+ * `includeArchived`, which is the only way an archive can be undone.
+ */
+export async function listProjects(
+  repository: ProjectRepository,
+  subject: AuthenticatedSubject,
+  includeArchived = false,
+): Promise<{
+  projects: Array<{ id: string; name: string; createdAt: string; isArchived: boolean; isDefault: boolean }>;
 }> {
   const projects = await repository.listForMember(subject);
   return {
     projects: projects
-      .filter((project) => !project.archived)
+      .filter((project) => includeArchived || !project.archived)
       .sort((left, right) => compareOrdinal(left.name, right.name) || compareOrdinal(left.id, right.id))
-      .map((project) => ({ id: project.id, name: project.name, createdAt: project.createdAt.toISOString(), isArchived: project.archived })),
+      .map((project) => ({
+        id: project.id,
+        name: project.name,
+        createdAt: project.createdAt.toISOString(),
+        isArchived: project.archived,
+        isDefault: project.isDefault,
+      })),
   };
 }
 
 /** Case-insensitive: "client work" and "Client Work" are one project to a person. */
 async function rejectDuplicateName(repository: ProjectRepository, subject: AuthenticatedSubject, name: string, exceptId?: string): Promise<void> {
+  // Archived rows count: unarchiving must never produce two projects with
+  // one name, which is exactly what this rule exists to prevent.
   const projects = await repository.listForMember(subject);
   const wanted = name.trim().toLowerCase();
   if (projects.some((project) => project.id !== exceptId && project.name.trim().toLowerCase() === wanted)) {
@@ -37,10 +54,17 @@ export async function createProject(repository: ProjectRepository, subject: Auth
   name: string;
   createdAt: string;
   isArchived: boolean;
+  isDefault: boolean;
 }> {
   await rejectDuplicateName(repository, subject, name);
   const project = await repository.createForMember(subject, name);
-  return { id: project.id, name: project.name, createdAt: project.createdAt.toISOString(), isArchived: project.archived };
+  return {
+    id: project.id,
+    name: project.name,
+    createdAt: project.createdAt.toISOString(),
+    isArchived: project.archived,
+    isDefault: project.isDefault,
+  };
 }
 
 export async function updateProject(
@@ -48,7 +72,7 @@ export async function updateProject(
   subject: AuthenticatedSubject,
   projectId: string,
   patch: ProjectUpdateRequest,
-): Promise<{ id: string; name: string; createdAt: string; isArchived: boolean }> {
+): Promise<{ id: string; name: string; createdAt: string; isArchived: boolean; isDefault: boolean }> {
   if (repository.updateForMember === undefined) throw new AppError("not_found", "Project not found.");
   if (patch.name !== undefined) await rejectDuplicateName(repository, subject, patch.name, projectId);
   const updated = await repository.updateForMember(subject, projectId, {
@@ -56,7 +80,13 @@ export async function updateProject(
     ...(patch.isArchived === undefined ? {} : { archived: patch.isArchived }),
   });
   if (updated === null) throw new AppError("not_found", "Project not found.");
-  return { id: updated.id, name: updated.name, createdAt: updated.createdAt.toISOString(), isArchived: updated.archived };
+  return {
+    id: updated.id,
+    name: updated.name,
+    createdAt: updated.createdAt.toISOString(),
+    isArchived: updated.archived,
+    isDefault: updated.isDefault,
+  };
 }
 
 export async function projectUsage(
@@ -71,8 +101,10 @@ export async function projectUsage(
 
 /**
  * Deletes a project, either moving its data to `reassignTo` first or taking
- * the data with it. The last project a member has refuses to die: automatic
- * recording needs somewhere for time to land.
+ * the data with it. Two guards, because this reaches beyond the caller:
+ * deletion is workspace-wide, so it destroys or moves *other* members'
+ * sessions, and only an admin may do that. And the last active project
+ * refuses to die - automatic recording needs somewhere for time to land.
  */
 export async function deleteProject(
   repository: ProjectRepository,
@@ -81,12 +113,16 @@ export async function deleteProject(
   reassignTo: string | null,
 ): Promise<void> {
   if (repository.deleteForOrganization === undefined) throw new AppError("not_found", "Project not found.");
+  if (subject.role !== "admin") {
+    throw new AppError("forbidden", "Only a workspace administrator can delete a project.");
+  }
   const project = await repository.findForMember(subject, projectId);
   if (project === null) throw new AppError("not_found", "Project not found.");
   if (project.isDefault) {
     throw new AppError("conflict", "The default project cannot be deleted; unattributed time lands there.");
   }
-  const remaining = (await repository.listForMember(subject)).filter((candidate) => candidate.id !== projectId);
+  const remaining = (await repository.listForMember(subject))
+    .filter((candidate) => candidate.id !== projectId && !candidate.archived);
   if (remaining.length === 0) {
     throw new AppError("conflict", "The last project cannot be deleted; recording needs somewhere to land.");
   }

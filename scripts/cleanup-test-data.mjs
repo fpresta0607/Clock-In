@@ -51,23 +51,37 @@ const run = async () => {
         and u.email !~ '\\+[0-9]{6,}@'
     )`;
 
+  // `x NOT IN (NULL)` is NULL, not true, so an empty test-org list must drop
+  // the clause entirely rather than filter everything out — otherwise the
+  // preview reads "nothing to delete" right before an unbounded delete.
+  const keptOrgs = testOrgs.length === 0
+    ? sql`true`
+    : sql`o.id not in ${sql(testOrgs.map((org) => org.id))}`;
   const staleRows = await sql`
     select o.id, o.name,
       count(*) filter (where t.started_at < ${boundary}) as stale_sessions,
       coalesce(sum(t.duration_seconds) filter (where t.started_at < ${boundary}), 0) as stale_seconds
     from organizations o join time_sessions t on t.organization_id = o.id
-    where o.id not in ${testOrgs.length === 0 ? sql`(select null::uuid)` : sql`${sql(testOrgs.map((org) => org.id))}`}
+    where ${keptOrgs}
     group by o.id, o.name having count(*) filter (where t.started_at < ${boundary}) > 0`;
+
+  const [staleEvidence] = await sql`
+    select
+      (select count(*) from activity_segments where started_at < ${boundary}) as segments,
+      (select count(*) from agent_sessions where started_at < ${boundary}) as agent_sessions`;
 
   const e2eProjects = await sql`
     select p.id, p.name from projects p
     where p.name like 'E2E%' and p.is_default = false`;
 
-  console.log(`Boundary: rows started before ${boundary.toISOString()}`);
+  console.log(`Boundary: rows started before ${boundary.toLocaleString()} (local) / ${boundary.toISOString()}`);
   console.log(`\nWhole test workspaces (${testOrgs.length}):`);
   for (const org of testOrgs) console.log(`  ${org.name} — ${org.sessions} sessions — ${org.emails ?? "no users"}`);
   console.log(`\nStale rows in kept workspaces (${staleRows.length}):`);
   for (const row of staleRows) console.log(`  ${row.name} — ${row.stale_sessions} sessions / ${Math.round(row.stale_seconds / 60)} min before boundary`);
+  // The evidence deletes are workspace-wide, so they are previewed in their
+  // own right rather than implied by the session counts above.
+  console.log(`\nPre-boundary evidence everywhere: ${staleEvidence?.segments ?? 0} activity segments, ${staleEvidence?.agent_sessions ?? 0} agent sessions`);
   console.log(`\nE2E projects (${e2eProjects.length}):`);
   for (const project of e2eProjects) console.log(`  ${project.name} (${project.id})`);
 
@@ -91,9 +105,13 @@ const run = async () => {
     await tx`delete from time_sessions where started_at < ${boundary}`;
     const projectIds = e2eProjects.map((project) => project.id);
     if (projectIds.length > 0) {
-      // An E2E project still referenced by kept sessions stays; deleting it
-      // would break rows the boundary chose to keep.
-      const referenced = await tx`select distinct project_id from time_sessions where project_id in ${tx(projectIds)}`;
+      // An E2E project still referenced by kept rows stays: agent_sessions
+      // holds an ON DELETE RESTRICT foreign key, so deleting one out from
+      // under a surviving row aborts the whole transaction.
+      const referenced = await tx`
+        select project_id from time_sessions where project_id in ${tx(projectIds)}
+        union select project_id from agent_sessions where project_id in ${tx(projectIds)}
+        union select project_id from project_path_mappings where project_id in ${tx(projectIds)}`;
       const removable = projectIds.filter((id) => !referenced.some((row) => row.project_id === id));
       if (removable.length > 0) {
         await tx`delete from user_project_selections where project_id in ${tx(removable)}`;

@@ -296,10 +296,12 @@ export const App = ({ client }: AppProps) => {
     };
   }, [client, signedIn, preferencesReady, sessionsOpen, range, sessionPage, scopeParams]);
 
+  // Reset on scope, range, or a fresh open: reopening the tab with a page
+  // counter still at 2 would append page 2's rows on top of themselves.
   useEffect(() => {
     setSessionPage(1);
     setSessionRows([]);
-  }, [scope, range]);
+  }, [scope, range, sessionsOpen]);
 
   const submitAuth = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -382,7 +384,7 @@ export const App = ({ client }: AppProps) => {
   };
 
   const refreshProjects = async (): Promise<void> => {
-    const listed = await client.projects();
+    const listed = await client.projects(true);
     setProjects(listed.projects);
     // A scope naming a project that no longer exists falls back to everything.
     if (scope !== "all" && scope !== "unassigned" && !listed.projects.some((project) => project.id === scope)) {
@@ -518,7 +520,11 @@ export const App = ({ client }: AppProps) => {
       title: "Completed sessions in this scope and range.",
     },
   ];
-  const sortedEntries = [...entries].sort(boardSorters[boardSort]);
+  // Rank follows the column being sorted by; showing the server's active-time
+  // rank under an agent-time sort reads as 1, 4, 2, 3.
+  const sortedEntries = [...entries]
+    .sort(boardSorters[boardSort])
+    .map((entry, index) => ({ ...entry, rank: boardSort === "active" ? entry.rank : index + 1 }));
   const memberAppRows = memberStats === undefined ? [] : buildAppRows(memberStats.apps);
   const concurrencyLine = (stats: MeStatsResponse): string => {
     const parts = [
@@ -792,7 +798,11 @@ export const App = ({ client }: AppProps) => {
         <ManageProjects
           client={client}
           projects={projects}
-          onChanged={() => void refreshProjects().then(() => reloadBoard())}
+          onChanged={() => {
+            void refreshProjects()
+              .then(() => reloadBoard())
+              .catch((error: unknown) => setDataError(messageFor(error)));
+          }}
           onClose={() => setManageOpen(false)}
         />
       )}
@@ -895,12 +905,24 @@ const ManageProjects = ({ client, projects, onChanged, onClose }: ManageProjects
                           className="ghost is-danger"
                           type="button"
                           disabled={busy}
-                          onClick={() => void act(async () => {
-                            const usage = await client.projectUsage(project.id);
-                            setDeleting({ project, usage });
-                            setConfirmName("");
-                            setReassignTo("");
-                          })}
+                          onClick={() => {
+                            // A read, not a mutation: opening the dialog must
+                            // not refetch the whole board.
+                            setBusy(true);
+                            setError(undefined);
+                            void client.projectUsage(project.id).then(
+                              (usage) => {
+                                setDeleting({ project, usage });
+                                setConfirmName("");
+                                setReassignTo("");
+                                setBusy(false);
+                              },
+                              (usageError: unknown) => {
+                                setError(messageFor(usageError));
+                                setBusy(false);
+                              },
+                            );
+                          }}
                         >
                           Delete
                         </button>

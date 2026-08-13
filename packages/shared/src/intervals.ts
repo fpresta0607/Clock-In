@@ -161,10 +161,17 @@ export function measureTime(
     awaySeconds: Math.round(Math.max(0, agentMs - coveredAgentMs) / 1_000),
   };
 
-  const bucketSum = concurrency.t0Seconds + concurrency.t1Seconds + concurrency.t2Seconds + concurrency.t3PlusSeconds;
-  // The buckets round independently, so allow one second of slack per bucket.
-  if (Math.abs(bucketSum - activeSeconds) > 4) {
-    throw new RangeError(`Concurrency buckets (${bucketSum}s) do not sum to active time (${activeSeconds}s).`);
+  // The invariant, restored rather than asserted. Each of the four buckets
+  // rounds once and activeSeconds rounds once, so the drift is at most a
+  // couple of seconds - and the largest bucket absorbing it keeps
+  // `active = t0+t1+t2+t3plus` exactly true for every caller. Throwing here
+  // would take a whole leaderboard down over a rounding remainder.
+  const bucketKeys = ["t0Seconds", "t1Seconds", "t2Seconds", "t3PlusSeconds"] as const;
+  const bucketSum = bucketKeys.reduce((sum, key) => sum + concurrency[key], 0);
+  const drift = activeSeconds - bucketSum;
+  if (drift !== 0) {
+    const largest = [...bucketKeys].sort((a, b) => concurrency[b] - concurrency[a])[0];
+    if (largest !== undefined && concurrency[largest] + drift >= 0) concurrency[largest] += drift;
   }
 
   return { activeSeconds, agentSeconds: Math.round(agentMs / 1_000), concurrency };

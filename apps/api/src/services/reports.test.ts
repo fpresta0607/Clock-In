@@ -337,6 +337,55 @@ describe("leaderboard", () => {
     expect(result.entries.map((row) => row.rank)).toEqual([1, 1, 3]);
   });
 
+  it("keeps a scoped board free of members who only have presence", async () => {
+    const hour = (h: number): Date => new Date(Date.UTC(2026, 7, 5, h));
+    const reports = new Reports();
+    // Alex worked in the scoped project; Sam only had the machine on.
+    reports.presenceIntervals = [
+      { user: { id: ids.user, name: "Alex" }, startedAt: hour(9), endedAt: hour(10) },
+      { user: { id: ids.otherUser, name: "Sam" }, startedAt: hour(9), endedAt: hour(11) },
+    ];
+    reports.sessionIntervals = [
+      { user: { id: ids.user, name: "Alex" }, projectId: ids.project, attribution: "selected", startedAt: hour(9), stoppedAt: hour(10) },
+    ];
+    const service = createReportService({ reports, reaper: silentReaper });
+
+    const result = await service.leaderboard(subject, { scope: ids.project });
+
+    // Presence carries no project, so Sam must not appear as a zero row.
+    expect(result.entries.map((entry) => entry.user.name)).toEqual(["Alex"]);
+    expect(reports.lastLeaderboardQuery?.projectId).toBe(ids.project);
+  });
+
+  it("maps the unassigned scope onto default-attributed sessions", async () => {
+    const reports = new Reports();
+    const service = createReportService({ reports, reaper: silentReaper });
+
+    await service.leaderboard(subject, { scope: "unassigned" });
+
+    expect(reports.lastLeaderboardQuery?.unassignedOnly).toBe(true);
+    expect(reports.lastLeaderboardQuery?.projectId).toBeUndefined();
+  });
+
+  it("refuses a scope naming a project outside the workspace", async () => {
+    const service = createReportService({ reports: new Reports([], new Set()), reaper: silentReaper });
+
+    await expect(service.leaderboard(subject, { scope: ids.otherProject }))
+      .rejects.toMatchObject({ code: "not_found", message: "Project not found." });
+  });
+
+  it("carries the dashboard scope into the session list and the export", async () => {
+    const reports = new Reports();
+    const service = createReportService({ reports, reaper: silentReaper });
+
+    await service.list(subject, { scope: ids.project, page: 1, pageSize: 50 });
+    expect(reports.lastPage?.query.projectId).toBe(ids.project);
+
+    await service.export(subject, { scope: "unassigned", page: 1, pageSize: 50 });
+    // The export reads through the same scoped query the board does.
+    expect(reports.exportReads).toBe(1);
+  });
+
   it("reads postgres sum strings and a null total without losing precision", async () => {
     const reports = new Reports();
     reports.leaderboardRows = [entry(ids.user, "Alex", "9007199254740990", 2), entry(ids.otherUser, "Sam", null, 0, null)];

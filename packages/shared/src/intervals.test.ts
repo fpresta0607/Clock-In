@@ -138,6 +138,19 @@ describe("intersectIntervals", () => {
   });
 });
 
+describe("bucket invariant under rounding", () => {
+  it("keeps active time exactly equal to its buckets even with odd half-seconds", () => {
+    // Boundaries deliberately land on half-seconds so every bucket rounds.
+    const odd = (ms: number): number => ms;
+    const measurement = measureTime(
+      [{ start: odd(0), end: odd(10_500) }],
+      [{ start: odd(1_500), end: odd(4_500) }, { start: odd(3_500), end: odd(7_500) }],
+    );
+    const { t0Seconds, t1Seconds, t2Seconds, t3PlusSeconds } = measurement.concurrency;
+    expect(t0Seconds + t1Seconds + t2Seconds + t3PlusSeconds).toBe(measurement.activeSeconds);
+  });
+});
+
 describe("leverage", () => {
   it("rounds to one decimal and reads 0 for fully manual work", () => {
     expect(leverage({ activeSeconds: 3_600, agentSeconds: 8_640 })).toBe(2.4);

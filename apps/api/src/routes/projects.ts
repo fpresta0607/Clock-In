@@ -23,8 +23,10 @@ async function requestBody(context: { req: { json(): Promise<unknown> } }): Prom
 
 export function createProjectRoutes(repository: ProjectRepository): Hono<ApiEnvironment> {
   const routes = new Hono<ApiEnvironment>();
+  // `?includeArchived=true` is what the management surface asks for; every
+  // picker takes the default and never offers an archived project.
   routes.get("/", async (context) => context.json(projectListResponseSchema.parse(
-    await listProjects(repository, getAuthenticatedSubject(context)),
+    await listProjects(repository, getAuthenticatedSubject(context), context.req.query("includeArchived") === "true"),
   )));
   routes.post("/", async (context) => {
     const input = projectCreateRequestSchema.safeParse(await requestBody(context));
