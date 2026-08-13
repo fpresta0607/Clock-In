@@ -520,3 +520,83 @@ describe("getting the desktop app", () => {
       .toHaveAttribute("href", windowsInstallerUrl);
   });
 });
+
+describe("project management", () => {
+  const webProjects = [
+    { id: "p1", name: "General", createdAt: "2026-08-10T12:00:00.000Z", isArchived: false, isDefault: true },
+    { id: "p2", name: "Client", createdAt: "2026-08-11T12:00:00.000Z", isArchived: false, isDefault: false },
+  ];
+
+  it("drops the Unassigned scope and reads a stored unassigned as everything", async () => {
+    const leaderboard = vi.fn().mockResolvedValue({ entries, totalDurationSeconds: 10_800, filters: {} });
+    await signIn(clientFor({
+      preferences: vi.fn().mockResolvedValue({ scope: "unassigned", range: "30d" }),
+      leaderboard,
+    }));
+
+    const scope = await screen.findByLabelText("Project scope");
+    await waitFor(() => expect(scope).toHaveValue("all"));
+    expect(within(scope).queryByRole("option", { name: "Unassigned" })).not.toBeInTheDocument();
+    // The board fetched the unscoped view rather than passing "unassigned" through.
+    await waitFor(() => {
+      const query = leaderboard.mock.calls.at(-1)?.[0] ?? "";
+      expect(query).not.toContain("scope=unassigned");
+      expect(query).not.toContain("scope=");
+    });
+  });
+
+  it("tags the default project and hides its delete button", async () => {
+    const person = await signIn(clientFor({
+      projects: vi.fn().mockResolvedValue({ projects: webProjects, selectedProjectId: null }),
+    }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+    await person.click(screen.getByRole("button", { name: "Projects" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Projects" });
+    const defaultRow = within(dialog).getByText("General").closest("li");
+    expect(defaultRow).not.toBeNull();
+    expect(within(defaultRow as HTMLElement).getByText("default")).toBeInTheDocument();
+    expect(within(defaultRow as HTMLElement).queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
+
+    const otherRow = within(dialog).getByText("Client").closest("li");
+    expect(otherRow).not.toBeNull();
+    expect(within(otherRow as HTMLElement).getByRole("button", { name: "Delete" })).toBeInTheDocument();
+  });
+
+  it("deletes an empty project on the click, with no confirmation panel", async () => {
+    const deleteProject = vi.fn().mockResolvedValue(undefined);
+    const person = await signIn(clientFor({
+      projects: vi.fn().mockResolvedValue({ projects: webProjects, selectedProjectId: null }),
+      projectUsage: vi.fn().mockResolvedValue({ sessionCount: 0, durationSeconds: 0, agentSessionCount: 0 }),
+      deleteProject,
+    }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+    await person.click(screen.getByRole("button", { name: "Projects" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Projects" });
+    const otherRow = within(dialog).getByText("Client").closest("li");
+    await person.click(within(otherRow as HTMLElement).getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(deleteProject).toHaveBeenCalledWith("p2", { reassignTo: null }));
+    expect(within(dialog).queryByText("What happens to its sessions?")).not.toBeInTheDocument();
+  });
+
+  it("shows counts and a move-or-delete choice instead of a typed name", async () => {
+    const person = await signIn(clientFor({
+      projects: vi.fn().mockResolvedValue({ projects: webProjects, selectedProjectId: null }),
+      projectUsage: vi.fn().mockResolvedValue({ sessionCount: 2, durationSeconds: 3_600, agentSessionCount: 5 }),
+    }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+    await person.click(screen.getByRole("button", { name: "Projects" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Projects" });
+    const otherRow = within(dialog).getByText("Client").closest("li");
+    await person.click(within(otherRow as HTMLElement).getByRole("button", { name: "Delete" }));
+
+    await within(dialog).findByText("What happens to its sessions?");
+    expect(dialog).toHaveTextContent("2 sessions");
+    expect(dialog).toHaveTextContent("5 agent sessions");
+    expect(within(dialog).queryByLabelText(/type the project's name to confirm/i)).not.toBeInTheDocument();
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Delete Client" })).toBeEnabled());
+  });
+});

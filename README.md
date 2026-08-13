@@ -169,15 +169,15 @@ A session is attributed whole or not at all, so `attributedSeconds +
 unattributedSeconds` always equals `durationSeconds`. Unattributed hours are not
 penalized or hidden; they are labelled, so a project total nobody vouched for
 reads differently from one that something did. `GET /reports`,
-`/reports/leaderboard`, `/me/stats`, and the CSV export all carry both figures,
-and the dashboard's **Unassigned** scope is exactly the `attribution = 'default'`
-bucket.
+`/reports/leaderboard`, `/me/stats`, and the CSV export all carry both figures;
+the `attribution = 'default'` bucket is the unattributed one.
 
 ### The project scope both surfaces share
 
-The dashboard's project scope — **All Projects**, one project, or **Unassigned** — filters
+The dashboard's project scope — **All Projects** or one project — filters
 the leaderboard, member stats, the session list, and the CSV export at the query layer. The
-scope and the time range are stored per member in `user_view_preferences` and read/written
+**Unassigned** scope is retired from both pickers, so a stored one reads as **All Projects**.
+The scope and the time range are stored per member in `user_view_preferences` and read/written
 through `GET/PUT /me/preferences`; the web control bar and the desktop All stats overlay both
 seed from and write through it, so opening one surface lands on the other's scope. Only the
 scope syncs: each surface keeps its own ranges, because the desktop's calendar "this week"

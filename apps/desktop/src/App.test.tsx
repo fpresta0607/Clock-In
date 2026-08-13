@@ -1065,4 +1065,44 @@ describe("the projects list", () => {
     expect(confirm).toHaveTextContent("2 sessions");
     expect(confirm).toHaveTextContent("5 agent sessions");
   });
+
+  it("deletes an empty project on the click, with no confirmation panel", async () => {
+    const projectDelete = vi.fn().mockResolvedValue(undefined);
+    const bridge = bridgeFor({
+      projectUsage: vi.fn().mockResolvedValue({ sessionCount: 0, durationSeconds: 0, agentSessionCount: 0 }),
+      projectDelete,
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const dialog = await openSettings(person);
+    await person.click(within(dialog).getByText("Projects"));
+
+    const list = within(dialog).getByTestId("project-manage-list");
+    const otherRow = within(list).getByText("Client work").closest("li");
+    await person.click(within(otherRow as HTMLElement).getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(projectDelete).toHaveBeenCalledWith(otherProject.id, null));
+    expect(within(dialog).queryByTestId("project-delete-confirm")).not.toBeInTheDocument();
+  });
+
+  it("asks for a move-or-delete choice instead of a typed name", async () => {
+    const bridge = bridgeFor({
+      projectUsage: vi.fn().mockResolvedValue({ sessionCount: 2, durationSeconds: 3_600, agentSessionCount: 5 }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const dialog = await openSettings(person);
+    await person.click(within(dialog).getByText("Projects"));
+
+    const list = within(dialog).getByTestId("project-manage-list");
+    const otherRow = within(list).getByText("Client work").closest("li");
+    await person.click(within(otherRow as HTMLElement).getByRole("button", { name: "Delete" }));
+
+    const confirm = await within(dialog).findByTestId("project-delete-confirm");
+    expect(confirm).toHaveTextContent("What happens to its sessions?");
+    expect(within(confirm).queryByLabelText(/type the project's name to confirm/i)).not.toBeInTheDocument();
+    await waitFor(() => expect(within(confirm).getByRole("button", { name: "Delete Client work" })).toBeEnabled());
+  });
 });
