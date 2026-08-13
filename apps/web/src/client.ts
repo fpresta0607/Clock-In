@@ -6,7 +6,6 @@ import type {
   ProjectDeleteRequest,
   ProjectListItem,
   ProjectListResponse,
-  ProjectUpdateRequest,
   ProjectUsageResponse,
   ReportResponse,
   ViewPreferences,
@@ -270,21 +269,12 @@ export function createClient(config: ClientConfig) {
       return response.json() as Promise<ViewPreferences>;
     },
 
-    projects: (includeArchived = false) =>
-      json<ProjectListResponse>(`/projects${includeArchived ? "?includeArchived=true" : ""}`),
+    projects: () => json<ProjectListResponse>("/projects"),
     async createProject(name: string): Promise<ProjectListItem> {
       const response = await apiRequest("/projects", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name }),
-      });
-      return response.json() as Promise<ProjectListItem>;
-    },
-    async updateProject(id: string, patch: ProjectUpdateRequest): Promise<ProjectListItem> {
-      const response = await apiRequest(`/projects/${id}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(patch),
       });
       return response.json() as Promise<ProjectListItem>;
     },
