@@ -128,7 +128,7 @@ export function createAuthenticationMiddleware(
   return async (context, next) => identify(context, async () => {
     const user = await dependencies.accounts.resolve(context.get("authenticatedIdentity"));
     context.set("authenticatedUser", user);
-    context.set("authenticatedSubject", { userId: user.id, organizationId: user.organizationId, role: user.role ?? "member" });
+    context.set("authenticatedSubject", { userId: user.id, organizationId: user.organizationId, role: user.role });
     await next();
   });
 }

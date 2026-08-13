@@ -9,13 +9,13 @@ export interface AuthenticatedUser {
   email: string;
   name: string;
   organizationId: string;
-  role?: "admin" | "member";
+  role: "admin" | "member";
 }
 
 export interface AuthenticatedSubject {
   userId: string;
   organizationId: string;
-  role?: "admin" | "member";
+  role: "admin" | "member";
 }
 
 export type FirstAdminClaimResult =

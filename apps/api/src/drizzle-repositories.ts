@@ -447,7 +447,7 @@ export class DrizzleAccountStore implements AccountStore {
         .update(users)
         .set({ organizationId: target.id, role: "member", updatedAt: new Date() })
         .where(eq(users.id, subject.userId))
-        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
+        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role });
       if (moved === undefined) throw new Error("Failed to move the account into its new organization.");
 
       const active = await tx
@@ -556,7 +556,7 @@ export class DrizzleAccountStore implements AccountStore {
           email: identity.email,
           name: identity.name,
         })
-        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
+        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role });
       if (user === undefined) throw new Error("Failed to create a user for a joining account.");
 
       const active = await tx
@@ -579,7 +579,7 @@ export class DrizzleAccountStore implements AccountStore {
 
   private async find(authUserId: string): Promise<AuthenticatedUser | null> {
     const rows = await this.db
-      .select({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId })
+      .select({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role })
       .from(users)
       .where(eq(users.id, authUserId))
       .limit(1);
@@ -591,7 +591,7 @@ export class DrizzleAccountStore implements AccountStore {
       .update(users)
       .set({ email: identity.email, name: identity.name, updatedAt: new Date() })
       .where(eq(users.id, identity.authUserId))
-      .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
+      .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role });
     const row = rows[0];
     if (row === undefined) throw new Error("The signed-in account disappeared during profile sync.");
     return row;
@@ -617,7 +617,7 @@ export class DrizzleAccountStore implements AccountStore {
           name: identity.name,
           role: "admin",
         })
-        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId });
+        .returning({ id: users.id, email: users.email, name: users.name, organizationId: users.organizationId, role: users.role });
       if (user === undefined) throw new Error("Failed to create a user for a new account.");
 
       await tx

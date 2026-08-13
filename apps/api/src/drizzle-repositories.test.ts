@@ -76,7 +76,7 @@ describe("Drizzle account store", () => {
     } as unknown as DatabaseConnection["db"];
     const accounts = new DrizzleAccountStore(db);
 
-    await expect(accounts.joinOrganization({ organizationId: currentOrganizationId, userId: input.userId }, "ACDEF-GHJKM"))
+    await expect(accounts.joinOrganization({ organizationId: currentOrganizationId, userId: input.userId, role: "member" as const }, "ACDEF-GHJKM"))
       .rejects.toMatchObject({
         code: "conflict",
         message: "The final administrator cannot leave a workspace while it still has members.",
@@ -133,7 +133,7 @@ describe("Drizzle account store", () => {
     } as unknown as DatabaseConnection["db"];
     const accounts = new DrizzleAccountStore(db);
 
-    const result = await accounts.joinOrganization({ organizationId: currentOrganizationId, userId: input.userId }, "ACDEF-GHJKM");
+    const result = await accounts.joinOrganization({ organizationId: currentOrganizationId, userId: input.userId, role: "member" as const }, "ACDEF-GHJKM");
     expect(result).toEqual({ id: input.userId, email: "legacy@example.com", name: "Legacy Admin", organizationId: targetOrganizationId });
     expect(deleted).toContain(projectMemberships);
   });
@@ -171,7 +171,7 @@ describe("Drizzle account store", () => {
 
     try {
       await new DrizzleAccountStore(db).joinOrganization(
-        { organizationId: currentOrganizationId, userId: input.userId },
+        { organizationId: currentOrganizationId, userId: input.userId, role: "member" as const },
         "ACDEF-GHJKM",
       );
       expect.fail("Expected joinOrganization to reject");
@@ -208,7 +208,7 @@ describe("Drizzle report repository", () => {
       transaction: async (callback: (handle: typeof transaction) => Promise<unknown>) => callback(transaction),
     } as unknown as DatabaseConnection["db"];
     const repository = new DrizzleReportRepository(db);
-    const subject = { organizationId: input.organizationId, userId: input.userId };
+    const subject = { organizationId: input.organizationId, userId: input.userId, role: "member" as const };
 
     await expect(repository.readPageForOrganization(subject, {}, { limit: 50, offset: 0 })).resolves.toMatchObject({ summary: { totalRows: 0 }, rows: [] });
     await expect(repository.readExportForOrganization(subject, {}, 10_000)).resolves.toMatchObject({ summary: { totalRows: 0 }, rows: [] });
@@ -233,7 +233,7 @@ describe("Drizzle report repository", () => {
       transaction: async (callback: (handle: unknown) => Promise<unknown>) => callback({}),
     } as unknown as DatabaseConnection["db"];
     const repository = new DrizzleReportRepository(db);
-    const subject = { organizationId: input.organizationId, userId: input.userId };
+    const subject = { organizationId: input.organizationId, userId: input.userId, role: "member" as const };
 
     await expect(repository.readProjectTotalsForMember(subject, {})).resolves.toEqual([{
       project: { id: input.projectId, name: "Timer" },
@@ -257,7 +257,7 @@ describe("Drizzle report repository", () => {
       transaction: async (callback: (handle: unknown) => Promise<unknown>) => callback({}),
     } as unknown as DatabaseConnection["db"];
     const repository = new DrizzleReportRepository(db);
-    const subject = { organizationId: input.organizationId, userId: input.userId };
+    const subject = { organizationId: input.organizationId, userId: input.userId, role: "member" as const };
 
     await expect(repository.readAppTotalsForMember(subject, {})).resolves.toEqual([
       { processName: "Code.exe", durationSeconds: "4800" },
@@ -292,7 +292,7 @@ describe("Drizzle report repository", () => {
 
 describe("Drizzle project repository", () => {
   it("creates the project and the creator's membership in one transaction", async () => {
-    const subject = { organizationId: input.organizationId, userId: input.userId };
+    const subject = { organizationId: input.organizationId, userId: input.userId, role: "member" as const };
     const row = { id: input.projectId, organizationId: subject.organizationId, name: "Field work", archived: false, createdAt: new Date("2026-08-10T12:00:00.000Z") };
     const inserted: Array<{ table: unknown; values: unknown }> = [];
     const db = {
@@ -358,7 +358,7 @@ describe("Drizzle path-mapping repository", () => {
       }),
     } as unknown as DatabaseConnection["db"];
     const repository = new DrizzlePathMappingRepository(db);
-    const subject = { organizationId: input.organizationId, userId: input.userId };
+    const subject = { organizationId: input.organizationId, userId: input.userId, role: "member" as const };
 
     const record = await repository.findById(subject, row.id);
     expect(record).not.toBeNull();

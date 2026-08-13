@@ -308,7 +308,7 @@ integration(integrationDescription, () => {
       { id: firstUserId, role: "member" },
       { id: secondUserId, role: "member" },
     ].sort((left, right) => left.id.localeCompare(right.id)));
-    await expect(legacyAccounts.claimFirstAdmin({ organizationId, userId: otherUserId })).resolves.toEqual({ kind: "not_member" });
+    await expect(legacyAccounts.claimFirstAdmin({ organizationId, userId: otherUserId, role: "member" as const })).resolves.toEqual({ kind: "not_member" });
 
     if (disposable === undefined) throw new Error("The disposable smoke database is required for this test.");
     const firstClaimant = createDatabase(disposable.databaseUrl, { max: 1 });
