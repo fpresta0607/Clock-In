@@ -447,7 +447,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     const generation = bridgeGeneration.current;
     void service.preferencesGet().then(
       (preferences) => {
-        if (active && isCurrent(service, generation)) setBoardScope(preferences.scope);
+        if (active && isCurrent(service, generation)) setBoardScope(preferences.scope === "unassigned" ? "all" : preferences.scope);
       },
       // A missing preference row is the default view, not a problem.
       () => undefined,
@@ -1600,28 +1600,31 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                               <span className="manage-name">
                                 <span className="project-dot" aria-hidden="true" style={item.color === null ? undefined : { background: item.color }} />
                                 {item.name}
+                                {item.id === ready.defaultProjectId && <span className="you-tag"> default</span>}
                               </span>
                               <span className="manage-actions">
                                 <button type="button" disabled={projectBusy} onClick={() => { setRenamingProjectId(item.id); setRenameDraft(item.name); }}>Rename</button>
-                                <button
-                                  type="button"
-                                  disabled={projectBusy}
-                                  onClick={() => {
-                                    void manageProject(async (service) => {
-                                      const usage = await service.projectUsage(item.id);
-                                      // An empty project has nothing to guard:
-                                      // it goes on the click.
-                                      if (usage.sessionCount === 0 && usage.agentSessionCount === 0) {
-                                        await service.projectDelete(item.id, null);
-                                        return;
-                                      }
-                                      setDeletingProject({ id: item.id, name: item.name, usage });
-                                      setDeleteReassignTo("");
-                                    });
-                                  }}
-                                >
-                                  Delete
-                                </button>
+                                {item.id !== ready.defaultProjectId && (
+                                  <button
+                                    type="button"
+                                    disabled={projectBusy}
+                                    onClick={() => {
+                                      void manageProject(async (service) => {
+                                        const usage = await service.projectUsage(item.id);
+                                        // An empty project has nothing to guard:
+                                        // it goes on the click.
+                                        if (usage.sessionCount === 0 && usage.agentSessionCount === 0) {
+                                          await service.projectDelete(item.id, null);
+                                          return;
+                                        }
+                                        setDeletingProject({ id: item.id, name: item.name, usage });
+                                        setDeleteReassignTo("");
+                                      });
+                                    }}
+                                  >
+                                    Delete
+                                  </button>
+                                )}
                               </span>
                             </>
                           )}
@@ -1632,7 +1635,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                     <div className="manage-delete" data-testid="project-delete-confirm">
                       <p className="subtle">
                         Deleting <strong>{deletingProject.name}</strong> takes {deletingProject.usage.sessionCount} sessions
-                        ({formatHuman(deletingProject.usage.durationSeconds)}) with it - unless they move first.
+                        ({formatHuman(deletingProject.usage.durationSeconds)}) and {deletingProject.usage.agentSessionCount} agent sessions with it - unless they move first.
                       </p>
                       <label className="setting-field">
                         What happens to its sessions?
