@@ -350,7 +350,9 @@ describe("dashboard", () => {
     expect(await stats.findByText("2h 00m", { selector: "strong" })).toBeInTheDocument();
     // The two cuts stay visibly apart: concurrency sums to active time, the
     // by-agent split rides on its runtime's row and sums to agent time.
-    expect(stats.getByTestId("concurrency-line")).toHaveTextContent("Unassisted 1h 00m · 1 agent 1h 00m");
+    // Plain words, and only the buckets with time in them - no "2 agents 0s".
+    expect(stats.getByTestId("concurrency-line")).toHaveTextContent("Solo 1h 00m · 1 agent 1h 00m");
+    expect(stats.getByTestId("concurrency-line")).not.toHaveTextContent("0s");
     // A model names its own runtime; a null model falls back to the source label.
     expect(stats.getByTestId("agent-note")).toHaveTextContent("claude-fable-5 50m · Claude Code 10m");
     expect(stats.getByText("General")).toBeInTheDocument();

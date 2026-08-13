@@ -475,16 +475,19 @@ export const App = ({ client }: AppProps) => {
   // An agent that only ran in the background has runtime but no focused app
   // row to carry its note, so it gets a row of its own.
   const backgroundAgents = [...agentNotes].filter(([source]) => !memberAppRows.some((row) => row.key === source));
-  const concurrencyLine = (stats: MeStatsResponse): string => {
-    const parts = [
-      `Unassisted ${formatHumanDuration(stats.concurrency.t0Seconds)}`,
-      `1 agent ${formatHumanDuration(stats.concurrency.t1Seconds)}`,
-      `2 agents ${formatHumanDuration(stats.concurrency.t2Seconds)}`,
-      `3+ ${formatHumanDuration(stats.concurrency.t3PlusSeconds)}`,
-    ];
-    if (stats.concurrency.awaySeconds > 0) parts.push(`agents while away ${formatHumanDuration(stats.concurrency.awaySeconds)}`);
-    return parts.join(" · ");
-  };
+  // Only the buckets with time in them, in plain words: "Solo 1h 00m · 1
+  // agent 40m". Empty buckets and jargon both make the line harder to read.
+  const concurrencyLine = (stats: MeStatsResponse): string =>
+    ([
+      ["Solo", stats.concurrency.t0Seconds],
+      ["1 agent", stats.concurrency.t1Seconds],
+      ["2 agents", stats.concurrency.t2Seconds],
+      ["3+ agents", stats.concurrency.t3PlusSeconds],
+      ["Agents while away", stats.concurrency.awaySeconds],
+    ] as const)
+      .filter(([, seconds]) => seconds > 0)
+      .map(([label, seconds]) => `${label} ${formatHumanDuration(seconds)}`)
+      .join(" · ");
 
   return (
     <main className="shell">
@@ -635,7 +638,9 @@ export const App = ({ client }: AppProps) => {
                     {leverage(memberStats) !== null && ` · ${leverage(memberStats)}×`}
                   </span>
                 </p>
-                <p className="member-line" data-testid="concurrency-line">{concurrencyLine(memberStats)}</p>
+                {concurrencyLine(memberStats) !== "" && (
+                  <p className="member-line" data-testid="concurrency-line">{concurrencyLine(memberStats)}</p>
+                )}
                 {memberStats.projects.length > 0 && (
                   <ul className="stat-list">
                     {memberStats.projects.filter((entry) => entry.durationSeconds > 0).map((entry) => (
