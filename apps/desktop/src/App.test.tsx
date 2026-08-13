@@ -1001,6 +1001,33 @@ describe("the team board", () => {
     expect(await within(dialog).findByText("Joined Team")).toBeInTheDocument();
     expect(within(dialog).getByTestId("invite-code")).toHaveTextContent("PQRTU-VWXY3");
   });
+
+  it("re-reads the account after joining so the picker lists the new workspace's projects", async () => {
+    const joinedProject = { id: "00000000-0000-4000-8000-000000000020", name: "Joined project", color: null };
+    const joinedAccount = {
+      ...account,
+      projects: [joinedProject],
+      defaultProjectId: joinedProject.id,
+    };
+    const bootstrap = vi.fn()
+      .mockResolvedValueOnce(account)
+      .mockResolvedValueOnce(joinedAccount);
+    const bridge = bridgeFor({ bootstrap });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const dialog = await openSettings(person);
+    await person.click(within(dialog).getByText("Team"));
+    await person.type(await screen.findByLabelText("Their invite code"), "PQRTU-VWXY3");
+    await person.click(screen.getByRole("button", { name: "Join this team" }));
+
+    await waitFor(() => expect(bridge.bootstrap).toHaveBeenCalledTimes(2));
+    await person.click(within(dialog).getByRole("button", { name: "Close settings" }));
+    await person.click(screen.getByRole("button", { name: "Change" }));
+
+    expect(await screen.findByRole("radio", { name: "Joined project" })).toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: "Field work" })).not.toBeInTheDocument();
+  });
 });
 
 describe("the update banner", () => {

@@ -824,8 +824,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setOverviewError(undefined);
     try {
       const result = await service.orgJoin(joinCode.trim());
+      const snapshot = await service.bootstrap();
       if (isCurrent(service, generation)) {
         setOverview(result);
+        setAccount(snapshot);
         setJoinCode("");
       }
     } catch (error: unknown) {

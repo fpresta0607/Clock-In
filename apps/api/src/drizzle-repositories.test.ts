@@ -37,6 +37,33 @@ describe("Drizzle session repository", () => {
 });
 
 describe("Drizzle account store", () => {
+  it("carries the role through resolve so an existing admin is not masked to member", async () => {
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [{
+              id: input.userId,
+              email: "admin@example.com",
+              name: "First Admin",
+              organizationId: input.organizationId,
+              role: "admin",
+            }],
+          }),
+        }),
+      }),
+    } as unknown as DatabaseConnection["db"];
+    const accounts = new DrizzleAccountStore(db);
+
+    const resolved = await accounts.resolve({
+      authUserId: input.userId,
+      email: "admin@example.com",
+      name: "First Admin",
+    });
+
+    expect(resolved.role).toBe("admin");
+  });
+
   it("refuses to move the final administrator while other members remain", async () => {
     const targetOrganizationId = "a1c7e513-b094-4d4c-ae55-21790ae019a4";
     const currentOrganizationId = "b1c7e513-b094-4d4c-ae55-21790ae019a4";
