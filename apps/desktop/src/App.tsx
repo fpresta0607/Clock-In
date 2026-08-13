@@ -58,10 +58,12 @@ type AppRow = {
 
 const TOP_APP_ROWS = 8;
 
-/// Heaviest-first app rows for the Today card: agent CLIs fold into one row,
-/// and everything past the top rows folds into "Everything else". Which
-/// executables count as an agent comes from the shared runtime roster, so a
-/// newly declared CLI folds in without a second list to remember.
+/// Heaviest-first app rows for the Today card: agent CLIs fold into one row
+/// that never folds further into "Everything else" (its by-agent note needs
+/// the row to anchor to), and everything else past the top rows folds into
+/// "Everything else". Which executables count as an agent comes from the
+/// shared runtime roster, so a newly declared CLI folds in without a second
+/// list to remember.
 const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
   let agentSeconds = 0;
   const agentSources = new Set<string>();

@@ -135,8 +135,10 @@ The leaderboard reports three measurements, deliberately distinct:
 Active time is then partitioned by **concurrency** — the share with no agent (t0), exactly
 one (t1), two (t2), or three-plus (t3+). An agent still working while the person is away
 feeds agent time only, never the person's hours. The per-agent split (Claude vs Codex, read
-from the data roster — nothing hardcoded) sums to agent time; the concurrency split sums to
-active time, and the two cuts are rendered visibly apart on both surfaces. One shared module,
+from the data roster — nothing hardcoded) sums to agent time and renders as a muted note
+under each runtime's app row on both surfaces — a model names its part, and a null model
+falls back to the source label; a runtime that only ran in the background gets a row of its
+own. The concurrency split sums to active time and keeps its own line. One shared module,
 `packages/shared/src/intervals.ts`, computes all of it so the invariants
 (`active = t0+t1+t2+t3+`, `agent = Σ n·tn + away`) hold everywhere.
 

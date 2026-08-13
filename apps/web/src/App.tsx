@@ -71,7 +71,7 @@ type AppRowItem = { key: string; label: string; agent: boolean; durationSeconds:
 const TOP_APP_ROWS = 8;
 
 /// One row per agent runtime (so "how much Claude Code" is a single line),
-/// friendly names for everything else, heaviest first, long tail folded.
+/// friendly names for everything else, heaviest first, non-agent tail folded.
 export const buildAppRows = (apps: MeStatsResponse["apps"]): AppRowItem[] => {
   const totals = new Map<string, AppRowItem>();
   for (const app of apps) {
