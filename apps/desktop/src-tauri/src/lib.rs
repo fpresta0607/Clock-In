@@ -30,7 +30,7 @@ use tokio::sync::Mutex;
 
 use api::{
     ApiClient, ApiResult, BridgeError, ErrorKind, LeaderboardEntry, MeStats, Organization,
-    TimerProject, TimerUser,
+    ProjectUsage, TimerProject, TimerUser, ViewPreferences,
 };
 use monitor::{MonitorSettings, MonitorStatus, SettingsPatch};
 use recovery::RecoveryState;
@@ -326,7 +326,7 @@ async fn org_join(state: State<'_, AppState>, input: JoinInput) -> ApiResult<Org
     // Return the new workspace so the window updates without a reload.
     let (organization, entries) = tokio::try_join!(
         state.client.organization(&access_token),
-        state.client.leaderboard(&access_token, None, None)
+        state.client.leaderboard(&access_token, None, None, None)
     )?;
     Ok(OrganizationOverview {
         organization,
@@ -345,6 +345,7 @@ async fn org_overview(
     state: State<'_, AppState>,
     from_at: Option<String>,
     to_exclusive_at: Option<String>,
+    scope: Option<String>,
 ) -> ApiResult<OrganizationOverview> {
     let access_token = state.access_token().await?;
     let (organization, entries) = tokio::try_join!(
@@ -352,7 +353,8 @@ async fn org_overview(
         state.client.leaderboard(
             &access_token,
             from_at.as_deref(),
-            to_exclusive_at.as_deref()
+            to_exclusive_at.as_deref(),
+            scope.as_deref()
         )
     )?;
     Ok(OrganizationOverview {
@@ -430,6 +432,7 @@ async fn me_stats(
     from_at: Option<String>,
     to_exclusive_at: Option<String>,
     user_id: Option<String>,
+    scope: Option<String>,
 ) -> ApiResult<MeStats> {
     let access_token = state.access_token().await?;
     state
@@ -439,6 +442,7 @@ async fn me_stats(
             from_at.as_deref(),
             to_exclusive_at.as_deref(),
             user_id.as_deref(),
+            scope.as_deref(),
         )
         .await
 }
@@ -483,6 +487,83 @@ async fn project_create(
     }
     let access_token = state.access_token().await?;
     state.client.create_project(&access_token, name).await
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectUpdateInput {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    is_archived: Option<bool>,
+}
+
+#[tauri::command]
+async fn project_update(
+    state: State<'_, AppState>,
+    id: String,
+    input: ProjectUpdateInput,
+) -> ApiResult<TimerProject> {
+    let access_token = state.access_token().await?;
+    state
+        .client
+        .update_project(
+            &access_token,
+            &id,
+            input.name.as_deref().map(str::trim),
+            input.is_archived,
+        )
+        .await
+}
+
+#[tauri::command]
+async fn preferences_get(state: State<'_, AppState>) -> ApiResult<ViewPreferences> {
+    let access_token = state.access_token().await?;
+    state.client.view_preferences(&access_token).await
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewPreferencesInput {
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    range: Option<String>,
+}
+
+#[tauri::command]
+async fn preferences_set(
+    state: State<'_, AppState>,
+    input: ViewPreferencesInput,
+) -> ApiResult<ViewPreferences> {
+    let access_token = state.access_token().await?;
+    state
+        .client
+        .set_view_preferences(
+            &access_token,
+            input.scope.as_deref(),
+            input.range.as_deref(),
+        )
+        .await
+}
+
+#[tauri::command]
+async fn project_usage(state: State<'_, AppState>, id: String) -> ApiResult<ProjectUsage> {
+    let access_token = state.access_token().await?;
+    state.client.project_usage(&access_token, &id).await
+}
+
+#[tauri::command]
+async fn project_delete(
+    state: State<'_, AppState>,
+    id: String,
+    reassign_to: Option<String>,
+) -> ApiResult<()> {
+    let access_token = state.access_token().await?;
+    state
+        .client
+        .delete_project(&access_token, &id, reassign_to.as_deref())
+        .await
 }
 
 /// Set once the exit flush starts. `AppHandle::exit` itself re-triggers
@@ -669,6 +750,11 @@ pub fn run() {
             me_stats,
             app_icons,
             project_create,
+            project_update,
+            project_usage,
+            preferences_get,
+            preferences_set,
+            project_delete,
         ])
         .build(tauri::generate_context!())
         .expect("the Clock-In desktop host failed to start")

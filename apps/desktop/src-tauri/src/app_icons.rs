@@ -110,7 +110,9 @@ mod platform {
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
     };
-    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
+    };
     use windows_sys::Win32::System::Threading::{
         GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     };
@@ -274,7 +276,15 @@ mod platform {
     /// `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\<name>`.
     /// `RegGetValueW` expands REG_EXPAND_SZ values itself; installers
     /// sometimes quote the path, so surrounding quotes are stripped.
+    /// Per-user installs register under HKCU, machine-wide ones under HKLM.
+    /// VS Code and Chrome are usually per-user, so reading only HKLM left
+    /// their rows iconless whenever the app was not running at that moment.
     fn app_paths_entry(name: &str) -> Option<String> {
+        app_paths_entry_in(HKEY_CURRENT_USER, name)
+            .or_else(|| app_paths_entry_in(HKEY_LOCAL_MACHINE, name))
+    }
+
+    fn app_paths_entry_in(root: HKEY, name: &str) -> Option<String> {
         let subkey: Vec<u16> =
             format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{name}\0")
                 .encode_utf16()
@@ -283,7 +293,7 @@ mod platform {
         let mut byte_count = (buffer.len() * std::mem::size_of::<u16>()) as u32;
         let status = unsafe {
             RegGetValueW(
-                HKEY_LOCAL_MACHINE,
+                root,
                 subkey.as_ptr(),
                 // The key's default value holds the executable path.
                 std::ptr::null(),

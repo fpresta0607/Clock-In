@@ -7,6 +7,8 @@ export interface ProjectRecord {
   organizationId: string;
   name: string;
   archived: boolean;
+  /** Where automatic time lands when nothing names a project; refuses deletion. */
+  isDefault: boolean;
   createdAt: Date;
 }
 
@@ -25,15 +27,42 @@ export interface SessionRecord {
   attribution: SessionAttribution;
 }
 
+export interface ProjectUsageRecord {
+  sessionCount: number;
+  durationSeconds: number;
+  agentSessionCount: number;
+}
+
 export interface ProjectRepository {
   listForMember(subject: AuthenticatedSubject): Promise<ProjectRecord[]>;
   findForMember(subject: AuthenticatedSubject, projectId: string): Promise<ProjectRecord | null>;
   /** Creates the project and the creator's membership in one transaction. */
   createForMember(subject: AuthenticatedSubject, name: string): Promise<ProjectRecord>;
+  /** Renames or archives; null when the project is not the caller's to change. */
+  updateForMember?(subject: AuthenticatedSubject, projectId: string, patch: { name?: string; archived?: boolean }): Promise<ProjectRecord | null>;
+  /** What deleting the project would take with it, for the confirm dialog. */
+  usageForOrganization?(subject: AuthenticatedSubject, projectId: string): Promise<ProjectUsageRecord>;
+  /**
+   * Deletes the project. `reassignTo` moves its sessions and agent evidence to
+   * another project first (creating the memberships that move needs); null
+   * deletes them with the project. One transaction.
+   */
+  deleteForOrganization?(subject: AuthenticatedSubject, projectId: string, reassignTo: string | null): Promise<void>;
   /** @deprecated Returns the member's preferred (default) project. */
   preferredForMember?(subject: AuthenticatedSubject): Promise<ProjectRecord | null>;
   /** @deprecated Records the member's last selected project. */
   rememberSelection?(subject: AuthenticatedSubject, projectId: string): Promise<void>;
+}
+
+export interface ViewPreferencesRecord {
+  scope: string;
+  range: string;
+}
+
+/** The one dashboard view state both surfaces share; one row per member, last write wins. */
+export interface ViewPreferencesRepository {
+  readForMember(subject: AuthenticatedSubject): Promise<ViewPreferencesRecord | null>;
+  writeForMember(subject: AuthenticatedSubject, patch: { scope?: string | undefined; range?: string | undefined }): Promise<ViewPreferencesRecord>;
 }
 
 export interface CreateRunningSession {
@@ -114,6 +143,8 @@ export interface ReportQuery {
   toExclusive?: Date;
   projectId?: string;
   userId?: string;
+  /** The dashboard's Unassigned scope: only sessions nothing named a project for. */
+  unassignedOnly?: boolean;
 }
 
 export interface ReportPageOptions {
@@ -168,9 +199,41 @@ export interface SiteTotalRecord {
   durationSeconds: number | string | bigint | null;
 }
 
+/** One person's machine-presence interval — an active OS segment, no project attached. */
+export interface PresenceIntervalRecord {
+  user: ReportLookupRecord;
+  startedAt: Date;
+  endedAt: Date;
+}
+
+/** One completed session's interval, with what the time model needs to scope and count it. */
+export interface SessionIntervalRecord {
+  user: ReportLookupRecord;
+  projectId: string;
+  attribution: SessionAttribution;
+  startedAt: Date;
+  stoppedAt: Date;
+}
+
+/** One agent session's runtime interval; running sessions end at their last event. */
+export interface AgentIntervalRecord {
+  user: ReportLookupRecord;
+  source: string;
+  model: string | null;
+  projectId: string | null;
+  startedAt: Date;
+  endedAt: Date;
+}
+
 export interface ReportRepository {
   findProjectForOrganization(subject: AuthenticatedSubject, projectId: string): Promise<ReportLookupRecord | null>;
   findUserForOrganization(subject: AuthenticatedSubject, userId: string): Promise<ReportLookupRecord | null>;
+  /** Active-kind OS segments overlapping the range, org-wide or one member. Presence carries no project, so project scopes intersect these with session intervals in the service. */
+  readPresenceIntervals(subject: AuthenticatedSubject, query: ReportQuery): Promise<PresenceIntervalRecord[]>;
+  /** Completed sessions overlapping the range, after project/unassigned scoping. */
+  readSessionIntervals(subject: AuthenticatedSubject, query: ReportQuery): Promise<SessionIntervalRecord[]>;
+  /** Agent-session runtimes overlapping the range, after project scoping. */
+  readAgentIntervals(subject: AuthenticatedSubject, query: ReportQuery): Promise<AgentIntervalRecord[]>;
   readPageForOrganization(subject: AuthenticatedSubject, query: ReportQuery, options: ReportPageOptions): Promise<ReportPageRead>;
   readExportForOrganization(subject: AuthenticatedSubject, query: ReportQuery, maxRows: number): Promise<ReportExportRead>;
   readLeaderboardForOrganization(subject: AuthenticatedSubject, query: ReportQuery): Promise<LeaderboardRowRecord[]>;

@@ -81,9 +81,11 @@ Run the migration, confirm it, then `railway up`.
 
 ### Production's migration journal has entries this repo no longer carries
 
-`drizzle.__drizzle_migrations` in production records ten migrations. Six match
-files in `packages/database/migrations` by content hash; the rest do not. Three
-of them are the migrations phase 3 applied and later rewrote in the repo
+`drizzle.__drizzle_migrations` in production records eleven migrations: the ten
+it already held, plus this repo's `0009_user-view-preferences`, applied
+directly after a Neon dry-run. Most match files in
+`packages/database/migrations` by content hash; the rest do not. Three of the
+mismatches are the migrations phase 3 applied and later rewrote in the repo
 (`0007_browser_attribution`, `0008_browser_span_rules`, `0009_mapping_kind_check`),
 so production already carries DDL that no file on `main` performs.
 

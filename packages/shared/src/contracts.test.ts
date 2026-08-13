@@ -361,13 +361,17 @@ describe("report and error contracts", () => {
       sessionCount: 2,
       attributedSeconds: 1_800,
       unattributedSeconds: 1_800,
+      activeSeconds: 3_600,
+      agentSeconds: 5_400,
+      concurrency: { t0Seconds: 1_800, t1Seconds: 0, t2Seconds: 1_800, t3PlusSeconds: 0, awaySeconds: 1_800 },
+      byAgent: [{ source: "claude_code", model: null, durationSeconds: 5_400 }],
     };
     expect(
-      leaderboardResponseSchema.parse({ filters: {}, totalDurationSeconds: 3_600, entries: [entry] }),
+      leaderboardResponseSchema.parse({ filters: {}, totalDurationSeconds: 3_600, medianSessionSeconds: 1_800, entries: [entry] }),
     ).toMatchObject({ entries: [{ rank: 1, attributedSeconds: 1_800 }] });
     const { attributedSeconds: _droppedFromEntry, ...unattributedEntry } = entry;
-    expect(() => leaderboardResponseSchema.parse({ filters: {}, totalDurationSeconds: 0, entries: [unattributedEntry] })).toThrow();
-    expect(() => leaderboardResponseSchema.parse({ filters: {}, totalDurationSeconds: 0, entries: [{ ...entry, attributedSeconds: 1.5 }] })).toThrow();
+    expect(() => leaderboardResponseSchema.parse({ filters: {}, totalDurationSeconds: 0, medianSessionSeconds: null, entries: [unattributedEntry] })).toThrow();
+    expect(() => leaderboardResponseSchema.parse({ filters: {}, totalDurationSeconds: 0, medianSessionSeconds: null, entries: [{ ...entry, attributedSeconds: 1.5 }] })).toThrow();
   });
 
   it("rejects running rows and incomplete report rows", () => {
@@ -610,6 +614,10 @@ describe("personal stats contracts", () => {
     totalDurationSeconds: 7_200,
     attributedSeconds: 5_400,
     unattributedSeconds: 1_800,
+    activeSeconds: 7_000,
+    agentSeconds: 3_600,
+    concurrency: { t0Seconds: 3_400, t1Seconds: 3_600, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
+    byAgent: [{ source: "claude_code", model: null, durationSeconds: 3_600 }],
     projects: [
       {
         project: { id: ids.project, name: "Website redesign" },

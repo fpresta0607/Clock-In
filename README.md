@@ -36,10 +36,14 @@ decides the hours:
   Which runtimes Clock-In knows by name is a roster, not a schema: see
   [**Agent hooks**](#agent-hooks).
 
-Reports then split every total into **attributed** and **unattributed** seconds: hours
-something named a project for, and hours that fell to the account's default project because
-nothing did. Neither is hidden or penalized. That's the posture: guessing isn't prevented,
-it's labelled.
+Reports measure three things, deliberately distinct: **active time** — the union of a
+person's working intervals, overlaps collapsed, which can never exceed wall clock and is what
+the leaderboard ranks by; **agent time** — the summed runtime of every agent, which parallel
+agents can legitimately push past active time; and **leverage** — agent ÷ active, shown as
+`2.4x`. Concurrency then splits active time into how many agents ran at once. The older
+**attributed** / **unattributed** split remains as a per-session label: hours something named
+a project for versus hours that fell to the default project because nothing did. Neither is
+hidden or penalized. That's the posture: guessing isn't prevented, it's labelled.
 
 The other half of the deal is that the tracked person sees everything the manager sees.
 `GET /me/stats` runs the same attribution math as the org report, and
@@ -115,6 +119,30 @@ The project cannot change under an open session: when the answer changes, the
 session closes at its last active moment and the next one picks up there. No
 second of work is dropped or counted twice.
 
+### How time is counted
+
+The leaderboard reports three measurements, deliberately distinct:
+
+- **Active time** is the union of a person's working intervals — active OS segments and
+  completed sessions — with overlaps collapsed. It can never exceed wall clock, which is what
+  makes it the headline the board ranks by.
+- **Agent time** is the summed runtime of every agent session. Three agents running for an
+  hour in parallel is 3h of agent time inside 1h of active time; that excess is leverage, not
+  a bug. Agent time is a consumption number, never an effort number.
+- **Leverage** is agent time ÷ active time, shown as `2.4x`; with no active time there is no
+  leverage to show.
+
+Active time is then partitioned by **concurrency** — the share with no agent (t0), exactly
+one (t1), two (t2), or three-plus (t3+). An agent still working while the person is away
+feeds agent time only, never the person's hours. The per-agent split (Claude vs Codex, read
+from the data roster — nothing hardcoded) sums to agent time; the concurrency split sums to
+active time, and the two cuts are rendered visibly apart on both surfaces. One shared module,
+`packages/shared/src/intervals.ts`, computes all of it so the invariants
+(`active = t0+t1+t2+t3+`, `agent = Σ n·tn + away`) hold everywhere.
+
+The desktop app's **What's recorded** panel and the web dashboard's **How Clock-In works**
+dialog state these rules word for word.
+
 ### Attributed and unattributed
 
 `time_sessions.attribution` records which of those answers applied, and reporting
@@ -131,7 +159,19 @@ A session is attributed whole or not at all, so `attributedSeconds +
 unattributedSeconds` always equals `durationSeconds`. Unattributed hours are not
 penalized or hidden; they are labelled, so a project total nobody vouched for
 reads differently from one that something did. `GET /reports`,
-`/reports/leaderboard`, `/me/stats`, and the CSV export all carry both figures.
+`/reports/leaderboard`, `/me/stats`, and the CSV export all carry both figures,
+and the dashboard's **Unassigned** scope is exactly the `attribution = 'default'`
+bucket.
+
+### The project scope both surfaces share
+
+The dashboard's project scope — **All Projects**, one project, or **Unassigned** — filters
+the leaderboard, member stats, the session list, and the CSV export at the query layer. The
+scope and the time range are stored per member in `user_view_preferences` and read/written
+through `GET/PUT /me/preferences`; the web control bar and the desktop All stats overlay both
+seed from and write through it, so opening one surface lands on the other's scope. Only the
+scope syncs: each surface keeps its own ranges, because the desktop's calendar "this week"
+and the web's rolling "7d" are different questions.
 
 **Legacy rows are untouched.** Every session recorded by the old manual timer
 keeps its data and is marked `manual`. The `POST /sessions`, `/sessions/:id/stop`,
@@ -219,11 +259,11 @@ A pnpm workspace. Contracts flow down; nothing flows back up.
 
 | Package | What lives there |
 |---|---|
-| **`packages/shared`** | Zod contracts shared by every client and the API, invite-code and duration helpers, and the SIQstack brand stylesheet both frontends import. |
+| **`packages/shared`** | Zod contracts shared by every client and the API, the interval/time model (`intervals.ts`), invite-code and duration helpers, and the SIQstack brand stylesheet both frontends import. |
 | **`packages/database`** | Drizzle schema, SQL migrations, the connection factory, and the migration runner. |
 | **`apps/api`** | Hono API: env validation, Neon Auth JWT verification, services (sessions, activity, agent sessions, attribution, reports), Drizzle repositories, CSV export. |
-| **`apps/desktop`** | The tray app. React UI over a Tauri 2 Rust host: `monitor.rs` (activity), `spool.rs` (shared with the hook binary), `uploader.rs`, `recovery.rs`, and the `clock-in-hook` bin target. |
-| **`apps/web`** | The dashboard: sign-up/sign-in, clickable team leaderboard with per-member breakdowns, installer downloads. |
+| **`apps/desktop`** | The tray app. React UI over a Tauri 2 Rust host: `monitor.rs` (activity), `spool.rs` (shared with the hook binary), `uploader.rs`, `recovery.rs`, the All stats overlay, and the `clock-in-hook` bin target. |
+| **`apps/web`** | The dashboard: sign-up/sign-in, clickable team leaderboard with per-member breakdowns, project management, installer downloads. |
 
 Routes stay thin, services own the rules, repositories own SQL. Every service is tested
 against explicit fakes, so the behavior suite needs no database.
@@ -300,7 +340,11 @@ organization are derived from verified claims, never from the request body.
 | `GET` | `/me` | the signed-in user |
 | `GET` | `/organization` | workspace name and invite code |
 | `POST` | `/organization/join` | move an account into another workspace |
-| `GET` | `/projects` | projects the caller belongs to |
+| `GET` | `/projects` | projects the caller belongs to; `?includeArchived=true` lists archived ones so an archive can be undone |
+| `POST` | `/projects` | create a project (case-insensitive duplicate names rejected, archived names included) |
+| `PATCH` | `/projects/:id` | inline rename or archive |
+| `GET` | `/projects/:id/usage` | what deleting the project would take with it |
+| `DELETE` | `/projects/:id` | delete (reassign its sessions or delete them with it); admin-only |
 | `POST` | `/sessions/observed` | batch upload of finished sessions, idempotent on the client-generated `clientId` |
 | `POST` | `/sessions`, `/sessions/:id/stop`, `GET /sessions/current` | **deprecated** manual timer; kept so older installed builds can finish their work |
 | `POST` | `/activity/segments` | batch upload of activity segments |
@@ -308,6 +352,7 @@ organization are derived from verified claims, never from the request body.
 | `GET` `POST` `PATCH` `DELETE` | `/path-mappings`, `/path-mappings/:id` | map a path prefix to a project |
 | `GET` | `/reports`, `/reports/leaderboard`, `/reports/export.csv` | organization reporting |
 | `GET` | `/me/stats` | the caller's totals per project and per app; an optional `?userId=` opens a teammate's |
+| `GET` `PUT` | `/me/preferences` | the dashboard scope+range view state shared with the desktop app |
 
 **Invariants the server enforces**, not the client: a session must end after it starts and
 not in the future; it must start inside the 7-day freshness window; its idle seconds cannot
@@ -315,6 +360,11 @@ exceed its elapsed time; sessions past 12 hours are flagged `needs_review`; and 
 project must be one the user is a member of (a composite foreign key, so it can't be
 bypassed). A bad row in a batch is rejected on its own and named in the response; the rest of
 the batch still lands.
+
+Project names are case-insensitively unique, archived names included. The default project can
+be neither archived nor deleted — unattributed time lands there — and the last active project
+refuses deletion too; deleting a project is admin-only because it moves or destroys other
+members' sessions.
 
 **Attributed seconds** are a session's whole duration when its `attribution` is anything but
 `default`, and zero when it is. History can't be backfilled: a session that arrives more than

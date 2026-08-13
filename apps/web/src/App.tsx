@@ -1,13 +1,19 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   agentRuntimeForBinary,
   agentRuntimeLabel,
   formatHumanDuration,
   friendlyAppName,
+  leverage,
   type LeaderboardEntry,
   type MeStatsResponse,
   type Organization,
+  type ProjectListItem,
+  type ProjectScope,
+  type ProjectUsageResponse,
+  type ReportRow,
+  type ViewPreferences,
 } from "@clock-in/shared";
 
 import { ClientError, type Client } from "./client.js";
@@ -17,44 +23,59 @@ import { WebGLShader } from "./WebGLShader.js";
 
 type AppProps = { client: Client };
 
-/// The same three ranges the desktop app's All stats offers, measured on the
-/// viewer's own clock.
-type Range = "today" | "week" | "all";
+/// The same ranges the desktop offers, measured on the viewer's own clock.
+type Range = ViewPreferences["range"];
 
 const rangeLabels: Record<Range, string> = {
   today: "Today",
-  week: "This week",
+  "7d": "7d",
+  "30d": "30d",
+  "90d": "90d",
   all: "All time",
 };
 
-/// Instant bounds on the viewer's local calendar: "today" runs midnight to
-/// midnight, "week" from Monday. Calendar-date params would be read as UTC
-/// days, which roll over mid-afternoon west of Greenwich. "All time" sends no
-/// bounds at all.
-export function rangeQuery(range: Range, now = new Date()): string {
-  if (range === "all") return "";
-  const from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  if (range === "week") from.setDate(from.getDate() - ((from.getDay() + 6) % 7));
-  const toExclusive = new Date(from);
-  toExclusive.setDate(toExclusive.getDate() + (range === "week" ? 7 : 1));
+const rangeSentence: Record<Range, string> = {
+  today: "Today",
+  "7d": "Last 7 days",
+  "30d": "Last 30 days",
+  "90d": "Last 90 days",
+  all: "All time",
+};
+
+const rangeDays: Record<Range, number | null> = { today: 1, "7d": 7, "30d": 30, "90d": 90, all: null };
+
+/**
+ * Instant bounds on the viewer's local calendar, ending at the next local
+ * midnight. Calendar-date params would be read as UTC days, which roll over
+ * mid-afternoon west of Greenwich. "All time" sends no bounds. `periodsBack`
+ * asks for the previous equivalent window, for the tiles' deltas.
+ */
+export function rangeQuery(range: Range, now = new Date(), periodsBack = 0): string {
+  const days = rangeDays[range];
+  if (days === null) return "";
+  const toExclusive = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  toExclusive.setDate(toExclusive.getDate() - days * periodsBack);
+  const from = new Date(toExclusive);
+  from.setDate(from.getDate() - days);
   return `?fromAt=${encodeURIComponent(from.toISOString())}&toExclusiveAt=${encodeURIComponent(toExclusive.toISOString())}`;
 }
 
-/// The member-stats query: the range bounds plus who to read.
-const statsQuery = (range: Range, userId: string): string => {
-  const bounds = rangeQuery(range);
-  return bounds === "" ? `?userId=${encodeURIComponent(userId)}` : `${bounds}&userId=${encodeURIComponent(userId)}`;
+/** Appends extra query parameters onto a possibly-empty range query. */
+const withParams = (base: string, params: Record<string, string>): string => {
+  const query = new URLSearchParams(base.replace(/^\?/, ""));
+  for (const [key, value] of Object.entries(params)) query.set(key, value);
+  const text = query.toString();
+  return text === "" ? "" : `?${text}`;
 };
 
-type AppRow = { key: string; label: string; agent: boolean; durationSeconds: number };
+type AppRowItem = { key: string; label: string; agent: boolean; durationSeconds: number };
 
 const TOP_APP_ROWS = 8;
 
-/// The same fold the desktop's stats use: one row per agent runtime (so "how
-/// much Claude Code" is a single line), friendly names for everything else,
-/// heaviest first, and the long tail gathered into "Everything else".
-export const buildAppRows = (apps: MeStatsResponse["apps"]): AppRow[] => {
-  const totals = new Map<string, AppRow>();
+/// One row per agent runtime (so "how much Claude Code" is a single line),
+/// friendly names for everything else, heaviest first, long tail folded.
+export const buildAppRows = (apps: MeStatsResponse["apps"]): AppRowItem[] => {
+  const totals = new Map<string, AppRowItem>();
   for (const app of apps) {
     if (app.durationSeconds <= 0) continue;
     const source = agentRuntimeForBinary(app.processName);
@@ -74,6 +95,22 @@ export const buildAppRows = (apps: MeStatsResponse["apps"]): AppRow[] => {
   return [...rows.slice(0, TOP_APP_ROWS), { key: "everything-else", label: "Everything else", agent: false, durationSeconds: rest }];
 };
 
+type BoardSort = "active" | "agent" | "leverage";
+
+const boardSorters: Record<BoardSort, (a: LeaderboardEntry, b: LeaderboardEntry) => number> = {
+  active: (a, b) => b.activeSeconds - a.activeSeconds,
+  agent: (a, b) => b.agentSeconds - a.agentSeconds,
+  leverage: (a, b) => (leverage(b) ?? 0) - (leverage(a) ?? 0),
+};
+
+/** "▲ 12%" / "▼ 8%" against the prior equivalent period; null hides the delta. */
+export function deltaLabel(current: number, prior: number | undefined): string | null {
+  if (prior === undefined || prior === 0) return null;
+  const change = Math.round(((current - prior) / prior) * 100);
+  if (change === 0) return "· flat";
+  return change > 0 ? `▲ ${change}%` : `▼ ${Math.abs(change)}%`;
+}
+
 const messageFor = (error: unknown): string =>
   error instanceof ClientError ? error.message : "Something went wrong. Try again.";
 
@@ -90,61 +127,42 @@ export const App = ({ client }: AppProps) => {
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | undefined>();
 
-  const [range, setRange] = useState<Range>("today");
+  const [scope, setScope] = useState<ProjectScope>("all");
+  const [range, setRange] = useState<Range>("30d");
+  const [preferencesReady, setPreferencesReady] = useState(false);
   const [organization, setOrganization] = useState<Organization | undefined>();
   const [selfId, setSelfId] = useState<string | undefined>();
+  const [projects, setProjects] = useState<readonly ProjectListItem[]>([]);
   const [entries, setEntries] = useState<readonly LeaderboardEntry[]>([]);
-  const [total, setTotal] = useState(0);
+  const [priorEntries, setPriorEntries] = useState<readonly LeaderboardEntry[] | undefined>();
+  const [medianSeconds, setMedianSeconds] = useState<number | null>(null);
+  const [boardSort, setBoardSort] = useState<BoardSort>("active");
   const [loading, setLoading] = useState(false);
   const [dataError, setDataError] = useState<string | undefined>();
-  // Tracked per card, because "we could not load this" and "there is nothing
-  // here" are different facts and a zero total is a lie about the first.
   const [boardFailed, setBoardFailed] = useState(false);
-  // Whose breakdown the drill-down shows: you by default, then whoever on the
-  // board was picked last.
   const [member, setMember] = useState<{ id: string; name: string } | undefined>();
   const [memberStats, setMemberStats] = useState<MeStatsResponse | undefined>();
   const [memberFailed, setMemberFailed] = useState(false);
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [sessionRows, setSessionRows] = useState<readonly ReportRow[]>([]);
+  const [sessionTotal, setSessionTotal] = useState(0);
+  const [sessionPage, setSessionPage] = useState(1);
+  const [manageOpen, setManageOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [joinCode, setJoinCode] = useState("");
   const [joinBusy, setJoinBusy] = useState(false);
   const [joinError, setJoinError] = useState<string | undefined>();
   const [helpOpen, setHelpOpen] = useState(false);
 
-  const load = useCallback(async (selected: Range) => {
-    setLoading(true);
-    setDataError(undefined);
-    setBoardFailed(false);
-    const query = rangeQuery(selected);
-    // Settled rather than all: these calls fail independently, and one refused
-    // report must not throw away the workspace that loaded beside it. While it
-    // did, a rejected report blanked the masthead and the invite code too, so
-    // a server-side failure read as an empty account.
-    const [organizationResult, board, meResult] = await Promise.allSettled([
-      client.organization(),
-      client.leaderboard(query),
-      client.me(),
-    ]);
-    const failures = [organizationResult, board, meResult]
-      .flatMap((result) => (result.status === "rejected" ? [result.reason as unknown] : []));
+  const expireSession = useCallback(() => {
+    setSignedIn(false);
+    setAuthError("Your session expired. Sign in again.");
+  }, []);
 
-    if (failures.some((reason) => reason instanceof ClientError && reason.kind === "auth")) {
-      setSignedIn(false);
-      setAuthError("Your session expired. Sign in again.");
-      setLoading(false);
-      return;
-    }
-
-    if (organizationResult.status === "fulfilled") setOrganization(organizationResult.value.organization);
-    if (meResult.status === "fulfilled") setSelfId(meResult.value.user.id);
-    setBoardFailed(board.status === "rejected");
-    setEntries(board.status === "fulfilled" ? board.value.entries : []);
-    setTotal(board.status === "fulfilled" ? board.value.totalDurationSeconds : 0);
-
-    const [firstFailure] = failures;
-    if (firstFailure !== undefined) setDataError(messageFor(firstFailure));
-    setLoading(false);
-  }, [client]);
+  const scopeParams = useCallback(
+    (base: string): string => (scope === "all" ? base : withParams(base, { scope })),
+    [scope],
+  );
 
   // On page load, trade a persisted auth cookie for a JWT before choosing
   // between the sign-in form and the dashboard — no form flash for a live session.
@@ -160,38 +178,130 @@ export const App = ({ client }: AppProps) => {
     };
   }, [client]);
 
+  // Who and where: identity, workspace, projects, and the shared view state.
+  // Preferences land BEFORE the first board fetch so the page opens where the
+  // desktop app last was, with no flicker through the defaults.
   useEffect(() => {
     if (!signedIn) return;
-    void load(range);
-  }, [signedIn, range, load]);
+    let cancelled = false;
+    void Promise.allSettled([client.organization(), client.me(), client.projects(), client.preferences()]).then(
+      ([organizationResult, meResult, projectsResult, preferencesResult]) => {
+        if (cancelled) return;
+        const failures = [organizationResult, meResult, projectsResult, preferencesResult]
+          .flatMap((result) => (result.status === "rejected" ? [result.reason as unknown] : []));
+        if (failures.some((reason) => reason instanceof ClientError && reason.kind === "auth")) {
+          expireSession();
+          return;
+        }
+        if (organizationResult.status === "fulfilled") setOrganization(organizationResult.value.organization);
+        if (meResult.status === "fulfilled") setSelfId(meResult.value.user.id);
+        if (projectsResult.status === "fulfilled") setProjects(projectsResult.value.projects);
+        if (preferencesResult.status === "fulfilled") {
+          setScope(preferencesResult.value.scope);
+          setRange(preferencesResult.value.range);
+        }
+        setPreferencesReady(true);
+        const [firstFailure] = failures;
+        if (firstFailure !== undefined) setDataError(messageFor(firstFailure));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [client, signedIn, expireSession]);
 
-  // The drill-down: one member's breakdown for the range on screen. It opens
-  // on you and follows whichever board row was picked.
+  // The board and its prior period, refetched whenever scope or range move.
+  const reloadBoard = useCallback(async () => {
+    setLoading(true);
+    setBoardFailed(false);
+    try {
+      const [current, prior] = await Promise.all([
+        client.leaderboard(scopeParams(rangeQuery(range))),
+        range === "all" ? Promise.resolve(undefined) : client.leaderboard(scopeParams(rangeQuery(range, new Date(), 1))),
+      ]);
+      setEntries(current.entries);
+      setMedianSeconds(current.medianSessionSeconds);
+      setPriorEntries(prior?.entries);
+      setDataError(undefined);
+    } catch (error: unknown) {
+      if (error instanceof ClientError && error.kind === "auth") {
+        expireSession();
+        return;
+      }
+      setBoardFailed(true);
+      setEntries([]);
+      setPriorEntries(undefined);
+      setDataError(messageFor(error));
+    } finally {
+      setLoading(false);
+    }
+  }, [client, range, scopeParams, expireSession]);
+
+  useEffect(() => {
+    if (!signedIn || !preferencesReady) return;
+    void reloadBoard();
+  }, [signedIn, preferencesReady, reloadBoard]);
+
+  // The shared view state follows every change, last write wins. The first
+  // render after preferences load must not write back what it just read.
+  const preferencesDirty = useRef(false);
+  useEffect(() => {
+    if (!signedIn || !preferencesReady) return;
+    if (!preferencesDirty.current) {
+      preferencesDirty.current = true;
+      return;
+    }
+    void client.updatePreferences({ scope, range }).catch(() => undefined);
+  }, [client, signedIn, preferencesReady, scope, range]);
+
+  // The drill-down: one member's breakdown for the scope and range on screen.
   const viewedId = member?.id ?? selfId;
   useEffect(() => {
-    if (!signedIn || viewedId === undefined) return undefined;
+    if (!signedIn || !preferencesReady || viewedId === undefined) return undefined;
     let cancelled = false;
     setMemberStats(undefined);
     setMemberFailed(false);
-    client.meStats(statsQuery(range, viewedId)).then(
+    client.meStats(scopeParams(withParams(rangeQuery(range), { userId: viewedId }))).then(
       (result) => {
         if (!cancelled) setMemberStats(result);
       },
       (error: unknown) => {
         if (cancelled) return;
         if (error instanceof ClientError && error.kind === "auth") {
-          setSignedIn(false);
-          setAuthError("Your session expired. Sign in again.");
+          expireSession();
           return;
         }
         setMemberFailed(true);
-        setDataError(messageFor(error));
       },
     );
     return () => {
       cancelled = true;
     };
-  }, [client, signedIn, range, viewedId]);
+  }, [client, signedIn, preferencesReady, range, viewedId, scopeParams, expireSession]);
+
+  // Recent sessions load only while their tab is open, one page at a time.
+  useEffect(() => {
+    if (!signedIn || !preferencesReady || !sessionsOpen) return undefined;
+    let cancelled = false;
+    client.report(withParams(scopeParams(rangeQuery(range)), { page: String(sessionPage), pageSize: "25" })).then(
+      (result) => {
+        if (cancelled) return;
+        setSessionRows((current) => (sessionPage === 1 ? result.rows : [...current, ...result.rows]));
+        setSessionTotal(result.pagination.totalRows);
+      },
+      () => undefined,
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [client, signedIn, preferencesReady, sessionsOpen, range, sessionPage, scopeParams]);
+
+  // Reset on scope, range, or a fresh open: reopening the tab with a page
+  // counter still at 2 would append page 2's rows on top of themselves.
+  useEffect(() => {
+    setSessionPage(1);
+    setSessionRows([]);
+  }, [scope, range, sessionsOpen]);
 
   const submitAuth = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -230,11 +340,17 @@ export const App = ({ client }: AppProps) => {
     setJustSignedUp(false);
     setOrganization(undefined);
     setSelfId(undefined);
+    setProjects([]);
     setEntries([]);
+    setPriorEntries(undefined);
     setMember(undefined);
     setMemberStats(undefined);
     setMemberFailed(false);
     setBoardFailed(false);
+    setSessionsOpen(false);
+    setSessionRows([]);
+    setPreferencesReady(false);
+    preferencesDirty.current = false;
     setAuthError(undefined);
   };
 
@@ -245,7 +361,9 @@ export const App = ({ client }: AppProps) => {
     try {
       await client.joinOrganization(joinCode.trim());
       setJoinCode("");
-      await load(range);
+      const refreshed = await client.organization();
+      setOrganization(refreshed.organization);
+      await reloadBoard();
     } catch (error: unknown) {
       setJoinError(messageFor(error));
     } finally {
@@ -262,6 +380,15 @@ export const App = ({ client }: AppProps) => {
     } catch {
       // Clipboard access can be denied; the code is on screen to copy by hand.
       setDataError("Could not copy. Select the code and copy it manually.");
+    }
+  };
+
+  const refreshProjects = async (): Promise<void> => {
+    const listed = await client.projects(true);
+    setProjects(listed.projects);
+    // A scope naming a project that no longer exists falls back to everything.
+    if (scope !== "all" && scope !== "unassigned" && !listed.projects.some((project) => project.id === scope && !project.isArchived)) {
+      setScope("all");
     }
   };
 
@@ -344,6 +471,72 @@ export const App = ({ client }: AppProps) => {
     );
   }
 
+  const activeProjects = projects.filter((project) => !project.isArchived);
+  const scopeName = scope === "all"
+    ? "All projects"
+    : scope === "unassigned"
+      ? "Unassigned"
+      : activeProjects.find((project) => project.id === scope)?.name ?? "All projects";
+  const sum = (list: readonly LeaderboardEntry[] | undefined, pick: (entry: LeaderboardEntry) => number): number =>
+    (list ?? []).reduce((total, entry) => total + pick(entry), 0);
+  const activeTotal = sum(entries, (entry) => entry.activeSeconds);
+  const agentTotal = sum(entries, (entry) => entry.agentSeconds);
+  const sessionsCount = sum(entries, (entry) => entry.sessionCount);
+  const unassistedTotal = sum(entries, (entry) => entry.concurrency.t0Seconds);
+  const teamLeverage = leverage({ activeSeconds: activeTotal, agentSeconds: agentTotal });
+  const unassistedShare = activeTotal === 0 ? null : Math.round((unassistedTotal / activeTotal) * 100);
+  const priorLabel = range === "all" ? "" : ` vs prior ${rangeSentence[range].toLowerCase().replace("last ", "")}`;
+  const tiles = [
+    {
+      key: "active",
+      label: "Active time",
+      value: formatHumanDuration(activeTotal),
+      sub: null,
+      delta: deltaLabel(activeTotal, priorEntries === undefined ? undefined : sum(priorEntries, (entry) => entry.activeSeconds)),
+      title: "The union of each person's working intervals — never more than wall clock.",
+    },
+    {
+      key: "agent",
+      label: "Agent time",
+      value: formatHumanDuration(agentTotal),
+      sub: teamLeverage === null ? null : `${teamLeverage}× leverage`,
+      delta: deltaLabel(agentTotal, priorEntries === undefined ? undefined : sum(priorEntries, (entry) => entry.agentSeconds)),
+      title: "Summed agent runtime. Parallel agents make this exceed active time; that is leverage, not double-counted hours.",
+    },
+    {
+      key: "unassisted",
+      label: "Unassisted",
+      value: unassistedShare === null ? "—" : `${unassistedShare}%`,
+      sub: unassistedShare === null ? null : `${formatHumanDuration(unassistedTotal)} with no agent`,
+      delta: null,
+      title: "The share of active time with no agent running.",
+    },
+    {
+      key: "sessions",
+      label: "Sessions",
+      value: String(sessionsCount),
+      sub: medianSeconds === null ? null : `median ${formatHumanDuration(medianSeconds)}`,
+      delta: deltaLabel(sessionsCount, priorEntries === undefined ? undefined : sum(priorEntries, (entry) => entry.sessionCount)),
+      title: "Completed sessions in this scope and range.",
+    },
+  ];
+  // Rank follows the column being sorted by; showing the server's active-time
+  // rank under an agent-time sort reads as 1, 4, 2, 3.
+  const sortedEntries = [...entries]
+    .sort(boardSorters[boardSort])
+    .map((entry, index) => ({ ...entry, rank: boardSort === "active" ? entry.rank : index + 1 }));
+  const memberAppRows = memberStats === undefined ? [] : buildAppRows(memberStats.apps);
+  const concurrencyLine = (stats: MeStatsResponse): string => {
+    const parts = [
+      `Unassisted ${formatHumanDuration(stats.concurrency.t0Seconds)}`,
+      `1 agent ${formatHumanDuration(stats.concurrency.t1Seconds)}`,
+      `2 agents ${formatHumanDuration(stats.concurrency.t2Seconds)}`,
+      `3+ ${formatHumanDuration(stats.concurrency.t3PlusSeconds)}`,
+    ];
+    if (stats.concurrency.awaySeconds > 0) parts.push(`agents while away ${formatHumanDuration(stats.concurrency.awaySeconds)}`);
+    return parts.join(" · ");
+  };
+
   return (
     <main className="shell">
       <WebGLShader />
@@ -351,21 +544,11 @@ export const App = ({ client }: AppProps) => {
         <div>
           <p className="eyebrow">Clock-In</p>
           <h1>{organization?.name ?? "Your workspace"}</h1>
+          <p className="page-qualifier">{scopeName} · {rangeSentence[range]}</p>
         </div>
         <div className="masthead-actions">
-          <div className="range-toggle" role="group" aria-label="Date range">
-            {(Object.keys(rangeLabels) as Range[]).map((value) => (
-              <button
-                key={value}
-                type="button"
-                className={range === value ? "is-active" : undefined}
-                onClick={() => setRange(value)}
-              >
-                {rangeLabels[value]}
-              </button>
-            ))}
-          </div>
           <DownloadInstaller />
+          <button className="ghost" type="button" onClick={() => setManageOpen(true)}>Projects</button>
           <button
             className="ghost help-button"
             type="button"
@@ -379,20 +562,46 @@ export const App = ({ client }: AppProps) => {
         </div>
       </header>
 
+      {/* The two global filters. Everything below reflects both. */}
+      <div className="control-bar">
+        <label className="scope-picker">
+          <span className="visually-hidden">Project scope</span>
+          <select value={scope} onChange={(event) => setScope(event.target.value as ProjectScope)}>
+            <option value="all">All projects</option>
+            <option value="unassigned">Unassigned</option>
+            {activeProjects.map((project) => (
+              <option key={project.id} value={project.id}>{project.name}</option>
+            ))}
+          </select>
+        </label>
+        <div className="range-toggle" role="group" aria-label="Date range">
+          {(Object.keys(rangeLabels) as Range[]).map((value) => (
+            <button
+              key={value}
+              type="button"
+              className={range === value ? "is-active" : undefined}
+              onClick={() => setRange(value)}
+            >
+              {rangeLabels[value]}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {dataError && <p className="error" role="alert">{dataError}</p>}
 
-      {organization && (
-        <section className="card invite-card">
-          <div>
-            <h2>Invite your team</h2>
-            <p className="subtle">Anyone who enters this code at sign-up joins this workspace.</p>
-          </div>
-          <div className="invite-actions">
-            <code className="invite-code">{organization.inviteCode}</code>
-            <button className="ghost" type="button" onClick={() => void copyInviteCode()}>{copied ? "Copied" : "Copy"}</button>
-          </div>
-        </section>
-      )}
+      <div className="tile-row">
+        {tiles.map((tile) => (
+          <section key={tile.key} className="card tile" aria-label={tile.label} title={tile.title}>
+            <p className="tile-label">{tile.label}</p>
+            <p className="tile-value">{boardFailed ? "—" : tile.value}</p>
+            <p className="tile-sub">
+              {tile.sub ?? " "}
+              {tile.delta !== null && !boardFailed && <span className="tile-delta">{tile.delta}{priorLabel}</span>}
+            </p>
+          </section>
+        ))}
+      </div>
 
       {organization && entries.length <= 1 && (
         <section className="card join-card" aria-labelledby="join-title">
@@ -414,19 +623,28 @@ export const App = ({ client }: AppProps) => {
       <section className="card" aria-labelledby="board-title">
         <div className="card-head">
           <h2 id="board-title">Leaderboard</h2>
-          <span className="total">{boardFailed ? "Not loaded" : `${formatHumanDuration(total)} total`}</span>
+          <label className="board-sort">
+            <span className="visually-hidden">Sort by</span>
+            <select value={boardSort} onChange={(event) => setBoardSort(event.target.value as BoardSort)}>
+              <option value="active">By active time</option>
+              <option value="agent">By agent time</option>
+              <option value="leverage">By leverage</option>
+            </select>
+          </label>
         </div>
         {boardFailed ? (
           <p className="subtle">Could not load hours for this range.</p>
         ) : loading && entries.length === 0 ? (
           <p className="subtle" role="status">Loading hours…</p>
         ) : entries.length === 0 ? (
-          <p className="subtle">No recorded time in this range yet.</p>
+          <p className="subtle">
+            {scope === "all"
+              ? "No recorded time in this range yet. Install the desktop app and it records on its own."
+              : "Nothing recorded here in this range. Pick another range, or All projects."}
+          </p>
         ) : (
-          // Each row picks whose breakdown the panel underneath shows. You are
-          // highlighted from the start; picking a teammate moves the highlight.
           <ol className="board-list">
-            {entries.map((entry) => (
+            {sortedEntries.map((entry) => (
               <li key={entry.user.id} className={entry.user.id === viewedId ? "is-selected" : undefined}>
                 <button
                   type="button"
@@ -439,7 +657,13 @@ export const App = ({ client }: AppProps) => {
                     {entry.user.name}
                     {entry.user.id === selfId && <span className="you-tag"> you</span>}
                   </span>
-                  <span className="board-hours">{formatHumanDuration(entry.durationSeconds)}</span>
+                  <span className="board-times">
+                    <span className="board-hours">{formatHumanDuration(entry.activeSeconds)}</span>
+                    <span className="board-agent">
+                      Agent {formatHumanDuration(entry.agentSeconds)}
+                      {leverage(entry) !== null && ` · ${leverage(entry)}×`}
+                    </span>
+                  </span>
                 </button>
               </li>
             ))}
@@ -452,7 +676,7 @@ export const App = ({ client }: AppProps) => {
               <h3 id="member-stats-title">
                 {(member?.name ?? entries.find((entry) => entry.user.id === selfId)?.user.name ?? "You")}
                 {" · "}
-                {rangeLabels[range]}
+                {rangeSentence[range]}
               </h3>
               {viewedId !== selfId && (
                 <button type="button" className="member-self" onClick={() => setMember(undefined)}>
@@ -466,7 +690,23 @@ export const App = ({ client }: AppProps) => {
               <p className="subtle" role="status">Loading…</p>
             ) : (
               <>
-                <p className="member-total"><strong>{formatHumanDuration(memberStats.totalDurationSeconds)}</strong> recorded</p>
+                <p className="member-total">
+                  <strong>{formatHumanDuration(memberStats.activeSeconds)}</strong> active
+                  <span className="member-agent-total">
+                    · Agent {formatHumanDuration(memberStats.agentSeconds)}
+                    {leverage(memberStats) !== null && ` · ${leverage(memberStats)}×`}
+                  </span>
+                </p>
+                {/* Two different cuts, kept visibly apart: the concurrency
+                    split sums to active time; the by-agent split sums to
+                    agent time and never to hours worked. */}
+                <p className="member-line" data-testid="concurrency-line">{concurrencyLine(memberStats)}</p>
+                {memberStats.byAgent.length > 0 && (
+                  <p className="member-line is-agents" data-testid="by-agent-line">
+                    {memberStats.byAgent.map((split) =>
+                      `${agentRuntimeLabel(split.source)}${split.model === null ? "" : ` (${split.model})`} ${formatHumanDuration(split.durationSeconds)}`).join(" · ")}
+                  </p>
+                )}
                 {memberStats.projects.length > 0 && (
                   <ul className="stat-list">
                     {memberStats.projects.filter((entry) => entry.durationSeconds > 0).map((entry) => (
@@ -477,11 +717,11 @@ export const App = ({ client }: AppProps) => {
                     ))}
                   </ul>
                 )}
-                {buildAppRows(memberStats.apps).length === 0 ? (
+                {memberAppRows.length === 0 ? (
                   <p className="subtle">No recorded time in this range.</p>
                 ) : (
                   <ul className="stat-list stat-apps">
-                    {buildAppRows(memberStats.apps).map((row) => (
+                    {memberAppRows.map((row) => (
                       <li key={row.key} className="stat-row">
                         <span className={row.agent ? "stat-name is-agent" : "stat-name"}>{row.label}</span>
                         <span className="stat-duration">{formatHumanDuration(row.durationSeconds)}</span>
@@ -501,7 +741,251 @@ export const App = ({ client }: AppProps) => {
         )}
       </section>
 
+      {/* History lives out of the main scroll, one page at a time. */}
+      <details
+        className="card sessions-card"
+        open={sessionsOpen}
+        onToggle={(event) => setSessionsOpen((event.target as HTMLDetailsElement).open)}
+      >
+        <summary>Recent sessions{sessionTotal > 0 ? ` (${sessionTotal})` : ""}</summary>
+        {sessionRows.length === 0 ? (
+          <p className="subtle">Nothing recorded in this range.</p>
+        ) : (
+          <>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Member</th>
+                  <th scope="col">Project</th>
+                  <th scope="col">Started</th>
+                  <th scope="col" className="numeric">Duration</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sessionRows.map((row) => (
+                  <tr key={row.id}>
+                    <td>{row.user.name}</td>
+                    <td>{row.project.name}</td>
+                    <td>{new Date(row.startedAt).toLocaleString()}</td>
+                    <td className="numeric hours">{formatHumanDuration(row.durationSeconds)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {sessionRows.length < sessionTotal && (
+              <button className="ghost" type="button" onClick={() => setSessionPage((page) => page + 1)}>
+                Show more
+              </button>
+            )}
+          </>
+        )}
+      </details>
+
+      {organization && (
+        <section className="card invite-card">
+          <div>
+            <h2>Invite your team</h2>
+            <p className="subtle">Anyone who enters this code at sign-up joins this workspace.</p>
+          </div>
+          <div className="invite-actions">
+            <code className="invite-code">{organization.inviteCode}</code>
+            <button className="ghost" type="button" onClick={() => void copyInviteCode()}>{copied ? "Copied" : "Copy"}</button>
+          </div>
+        </section>
+      )}
+
+      {manageOpen && (
+        <ManageProjects
+          client={client}
+          projects={projects}
+          onChanged={() => {
+            void refreshProjects()
+              .then(() => reloadBoard())
+              .catch((error: unknown) => setDataError(messageFor(error)));
+          }}
+          onClose={() => setManageOpen(false)}
+        />
+      )}
+
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
     </main>
+  );
+};
+
+type ManageProjectsProps = {
+  client: Client;
+  projects: readonly ProjectListItem[];
+  onChanged: () => void;
+  onClose: () => void;
+};
+
+/** Create, rename, archive, and the guarded delete — the one management surface. */
+const ManageProjects = ({ client, projects, onChanged, onClose }: ManageProjectsProps) => {
+  const [error, setError] = useState<string | undefined>();
+  const [newName, setNewName] = useState("");
+  const [renamingId, setRenamingId] = useState<string | undefined>();
+  const [renameDraft, setRenameDraft] = useState("");
+  const [deleting, setDeleting] = useState<{ project: ProjectListItem; usage: ProjectUsageResponse } | undefined>();
+  const [confirmName, setConfirmName] = useState("");
+  const [reassignTo, setReassignTo] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+
+  const act = async (action: () => Promise<void>): Promise<void> => {
+    setBusy(true);
+    setError(undefined);
+    try {
+      await action();
+      onChanged();
+    } catch (actionError: unknown) {
+      setError(messageFor(actionError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <section
+        className="card modal manage-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="manage-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="card-head">
+          <h2 id="manage-title">Projects</h2>
+          <button className="ghost" type="button" aria-label="Close projects" onClick={onClose}>✕</button>
+        </div>
+        {error && <p className="error" role="alert">{error}</p>}
+
+        {deleting === undefined ? (
+          <>
+            <ul className="manage-list">
+              {projects.map((project) => (
+                <li key={project.id} className="manage-row">
+                  {renamingId === project.id ? (
+                    <form
+                      className="manage-rename"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void act(async () => {
+                          await client.updateProject(project.id, { name: renameDraft.trim() });
+                          setRenamingId(undefined);
+                        });
+                      }}
+                    >
+                      <label>
+                        <span className="visually-hidden">New name for {project.name}</span>
+                        <input value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} maxLength={80} required />
+                      </label>
+                      <button className="ghost" type="submit" disabled={busy}>Save</button>
+                      <button className="ghost" type="button" onClick={() => setRenamingId(undefined)}>Cancel</button>
+                    </form>
+                  ) : (
+                    <>
+                      <span className="manage-name">
+                        {project.name}
+                        {project.isArchived && <span className="you-tag"> archived</span>}
+                      </span>
+                      <span className="manage-actions">
+                        <button className="ghost" type="button" disabled={busy} onClick={() => { setRenamingId(project.id); setRenameDraft(project.name); }}>
+                          Rename
+                        </button>
+                        <button
+                          className="ghost"
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void act(async () => {
+                            await client.updateProject(project.id, { isArchived: !project.isArchived });
+                          })}
+                        >
+                          {project.isArchived ? "Unarchive" : "Archive"}
+                        </button>
+                        <button
+                          className="ghost is-danger"
+                          type="button"
+                          disabled={busy}
+                          onClick={() => {
+                            // A read, not a mutation: opening the dialog must
+                            // not refetch the whole board.
+                            setBusy(true);
+                            setError(undefined);
+                            void client.projectUsage(project.id).then(
+                              (usage) => {
+                                setDeleting({ project, usage });
+                                setConfirmName("");
+                                setReassignTo("");
+                                setBusy(false);
+                              },
+                              (usageError: unknown) => {
+                                setError(messageFor(usageError));
+                                setBusy(false);
+                              },
+                            );
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </span>
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <form
+              className="manage-create"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void act(async () => {
+                  await client.createProject(newName.trim());
+                  setNewName("");
+                });
+              }}
+            >
+              <label>
+                <span className="visually-hidden">New project name</span>
+                <input value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="New project…" maxLength={80} required />
+              </label>
+              <button className="ghost" type="submit" disabled={busy}>Create</button>
+            </form>
+          </>
+        ) : (
+          <div className="manage-delete">
+            <p>
+              Deleting <strong>{deleting.project.name}</strong> takes with it{" "}
+              <strong>{deleting.usage.sessionCount} sessions</strong> ({formatHumanDuration(deleting.usage.durationSeconds)})
+              and {deleting.usage.agentSessionCount} agent sessions — unless they move first.
+            </p>
+            <label className="manage-reassign">
+              What happens to its sessions?
+              <select value={reassignTo} onChange={(event) => setReassignTo(event.target.value)}>
+                <option value="">Delete them with the project</option>
+                {projects.filter((project) => project.id !== deleting.project.id).map((project) => (
+                  <option key={project.id} value={project.id}>Move to {project.name}</option>
+                ))}
+              </select>
+            </label>
+            <label className="manage-confirm">
+              Type the project's name to confirm
+              <input value={confirmName} onChange={(event) => setConfirmName(event.target.value)} placeholder={deleting.project.name} autoComplete="off" />
+            </label>
+            <div className="manage-actions">
+              <button
+                className="ghost is-danger"
+                type="button"
+                disabled={busy || confirmName.trim() !== deleting.project.name}
+                onClick={() => void act(async () => {
+                  await client.deleteProject(deleting.project.id, { reassignTo: reassignTo === "" ? null : reassignTo });
+                  setDeleting(undefined);
+                })}
+              >
+                Delete {deleting.project.name}
+              </button>
+              <button className="ghost" type="button" disabled={busy} onClick={() => setDeleting(undefined)}>Cancel</button>
+            </div>
+          </div>
+        )}
+      </section>
+    </div>
   );
 };

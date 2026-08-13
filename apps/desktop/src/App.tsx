@@ -11,6 +11,7 @@ import {
   type MonitorSettings,
   type MonitorStatus,
   type OrganizationOverview,
+  type ProjectUsage,
   type AgentQuota,
   type QuotaSnapshot,
   type SessionApp,
@@ -19,7 +20,7 @@ import {
 } from "./bridge.js";
 import { AgentRuntimeIcon } from "./agent-icons.js";
 import { QuotaDial } from "./QuotaDial.js";
-import { agentRuntimeForBinary, formatDuration, formatHumanDuration as formatHuman, friendlyAppName } from "@clock-in/shared";
+import { agentRuntimeForBinary, formatDuration, formatHumanDuration as formatHuman, friendlyAppName, leverage } from "@clock-in/shared";
 import { RecordingPanel, recordingState, type RecordingState } from "./RecordingPanel.js";
 import { WebGLShader } from "./WebGLShader.js";
 
@@ -251,6 +252,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   /// someone's week there never rewrites the day the main screen is showing.
   const [boardRange, setBoardRange] = useState<StatsRange>("today");
   const [boardMember, setBoardMember] = useState<{ id: string; name: string } | undefined>();
+  /// The project scope shared with the web dashboard: opening All stats lands
+  /// where the dashboard last was, and changing it here moves the dashboard.
+  const [boardScope, setBoardScope] = useState("all");
   const [boardStats, setBoardStats] = useState<MeStats | undefined>();
   const [boardStatsError, setBoardStatsError] = useState<string | undefined>();
   const [activeTeamId, setActiveTeamId] = useState("");
@@ -258,6 +262,12 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [settingsError, setSettingsError] = useState<string | undefined>();
   const [quietDraft, setQuietDraft] = useState("");
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [renamingProjectId, setRenamingProjectId] = useState<string | undefined>();
+  const [renameDraft, setRenameDraft] = useState("");
+  const [deletingProject, setDeletingProject] = useState<{ id: string; name: string; usage: ProjectUsage } | undefined>();
+  const [deleteConfirmName, setDeleteConfirmName] = useState("");
+  const [deleteReassignTo, setDeleteReassignTo] = useState("");
+  const [projectBusy, setProjectBusy] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [appIcons, setAppIcons] = useState<Record<string, string | null>>({});
   const [quota, setQuota] = useState<QuotaSnapshot | undefined>();
@@ -289,6 +299,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setStats(undefined);
     setStatsError(undefined);
     setBoardMember(undefined);
+    setBoardScope("all");
     setBoardStats(undefined);
     setBoardStatsError(undefined);
     setActiveTeamId("");
@@ -401,6 +412,25 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     return () => { active = false; };
   }, [bridge, signedIn?.user.id, statsTick]);
 
+  // Each open of the overlay starts from the scope the shared row holds, so
+  // this surface lands wherever the dashboard (or this app, last time) was.
+  useEffect(() => {
+    if (signedIn === undefined || !allStatsOpen) return undefined;
+    let active = true;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    void service.preferencesGet().then(
+      (preferences) => {
+        if (active && isCurrent(service, generation)) setBoardScope(preferences.scope);
+      },
+      // A missing preference row is the default view, not a problem.
+      () => undefined,
+    );
+    return () => { active = false; };
+    // Seeding re-runs only when the overlay opens, not when the scope moves.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bridge, allStatsOpen, signedIn?.user.id]);
+
   // The All stats overlay reads on its own account: whichever member is being
   // looked at, over whichever range that overlay is set to. Only while it is
   // open — nobody is served by fetching a teammate's year in the background.
@@ -412,18 +442,25 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const lastBoardKey = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (signedIn === undefined || !allStatsOpen) return undefined;
-    const boardKey = `${boardRange}|${boardMember?.id ?? ""}`;
+    const boardKey = `${boardRange}|${boardScope}|${boardMember?.id ?? ""}`;
     if (lastBoardKey.current !== boardKey) {
       lastBoardKey.current = boardKey;
       setBoardStats(undefined);
       setBoardStatsError(undefined);
     }
-    if ((boardMember === undefined || boardMember.id === signedIn.user.id) && boardRange === "today") return undefined;
+    // The live-day shortcut reuses the main screen's reading, which is
+    // unscoped - so it only stands while the overlay is unscoped too.
+    if ((boardMember === undefined || boardMember.id === signedIn.user.id) && boardRange === "today" && boardScope === "all") return undefined;
     let active = true;
     const service = bridge;
     const generation = bridgeGeneration.current;
     const bounds = rangeBounds(boardRange);
-    void service.meStats(bounds?.fromAt, bounds?.toExclusiveAt, boardMember?.id).then(
+    void service.meStats(
+      bounds?.fromAt,
+      bounds?.toExclusiveAt,
+      boardMember?.id,
+      boardScope === "all" ? undefined : boardScope,
+    ).then(
       (result) => {
         if (active && isCurrent(service, generation)) {
           setBoardStats(result);
@@ -437,7 +474,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       },
     );
     return () => { active = false; };
-  }, [bridge, allStatsOpen, boardRange, boardMember?.id, signedIn?.user.id, statsTick]);
+  }, [bridge, allStatsOpen, boardRange, boardScope, boardMember?.id, signedIn?.user.id, statsTick]);
 
   // The board itself follows the overlay's range too: hours beside a name and
   // the breakdown under it must answer for the same days. All time sends no
@@ -448,7 +485,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     const service = bridge;
     const generation = bridgeGeneration.current;
     const bounds = rangeBounds(boardRange);
-    void service.orgOverview(bounds?.fromAt, bounds?.toExclusiveAt).then(
+    void service.orgOverview(
+      bounds?.fromAt,
+      bounds?.toExclusiveAt,
+      boardScope === "all" ? undefined : boardScope,
+    ).then(
       (result) => {
         if (active && isCurrent(service, generation)) {
           setOverview(result);
@@ -462,7 +503,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       },
     );
     return () => { active = false; };
-  }, [bridge, allStatsOpen, boardRange, signedIn?.user.id, statsTick]);
+  }, [bridge, allStatsOpen, boardRange, boardScope, signedIn?.user.id, statsTick]);
 
   // Agent plan quota, read from this machine. Advisory and never on the
   // critical path: a failure leaves the dials unknown rather than saying so.
@@ -674,6 +715,24 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     }
   };
 
+  /// Runs one project-management call, then re-bootstraps so every surface
+  /// sees the new project list.
+  const manageProject = async (action: (service: TimerBridge) => Promise<void>): Promise<void> => {
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    setProjectBusy(true);
+    setSettingsError(undefined);
+    try {
+      await action(service);
+      const snapshot = await service.bootstrap();
+      if (isCurrent(service, generation)) setAccount(snapshot);
+    } catch (error: unknown) {
+      if (isCurrent(service, generation)) setSettingsError(bridgeError(error).message);
+    } finally {
+      if (isCurrent(service, generation)) setProjectBusy(false);
+    }
+  };
+
   const applySettings = async (patch: SettingsPatch): Promise<void> => {
     const service = bridge;
     const generation = bridgeGeneration.current;
@@ -851,6 +910,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   // With nothing pinned, the header still names where time is landing right
   // now rather than leaving the question open.
   const liveProjectName = currentProject?.name;
+  // The dot beside the project name wears that project's color - the same
+  // color its row wears below - so the two never disagree.
+  const headerProjectColor = (pinnedProject === ""
+    ? currentProject?.color
+    : ready.projects.find((item) => item.id === pinnedProject)?.color) ?? null;
   const defaultProject = ready.projects.find((item) => item.id === ready.defaultProjectId);
   // ponytail: one login belongs to one workspace today, so this list holds a
   // single entry and the picker's team row has nothing to switch to. Projects
@@ -973,11 +1037,24 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   // Your own "today" in the overlay is the very day the clock above is
   // counting, live stretch and all: it reuses those rows rather than
   // re-deriving them, because two numbers for one day is the whole confusion.
-  const showingLiveDay = viewingSelf && boardRange === "today";
+  const showingLiveDay = viewingSelf && boardRange === "today" && boardScope === "all";
+  // A scope naming a project this account no longer sees renders as "all"
+  // rather than a select stuck on an invisible value.
+  const scopeValue = boardScope === "all" || boardScope === "unassigned"
+    || ready.projects.some((item) => item.id === boardScope)
+    ? boardScope
+    : "all";
+  const changeBoardScope = (scope: string): void => {
+    setBoardScope(scope);
+    // Written through so the dashboard lands here too; a failed write only
+    // costs the sync, never the view.
+    void bridge.preferencesSet({ scope }).catch(() => undefined);
+  };
   const boardLoading = showingLiveDay ? stats === undefined : boardStats === undefined;
   const boardError = showingLiveDay ? statsError : boardStatsError;
   const boardTotalSeconds = showingLiveDay ? todayTotalSeconds : boardStats?.totalDurationSeconds ?? 0;
   const boardUnattributedSeconds = (showingLiveDay ? stats : boardStats)?.unattributedSeconds ?? 0;
+  const boardMeasurement = showingLiveDay ? stats : boardStats;
   const boardAppRows = buildAppRows(showingLiveDay ? liveApps : boardStats?.apps ?? []);
   const boardProjectRows = showingLiveDay
     ? projectRows.map((row) => ({ id: row.key, name: row.name, durationSeconds: row.durationSeconds }))
@@ -1004,7 +1081,12 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           <p className="filing-where" data-testid="filing-where">
             {overview && <span className="filing-org">{overview.organization.name}</span>}
             <span className="filing-project">
-              <span className={`monitor-dot is-${state}`} aria-hidden="true" />
+              <span
+                className={`monitor-dot is-${state}`}
+                aria-hidden="true"
+                title={MONITOR_LINE[state]}
+                style={headerProjectColor === null ? undefined : { background: headerProjectColor }}
+              />
               {pinnedProjectName ?? liveProjectName ?? "Picked automatically"}
             </span>
             <span className="visually-hidden">{MONITOR_LINE[state]}</span>
@@ -1205,6 +1287,16 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         >
           <div className="panel-head">
             <h2 id="today-title">{overview?.organization.name ?? "All stats"}</h2>
+            {/* The scope shared with the web dashboard: change it here and
+                the dashboard opens on the same project, and vice versa. */}
+            <label className="board-scope">
+              <span className="visually-hidden">Project scope</span>
+              <select value={scopeValue} onChange={(event) => changeBoardScope(event.target.value)}>
+                <option value="all">All projects</option>
+                <option value="unassigned">Unassigned</option>
+                {ready.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              </select>
+            </label>
             <div className="range-toggle" role="group" aria-label="Date range">
               {(["today", "week", "all"] as const).map((range) => (
                 <button
@@ -1243,7 +1335,13 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                           {entry.user.name}
                           {entry.user.id === ready.user.id && <span className="you-tag"> you</span>}
                         </span>
-                        <span className="board-hours">{formatHuman(entry.durationSeconds)}</span>
+                        <span className="board-times">
+                          <span className="board-hours">{formatHuman(entry.activeSeconds)}</span>
+                          <span className="board-agent">
+                            Agent {formatHuman(entry.agentSeconds)}
+                            {leverage(entry) !== null && ` · ${leverage(entry)}×`}
+                          </span>
+                        </span>
                       </button>
                     </li>
                   ))}
@@ -1267,6 +1365,28 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             ) : (
               <>
                 <p className="today-total"><strong>{formatHuman(boardTotalSeconds)}</strong> recorded</p>
+                {boardMeasurement !== undefined && (
+                  <>
+                    {/* Two different cuts, kept apart on purpose: the
+                        concurrency split sums to active time; the by-agent
+                        split sums to agent time, never to hours worked. */}
+                    <p className="member-line" data-testid="measurement-line">
+                      Active {formatHuman(boardMeasurement.activeSeconds)}
+                      {" · Agent "}{formatHuman(boardMeasurement.agentSeconds)}
+                      {leverage(boardMeasurement) !== null && ` · ${leverage(boardMeasurement)}×`}
+                    </p>
+                    <p className="member-line" data-testid="concurrency-line">
+                      {`Unassisted ${formatHuman(boardMeasurement.concurrency.t0Seconds)} · 1 agent ${formatHuman(boardMeasurement.concurrency.t1Seconds)} · 2 agents ${formatHuman(boardMeasurement.concurrency.t2Seconds)} · 3+ ${formatHuman(boardMeasurement.concurrency.t3PlusSeconds)}`}
+                      {boardMeasurement.concurrency.awaySeconds > 0 && ` · agents while away ${formatHuman(boardMeasurement.concurrency.awaySeconds)}`}
+                    </p>
+                    {boardMeasurement.byAgent.length > 0 && (
+                      <p className="member-line is-agents" data-testid="by-agent-line">
+                        {boardMeasurement.byAgent.map((split) =>
+                          `${sourceLabel(split.source)}${split.model === null ? "" : ` (${split.model})`} ${formatHuman(split.durationSeconds)}`).join(" · ")}
+                      </p>
+                    )}
+                  </>
+                )}
                 {boardProjectRows.length > 0 && (
                   <ul className="app-list" data-testid="member-project-list">
                     {boardProjectRows.map((entry) => (
@@ -1398,6 +1518,98 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                     ))}
                   </details>
                 )}
+
+                <details className="settings-group">
+                  <summary>Projects</summary>
+                  {deletingProject === undefined ? (
+                    <ul className="manage-list" data-testid="project-manage-list">
+                      {ready.projects.map((item) => (
+                        <li key={item.id} className="manage-row">
+                          {renamingProjectId === item.id ? (
+                            <form
+                              className="manage-rename"
+                              onSubmit={(event) => {
+                                event.preventDefault();
+                                const trimmed = renameDraft.trim();
+                                if (trimmed === "") return;
+                                void manageProject(async (service) => {
+                                  await service.projectUpdate(item.id, { name: trimmed });
+                                  setRenamingProjectId(undefined);
+                                });
+                              }}
+                            >
+                              <label>
+                                <span className="visually-hidden">New name for {item.name}</span>
+                                <input value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} maxLength={80} required />
+                              </label>
+                              <button type="submit" disabled={projectBusy}>Save</button>
+                              <button type="button" onClick={() => setRenamingProjectId(undefined)}>Cancel</button>
+                            </form>
+                          ) : (
+                            <>
+                              <span className="manage-name">
+                                <span className="project-dot" aria-hidden="true" style={item.color === null ? undefined : { background: item.color }} />
+                                {item.name}
+                              </span>
+                              <span className="manage-actions">
+                                <button type="button" disabled={projectBusy} onClick={() => { setRenamingProjectId(item.id); setRenameDraft(item.name); }}>Rename</button>
+                                <button
+                                  type="button"
+                                  disabled={projectBusy}
+                                  onClick={() => {
+                                    void manageProject(async (service) => {
+                                      const usage = await service.projectUsage(item.id);
+                                      setDeletingProject({ id: item.id, name: item.name, usage });
+                                      setDeleteConfirmName("");
+                                      setDeleteReassignTo("");
+                                    });
+                                  }}
+                                >
+                                  Delete
+                                </button>
+                              </span>
+                            </>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="manage-delete" data-testid="project-delete-confirm">
+                      <p className="subtle">
+                        Deleting <strong>{deletingProject.name}</strong> takes {deletingProject.usage.sessionCount} sessions
+                        ({formatHuman(deletingProject.usage.durationSeconds)}) with it - unless they move first.
+                      </p>
+                      <label className="setting-field">
+                        What happens to its sessions?
+                        <select value={deleteReassignTo} onChange={(event) => setDeleteReassignTo(event.target.value)}>
+                          <option value="">Delete them with the project</option>
+                          {ready.projects.filter((item) => item.id !== deletingProject.id).map((item) => (
+                            <option key={item.id} value={item.id}>Move to {item.name}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="setting-field">
+                        Type the project's name to confirm
+                        <input value={deleteConfirmName} onChange={(event) => setDeleteConfirmName(event.target.value)} placeholder={deletingProject.name} autoComplete="off" />
+                      </label>
+                      <div className="manage-actions">
+                        <button
+                          type="button"
+                          disabled={projectBusy || deleteConfirmName.trim() !== deletingProject.name}
+                          onClick={() => {
+                            void manageProject(async (service) => {
+                              await service.projectDelete(deletingProject.id, deleteReassignTo === "" ? null : deleteReassignTo);
+                              setDeletingProject(undefined);
+                            });
+                          }}
+                        >
+                          Delete {deletingProject.name}
+                        </button>
+                        <button type="button" disabled={projectBusy} onClick={() => setDeletingProject(undefined)}>Cancel</button>
+                      </div>
+                    </div>
+                  )}
+                </details>
 
                 {overview && (
                   <details className="settings-group">

@@ -68,6 +68,20 @@ pub fn classify(status: u16) -> BridgeError {
     }
 }
 
+async fn classify_api_error(response: reqwest::Response) -> BridgeError {
+    let status = response.status().as_u16();
+    let server_message = response
+        .json::<ApiErrorBody>()
+        .await
+        .ok()
+        .map(|body| body.error.message)
+        .filter(|message| !message.is_empty());
+    match server_message {
+        Some(message) => BridgeError::new(classify(status).kind, message),
+        None => classify(status),
+    }
+}
+
 /// Sign-up failures are worth naming precisely: "already registered" and "too
 /// short" are both things the user can act on, unlike a generic rejection. The
 /// code is matched from a known set rather than echoing the server's own text.
@@ -144,6 +158,8 @@ pub struct LeaderboardEntry {
     pub user: LeaderboardMember,
     pub duration_seconds: u64,
     pub session_count: u32,
+    pub active_seconds: u64,
+    pub agent_seconds: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +199,16 @@ struct ProjectListItem {
 struct AuthErrorBody {
     #[serde(default)]
     code: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ApiErrorBody {
+    error: ApiErrorBodyError,
+}
+
+#[derive(Deserialize)]
+struct ApiErrorBodyError {
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -247,12 +273,62 @@ struct PathMappingListResponse {
     mappings: Vec<PathMapping>,
 }
 
+/// Active time split by how many agents ran at once, plus agent runtime that
+/// fell outside the member's presence entirely.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeStatsConcurrency {
+    pub t0_seconds: u64,
+    pub t1_seconds: u64,
+    pub t2_seconds: u64,
+    pub t3_plus_seconds: u64,
+    pub away_seconds: u64,
+}
+
+/// One agent runtime's share of agent time; sums to agent time, never to active time.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeStatsAgentSplit {
+    pub source: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    pub duration_seconds: u64,
+}
+
+/// The dashboard view state both surfaces share. Only `scope` is synchronised:
+/// the two surfaces offer different ranges on purpose (this app's "this week"
+/// is a calendar week, the dashboard's "7d" is a rolling one), so each keeps
+/// its own while the project scope follows you between them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewPreferences {
+    pub scope: String,
+    pub range: String,
+}
+
+/// What deleting a project takes with it, as `/projects/:id/usage` reports it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectUsage {
+    pub session_count: u64,
+    pub duration_seconds: u64,
+    pub agent_session_count: u64,
+}
+
 /// The `GET /me/stats` response: the reporting service's attribution totals
 /// scoped to the caller.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeStats {
     pub filters: MeStatsFilters,
+    /// Union of the member's working intervals - never exceeds wall clock.
+    /// These four ride through to the webview, whose decoder requires them:
+    /// a field missing here is a hard `invalidResponse()` over there.
+    pub active_seconds: u64,
+    /// Summed agent runtime; exceeding `active_seconds` is leverage, not an error.
+    pub agent_seconds: u64,
+    pub concurrency: MeStatsConcurrency,
+    pub by_agent: Vec<MeStatsAgentSplit>,
     pub total_duration_seconds: u64,
     pub attributed_seconds: u64,
     pub unattributed_seconds: u64,
@@ -499,15 +575,21 @@ impl ApiClient {
         access_token: &str,
         from_at: Option<&str>,
         to_exclusive_at: Option<&str>,
+        scope: Option<&str>,
     ) -> ApiResult<Vec<LeaderboardEntry>> {
-        // ISO-8601 UTC instants contain no characters that need escaping in a
-        // query string, so the bounds are interpolated as-is.
-        let query = match (from_at, to_exclusive_at) {
+        // ISO-8601 UTC instants and scope values (uuid / "all" / "unassigned")
+        // contain no characters that need escaping in a query string, so they
+        // are interpolated as-is.
+        let mut query = match (from_at, to_exclusive_at) {
             (Some(from_at), Some(to_exclusive_at)) => {
                 format!("?fromAt={from_at}&toExclusiveAt={to_exclusive_at}")
             }
             _ => String::new(),
         };
+        if let Some(scope) = scope.filter(|scope| *scope != "all") {
+            query.push(if query.is_empty() { '?' } else { '&' });
+            query.push_str(&format!("scope={scope}"));
+        }
         let body: LeaderboardResponse = self
             .get_json(access_token, &format!("/reports/leaderboard{query}"))
             .await?;
@@ -551,7 +633,7 @@ impl ApiClient {
             .map_err(|error| classify_transport(&error))?;
 
         if !response.status().is_success() {
-            return Err(classify(response.status().as_u16()));
+            return Err(classify_api_error(response).await);
         }
         let body: ProjectListItem = response
             .json()
@@ -563,6 +645,109 @@ impl ApiClient {
             color: body.color,
             created_at: body.created_at,
         })
+    }
+
+    /// Renames or archives a project via `PATCH /projects/:id`.
+    pub async fn update_project(
+        &self,
+        access_token: &str,
+        id: &str,
+        name: Option<&str>,
+        is_archived: Option<bool>,
+    ) -> ApiResult<TimerProject> {
+        let mut body = serde_json::Map::new();
+        if let Some(name) = name {
+            body.insert("name".into(), serde_json::json!(name));
+        }
+        if let Some(is_archived) = is_archived {
+            body.insert("isArchived".into(), serde_json::json!(is_archived));
+        }
+        let response = self
+            .http
+            .patch(format!("{}/projects/{id}", self.api_base_url))
+            .bearer_auth(access_token)
+            .json(&serde_json::Value::Object(body))
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+        if !response.status().is_success() {
+            return Err(classify_api_error(response).await);
+        }
+        let body: ProjectListItem = response
+            .json()
+            .await
+            .map_err(|_| BridgeError::unknown("The project response could not be read."))?;
+        Ok(TimerProject {
+            id: body.id,
+            name: body.name,
+            color: body.color,
+            created_at: body.created_at,
+        })
+    }
+
+    /// The shared dashboard view state.
+    pub async fn view_preferences(&self, access_token: &str) -> ApiResult<ViewPreferences> {
+        self.get_json(access_token, "/me/preferences").await
+    }
+
+    /// Writes the shared view state. Absent fields are left as they were, so
+    /// this app can move the scope without claiming anything about the range
+    /// the dashboard is showing.
+    pub async fn set_view_preferences(
+        &self,
+        access_token: &str,
+        scope: Option<&str>,
+        range: Option<&str>,
+    ) -> ApiResult<ViewPreferences> {
+        let mut body = serde_json::Map::new();
+        if let Some(scope) = scope {
+            body.insert("scope".into(), serde_json::json!(scope));
+        }
+        if let Some(range) = range {
+            body.insert("range".into(), serde_json::json!(range));
+        }
+        let response = self
+            .http
+            .put(format!("{}/me/preferences", self.api_base_url))
+            .bearer_auth(access_token)
+            .json(&serde_json::Value::Object(body))
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+        if !response.status().is_success() {
+            return Err(classify_api_error(response).await);
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| BridgeError::unknown("The preferences response could not be read."))
+    }
+
+    /// What deleting the project would take with it, for the confirm dialog.
+    pub async fn project_usage(&self, access_token: &str, id: &str) -> ApiResult<ProjectUsage> {
+        self.get_json(access_token, &format!("/projects/{id}/usage"))
+            .await
+    }
+
+    /// Deletes a project; `reassign_to` moves its data to another project first.
+    pub async fn delete_project(
+        &self,
+        access_token: &str,
+        id: &str,
+        reassign_to: Option<&str>,
+    ) -> ApiResult<()> {
+        let response = self
+            .http
+            .delete(format!("{}/projects/{id}", self.api_base_url))
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({ "reassignTo": reassign_to }))
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        Err(classify_api_error(response).await)
     }
 
     /// Uploads one batch of finished sessions (at most 500 rows; the caller
@@ -656,6 +841,7 @@ impl ApiClient {
         from_at: Option<&str>,
         to_exclusive_at: Option<&str>,
         user_id: Option<&str>,
+        scope: Option<&str>,
     ) -> ApiResult<MeStats> {
         let mut query: Vec<(&str, &str)> = Vec::new();
         if let (Some(from_at), Some(to_exclusive_at)) = (from_at, to_exclusive_at) {
@@ -664,6 +850,9 @@ impl ApiClient {
         }
         if let Some(user_id) = user_id {
             query.push(("userId", user_id));
+        }
+        if let Some(scope) = scope.filter(|scope| *scope != "all") {
+            query.push(("scope", scope));
         }
         let response = self
             .http
@@ -702,7 +891,7 @@ impl ApiClient {
             .map_err(|error| classify_transport(&error))?;
 
         if !response.status().is_success() {
-            return Err(classify(response.status().as_u16()));
+            return Err(classify_api_error(response).await);
         }
         response
             .json()
@@ -881,10 +1070,37 @@ mod tests {
                 "apps": [
                     {"processName": "Code.exe", "durationSeconds": 4800},
                     {"processName": "chrome.exe", "durationSeconds": 1200}
+                ],
+                "activeSeconds": 7000,
+                "agentSeconds": 10800,
+                "concurrency": {
+                    "t0Seconds": 3400,
+                    "t1Seconds": 0,
+                    "t2Seconds": 3600,
+                    "t3PlusSeconds": 0,
+                    "awaySeconds": 3600
+                },
+                "byAgent": [
+                    {"source": "claude_code", "model": null, "durationSeconds": 7200},
+                    {"source": "codex", "model": "gpt-5", "durationSeconds": 3600}
                 ]
             }"#,
         )
         .expect("stats parse");
+
+        // The measurement block must survive the round trip: the webview's
+        // decoder rejects the whole reading if any of it is missing.
+        assert_eq!(stats.active_seconds, 7_000);
+        assert_eq!(stats.agent_seconds, 10_800);
+        assert_eq!(stats.concurrency.t2_seconds, 3_600);
+        assert_eq!(stats.concurrency.away_seconds, 3_600);
+        assert_eq!(stats.by_agent[1].source, "codex");
+        assert_eq!(stats.by_agent[1].model.as_deref(), Some("gpt-5"));
+        // Re-serialized to the webview in the camelCase the decoder reads.
+        let echoed = serde_json::to_value(&stats).expect("stats serialize");
+        assert_eq!(echoed["activeSeconds"], 7_000);
+        assert_eq!(echoed["concurrency"]["t3PlusSeconds"], 0);
+        assert_eq!(echoed["byAgent"][0]["durationSeconds"], 7_200);
 
         assert_eq!(stats.filters.from.as_deref(), Some("2026-08-01"));
         assert_eq!(stats.filters.to, None);

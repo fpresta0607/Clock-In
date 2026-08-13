@@ -1,4 +1,11 @@
 export {
+  agentSplitSchema,
+  concurrencySchema,
+  projectDeleteRequestSchema,
+  projectScopeSchema,
+  projectUsageResponseSchema,
+  viewPreferencesSchema,
+  viewPreferencesUpdateSchema,
   activitySegmentBatchRequestSchema,
   activitySegmentBatchResponseSchema,
   activitySegmentKindSchema,
@@ -55,6 +62,13 @@ export {
   userSchema,
 } from "./contracts.js";
 export type {
+  AgentSplit,
+  Concurrency,
+  ProjectDeleteRequest,
+  ProjectScope,
+  ProjectUsageResponse,
+  ViewPreferences,
+  ViewPreferencesUpdate,
   ActivitySegmentBatchRequest,
   ActivitySegmentBatchResponse,
   ActivitySegmentKind,
@@ -118,4 +132,14 @@ export {
   normalizeInviteCode,
 } from "./invite-code.js";
 export { friendlyAppName } from "./app-names.js";
+export {
+  clipInterval,
+  intersectIntervals,
+  leverage,
+  measureTime,
+  mergeIntervals,
+  summedSeconds,
+  unionSeconds,
+} from "./intervals.js";
+export type { ConcurrencyBreakdown, Interval, TimeMeasurement } from "./intervals.js";
 export { formatDuration, formatHumanDuration } from "./time.js";

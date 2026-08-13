@@ -128,6 +128,34 @@ export const projectMemberships = pgTable(
   ],
 );
 
+// The one dashboard view state both surfaces share: the project scope and
+// range last picked, one row per member, last write wins. Scope is text, not a
+// project FK: 'all' and 'unassigned' are values too, and a deleted project's
+// stale scope harmlessly falls back to 'all' at read time.
+export const userViewPreferences = pgTable(
+  "user_view_preferences",
+  {
+    organizationId: uuid("organization_id").notNull(),
+    userId: uuid("user_id").notNull(),
+    scope: text("scope").default("all").notNull(),
+    range: text("range").default("30d").notNull(),
+    ...auditColumns,
+  },
+  (table) => [
+    unique("user_view_preferences_organization_user_unique").on(table.organizationId, table.userId),
+    foreignKey({
+      columns: [table.organizationId, table.userId],
+      foreignColumns: [users.organizationId, users.id],
+      name: "user_view_preferences_organization_user_fk",
+    }).onDelete("cascade"),
+    check("user_view_preferences_scope_valid", sql`char_length(${table.scope}) between 1 and 40`),
+    check(
+      "user_view_preferences_range_valid",
+      sql`${table.range} in ('today', '7d', '30d', '90d', 'all')`,
+    ),
+  ],
+);
+
 export const userProjectSelections = pgTable(
   "user_project_selections",
   {

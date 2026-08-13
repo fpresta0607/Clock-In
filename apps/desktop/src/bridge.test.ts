@@ -152,6 +152,10 @@ describe("defaultBridge", () => {
         sessionCount: 3,
       }],
       apps: [{ processName: "Code.exe", durationSeconds: 4_800 }],
+      activeSeconds: 7_000,
+      agentSeconds: 3_600,
+      concurrency: { t0Seconds: 3_400, t1Seconds: 3_600, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
+      byAgent: [{ source: "claude_code", model: null, durationSeconds: 3_600 }],
     };
     invoke.mockResolvedValueOnce(stats);
 
@@ -172,6 +176,10 @@ describe("defaultBridge", () => {
       totalDurationSeconds: 0,
       attributedSeconds: 0,
       unattributedSeconds: 0,
+      activeSeconds: 0,
+      agentSeconds: 0,
+      concurrency: { t0Seconds: 0, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
+      byAgent: [],
       projects: [],
       apps: [],
     };

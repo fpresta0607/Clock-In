@@ -71,11 +71,19 @@ const recording = {
   },
 };
 
+const noMeasurement = {
+  activeSeconds: 0,
+  agentSeconds: 0,
+  concurrency: { t0Seconds: 0, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
+  byAgent: [] as never[],
+};
+
 const meStats = {
   filters: {},
   totalDurationSeconds: 7_200,
   attributedSeconds: 5_400,
   unattributedSeconds: 1_800,
+  ...noMeasurement,
   projects: [{
     project: { id: project.id, name: project.name },
     durationSeconds: 7_200,
@@ -101,16 +109,18 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   login: vi.fn().mockResolvedValue(account),
   signup: vi.fn().mockResolvedValue(account),
   logout: vi.fn().mockResolvedValue(undefined),
+  preferencesGet: vi.fn().mockResolvedValue({ scope: "all", range: "30d" }),
+  preferencesSet: vi.fn().mockResolvedValue({ scope: "all", range: "30d" }),
   orgOverview: vi.fn().mockResolvedValue({
     organization: { id: "00000000-0000-4000-8000-000000000900", name: "SIQstack", inviteCode: "ACDEF-GHJKM" },
     entries: [
-      { rank: 1, user: { id: "b1c7e513-b094-4d4c-ae55-21790ae019a4", name: "Sam" }, durationSeconds: 7_200, sessionCount: 3 },
-      { rank: 2, user: { id: user.id, name: user.name }, durationSeconds: 3_600, sessionCount: 1 },
+      { rank: 1, user: { id: "b1c7e513-b094-4d4c-ae55-21790ae019a4", name: "Sam" }, durationSeconds: 7_200, sessionCount: 3, activeSeconds: 7_000, agentSeconds: 3_600 },
+      { rank: 2, user: { id: user.id, name: user.name }, durationSeconds: 3_600, sessionCount: 1, activeSeconds: 3_600, agentSeconds: 1_800 },
     ],
   }),
   orgJoin: vi.fn().mockResolvedValue({
     organization: { id: "00000000-0000-4000-8000-000000000901", name: "Joined Team", inviteCode: "PQRTU-VWXY3" },
-    entries: [{ rank: 1, user: { id: user.id, name: user.name }, durationSeconds: 0, sessionCount: 0 }],
+    entries: [{ rank: 1, user: { id: user.id, name: user.name }, durationSeconds: 0, sessionCount: 0, activeSeconds: 0, agentSeconds: 0 }],
   }),
   // The default is "the host cannot report": every recording surface stays
   // quiet rather than claiming something it cannot see.
@@ -122,6 +132,9 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   settingsUpdate: vi.fn().mockResolvedValue(settings),
   meStats: vi.fn().mockResolvedValue(meStats),
   projectCreate: vi.fn().mockResolvedValue(newProject),
+  projectUpdate: vi.fn().mockResolvedValue(project),
+  projectUsage: vi.fn().mockResolvedValue({ sessionCount: 0, durationSeconds: 0, agentSessionCount: 0 }),
+  projectDelete: vi.fn().mockResolvedValue(undefined),
   appIcons: vi.fn().mockResolvedValue({}),
   quotaStatus: vi.fn().mockResolvedValue({ status: "ready", checkedAt: null, detail: null, providers: [] }),
   onUpdateAvailable: vi.fn().mockResolvedValue(() => undefined),
@@ -393,9 +406,9 @@ describe("today", () => {
     const panel = await openAllStats(person);
     // The card renders before the stats land, so wait for the figure itself.
     // The project row underneath repeats the number, so pin the headline.
-    expect(await within(panel).findByText("2 hr", { selector: "strong" })).toBeInTheDocument();
+    expect(await within(panel).findByText("2h 00m", { selector: "strong" })).toBeInTheDocument();
     expect(within(panel).getByTestId("unattributed-foot")).toHaveTextContent(
-      "30 min of that landed in the default project, because nothing said which project it was for.",
+      "30m of that landed in the default project, because nothing said which project it was for.",
     );
   });
 
@@ -603,18 +616,18 @@ describe("the today panel", () => {
     // Time consolidates under the projects the monitor filed it into.
     const projects = within(await screen.findByTestId("project-list")).getAllByRole("listitem");
     expect(projects[0]).toHaveTextContent("Field work");
-    expect(projects[0]).toHaveTextContent("1 hr 30 min");
+    expect(projects[0]).toHaveTextContent("1h 30m");
     expect(projects[1]).toHaveTextContent("Client work");
-    expect(projects[1]).toHaveTextContent("15 min");
+    expect(projects[1]).toHaveTextContent("15m");
 
     const rows = within(screen.getByTestId("session-app-list")).getAllByRole("listitem");
     // Heaviest first, agent CLIs named by their runtime rather than their exe.
     expect(rows[0]).toHaveTextContent("Claude Code");
-    expect(rows[0]).toHaveTextContent("1 hr");
+    expect(rows[0]).toHaveTextContent("1h 00m");
     expect(rows[1]).toHaveTextContent("Google Chrome");
-    expect(rows[1]).toHaveTextContent("30 min");
+    expect(rows[1]).toHaveTextContent("30m");
     expect(rows[2]).toHaveTextContent("VS Code");
-    expect(rows[2]).toHaveTextContent("15 min");
+    expect(rows[2]).toHaveTextContent("15m");
   });
 
   it("keeps agent runtimes on their own rows instead of folding them together", async () => {
@@ -653,7 +666,7 @@ describe("the today panel", () => {
 
     const projects = within(await screen.findByTestId("project-list")).getAllByRole("listitem");
     expect(projects[0]).toHaveTextContent("Field work");
-    expect(projects[0]).toHaveTextContent(/sec/);
+    expect(projects[0]).toHaveTextContent(/\d+s/);
   });
 
   it("counts the still-open span so the app in front is neither frozen nor missing", async () => {
@@ -674,7 +687,7 @@ describe("the today panel", () => {
     // The open app appears at all - the server has never heard of it - and
     // outranks the app the server does know about.
     expect(rows[0]).toHaveTextContent("Windows Terminal");
-    expect(rows[0]).toHaveTextContent("2 min");
+    expect(rows[0]).toHaveTextContent("2m");
     expect(rows[1]).toHaveTextContent("VS Code");
   });
 
@@ -793,6 +806,31 @@ describe("the today panel", () => {
   });
 });
 
+describe("the shared scope", () => {
+  it("lands where the dashboard was, and writes a change back for it", async () => {
+    const bridge = bridgeFor({
+      preferencesGet: vi.fn().mockResolvedValue({ scope: otherProject.id, range: "30d" }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const panel = await openAllStats(person);
+    // Seeded from the shared row: the select lands on the dashboard's project.
+    const scope = await within(panel).findByLabelText("Project scope");
+    await waitFor(() => expect(scope).toHaveValue(otherProject.id));
+    // A scoped view fetches scoped stats rather than reusing the live day.
+    await waitFor(() => expect(bridge.meStats).toHaveBeenLastCalledWith(
+      expect.any(String),
+      expect.any(String),
+      undefined,
+      otherProject.id,
+    ));
+
+    await person.selectOptions(scope, "unassigned");
+    await waitFor(() => expect(bridge.preferencesSet).toHaveBeenCalledWith({ scope: "unassigned" }));
+  });
+});
+
 describe("the team board", () => {
   it("ranks the workspace and marks the signed-in member", async () => {
     const person = userEvent.setup();
@@ -829,6 +867,7 @@ describe("the team board", () => {
       expect.any(String),
       expect.any(String),
       "b1c7e513-b094-4d4c-ae55-21790ae019a4",
+      undefined,
     ));
     expect(await within(stats).findByText("Blender")).toBeInTheDocument();
   });
@@ -873,9 +912,11 @@ describe("the team board", () => {
 
   it("joins another workspace by invite code from settings", async () => {
     const bridge = bridgeFor({
-      orgOverview: vi.fn().mockResolvedValue({
+      preferencesGet: vi.fn().mockResolvedValue({ scope: "all", range: "30d" }),
+  preferencesSet: vi.fn().mockResolvedValue({ scope: "all", range: "30d" }),
+  orgOverview: vi.fn().mockResolvedValue({
         organization: { id: "00000000-0000-4000-8000-000000000900", name: "SIQstack", inviteCode: "ACDEF-GHJKM" },
-        entries: [{ rank: 1, user: { id: user.id, name: user.name }, durationSeconds: 0, sessionCount: 0 }],
+        entries: [{ rank: 1, user: { id: user.id, name: user.name }, durationSeconds: 0, sessionCount: 0, activeSeconds: 0, agentSeconds: 0 }],
       }),
     });
     const person = userEvent.setup();

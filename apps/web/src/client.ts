@@ -1,4 +1,17 @@
-import type { LeaderboardResponse, MeResponse, MeStatsResponse, OrganizationResponse, ReportResponse } from "@clock-in/shared";
+import type {
+  LeaderboardResponse,
+  MeResponse,
+  MeStatsResponse,
+  OrganizationResponse,
+  ProjectDeleteRequest,
+  ProjectListItem,
+  ProjectListResponse,
+  ProjectUpdateRequest,
+  ProjectUsageResponse,
+  ReportResponse,
+  ViewPreferences,
+  ViewPreferencesUpdate,
+} from "@clock-in/shared";
 
 /**
  * Talks to Neon Auth and the Clock-In API from the browser.
@@ -35,13 +48,22 @@ export interface SignUpInput extends Credentials {
   workspaceName?: string;
 }
 
-function classify(status: number): ClientError {
-  if (status === 401 || status === 403) return new ClientError("auth", "Your session expired. Sign in again.");
-  if (status === 404) return new ClientError("validation", "That invite code does not match a workspace.");
+/**
+ * Maps a status onto a message. The server states its own reason for the
+ * cases that carry one - a duplicate project name, a project that refuses to
+ * be deleted - so those are read from the body rather than guessed at from a
+ * status the invite flow also uses.
+ */
+function classify(status: number, serverMessage?: string): ClientError {
+  if (status === 401) return new ClientError("auth", "Your session expired. Sign in again.");
+  if (status === 403) return new ClientError("auth", serverMessage ?? "You do not have permission to do that.");
+  if (status === 404) {
+    return new ClientError("validation", serverMessage ?? "That invite code does not match a workspace.");
+  }
   if (status === 409) {
     return new ClientError(
       "validation",
-      "This account already recorded time here, so it cannot move. Ask an admin, or use a fresh account.",
+      serverMessage ?? "This account already recorded time here, so it cannot move. Ask an admin, or use a fresh account.",
     );
   }
   // Nobody composes these requests by hand, so a refused one is never something
@@ -55,6 +77,25 @@ function classify(status: number): ClientError {
   }
   if (status >= 500) return new ClientError("transient", "The server is unavailable. Try again shortly.");
   return new ClientError("unknown", "That request did not complete.");
+}
+
+/**
+ * The API's own sentence for this failure, when it sent one. Project CRUD
+ * refuses for reasons only the server knows ("A project with that name
+ * already exists"), and reprinting the invite flow's copy over those would
+ * tell the reader something untrue.
+ */
+async function apiErrorMessage(response: Response): Promise<string | undefined> {
+  try {
+    const body: unknown = await response.clone().json();
+    if (typeof body === "object" && body !== null && "error" in body) {
+      const { error } = body as { error?: { message?: unknown } };
+      return typeof error?.message === "string" ? error.message : undefined;
+    }
+  } catch {
+    // A body that will not parse tells us nothing; the status stands alone.
+  }
+  return undefined;
 }
 
 async function authErrorCode(response: Response): Promise<string | undefined> {
@@ -121,7 +162,7 @@ export function createClient(config: ClientConfig) {
         throw new ClientError("transient", "Cannot reach the server.");
       }
     }
-    if (!response.ok) throw classify(response.status);
+    if (!response.ok) throw classify(response.status, await apiErrorMessage(response));
     return response;
   };
 
@@ -217,6 +258,44 @@ export function createClient(config: ClientConfig) {
     me: () => json<MeResponse>("/me"),
     /** One member's breakdown; `userId` in the query names a teammate. */
     meStats: (query = "") => json<MeStatsResponse>(`/me/stats${query}`),
+
+    /** The scope+range view state shared with the desktop app. */
+    preferences: () => json<ViewPreferences>("/me/preferences"),
+    async updatePreferences(patch: ViewPreferencesUpdate): Promise<ViewPreferences> {
+      const response = await apiRequest("/me/preferences", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      return response.json() as Promise<ViewPreferences>;
+    },
+
+    projects: (includeArchived = false) =>
+      json<ProjectListResponse>(`/projects${includeArchived ? "?includeArchived=true" : ""}`),
+    async createProject(name: string): Promise<ProjectListItem> {
+      const response = await apiRequest("/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      return response.json() as Promise<ProjectListItem>;
+    },
+    async updateProject(id: string, patch: ProjectUpdateRequest): Promise<ProjectListItem> {
+      const response = await apiRequest(`/projects/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      return response.json() as Promise<ProjectListItem>;
+    },
+    projectUsage: (id: string) => json<ProjectUsageResponse>(`/projects/${id}/usage`),
+    async deleteProject(id: string, body: ProjectDeleteRequest): Promise<void> {
+      await apiRequest(`/projects/${id}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    },
   };
 }
 

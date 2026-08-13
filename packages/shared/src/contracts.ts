@@ -84,15 +84,61 @@ function validateCalendarAndInstantBounds(
   }
 }
 
+/**
+ * Which agent runtime produced a session. Deliberately *not* an enum: the
+ * roster in `agent-runtimes.json` decides what Clock-In can say about a
+ * runtime, never whether it may be recorded. A runtime nobody has declared yet
+ * is stored under its own id rather than collapsed into `other` or rejected,
+ * so support for a new CLI is a roster entry, not a schema migration.
+ *
+ * The shape is the contract: lowercase snake_case, which is what every
+ * declared id already is.
+ */
+export const agentSourcePattern = /^[a-z][a-z0-9_]*$/;
+export const agentSourceSchema = z.string().max(40).regex(agentSourcePattern);
+
+/**
+ * The dashboard's project scope: everything, one project, or the unassigned
+ * bucket — sessions whose project nothing named (`attribution = 'default'`).
+ */
+export const projectScopeSchema = z.union([z.literal("all"), z.literal("unassigned"), idSchema]);
+
 export const leaderboardFiltersSchema = z
   .object({
     from: dateSchema.optional(),
     to: dateSchema.optional(),
     fromAt: timestampSchema.optional(),
     toExclusiveAt: timestampSchema.optional(),
+    /** Absent means all projects. */
+    scope: projectScopeSchema.optional(),
   })
   .strict()
   .superRefine(validateCalendarAndInstantBounds);
+
+/**
+ * Active time split by how many agents ran at once, plus the agent runtime
+ * that fell outside the person's presence entirely. The buckets sum to
+ * `activeSeconds`; `t1 + 2·t2 + 3·t3plus + away` reconstructs `agentSeconds`
+ * up to slice truncation at t3plus.
+ */
+export const concurrencySchema = z
+  .object({
+    t0Seconds: z.number().int().nonnegative().safe(),
+    t1Seconds: z.number().int().nonnegative().safe(),
+    t2Seconds: z.number().int().nonnegative().safe(),
+    t3PlusSeconds: z.number().int().nonnegative().safe(),
+    awaySeconds: z.number().int().nonnegative().safe(),
+  })
+  .strict();
+
+/** One agent runtime's share of a person's agent time; sums to agentSeconds, never to activeSeconds. */
+export const agentSplitSchema = z
+  .object({
+    source: agentSourceSchema,
+    model: z.string().min(1).max(200).nullable(),
+    durationSeconds: z.number().int().nonnegative().safe(),
+  })
+  .strict();
 
 export const leaderboardEntrySchema = z
   .object({
@@ -102,6 +148,12 @@ export const leaderboardEntrySchema = z
     sessionCount: z.number().int().nonnegative().safe(),
     attributedSeconds: z.number().int().nonnegative().safe(),
     unattributedSeconds: z.number().int().nonnegative().safe(),
+    /** Union of working intervals — the human-hours number the board ranks by. */
+    activeSeconds: z.number().int().nonnegative().safe(),
+    /** Summed agent runtime. May exceed activeSeconds; that is leverage, not a bug. */
+    agentSeconds: z.number().int().nonnegative().safe(),
+    concurrency: concurrencySchema,
+    byAgent: z.array(agentSplitSchema),
   })
   .strict();
 
@@ -109,9 +161,26 @@ export const leaderboardResponseSchema = z
   .object({
     filters: leaderboardFiltersSchema,
     totalDurationSeconds: z.number().int().nonnegative().safe(),
+    /** Median completed-session length in this scope and range; null with no sessions. */
+    medianSessionSeconds: z.number().int().nonnegative().safe().nullable(),
     entries: z.array(leaderboardEntrySchema),
   })
   .strict();
+
+/**
+ * The one dashboard view state both surfaces share: the project scope and the
+ * time range last picked, stored server-side so opening one app lands where
+ * the other was. Last write wins.
+ */
+export const viewPreferencesSchema = z
+  .object({
+    scope: projectScopeSchema,
+    range: z.enum(["today", "7d", "30d", "90d", "all"]),
+  })
+  .strict();
+
+export const viewPreferencesUpdateSchema = viewPreferencesSchema.partial()
+  .refine((value) => value.scope !== undefined || value.range !== undefined);
 
 export const projectListItemSchema = z
   .object({
@@ -144,6 +213,26 @@ export const projectUpdateRequestSchema = z
   })
   .strict()
   .refine((value) => value.name !== undefined || value.isArchived !== undefined || value.replacementProjectId !== undefined);
+
+/** What deleting a project would take with it; shown in the confirm dialog. */
+export const projectUsageResponseSchema = z
+  .object({
+    sessionCount: z.number().int().nonnegative().safe(),
+    durationSeconds: z.number().int().nonnegative().safe(),
+    agentSessionCount: z.number().int().nonnegative().safe(),
+  })
+  .strict();
+
+/**
+ * Destroys a project. `reassignTo` moves its sessions to another project
+ * first; null deletes them with the project. The default project and the
+ * caller's last project refuse to die.
+ */
+export const projectDeleteRequestSchema = z
+  .object({
+    reassignTo: idSchema.nullable(),
+  })
+  .strict();
 
 const sessionBaseSchema = z
   .object({
@@ -240,6 +329,8 @@ export const reportFiltersSchema = z
     toExclusiveAt: timestampSchema.optional(),
     projectId: idSchema.optional(),
     userId: idSchema.optional(),
+    /** The dashboard scope; `projectId` remains for callers that already name one. */
+    scope: projectScopeSchema.optional(),
     page: z.coerce.number().int().min(1).max(10_000).default(1),
     pageSize: z.coerce.number().int().min(1).max(200).default(50),
   })
@@ -306,19 +397,6 @@ export const activitySegmentBatchResponseSchema = z
     rejected: z.array(z.object({ clientId: idSchema, reason: z.string().min(1) }).strict()),
   })
   .strict();
-
-/**
- * Which agent runtime produced a session. Deliberately *not* an enum: the
- * roster in `agent-runtimes.json` decides what Clock-In can say about a
- * runtime, never whether it may be recorded. A runtime nobody has declared yet
- * is stored under its own id rather than collapsed into `other` or rejected,
- * so support for a new CLI is a roster entry, not a schema migration.
- *
- * The shape is the contract: lowercase snake_case, which is what every
- * declared id already is.
- */
-export const agentSourcePattern = /^[a-z][a-z0-9_]*$/;
-export const agentSourceSchema = z.string().max(40).regex(agentSourcePattern);
 
 export const agentEventKindValues = ["started", "ended", "heartbeat"] as const;
 export const agentEventKindSchema = z.enum(agentEventKindValues);
@@ -458,6 +536,8 @@ export const meStatsFiltersSchema = z
      * workspace is a stable not_found, the same answer the org report gives.
      */
     userId: idSchema.optional(),
+    /** The dashboard's project scope; absent means all projects. */
+    scope: projectScopeSchema.optional(),
   })
   .strict()
   .superRefine(validateCalendarAndInstantBounds);
@@ -499,6 +579,12 @@ export const meStatsResponseSchema = z
     totalDurationSeconds: z.number().int().nonnegative().safe(),
     attributedSeconds: z.number().int().nonnegative().safe(),
     unattributedSeconds: z.number().int().nonnegative().safe(),
+    /** Union of this member's working intervals — never exceeds wall clock. */
+    activeSeconds: z.number().int().nonnegative().safe(),
+    /** Summed agent runtime; exceeding activeSeconds is leverage, not an error. */
+    agentSeconds: z.number().int().nonnegative().safe(),
+    concurrency: concurrencySchema,
+    byAgent: z.array(agentSplitSchema),
     projects: z.array(meStatsProjectSchema),
     /** Per-foreground-process totals, heaviest first; the producer sorts, the schema only validates. */
     apps: z.array(meStatsAppSchema),
@@ -547,7 +633,14 @@ export type ApiError = z.infer<typeof apiErrorSchema>;
 export type ApiErrorCode = z.infer<typeof apiErrorCodeSchema>;
 export type CurrentSessionResponse = z.infer<typeof currentSessionResponseSchema>;
 export type JoinOrganizationRequest = z.infer<typeof joinOrganizationRequestSchema>;
+export type AgentSplit = z.infer<typeof agentSplitSchema>;
+export type Concurrency = z.infer<typeof concurrencySchema>;
 export type LeaderboardEntry = z.infer<typeof leaderboardEntrySchema>;
+export type ProjectDeleteRequest = z.infer<typeof projectDeleteRequestSchema>;
+export type ProjectScope = z.infer<typeof projectScopeSchema>;
+export type ProjectUsageResponse = z.infer<typeof projectUsageResponseSchema>;
+export type ViewPreferences = z.infer<typeof viewPreferencesSchema>;
+export type ViewPreferencesUpdate = z.infer<typeof viewPreferencesUpdateSchema>;
 export type LeaderboardFilters = z.infer<typeof leaderboardFiltersSchema>;
 export type LeaderboardResponse = z.infer<typeof leaderboardResponseSchema>;
 export type MeResponse = z.infer<typeof meResponseSchema>;

@@ -40,8 +40,16 @@ const unreadable: AgentQuota = {
 
 /// The same locale formatting the dial uses, so the assertion does not pin the
 /// runner's time zone.
-const resetText = (resetsAt: string): string =>
-  new Date(resetsAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+const resetText = (resetsAt: string): string => {
+  const resets = new Date(resetsAt);
+  const now = new Date();
+  const isToday = resets.getFullYear() === now.getFullYear()
+    && resets.getMonth() === now.getMonth()
+    && resets.getDate() === now.getDate();
+  return isToday
+    ? resets.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : resets.toLocaleDateString([], { month: "short", day: "numeric" });
+};
 
 /// The dial's own control, found by the reading it speaks rather than by class.
 const dialFor = (name: RegExp): HTMLElement => screen.getByRole("button", { name });
@@ -52,10 +60,10 @@ describe("QuotaDial", () => {
 
     // The number is on the face, not only in the arc: colour is never the only
     // channel this reading travels on.
-    const trigger = dialFor(/Claude Code quota: 72% remaining on the Max plan, left until /);
+    const trigger = dialFor(/Claude Code quota: 72% remaining on the Max plan, til /);
     expect(trigger).toHaveTextContent("72%");
     expect(trigger).toHaveTextContent("Max");
-    expect(trigger).toHaveTextContent(`left until ${resetText("2026-08-13T21:00:00.000Z")}`);
+    expect(trigger).toHaveTextContent(`til ${resetText("2026-08-13T21:00:00.000Z")}`);
   });
 
   it("names the window when the provider gave no reset time to count down to", () => {
@@ -67,7 +75,7 @@ describe("QuotaDial", () => {
     );
 
     expect(screen.getByText("week")).toBeInTheDocument();
-    expect(screen.queryByText(/left until/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/til /)).not.toBeInTheDocument();
   });
 
   it("falls back to the window name rather than printing a reset it cannot parse", () => {

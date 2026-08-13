@@ -82,6 +82,16 @@ export const HelpModal = ({ open, onClose }: HelpModalProps) => {
           {KEPT.map((line) => <li key={line}>{line}</li>)}
         </ul>
 
+        <h3 className="help-heading">How time is counted</h3>
+        {/* Word-for-word the desktop app's "What's recorded" panel - one set
+            of rules, told once, so no surface can contradict another. */}
+        <ul className="record-list">
+          <li>Your hours are wall-clock time you were actually at the machine. They can never exceed real elapsed time.</li>
+          <li>Agent time is the summed runtime of every AI tool working for you. Three agents in parallel for an hour is 3h of agent time inside 1h of yours - that ratio is your leverage, never extra hours.</li>
+          <li>An agent still working while you step away keeps counting as agent time, but never as your hours.</li>
+          <li>The leaderboard ranks by your hours. Agent time and leverage sit beside them, answering a different question: how much work you got out of the tools.</li>
+        </ul>
+
         <h3 className="help-heading">Clock-In never writes down</h3>
         <ul className="record-list is-never">
           {NEVER.map((line) => <li key={line}>{line}</li>)}
