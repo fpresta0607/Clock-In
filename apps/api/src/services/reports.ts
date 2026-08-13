@@ -358,8 +358,9 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       const query: ReportQuery = { ...normalizedQuery(filters), ...scopeQuery(filters.scope) };
       await authorizeFilters(dependencies.reports, subject, query);
       await dependencies.reaper.reapStale(subject);
-      const [rows, presence, sessionIntervals, agentIntervals] = await Promise.all([
+      const [rows, roster, presence, sessionIntervals, agentIntervals] = await Promise.all([
         dependencies.reports.readLeaderboardForOrganization(subject, query),
+        dependencies.reports.readMembersForOrganization(subject),
         dependencies.reports.readPresenceIntervals(subject, query),
         dependencies.reports.readSessionIntervals(subject, query),
         dependencies.reports.readAgentIntervals(subject, query),
@@ -367,33 +368,27 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       const members = collectMembers(presence, sessionIntervals, agentIntervals);
       const legacy = rows.map(asLeaderboardEntry);
       const legacyById = new Map(legacy.map((entry) => [entry.user.id, entry]));
-      // Someone with agent work but no completed session still belongs on the
-      // board. Presence alone does not qualify under a project or unassigned
-      // scope: presence carries no project, so every member of the workspace
-      // would otherwise appear as an all-zero row under every scope.
-      const scoped = query.projectId !== undefined || query.unassignedOnly === true;
-      const qualifies = (member: MemberIntervals): boolean =>
-        scoped ? member.sessions.length > 0 || member.agents.length > 0 : member.presence.length > 0 || member.agents.length > 0;
-      const synthesized = new Set<string>();
-      for (const member of members.values()) {
-        if (!legacyById.has(member.user.id) && qualifies(member)) {
-          const empty = { rank: 0, user: member.user, durationSeconds: 0, sessionCount: 0, attributedSeconds: 0, unattributedSeconds: 0 };
-          legacy.push(empty);
-          legacyById.set(member.user.id, empty);
-          synthesized.add(member.user.id);
-        }
+      // Every member of the workspace is on the board, zeros included: a
+      // teammate with no recorded time today reads as "0s", never as missing.
+      for (const user of roster) {
+        if (legacyById.has(user.id)) continue;
+        const empty = { rank: 0, user, durationSeconds: 0, sessionCount: 0, attributedSeconds: 0, unattributedSeconds: 0 };
+        legacy.push(empty);
+        legacyById.set(user.id, empty);
       }
-      const measured = legacy
-        .map((entry) => {
-          const member = members.get(entry.user.id);
-          const measurement = member === undefined ? EMPTY_MEASUREMENT : measureMember(member, query);
-          return { ...entry, ...measurement };
-        })
-        // A member the report itself returned always stands, even at zero.
-        // A member this code invented from interval evidence has to justify
-        // the row, or a scope with nothing in it fills with phantom zeroes.
-        .filter((entry) => !synthesized.has(entry.user.id)
-          || entry.activeSeconds > 0 || entry.agentSeconds > 0 || entry.durationSeconds > 0);
+      // Interval evidence can name someone the roster no longer does (a
+      // member deleted mid-range); their measured work still counts.
+      for (const member of members.values()) {
+        if (legacyById.has(member.user.id)) continue;
+        const empty = { rank: 0, user: member.user, durationSeconds: 0, sessionCount: 0, attributedSeconds: 0, unattributedSeconds: 0 };
+        legacy.push(empty);
+        legacyById.set(member.user.id, empty);
+      }
+      const measured = legacy.map((entry) => {
+        const member = members.get(entry.user.id);
+        const measurement = member === undefined ? EMPTY_MEASUREMENT : measureMember(member, query);
+        return { ...entry, ...measurement };
+      });
       // The board ranks by active time - the human-hours number - with the
       // legacy duration as a stable tiebreak. A rank is shared only when the
       // whole ranking key ties, so equal work reads as equal and nothing else does.

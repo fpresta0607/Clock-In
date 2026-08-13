@@ -171,6 +171,14 @@ export const App = ({ client }: AppProps) => {
     };
   }, [client]);
 
+  // Workspaces that predate roles have no administrator at all, which locks
+  // everyone out of project deletion. The first signed-in member claims the
+  // role; every later call is refused by the server and ignored here.
+  useEffect(() => {
+    if (!signedIn) return;
+    void client.claimAdmin().catch(() => undefined);
+  }, [client, signedIn]);
+
   // Who and where: identity, workspace, projects, and the shared view state.
   // Preferences land BEFORE the first board fetch so the page opens where the
   // desktop app last was, with no flicker through the defaults.

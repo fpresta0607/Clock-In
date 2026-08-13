@@ -53,6 +53,7 @@ function clientFor(overrides: Partial<Client> = {}): Client {
     signUp: vi.fn().mockResolvedValue(undefined),
     signOut: vi.fn().mockResolvedValue(undefined),
     organization: vi.fn().mockResolvedValue({ organization }),
+    claimAdmin: vi.fn().mockRejectedValue(new ClientError("validation", "A workspace administrator already exists.")),
     leaderboard: vi.fn().mockResolvedValue({ entries, totalDurationSeconds: 10_800, medianSessionSeconds: 1_800, filters: {} }),
     me: vi.fn().mockResolvedValue({ user: self }),
     meStats: vi.fn().mockResolvedValue(memberStats),
