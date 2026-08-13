@@ -573,22 +573,29 @@ async fn project_delete(
 static EXIT_FLUSH_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// Stops the monitor (flushing and spooling the open activity segment) and
-/// only then exits the process. Tauri's tray menu and run-event callbacks are
-/// synchronous and cannot await, so the stop runs on the async runtime and the
-/// exit happens once the segment is safely on disk. Only manually verifiable:
-/// a test would need a live event loop. A force quit (Task Manager kill) still
-/// runs no code at all — durability there is what is already spooled, so at
-/// most the trailing open span since the last transition is lost.
+/// pushes the freshly closed segment to the server. Bounded by design: the
+/// upload gives up within its timeout, so an offline quit stays prompt.
+async fn flush_monitor(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    state.monitor.stop().await;
+    // The session the flush just spooled reaches the server before the
+    // process dies; otherwise it sits invisible until the next launch.
+    // Offline, the pass gives up within its timeout and quit proceeds.
+    state.monitor.upload_flush().await;
+}
+
+/// Flushes the monitor and only then exits the process. Tauri's tray menu and
+/// run-event callbacks are synchronous and cannot await, so the stop runs on
+/// the async runtime and the exit happens once the segment is safely on disk.
+/// Only manually verifiable: a test would need a live event loop. A force quit
+/// (Task Manager kill) still runs no code at all — durability there is what is
+/// already spooled, so at most the trailing open span since the last transition
+/// is lost.
 fn flush_monitor_and_exit(app: &tauri::AppHandle, code: i32) {
     EXIT_FLUSH_STARTED.store(true, Ordering::SeqCst);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        state.monitor.stop().await;
-        // The session the flush just spooled reaches the server before the
-        // process dies; otherwise it sits invisible until the next launch.
-        // Offline, the pass gives up within its timeout and quit proceeds.
-        state.monitor.upload_flush().await;
+        flush_monitor(&app).await;
         app.exit(code);
     });
 }
@@ -693,10 +700,43 @@ fn spawn_update_checks(handle: tauri::AppHandle) {
     });
 }
 
+/// The login autostart launches with `--hidden`, so a second `--hidden`
+/// launch is the OS pointing at the already-running tray app, not a person
+/// asking for the window. Only a hand launch (no `--hidden`) surfaces it.
+fn second_launch_surfaces_window(arguments: &[String]) -> bool {
+    !arguments.iter().any(|argument| argument == "--hidden")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // A second launch is someone looking for the window, not asking for a
+        // second monitor: surface the running instance and let the new one die.
+        .plugin(tauri_plugin_single_instance::init(
+            |app, arguments, _working_dir| {
+                if !second_launch_surfaces_window(&arguments) {
+                    return;
+                }
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            },
+        ))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--hidden"]),
+        ))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Closing the window is not quitting: hours only count while the app
+        // runs, so the X hides to the tray and recording continues. Quit lives
+        // in the tray menu; an OS session end still flushes before exit.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .setup(|app| {
             spawn_update_checks(app.handle().clone());
             let recovery_path = app
@@ -731,6 +771,23 @@ pub fn run() {
                 quota: quota::QuotaMonitor::new(),
             });
             build_tray(app.handle())?;
+
+            // The app keeps the machine's hours, so it registers to start
+            // with the OS on every launch - re-enabling also repairs an entry
+            // a cleanup tool removed. The login start passes `--hidden` and
+            // stays in the tray; a person opening it by hand gets the window.
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                if let Err(error) = app.autolaunch().enable() {
+                    eprintln!("clock-in: could not register the login autostart: {error}");
+                }
+            }
+            if !std::env::args().any(|argument| argument == "--hidden") {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -758,19 +815,29 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("the Clock-In desktop host failed to start")
-        .run(|app_handle, event| {
-            // Window close → exit and OS session end (logoff/shutdown) both
-            // arrive here. The exit is held until the monitor's open segment
-            // is flushed to the spool, then the process exits itself. The
-            // `app.exit` that finishes the flush re-triggers this event; the
-            // flag lets that one through instead of looping.
-            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+        .run(|app_handle, event| match event {
+            // A preventable exit request (tray Quit, and a close that destroys
+            // the window on platforms without a tray-resident flow) is held
+            // until the monitor's open segment is flushed to the spool, then
+            // the process exits itself. The `app.exit` that finishes the flush
+            // re-triggers this event; the flag lets that one through instead
+            // of looping.
+            tauri::RunEvent::ExitRequested { api, code, .. } => {
                 if EXIT_FLUSH_STARTED.load(Ordering::SeqCst) {
                     return;
                 }
                 api.prevent_exit();
                 flush_monitor_and_exit(app_handle, code.unwrap_or(0));
             }
+            // Windows logoff/shutdown never surfaces as ExitRequested: tao's
+            // WM_ENDSESSION calls loop_destroyed(), and the loop is already
+            // gone by the time this event lands. Nothing is left to prevent,
+            // so flush synchronously and let the process finish.
+            tauri::RunEvent::Exit if !EXIT_FLUSH_STARTED.load(Ordering::SeqCst) => {
+                EXIT_FLUSH_STARTED.store(true, Ordering::SeqCst);
+                tauri::async_runtime::block_on(flush_monitor(app_handle));
+            }
+            _ => {}
         });
 }
 
@@ -903,5 +970,22 @@ mod tests {
             ),
             "https://api.clock-in.example"
         );
+    }
+
+    #[test]
+    fn a_hidden_second_launch_stays_in_the_tray() {
+        assert!(!second_launch_surfaces_window(&["--hidden".to_string()]));
+        assert!(!second_launch_surfaces_window(&[
+            "clock-in-desktop.exe".to_string(),
+            "--hidden".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn a_hand_second_launch_surfaces_the_window() {
+        assert!(second_launch_surfaces_window(&[]));
+        assert!(second_launch_surfaces_window(&[
+            "--some-other-flag".to_string()
+        ]));
     }
 }

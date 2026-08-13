@@ -82,6 +82,11 @@ Nobody starts anything. While the desktop app is running and recording is on,
 Clock-In writes down the hours you spend at the machine and files them under a
 project. The consent toggle is the only on/off the product has.
 
+The desktop app is tray-resident by default: closing the window hides it to the
+tray and recording continues, and it registers a login autostart on every launch
+so hours survive a reboot. Quit lives in the tray menu, and a second launch
+surfaces the already-running instance instead of a second monitor.
+
 ### Sessions are decided by the machine, not by a person
 
 The monitor already folds the OS into coarse spans (`active`, `idle`, `locked`,
