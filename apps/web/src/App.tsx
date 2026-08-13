@@ -613,7 +613,7 @@ export const App = ({ client }: AppProps) => {
             ) : (
               <>
                 <p className="member-total">
-                  <strong>{formatHumanDuration(memberStats.activeSeconds)}</strong> active
+                  <strong>{formatHumanDuration(memberStats.activeSeconds)}</strong> active{" "}
                   <span className="member-agent-total">
                     · Agent {formatHumanDuration(memberStats.agentSeconds)}
                     {leverage(memberStats) !== null && ` · ${leverage(memberStats)}×`}
