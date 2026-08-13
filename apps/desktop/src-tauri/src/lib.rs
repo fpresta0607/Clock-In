@@ -700,13 +700,23 @@ fn spawn_update_checks(handle: tauri::AppHandle) {
     });
 }
 
+/// The login autostart launches with `--hidden`, so a second `--hidden`
+/// launch is the OS pointing at the already-running tray app, not a person
+/// asking for the window. Only a hand launch (no `--hidden`) surfaces it.
+fn second_launch_surfaces_window(arguments: &[String]) -> bool {
+    !arguments.iter().any(|argument| argument == "--hidden")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         // A second launch is someone looking for the window, not asking for a
         // second monitor: surface the running instance and let the new one die.
         .plugin(tauri_plugin_single_instance::init(
-            |app, _arguments, _working_dir| {
+            |app, arguments, _working_dir| {
+                if !second_launch_surfaces_window(&arguments) {
+                    return;
+                }
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
                     let _ = window.set_focus();
@@ -960,5 +970,20 @@ mod tests {
             ),
             "https://api.clock-in.example"
         );
+    }
+
+    #[test]
+    fn a_hidden_second_launch_stays_in_the_tray() {
+        assert!(!second_launch_surfaces_window(&["--hidden".to_string()]));
+        assert!(!second_launch_surfaces_window(&[
+            "clock-in-desktop.exe".to_string(),
+            "--hidden".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn a_hand_second_launch_surfaces_the_window() {
+        assert!(second_launch_surfaces_window(&[]));
+        assert!(second_launch_surfaces_window(&["--some-other-flag".to_string()]));
     }
 }
