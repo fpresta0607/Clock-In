@@ -848,8 +848,8 @@ describe("the shared scope", () => {
       otherProject.id,
     ));
 
-    await person.selectOptions(scope, "unassigned");
-    await waitFor(() => expect(bridge.preferencesSet).toHaveBeenCalledWith({ scope: "unassigned" }));
+    await person.selectOptions(scope, "all");
+    await waitFor(() => expect(bridge.preferencesSet).toHaveBeenCalledWith({ scope: "all" }));
   });
 });
 
