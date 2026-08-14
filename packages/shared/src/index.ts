@@ -1,6 +1,7 @@
 export {
   agentSplitSchema,
   concurrencySchema,
+  hourlyBucketSchema,
   projectDeleteRequestSchema,
   projectScopeSchema,
   projectUsageResponseSchema,
@@ -64,6 +65,7 @@ export {
 export type {
   AgentSplit,
   Concurrency,
+  HourlyBucket,
   ProjectDeleteRequest,
   ProjectScope,
   ProjectUsageResponse,

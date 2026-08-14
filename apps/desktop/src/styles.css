@@ -518,3 +518,36 @@ select:disabled { opacity: .55; }
 
 /* The overlay's shared project scope, kept as slim as the range toggle. */
 .board-scope select { min-height: 30px; padding: 3px 8px; font-size: .74rem; }
+
+/* The human/agent metric breakdown: labeled rows, not one cramped sentence. */
+.breakdown { display: grid; gap: 0; }
+.group-label { margin: 14px 0 5px; color: var(--text-secondary); font-size: .72rem; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
+.group-label:first-child { margin-top: 0; }
+.metric-row { display: flex; align-items: baseline; gap: 10px; padding: 5px 2px; border-bottom: 1px solid rgba(163, 179, 194, .08); font-size: .85rem; }
+.metric-row:last-child { border-bottom: 0; }
+.metric-row.is-headline { font-size: .95rem; padding: 7px 2px; }
+.metric-row.is-headline .metric-value { color: var(--mint); font-weight: 700; }
+.metric-row.is-subtotal { border-top: 1px solid rgba(163, 179, 194, .12); }
+.metric-name { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.metric-hint { color: var(--text-secondary); font-size: .74rem; }
+.metric-value { flex: none; font-variant-numeric: tabular-nums; }
+.metric-swatch { flex: none; width: 9px; height: 9px; border-radius: 2px; align-self: center; }
+.swatch-human { background: #8b98a8; }
+.swatch-agent1 { background: #00e59b; }
+.swatch-agent2 { background: #00c97f; }
+.swatch-agent3 { background: #00a868; }
+.swatch-away { background: var(--accent-blue); }
+
+/* Which models ran, with session count, overlap, and length. */
+.agent-sessions { margin-top: 14px; }
+.agent-sessions table { margin-top: 2px; }
+.agent-sessions .numeric { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Hourly line graphs, lightweight SVG, two lines + legend. */
+.graph { margin-top: 14px; }
+.graph svg { display: block; width: 100%; height: auto; }
+.legend { display: flex; gap: 16px; flex-wrap: wrap; margin: 4px 0 0; padding: 0; list-style: none; color: var(--text-secondary); font-size: .74rem; }
+.legend li { display: flex; align-items: center; gap: 6px; }
+.legend-line { width: 14px; height: 2px; border-radius: 1px; }
+.legend-agents { background: var(--accent-green); }
+.legend-humans { background: #8b98a8; }

@@ -364,7 +364,7 @@ describe("report and error contracts", () => {
       activeSeconds: 3_600,
       agentSeconds: 5_400,
       concurrency: { t0Seconds: 1_800, t1Seconds: 0, t2Seconds: 1_800, t3PlusSeconds: 0, awaySeconds: 1_800 },
-      byAgent: [{ source: "claude_code", model: null, durationSeconds: 5_400 }],
+      byAgent: [{ source: "claude_code", model: null, durationSeconds: 5_400, sessionCount: 1, maxConcurrent: 1, medianSeconds: 5_400 }],
     };
     expect(
       leaderboardResponseSchema.parse({ filters: {}, totalDurationSeconds: 3_600, medianSessionSeconds: 1_800, entries: [entry] }),
@@ -617,7 +617,8 @@ describe("personal stats contracts", () => {
     activeSeconds: 7_000,
     agentSeconds: 3_600,
     concurrency: { t0Seconds: 3_400, t1Seconds: 3_600, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
-    byAgent: [{ source: "claude_code", model: null, durationSeconds: 3_600 }],
+    byAgent: [{ source: "claude_code", model: null, durationSeconds: 3_600, sessionCount: 1, maxConcurrent: 1, medianSeconds: 3_600 }],
+    hourly: [],
     projects: [
       {
         project: { id: ids.project, name: "Website redesign" },

@@ -182,6 +182,8 @@ export type MeStats = {
   agentSeconds: number;
   concurrency: MeStatsConcurrency;
   byAgent: readonly MeStatsAgentSplit[];
+  /// Hourly series for the line graph, bucketed to the caller's local hours.
+  hourly: readonly MeStatsHourlyBucket[];
   projects: readonly MeStatsProject[];
   apps: readonly MeStatsApp[];
 };
@@ -198,6 +200,15 @@ export type MeStatsAgentSplit = {
   source: string;
   model: string | null;
   durationSeconds: number;
+  sessionCount: number;
+  maxConcurrent: number;
+  medianSeconds: number;
+};
+
+export type MeStatsHourlyBucket = {
+  hourStart: string;
+  activeSeconds: number;
+  agentSeconds: number;
 };
 
 /// The dashboard view state shared with the web app. Only `scope` is
@@ -312,6 +323,11 @@ const timestamp = (value: unknown): string => {
 const nonnegativeInteger = (value: unknown): number => {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) invalidResponse();
   return value as number;
+};
+
+const optionalNonnegativeInteger = (value: unknown): number => {
+  if (value === undefined || value === null) return 0;
+  return nonnegativeInteger(value);
 };
 
 const decodeUser = (value: unknown): TimerUser => {
@@ -599,6 +615,18 @@ const decodeAgentSplit = (value: unknown): MeStatsAgentSplit => {
     source: string(candidate.source),
     model: stringOrNull(candidate.model ?? null),
     durationSeconds: nonnegativeInteger(candidate.durationSeconds),
+    sessionCount: optionalNonnegativeInteger(candidate.sessionCount),
+    maxConcurrent: optionalNonnegativeInteger(candidate.maxConcurrent),
+    medianSeconds: optionalNonnegativeInteger(candidate.medianSeconds),
+  };
+};
+
+const decodeHourlyBucket = (value: unknown): MeStatsHourlyBucket => {
+  const candidate = record(value);
+  return {
+    hourStart: string(candidate.hourStart),
+    activeSeconds: nonnegativeInteger(candidate.activeSeconds),
+    agentSeconds: nonnegativeInteger(candidate.agentSeconds),
   };
 };
 
@@ -608,7 +636,9 @@ export const decodeMeStats = (value: unknown): MeStats => {
   const projects = candidate.projects;
   const apps = candidate.apps;
   const byAgent = candidate.byAgent;
+  const hourly = candidate.hourly;
   if (!Array.isArray(projects) || !Array.isArray(apps) || !Array.isArray(byAgent)) invalidResponse();
+  if (hourly !== undefined && hourly !== null && !Array.isArray(hourly)) invalidResponse();
   const totalDurationSeconds = nonnegativeInteger(candidate.totalDurationSeconds);
   const attributedSeconds = nonnegativeInteger(candidate.attributedSeconds);
   if (attributedSeconds > totalDurationSeconds) invalidResponse();
@@ -621,6 +651,7 @@ export const decodeMeStats = (value: unknown): MeStats => {
     agentSeconds: nonnegativeInteger(candidate.agentSeconds),
     concurrency: decodeConcurrency(candidate.concurrency),
     byAgent: (byAgent as unknown[]).map(decodeAgentSplit),
+    hourly: (Array.isArray(hourly) ? hourly : []).map(decodeHourlyBucket),
     projects: (projects as unknown[]).map(decodeMeStatsProject),
     apps: (apps as unknown[]).map(decodeMeStatsApp),
   };

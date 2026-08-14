@@ -1,10 +1,13 @@
 import {
+  clipInterval,
   intersectIntervals,
   isAttributed,
   measureTime,
   summedSeconds,
+  unionSeconds,
   type AgentSplit,
   type Concurrency,
+  type HourlyBucket,
   type Interval,
   type LeaderboardFilters,
   type LeaderboardResponse,
@@ -150,15 +153,101 @@ type MemberMeasurement = {
   byAgent: AgentSplit[];
 };
 
+/** The range as epoch-millisecond bounds, matching what `measureTime` clips by. */
+function queryRange(query: ReportQuery): Partial<Interval> {
+  return {
+    ...(query.from === undefined ? {} : { start: query.from.getTime() }),
+    ...(query.toExclusive === undefined ? {} : { end: query.toExclusive.getTime() }),
+  };
+}
+
+/**
+ * The person's working intervals under the current scope. Presence carries no
+ * project, so a project or unassigned scope narrows it to the slices where that
+ * scope's sessions were open; the all-projects scope is presence itself.
+ */
+function workingIntervals(member: MemberIntervals, query: ReportQuery): Interval[] {
+  const scoped = query.projectId !== undefined || query.unassignedOnly === true;
+  return scoped ? intersectIntervals(member.presence, member.sessions) : member.presence;
+}
+
+/** Intervals clipped to the range, zero-length ones dropped. */
+function clippedIntervals(intervals: readonly Interval[], range: Partial<Interval>): Interval[] {
+  return intervals
+    .map((interval) => clipInterval(interval, range))
+    .filter((interval): interval is Interval => interval !== null);
+}
+
+/** Peak number of the given intervals overlapping at once, via a sweep line. */
+function maxConcurrentCount(intervals: readonly Interval[]): number {
+  const starts = intervals.map((interval) => interval.start).sort((a, b) => a - b);
+  const ends = intervals.map((interval) => interval.end).sort((a, b) => a - b);
+  let startIndex = 0;
+  let endIndex = 0;
+  let running = 0;
+  let peak = 0;
+  while (startIndex < starts.length) {
+    if (starts[startIndex]! < ends[endIndex]!) {
+      running += 1;
+      peak = Math.max(peak, running);
+      startIndex += 1;
+    } else {
+      running -= 1;
+      endIndex += 1;
+    }
+  }
+  return peak;
+}
+
+/** Median in-range session length in seconds; 0 with no sessions. */
+function medianDurationSeconds(intervals: readonly Interval[]): number {
+  const lengths = intervals
+    .map((interval) => interval.end - interval.start)
+    .filter((ms) => ms > 0)
+    .sort((a, b) => a - b);
+  if (lengths.length === 0) return 0;
+  const middle = Math.floor(lengths.length / 2);
+  const medianMs = lengths.length % 2 === 1 ? lengths[middle]! : (lengths[middle - 1]! + lengths[middle]!) / 2;
+  return Math.round(medianMs / 1_000);
+}
+
+/**
+ * One hour of the caller's local calendar at a time. Bounded ranges tile from
+ * their start instant - which the dashboards send as the viewer's local
+ * midnight - so bucket `k` is local hour `k`. The unbounded "all time" range
+ * returns no buckets; its full history lives in the CSV export instead.
+ */
+function hourlySeries(
+  working: readonly Interval[],
+  agents: readonly Interval[],
+  range: Partial<Interval>,
+): HourlyBucket[] {
+  if (range.start === undefined || range.end === undefined) return [];
+  const evidence = [...working, ...agents];
+  if (evidence.length === 0) return [];
+  const start = range.start;
+  const end = range.end;
+  if (start >= end) return [];
+  const buckets: HourlyBucket[] = [];
+  for (let cursor = start; cursor < end; cursor += 60 * 60 * 1_000) {
+    const hour = { start: cursor, end: Math.min(cursor + 60 * 60 * 1_000, end) };
+    buckets.push({
+      hourStart: new Date(cursor).toISOString(),
+      activeSeconds: unionSeconds(working, hour),
+      agentSeconds: summedSeconds(agents, hour),
+    });
+  }
+  return buckets;
+}
+
 /**
  * One member's numbers under the current scope. Presence carries no project,
  * so a project or unassigned scope narrows it to the slices where that scope's
  * sessions were open; the all-projects scope is presence itself.
  */
 function measureMember(member: MemberIntervals, query: ReportQuery): MemberMeasurement {
-  const scoped = query.projectId !== undefined || query.unassignedOnly === true;
-  const working = scoped ? intersectIntervals(member.presence, member.sessions) : member.presence;
-  const range = { ...(query.from === undefined ? {} : { start: query.from.getTime() }), ...(query.toExclusive === undefined ? {} : { end: query.toExclusive.getTime() }) };
+  const working = workingIntervals(member, query);
+  const range = queryRange(query);
   const measurement = measureTime(working, member.agents.map((agent) => agent.interval), range);
   // Grouped before summing, so each split rounds once. Rounding every
   // interval on its own drifts the splits away from the agentSeconds total
@@ -172,10 +261,14 @@ function measureMember(member: MemberIntervals, query: ReportQuery): MemberMeasu
   }
   const splits = new Map<string, AgentSplit>();
   for (const [key, group] of grouped) {
+    const clipped = clippedIntervals(group.intervals, range);
     splits.set(key, {
       source: group.source,
       model: group.model,
-      durationSeconds: summedSeconds(group.intervals, range),
+      durationSeconds: Math.round(clipped.reduce((sum, interval) => sum + (interval.end - interval.start), 0) / 1_000),
+      sessionCount: clipped.length,
+      maxConcurrent: maxConcurrentCount(clipped),
+      medianSeconds: medianDurationSeconds(clipped),
     });
   }
   return {
@@ -428,12 +521,16 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       ]);
       const member = collectMembers(presence, sessionIntervals, agentIntervals).get(query.userId ?? subject.userId);
       const measurement = member === undefined ? EMPTY_MEASUREMENT : measureMember(member, query);
+      const hourly = member === undefined
+        ? []
+        : hourlySeries(workingIntervals(member, query), member.agents.map((agent) => agent.interval), queryRange(query));
       return {
         filters,
         totalDurationSeconds: projects.reduce((total, project) => total + project.durationSeconds, 0),
         attributedSeconds: projects.reduce((total, project) => total + project.attributedSeconds, 0),
         unattributedSeconds: projects.reduce((total, project) => total + project.unattributedSeconds, 0),
         ...measurement,
+        hourly,
         projects,
         apps,
         sites,

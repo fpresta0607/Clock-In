@@ -223,6 +223,8 @@ export const RecordingPanel = ({
           of rules, told once, so no surface can contradict another. */}
       <ul className="record-list">
           <li>Your hours are wall-clock time you were actually at the machine. They can never exceed real elapsed time.</li>
+          <li>Human work is the time you worked with no agent running - the share you verified yourself.</li>
+          <li>The 1, 2, and 3+ agent splits are your agent-assisted share - still your hours, split by how many agents ran beside you at once.</li>
           <li>Agent time is the summed runtime of every AI tool working for you. Three agents in parallel for an hour is 3h of agent time inside 1h of yours - that ratio is your leverage, never extra hours.</li>
           <li>An agent still working while you step away keeps counting as agent time, but never as your hours.</li>
           <li>The leaderboard ranks by your hours. Agent time and leverage sit beside them, answering a different question: how much work you got out of the tools.</li>

@@ -319,8 +319,8 @@ describe("leaderboard", () => {
     expect(alex?.concurrency).toEqual({ t0Seconds: 3_600, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 3_600, awaySeconds: 0 });
     // The by-agent split sums to agent time, never to active time.
     expect(alex?.byAgent).toEqual([
-      { source: "claude_code", model: null, durationSeconds: 7_200 },
-      { source: "codex", model: null, durationSeconds: 3_600 },
+      { source: "claude_code", model: null, durationSeconds: 7_200, sessionCount: 2, maxConcurrent: 2, medianSeconds: 3_600 },
+      { source: "codex", model: null, durationSeconds: 3_600, sessionCount: 1, maxConcurrent: 1, medianSeconds: 3_600 },
     ]);
     expect(sam?.rank).toBe(2);
     expect(sam?.activeSeconds).toBe(3_600);
@@ -488,6 +488,7 @@ describe("me/stats", () => {
       attributedSeconds: 6_000,
       unattributedSeconds: 1_800,
       ...noMeasurement,
+      hourly: [],
       projects: [
         { project: { id: ids.project, name: "Timer" }, durationSeconds: 7_200, attributedSeconds: 5_400, unattributedSeconds: 1_800, sessionCount: 2 },
         { project: { id: ids.otherProject, name: "Side" }, durationSeconds: 600, attributedSeconds: 600, unattributedSeconds: 0, sessionCount: 1 },
@@ -514,7 +515,57 @@ describe("me/stats", () => {
   it("returns an empty stats response when the caller recorded nothing", async () => {
     const result = await createReportService({ reports: new Reports(), reaper: silentReaper }).meStats(subject, {});
 
-    expect(result).toEqual({ filters: {}, totalDurationSeconds: 0, attributedSeconds: 0, unattributedSeconds: 0, ...noMeasurement, projects: [], apps: [], sites: [] });
+    expect(result).toEqual({ filters: {}, totalDurationSeconds: 0, attributedSeconds: 0, unattributedSeconds: 0, ...noMeasurement, hourly: [], projects: [], apps: [], sites: [] });
+  });
+
+  it("buckets active and agent time by the caller's local hours, collapsing overlap but summing parallelism", async () => {
+    const hour = (h: number): Date => new Date(Date.UTC(2026, 7, 5, h));
+    const reports = new Reports();
+    // Two overlapping presence intervals still count as one hour of presence
+    // per wall-clock hour - the union, never the sum.
+    reports.presenceIntervals = [
+      { user: { id: ids.user, name: "Alex" }, startedAt: hour(9), endedAt: hour(11) },
+      { user: { id: ids.user, name: "Alex" }, startedAt: new Date(Date.UTC(2026, 7, 5, 9, 30)), endedAt: new Date(Date.UTC(2026, 7, 5, 10, 30)) },
+    ];
+    // Two agents running in parallel count twice inside that hour.
+    reports.agentIntervals = [
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
+      { user: { id: ids.user, name: "Alex" }, source: "codex", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
+    ];
+    const service = createReportService({ reports, reaper: silentReaper });
+
+    const result = await service.meStats(subject, {
+      fromAt: "2026-08-05T00:00:00.000Z",
+      toExclusiveAt: "2026-08-06T00:00:00.000Z",
+    });
+
+    // The series tiles midnight-to-midnight on the caller's calendar, so the
+    // empty early hours are present and the two busy hours read exactly.
+    expect(result.hourly).toHaveLength(24);
+    const byHour = new Map(result.hourly.map((bucket) => [new Date(bucket.hourStart).getUTCHours(), bucket]));
+    expect(byHour.get(9)).toEqual({ hourStart: "2026-08-05T09:00:00.000Z", activeSeconds: 3_600, agentSeconds: 7_200 });
+    expect(byHour.get(10)).toEqual({ hourStart: "2026-08-05T10:00:00.000Z", activeSeconds: 3_600, agentSeconds: 0 });
+    for (let h = 0; h < 24; h++) {
+      if (h === 9 || h === 10) continue;
+      expect(byHour.get(h)).toEqual({ hourStart: `2026-08-05T${String(h).padStart(2, "0")}:00:00.000Z`, activeSeconds: 0, agentSeconds: 0 });
+    }
+  });
+
+  it("leaves the unbounded all-time range without an hourly graph", async () => {
+    const hour = (h: number): Date => new Date(Date.UTC(2026, 7, 5, h));
+    const reports = new Reports();
+    reports.presenceIntervals = [
+      { user: { id: ids.user, name: "Alex" }, startedAt: hour(9), endedAt: hour(11) },
+    ];
+    reports.agentIntervals = [
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
+    ];
+    const service = createReportService({ reports, reaper: silentReaper });
+
+    const result = await service.meStats(subject, {});
+
+    expect(result.hourly).toEqual([]);
+    expect(result.activeSeconds).toBe(7_200);
   });
 
   it("reads a named teammate's stats instead of the caller's when asked", async () => {
