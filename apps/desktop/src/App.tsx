@@ -97,25 +97,154 @@ const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
   return [...kept, { key: "everything-else", label: "Everything else", durationSeconds: rest, agent: false }];
 };
 
-/// Only the buckets with time in them, in plain words: "Solo 1h 00m · 1
-/// agent 40m". Empty buckets and jargon both make the line harder to read.
-const concurrencyLine = (concurrency: {
-  t0Seconds: number;
-  t1Seconds: number;
-  t2Seconds: number;
-  t3PlusSeconds: number;
-  awaySeconds: number;
-}): string =>
-  ([
-    ["Solo", concurrency.t0Seconds],
-    ["1 agent", concurrency.t1Seconds],
-    ["2 agents", concurrency.t2Seconds],
-    ["3+ agents", concurrency.t3PlusSeconds],
-    ["Agents while away", concurrency.awaySeconds],
-  ] as const)
-    .filter(([, seconds]) => seconds > 0)
-    .map(([label, seconds]) => `${label} ${formatHuman(seconds)}`)
-    .join(" · ");
+/// The human/agent split laid out as labeled rows instead of one cramped
+/// sentence: active time up top (Solo is now "Human work"), agent runtime
+/// below, and the leverage ratio as the agent-side headline.
+const MemberBreakdown = ({ stats }: { stats: MeStats }) => {
+  const { activeSeconds, agentSeconds, concurrency } = stats;
+  const awaySeconds = concurrency.awaySeconds;
+  const presentAgentSeconds = Math.max(0, agentSeconds - awaySeconds);
+  const ratio = leverage(stats);
+  return (
+    <div className="breakdown" data-testid="breakdown">
+      <p className="group-label">Your active time — the hours you were at this computer</p>
+      <div className="metric-row is-headline">
+        <span className="metric-name">Active time</span>
+        <span className="metric-value">{formatHuman(activeSeconds)}</span>
+      </div>
+      <div className="metric-row">
+        <span className="metric-swatch swatch-human" aria-hidden="true" />
+        <span className="metric-name">Human work <span className="metric-hint">(no agent running)</span></span>
+        <span className="metric-value">{formatHuman(concurrency.t0Seconds)}</span>
+      </div>
+      {concurrency.t1Seconds > 0 && (
+        <div className="metric-row">
+          <span className="metric-swatch swatch-agent1" aria-hidden="true" />
+          <span className="metric-name">With 1 agent</span>
+          <span className="metric-value">{formatHuman(concurrency.t1Seconds)}</span>
+        </div>
+      )}
+      {concurrency.t2Seconds > 0 && (
+        <div className="metric-row">
+          <span className="metric-swatch swatch-agent2" aria-hidden="true" />
+          <span className="metric-name">With 2 agents</span>
+          <span className="metric-value">{formatHuman(concurrency.t2Seconds)}</span>
+        </div>
+      )}
+      {concurrency.t3PlusSeconds > 0 && (
+        <div className="metric-row">
+          <span className="metric-swatch swatch-agent3" aria-hidden="true" />
+          <span className="metric-name">With 3+ agents</span>
+          <span className="metric-value">{formatHuman(concurrency.t3PlusSeconds)}</span>
+        </div>
+      )}
+      {agentSeconds > 0 && (
+        <>
+          <p className="group-label">Agent runtime — summed, may exceed your hours</p>
+          <div className="metric-row is-subtotal">
+            <span className="metric-name">While you were there</span>
+            <span className="metric-value">{formatHuman(presentAgentSeconds)}</span>
+          </div>
+          {awaySeconds > 0 && (
+            <div className="metric-row">
+              <span className="metric-swatch swatch-away" aria-hidden="true" />
+              <span className="metric-name">Agents while away <span className="metric-hint">(never your hours)</span></span>
+              <span className="metric-value">{formatHuman(awaySeconds)}</span>
+            </div>
+          )}
+          <div className="metric-row is-subtotal is-headline">
+            <span className="metric-name">Total agent time · leverage</span>
+            <span className="metric-value">{formatHuman(agentSeconds)}{ratio !== null && ` · ${ratio}×`}</span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
+/// Which models actually ran, how many sessions that was, how many overlapped
+/// at once, and how long a session typically lasted - all already in the
+/// agent_sessions table, now presented rather than folded into a note.
+const AgentSessionsTable = ({ byAgent }: { byAgent: readonly MeStats["byAgent"][number][] }) => {
+  if (byAgent.length === 0) return null;
+  return (
+    <div className="agent-sessions" data-testid="agent-sessions">
+      <p className="group-label">Agent sessions</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Agent</th>
+            <th className="numeric">Sessions</th>
+            <th className="numeric">Max at once</th>
+            <th className="numeric">Total</th>
+            <th className="numeric">Median</th>
+          </tr>
+        </thead>
+        <tbody>
+          {byAgent.map((split) => (
+            <tr key={`${split.source}|${split.model ?? ""}`}>
+              <td>
+                {split.model ?? sourceLabel(split.source)}
+                {split.model !== null && <span className="metric-hint"> · {sourceLabel(split.source)}</span>}
+              </td>
+              <td className="numeric">{split.sessionCount}</td>
+              <td className="numeric">{split.maxConcurrent}</td>
+              <td className="numeric">{formatHuman(split.durationSeconds)}</td>
+              <td className="numeric">{formatHuman(split.medianSeconds)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+/// Two-line SVG chart - agents in the brand green, the person in gray. No
+/// chart library: a fixed viewBox and two polylines are all a day needs, and
+/// the server already buckets to the caller's local hours.
+const HourlyGraph = ({ buckets }: { buckets: readonly MeStats["hourly"][number][] }) => {
+  if (buckets.length === 0) return null;
+  const width = 640;
+  const height = 190;
+  const margin = { left: 38, right: 12, top: 14, bottom: 24 };
+  const plotW = width - margin.left - margin.right;
+  const plotH = height - margin.top - margin.bottom;
+  const rawMax = Math.max(60, ...buckets.map((bucket) => Math.max(bucket.activeSeconds, bucket.agentSeconds)));
+  const yMax = Math.max(900, Math.ceil(rawMax / 900) * 900);
+  const x = (index: number): number =>
+    buckets.length === 1 ? margin.left + plotW / 2 : margin.left + (index / (buckets.length - 1)) * plotW;
+  const y = (value: number): number => margin.top + plotH - (value / yMax) * plotH;
+  const line = (key: "activeSeconds" | "agentSeconds"): string =>
+    buckets.map((bucket, index) => `${index === 0 ? "M" : "L"}${x(index).toFixed(1)},${y(bucket[key]).toFixed(1)}`).join(" ");
+  const tickCount = Math.min(7, buckets.length);
+  const xTicks = Array.from({ length: tickCount }, (_, tick) => {
+    const index = tickCount === 1 ? 0 : Math.round((tick / (tickCount - 1)) * (buckets.length - 1));
+    const date = new Date(buckets[index]!.hourStart);
+    const label = buckets.length <= 48
+      ? String(date.getHours()).padStart(2, "0")
+      : date.toLocaleDateString([], { month: "short", day: "numeric" });
+    return { index, label };
+  });
+  return (
+    <div className="graph" data-testid="hourly-graph">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Hourly active and agent time">
+        <line x1={margin.left} y1={y(0)} x2={width - margin.right} y2={y(0)} stroke="rgba(163,179,194,.25)" />
+        <line x1={margin.left} y1={y(yMax)} x2={width - margin.right} y2={y(yMax)} stroke="rgba(163,179,194,.12)" />
+        <text x={margin.left - 6} y={y(0) + 3} fill="#a3b3c2" fontSize="9" textAnchor="end">0</text>
+        <text x={margin.left - 6} y={y(yMax) + 3} fill="#a3b3c2" fontSize="9" textAnchor="end">{formatHuman(yMax)}</text>
+        {xTicks.map(({ index, label }) => (
+          <text key={index} x={x(index)} y={height - 6} fill="#a3b3c2" fontSize="9" textAnchor="middle">{label}</text>
+        ))}
+        <polyline points={line("activeSeconds")} fill="none" stroke="#8b98a8" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+        <polyline points={line("agentSeconds")} fill="none" stroke="#00e59b" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+      </svg>
+      <ul className="legend">
+        <li><span className="legend-line legend-agents" aria-hidden="true" />Agents</li>
+        <li><span className="legend-line legend-humans" aria-hidden="true" />You</li>
+      </ul>
+    </div>
+  );
+};
 
 /// Every sentence the main page says about recording, keyed by the one shared
 /// recording state. Keeping them in tables rather than inline conditionals is
@@ -1074,29 +1203,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const boardUnattributedSeconds = (showingLiveDay ? stats : boardStats)?.unattributedSeconds ?? 0;
   const boardMeasurement = showingLiveDay ? stats : boardStats;
   const boardAppRows = buildAppRows(showingLiveDay ? liveApps : boardStats?.apps ?? []);
-  // The by-agent split rides on the folded agent row as a muted note, one
-  // part per model; it sums to agent time, never to the hours beside it.
-  const boardAgentSplits = boardMeasurement?.byAgent ?? [];
-  const boardAgentNotes = new Map<string, string>();
-  for (const split of boardAgentSplits) {
-    const part = `${split.model ?? sourceLabel(split.source)} ${formatHuman(split.durationSeconds)}`;
-    const existing = boardAgentNotes.get(split.source);
-    boardAgentNotes.set(split.source, existing === undefined ? part : `${existing} · ${part}`);
-  }
-  const boardHasAgentRow = boardAppRows.some((row) => row.agent);
-  const boardForegroundAgentSources = boardHasAgentRow
-    ? new Set(
-        (showingLiveDay ? liveApps : boardStats?.apps ?? [])
-          .map((app) => agentRuntimeForBinary(app.processName))
-          .filter((source): source is string => source !== undefined),
-      )
-    : new Set<string>();
-  const boardAgentNote = [...boardAgentNotes]
-    .filter(([source]) => boardForegroundAgentSources.has(source))
-    .map(([, note]) => note)
-    .join(" · ");
-  const boardBackgroundAgents = [...boardAgentNotes]
-    .filter(([source]) => !boardForegroundAgentSources.has(source));
   const boardProjectRows = showingLiveDay
     ? projectRows.map((row) => ({ id: row.key, name: row.name, durationSeconds: row.durationSeconds }))
     : (boardStats?.projects ?? [])
@@ -1282,6 +1388,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                   )}
                 </ul>
               )}
+              <HourlyGraph buckets={stats?.hourly ?? []} />
             </>
           )}
         </section>
@@ -1399,16 +1506,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                 <p className="today-total"><strong>{formatHuman(boardTotalSeconds)}</strong> recorded</p>
                 {boardMeasurement !== undefined && (
                   <>
-                    <p className="member-line" data-testid="measurement-line">
-                      Active {formatHuman(boardMeasurement.activeSeconds)}
-                      {" · Agent "}{formatHuman(boardMeasurement.agentSeconds)}
-                      {leverage(boardMeasurement) !== null && ` · ${leverage(boardMeasurement)}×`}
-                    </p>
-                    {concurrencyLine(boardMeasurement.concurrency) !== "" && (
-                      <p className="member-line" data-testid="concurrency-line">
-                        {concurrencyLine(boardMeasurement.concurrency)}
-                      </p>
-                    )}
+                    <MemberBreakdown stats={boardMeasurement} />
+                    <AgentSessionsTable byAgent={boardMeasurement.byAgent} />
                   </>
                 )}
                 {boardProjectRows.length > 0 && (
@@ -1421,7 +1520,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                     ))}
                   </ul>
                 )}
-                {boardAppRows.length === 0 && boardBackgroundAgents.length === 0 ? (
+                {boardAppRows.length === 0 ? (
                   // Only the caller's own emptiness can be explained by this
                   // machine's recording state; a teammate's is just empty.
                   <p className="subtle" data-testid="today-empty">
@@ -1436,15 +1535,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                           {row.agent && viewingSelf && monitorStatus?.agentActive && <span className="app-active"> · active now</span>}
                         </span>
                         <span className="app-duration">{formatHuman(row.durationSeconds)}</span>
-                        {row.agent && boardAgentNote !== "" && (
-                          <span className="app-note" data-testid="agent-note">{boardAgentNote}</span>
-                        )}
-                      </li>
-                    ))}
-                    {boardBackgroundAgents.map(([source, note]) => (
-                      <li key={source} className="app-row is-agent">
-                        <span className="app-name">{sourceLabel(source)}</span>
-                        <span className="app-note" data-testid="agent-note">{note}</span>
                       </li>
                     ))}
                   </ul>

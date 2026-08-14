@@ -355,6 +355,7 @@ const noMeasurement = {
   agentSeconds: 0,
   concurrency: { t0Seconds: 0, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
   byAgent: [] as never[],
+  hourly: [] as never[],
 };
 
 describe("me/stats routes", () => {

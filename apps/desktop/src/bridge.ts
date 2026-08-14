@@ -182,6 +182,8 @@ export type MeStats = {
   agentSeconds: number;
   concurrency: MeStatsConcurrency;
   byAgent: readonly MeStatsAgentSplit[];
+  /// Hourly series for the line graph, bucketed to the caller's local hours.
+  hourly: readonly MeStatsHourlyBucket[];
   projects: readonly MeStatsProject[];
   apps: readonly MeStatsApp[];
 };
@@ -198,6 +200,15 @@ export type MeStatsAgentSplit = {
   source: string;
   model: string | null;
   durationSeconds: number;
+  sessionCount: number;
+  maxConcurrent: number;
+  medianSeconds: number;
+};
+
+export type MeStatsHourlyBucket = {
+  hourStart: string;
+  activeSeconds: number;
+  agentSeconds: number;
 };
 
 /// The dashboard view state shared with the web app. Only `scope` is
@@ -599,6 +610,18 @@ const decodeAgentSplit = (value: unknown): MeStatsAgentSplit => {
     source: string(candidate.source),
     model: stringOrNull(candidate.model ?? null),
     durationSeconds: nonnegativeInteger(candidate.durationSeconds),
+    sessionCount: nonnegativeInteger(candidate.sessionCount),
+    maxConcurrent: nonnegativeInteger(candidate.maxConcurrent),
+    medianSeconds: nonnegativeInteger(candidate.medianSeconds),
+  };
+};
+
+const decodeHourlyBucket = (value: unknown): MeStatsHourlyBucket => {
+  const candidate = record(value);
+  return {
+    hourStart: string(candidate.hourStart),
+    activeSeconds: nonnegativeInteger(candidate.activeSeconds),
+    agentSeconds: nonnegativeInteger(candidate.agentSeconds),
   };
 };
 
@@ -608,7 +631,8 @@ export const decodeMeStats = (value: unknown): MeStats => {
   const projects = candidate.projects;
   const apps = candidate.apps;
   const byAgent = candidate.byAgent;
-  if (!Array.isArray(projects) || !Array.isArray(apps) || !Array.isArray(byAgent)) invalidResponse();
+  const hourly = candidate.hourly;
+  if (!Array.isArray(projects) || !Array.isArray(apps) || !Array.isArray(byAgent) || !Array.isArray(hourly)) invalidResponse();
   const totalDurationSeconds = nonnegativeInteger(candidate.totalDurationSeconds);
   const attributedSeconds = nonnegativeInteger(candidate.attributedSeconds);
   if (attributedSeconds > totalDurationSeconds) invalidResponse();
@@ -621,6 +645,7 @@ export const decodeMeStats = (value: unknown): MeStats => {
     agentSeconds: nonnegativeInteger(candidate.agentSeconds),
     concurrency: decodeConcurrency(candidate.concurrency),
     byAgent: (byAgent as unknown[]).map(decodeAgentSplit),
+    hourly: (hourly as unknown[]).map(decodeHourlyBucket),
     projects: (projects as unknown[]).map(decodeMeStatsProject),
     apps: (apps as unknown[]).map(decodeMeStatsApp),
   };

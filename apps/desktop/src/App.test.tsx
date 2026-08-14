@@ -440,26 +440,25 @@ describe("today", () => {
     expect(within(panel).getByText("VS Code")).toBeInTheDocument();
   });
 
-  it("gives a background-only runtime its own row beside the folded agent row", async () => {
+  it("lists every model in the agent sessions table, including background-only runtimes", async () => {
     const person = userEvent.setup();
     render(<App bridge={bridgeFor({
       meStats: vi.fn().mockResolvedValue({
         ...meStats,
         apps: [{ processName: "claude.exe", durationSeconds: 3_600 }],
         byAgent: [
-          { source: "claude_code", model: "claude-fable-5", durationSeconds: 3_000 },
-          { source: "codex", model: null, durationSeconds: 600 },
+          { source: "claude_code", model: "claude-fable-5", durationSeconds: 3_000, sessionCount: 4, maxConcurrent: 2, medianSeconds: 750 },
+          { source: "codex", model: null, durationSeconds: 600, sessionCount: 1, maxConcurrent: 1, medianSeconds: 600 },
         ],
       }),
     })} />);
 
     const panel = await openAllStats(person);
-    const rows = within(await within(panel).findByTestId("member-app-list")).getAllByRole("listitem");
-    const claude = rows.find((row) => row.textContent?.includes("Claude Code"));
-    const codex = rows.find((row) => row.textContent?.includes("Codex"));
-    expect(claude).toHaveTextContent("claude-fable-5 50m");
-    expect(claude).not.toHaveTextContent("Codex 10m");
-    expect(codex).toHaveTextContent("Codex 10m");
+    const sessions = await within(panel).findByTestId("agent-sessions");
+    expect(sessions).toHaveTextContent("claude-fable-5");
+    expect(sessions).toHaveTextContent("Codex");
+    // The app row still folds the CLI into one friendly "Claude Code" row.
+    expect(within(panel).getByText("Claude Code")).toBeInTheDocument();
   });
 });
 
@@ -909,10 +908,12 @@ describe("the team board", () => {
     expect(await within(stats).findByText("Blender")).toBeInTheDocument();
   });
 
-  it("writes the concurrency line in plain words and drops empty buckets", async () => {
+  it("writes the breakdown in plain words and drops empty agent buckets", async () => {
     const bridge = bridgeFor({
       meStats: vi.fn().mockResolvedValue({
         ...meStats,
+        activeSeconds: 14_400,
+        agentSeconds: 21_600,
         concurrency: { t0Seconds: 3_600, t1Seconds: 3_600, t2Seconds: 0, t3PlusSeconds: 5_400, awaySeconds: 1_800 },
       }),
     });
@@ -921,20 +922,26 @@ describe("the team board", () => {
 
     const panel = await openAllStats(person);
     const stats = within(panel).getByTestId("member-stats");
-    const line = within(stats).getByTestId("concurrency-line");
-    expect(line).toHaveTextContent("Solo 1h 00m · 1 agent 1h 00m · 3+ agents 1h 30m · Agents while away 30m");
-    expect(line).not.toHaveTextContent("Unassisted");
-    expect(line).not.toHaveTextContent("2 agents");
-    expect(line).not.toHaveTextContent("0s");
+    const breakdown = within(stats).getByTestId("breakdown");
+    expect(breakdown).toHaveTextContent("Human work");
+    expect(breakdown).toHaveTextContent("With 1 agent");
+    expect(breakdown).toHaveTextContent("With 3+ agents");
+    expect(breakdown).toHaveTextContent("1h 30m");
+    expect(breakdown).toHaveTextContent("Agents while away");
+    expect(breakdown).toHaveTextContent("30m");
+    expect(breakdown).not.toHaveTextContent("With 2 agents");
   });
 
-  it("hides the concurrency line when every bucket is empty", async () => {
+  it("keeps the breakdown quiet when there is nothing recorded", async () => {
     const person = userEvent.setup();
     render(<App bridge={bridgeFor()} />);
 
     const panel = await openAllStats(person);
     const stats = within(panel).getByTestId("member-stats");
-    expect(within(stats).queryByTestId("concurrency-line")).not.toBeInTheDocument();
+    const breakdown = within(stats).getByTestId("breakdown");
+    expect(breakdown).toHaveTextContent("Human work");
+    expect(breakdown).not.toHaveTextContent("Total agent time");
+    expect(within(stats).queryByTestId("agent-sessions")).not.toBeInTheDocument();
   });
 
   it("offers a way back to your own breakdown after picking a teammate", async () => {

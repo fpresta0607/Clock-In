@@ -33,9 +33,10 @@ const memberStats = {
   agentSeconds: 3_600,
   concurrency: { t0Seconds: 3_600, t1Seconds: 3_600, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
   byAgent: [
-    { source: "claude_code", model: "claude-fable-5", durationSeconds: 3_000 },
-    { source: "claude_code", model: null, durationSeconds: 600 },
+    { source: "claude_code", model: "claude-fable-5", durationSeconds: 3_000, sessionCount: 4, maxConcurrent: 2, medianSeconds: 750 },
+    { source: "claude_code", model: null, durationSeconds: 600, sessionCount: 1, maxConcurrent: 1, medianSeconds: 600 },
   ],
+  hourly: [],
   projects: [
     { project: { id: "p1", name: "General" }, durationSeconds: 7_200, attributedSeconds: 5_400, unattributedSeconds: 1_800, sessionCount: 3 },
   ],
@@ -372,18 +373,22 @@ describe("dashboard", () => {
     // You are the highlighted row from the start.
     expect(await board.findByRole("button", { name: /Alex/ })).toHaveAttribute("aria-pressed", "true");
     const stats = within(await screen.findByRole("region", { name: /Alex · Last 30 days/ }));
-    // The headline is active time; the project row repeats other numbers.
-    expect(await stats.findByText("2h 00m", { selector: "strong" })).toBeInTheDocument();
-    // The two cuts stay visibly apart: concurrency sums to active time, the
-    // by-agent split rides on its runtime's row and sums to agent time.
-    // Plain words, and only the buckets with time in them - no "2 agents 0s".
-    expect(stats.getByTestId("concurrency-line")).toHaveTextContent("Solo 1h 00m · 1 agent 1h 00m");
-    expect(stats.getByTestId("concurrency-line")).not.toHaveTextContent("0s");
-    // A model names its own runtime; a null model falls back to the source label.
-    expect(stats.getByTestId("agent-note")).toHaveTextContent("claude-fable-5 50m · Claude Code 10m");
+    // The breakdown leads with active time and splits it into human work and
+    // the agent-assisted buckets that actually have time in them.
+    const breakdown = stats.getByTestId("breakdown");
+    expect(breakdown).toHaveTextContent("Active time");
+    expect(breakdown).toHaveTextContent("2h 00m");
+    expect(breakdown).toHaveTextContent("Human work");
+    expect(breakdown).toHaveTextContent("With 1 agent");
+    expect(breakdown).not.toHaveTextContent("With 2 agents");
+    expect(breakdown).not.toHaveTextContent("Agents while away");
+    // The model table lists what ran, how many sessions, and their lengths.
+    const sessions = stats.getByTestId("agent-sessions");
+    expect(sessions).toHaveTextContent("claude-fable-5");
+    expect(sessions).toHaveTextContent("Claude Code");
     expect(stats.getByText("General")).toBeInTheDocument();
     // claude.exe reads as the tool it is, so the team sees Claude usage plainly.
-    expect(stats.getByText("Claude Code")).toBeInTheDocument();
+    expect(stats.getAllByText("Claude Code").length).toBeGreaterThan(0);
     expect(stats.getByText("VS Code")).toBeInTheDocument();
     expect(stats.getByText(/30m of that landed in the default project/)).toBeInTheDocument();
   });
@@ -397,23 +402,31 @@ describe("dashboard", () => {
     }));
 
     const stats = within(await screen.findByRole("region", { name: /Alex · Last 30 days/ }));
-    const line = stats.getByTestId("concurrency-line");
-    expect(line).toHaveTextContent("3+ agents 1h 30m · Agents while away 30m");
-    expect(line).not.toHaveTextContent("Solo");
-    expect(line).not.toHaveTextContent("2 agents");
-    expect(line).not.toHaveTextContent("0s");
+    const breakdown = stats.getByTestId("breakdown");
+    expect(breakdown).toHaveTextContent("With 3+ agents");
+    expect(breakdown).toHaveTextContent("1h 30m");
+    expect(breakdown).toHaveTextContent("Agents while away");
+    expect(breakdown).toHaveTextContent("30m");
+    expect(breakdown).not.toHaveTextContent("With 2 agents");
+    expect(breakdown).not.toHaveTextContent("With 1 agent");
   });
 
-  it("hides the concurrency line when every bucket is empty", async () => {
+  it("keeps the breakdown quiet when there is nothing recorded", async () => {
     await signIn(clientFor({
       meStats: vi.fn().mockResolvedValue({
         ...memberStats,
+        activeSeconds: 0,
+        agentSeconds: 0,
         concurrency: { t0Seconds: 0, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
+        byAgent: [],
       }),
     }));
 
     const stats = within(await screen.findByRole("region", { name: /Alex · Last 30 days/ }));
-    expect(stats.queryByTestId("concurrency-line")).not.toBeInTheDocument();
+    const breakdown = stats.getByTestId("breakdown");
+    expect(breakdown).toHaveTextContent("Human work");
+    expect(breakdown).not.toHaveTextContent("Total agent time");
+    expect(stats.queryByTestId("agent-sessions")).not.toBeInTheDocument();
   });
 
   it("follows whichever member gets picked on the board", async () => {

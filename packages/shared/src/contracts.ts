@@ -131,12 +131,38 @@ export const concurrencySchema = z
   })
   .strict();
 
-/** One agent runtime's share of a person's agent time; sums to agentSeconds, never to activeSeconds. */
+/**
+ * One agent runtime's share of a person's agent time; sums to agentSeconds,
+ * never to activeSeconds. A row folds together every session of one
+ * (runtime, model) pair, so it also carries the session-level facts the
+ * monitoring table needs: how many sessions that was, the peak number that
+ * ran at once, and the median session length.
+ */
 export const agentSplitSchema = z
   .object({
     source: agentSourceSchema,
     model: z.string().min(1).max(200).nullable(),
     durationSeconds: z.number().int().nonnegative().safe(),
+    /** How many agent sessions this row folds together, clipped to the range. */
+    sessionCount: z.number().int().nonnegative().safe(),
+    /** Peak number of these sessions running at the same moment in the range. */
+    maxConcurrent: z.number().int().nonnegative().safe(),
+    /** Median length of those sessions, in seconds; 0 with no sessions. */
+    medianSeconds: z.number().int().nonnegative().safe(),
+  })
+  .strict();
+
+/**
+ * One hour of the caller's local calendar for the line graphs: active time
+ * and agent runtime bucketed to the hour, so the chart's x-axis reads
+ * midnight-to-midnight on the viewer's clock rather than UTC's.
+ */
+export const hourlyBucketSchema = z
+  .object({
+    /** Inclusive start of the hour, an instant on the caller's local calendar. */
+    hourStart: timestampSchema,
+    activeSeconds: z.number().int().nonnegative().safe(),
+    agentSeconds: z.number().int().nonnegative().safe(),
   })
   .strict();
 
@@ -585,6 +611,8 @@ export const meStatsResponseSchema = z
     agentSeconds: z.number().int().nonnegative().safe(),
     concurrency: concurrencySchema,
     byAgent: z.array(agentSplitSchema),
+    /** Hourly time series for the line graphs; empty when there is nothing to plot. */
+    hourly: z.array(hourlyBucketSchema),
     projects: z.array(meStatsProjectSchema),
     /** Per-foreground-process totals, heaviest first; the producer sorts, the schema only validates. */
     apps: z.array(meStatsAppSchema),
@@ -635,6 +663,7 @@ export type CurrentSessionResponse = z.infer<typeof currentSessionResponseSchema
 export type JoinOrganizationRequest = z.infer<typeof joinOrganizationRequestSchema>;
 export type AgentSplit = z.infer<typeof agentSplitSchema>;
 export type Concurrency = z.infer<typeof concurrencySchema>;
+export type HourlyBucket = z.infer<typeof hourlyBucketSchema>;
 export type LeaderboardEntry = z.infer<typeof leaderboardEntrySchema>;
 export type ProjectDeleteRequest = z.infer<typeof projectDeleteRequestSchema>;
 export type ProjectScope = z.infer<typeof projectScopeSchema>;
