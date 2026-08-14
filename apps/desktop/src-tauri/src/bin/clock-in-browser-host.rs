@@ -18,7 +18,6 @@ use clock_in_desktop_lib::browser::{
 use clock_in_desktop_lib::native_messaging::{self, Frame};
 use clock_in_desktop_lib::spool::{self, AgentEventKind, SpoolEvent};
 use serde_json::{json, Map, Value};
-use uuid::Uuid;
 
 fn main() {
     let dir = spool::browser_dir();
@@ -139,6 +138,32 @@ fn read_rules(dir: &Path) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+fn is_canonical_uuid(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 36
+        && b[8] == b'-'
+        && b[13] == b'-'
+        && b[18] == b'-'
+        && b[23] == b'-'
+        && b.iter()
+            .enumerate()
+            .all(|(i, &byte)| matches!(i, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit())
+}
+
+fn is_strict_rfc3339(s: &str) -> bool {
+    if DateTime::parse_from_rfc3339(s).is_err() {
+        return false;
+    }
+    let b = s.as_bytes();
+    if !s.is_ascii() || b.get(10) != Some(&b'T') || s.ends_with('z') {
+        return false;
+    }
+    if b.get(17) == Some(&b'6') && b.get(18) == Some(&b'0') {
+        return false;
+    }
+    true
+}
+
 /// A span verdict: append it to the browser spool and acknowledge. A verdict
 /// for a collection the app no longer admits is answered with `span-retry`,
 /// which makes the extension reconnect and re-sync its collection state rather
@@ -157,8 +182,8 @@ fn span_reply(dir: &Path, message: &Value) -> Option<Value> {
     let occurred_at = event.get("occurredAt")?.as_str()?;
     if external_session_id.is_empty()
         || external_session_id.len() > 200
-        || Uuid::parse_str(rule_id).is_err()
-        || DateTime::parse_from_rfc3339(occurred_at).is_err()
+        || !is_canonical_uuid(rule_id)
+        || !is_strict_rfc3339(occurred_at)
     {
         return None;
     }
@@ -322,5 +347,72 @@ mod tests {
             reply.as_ref().and_then(|value| value.get("collectionId")),
             Some(&json!("some-collection"))
         );
+    }
+
+    #[test]
+    fn malformed_span_fields_are_dropped() {
+        let dir = temp_dir("span-validate");
+
+        let reply_for = |rule_id: &str, occurred_at: &str| {
+            span_reply(
+                &dir,
+                &json!({
+                    "type": "span-event",
+                    "collectionId": "some-collection",
+                    "event": {
+                        "event": "started",
+                        "externalSessionId": "s1",
+                        "ruleId": rule_id,
+                        "occurredAt": occurred_at,
+                    },
+                }),
+            )
+        };
+
+        assert!(reply_for(
+            "00000000-0000-0000-0000-000000000001",
+            "2026-08-06T13:30:00.000Z"
+        )
+        .is_some());
+        assert!(reply_for(
+            "00000000000000000000000000000001",
+            "2026-08-06T13:30:00.000Z"
+        )
+        .is_none());
+        assert!(reply_for(
+            "urn:uuid:00000000-0000-0000-0000-000000000001",
+            "2026-08-06T13:30:00.000Z"
+        )
+        .is_none());
+        assert!(reply_for(
+            "{00000000-0000-0000-0000-000000000001}",
+            "2026-08-06T13:30:00.000Z"
+        )
+        .is_none());
+        assert!(reply_for(
+            "00000000-0000-0000-0000-000000000001",
+            "2026-08-06 13:30:00+00:00"
+        )
+        .is_none());
+        assert!(reply_for(
+            "00000000-0000-0000-0000-000000000001",
+            "2026-08-06t13:30:00Z"
+        )
+        .is_none());
+        assert!(reply_for(
+            "00000000-0000-0000-0000-000000000001",
+            "2026-08-06T13:30:00z"
+        )
+        .is_none());
+        assert!(reply_for(
+            "00000000-0000-0000-0000-000000000001",
+            "2026-08-06T23:59:60Z"
+        )
+        .is_none());
+        assert!(reply_for(
+            "00000000-0000-0000-0000-000000000001",
+            "2026-08-06T13:30:00\u{2212}05:00"
+        )
+        .is_none());
     }
 }
