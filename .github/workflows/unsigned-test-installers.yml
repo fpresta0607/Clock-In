@@ -2,10 +2,10 @@ name: Unsigned test installers
 
 # Builds desktop installers with NO signing, uploads them as workflow-run
 # artifacts, and (on a deliberate `workflow_dispatch` only) republishes the
-# `unsigned-latest` **prerelease** so the website has something anonymous
-# visitors can actually download.
+# `unsigned-latest` release so the website has something anonymous visitors
+# can actually download.
 #
-# Why a prerelease and not the run artifact: GitHub requires authentication to
+# Why a release and not the run artifact: GitHub requires authentication to
 # download a workflow artifact, so a raw artifact URL is useless to a signed-out
 # visitor. Release assets are public on a public repo. The tag is fixed and the
 # asset names are fixed, so `releases/download/unsigned-latest/<asset>` is a
@@ -94,10 +94,13 @@ jobs:
       - name: Build the hook helper
         run: cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml --bin clock-in-hook
 
-      # `externalBin` resolves `binaries/<name>-<target-triple>`, so the helper
-      # has to sit there under that name before the bundler runs. Same staging
+      - name: Build the browser host helper
+        run: cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml --bin clock-in-browser-host
+
+      # `externalBin` resolves `binaries/<name>-<target-triple>`, so the helpers
+      # have to sit there under that name before the bundler runs. Same staging
       # rule as the release workflow, minus the signing.
-      - name: Stage the hook helper for bundling
+      - name: Stage the helpers for bundling
         shell: bash
         run: |
           set -euo pipefail
@@ -109,6 +112,8 @@ jobs:
           mkdir -p apps/desktop/src-tauri/binaries
           cp "apps/desktop/src-tauri/target/debug/clock-in-hook$suffix" \
             "apps/desktop/src-tauri/binaries/clock-in-hook-$triple$suffix"
+          cp "apps/desktop/src-tauri/target/debug/clock-in-browser-host$suffix" \
+            "apps/desktop/src-tauri/binaries/clock-in-browser-host-$triple$suffix"
 
       # The updater only offers a build whose semver is strictly higher than
       # the installed one, so every run needs its own version. `run_number`
@@ -329,16 +334,16 @@ jobs:
 
       # Edit-or-create, never delete-and-recreate: deleting would leave the
       # published download URL 404ing for the length of the upload.
-      - name: Publish the prerelease
+      - name: Publish the release
         shell: bash
         run: |
           set -euo pipefail
           title="Unsigned test build $VERSION"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --title "$title" --notes-file release-notes.md \
-              --prerelease --target "${{ github.sha }}"
+              --target "${{ github.sha }}"
           else
             gh release create "$TAG" --title "$title" --notes-file release-notes.md \
-              --prerelease --target "${{ github.sha }}"
+              --target "${{ github.sha }}"
           fi
           gh release upload "$TAG" release-assets/* --clobber

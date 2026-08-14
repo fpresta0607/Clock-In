@@ -6,7 +6,7 @@ import type {
   PathMappingRepository,
   SessionRepository,
 } from "../repositories.js";
-import { resolveProjectForCwd, type PathMappingCandidate } from "./attribution.js";
+import { resolveProjectForCwd, resolveProjectForRule, type PathMappingCandidate } from "./attribution.js";
 
 const futureEventToleranceMs = 30_000;
 const defaultStaleThresholdMs = 6 * 60 * 60 * 1_000;
@@ -24,6 +24,8 @@ export interface AgentSessionEventInput {
   event: "started" | "ended" | "heartbeat";
   occurredAt: Date;
   cwd: string;
+  /** The matched url-rule mapping id for browser spans; null for agent events. */
+  ruleId: string | null;
 }
 
 export interface AgentSessionServiceDependencies {
@@ -82,6 +84,10 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
       };
 
       const results: AgentSessionEventBatchResponse["results"] = [];
+      const resolveProject = (event: AgentSessionEventInput, mappings: PathMappingCandidate[]): string | null =>
+        event.source === "browser"
+          ? (event.ruleId === null ? null : resolveProjectForRule(event.ruleId, mappings))
+          : resolveProjectForCwd(event.cwd, mappings);
       for (const event of events) {
         const occurredAt = event.occurredAt.getTime();
         if (!Number.isFinite(occurredAt)) {
@@ -94,7 +100,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
         }
 
         if (event.event === "started") {
-          const projectId = resolveProjectForCwd(event.cwd, await loadMappings());
+          const projectId = resolveProject(event, await loadMappings());
           let linkedSessionId: string | null = null;
           if (projectId !== null) {
             const running = await dependencies.sessions.findRunning(subject);
@@ -107,6 +113,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
             model: event.model,
             externalSessionId: event.externalSessionId,
             cwd: event.cwd,
+            ruleId: event.ruleId,
             projectId,
             linkedSessionId,
             occurredAt: event.occurredAt,
@@ -116,7 +123,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
           const existing = await dependencies.agentSessions.findByExternalKey(subject, event.source, event.externalSessionId);
           if (existing === null) {
             // End-before-start is tolerated: the row is stored directly as ended.
-            const projectId = resolveProjectForCwd(event.cwd, await loadMappings());
+            const projectId = resolveProject(event, await loadMappings());
             await dependencies.agentSessions.insertEnded({
               organizationId: subject.organizationId,
               userId: subject.userId,
@@ -124,6 +131,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
               model: event.model,
               externalSessionId: event.externalSessionId,
               cwd: event.cwd,
+              ruleId: event.ruleId,
               projectId,
               occurredAt: event.occurredAt,
               receivedAt: now,

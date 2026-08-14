@@ -6,6 +6,7 @@ import { sourceLabel } from "./agent-sources.js";
 import {
   bridgeError,
   defaultBridge,
+  type BrowserHealth,
   type MeStats,
   type MeStatsApp,
   type MonitorSettings,
@@ -432,6 +433,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [newProjectError, setNewProjectError] = useState<string | undefined>();
   /// Manual hook-setup snippets returned by `hookRegister`, keyed by CLI source.
   const [hookSnippets, setHookSnippets] = useState<Readonly<Record<string, string>>>({});
+  /// One card per installed browser, refreshed while the recording panel is open.
+  const [browsers, setBrowsers] = useState<readonly BrowserHealth[]>([]);
   const latestBridge = useRef(bridge);
   const mounted = useRef(true);
   const bridgeGeneration = useRef(0);
@@ -751,6 +754,27 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     return () => { active = false; window.clearInterval(timer); };
   }, [bridge, signedIn?.user.id]);
 
+  // The browser cards' connection state changes only when a browser launches
+  // the host, so it is polled while the panel is open rather than always.
+  // Failures leave the last cards rather than blanking the list.
+  useEffect(() => {
+    if (!recordingOpen) return undefined;
+    let active = true;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const poll = (): void => {
+      void service.browserStatus().then(
+        (next) => {
+          if (active && isCurrent(service, generation)) setBrowsers(next);
+        },
+        () => undefined,
+      );
+    };
+    poll();
+    const timer = window.setInterval(poll, MONITOR_POLL_MS);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [bridge, recordingOpen]);
+
   // Settings only load while the settings overlay is open.
   useEffect(() => {
     if (!settingsOpen) return undefined;
@@ -933,6 +957,33 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       }
       const status = await service.monitorStatus();
       if (isCurrent(service, generation)) applyStatus(status);
+    } catch (error: unknown) {
+      if (isCurrent(service, generation)) setSettingsError(bridgeError(error).message);
+    }
+  };
+
+  /// Opens the browser's extension store page; the one step a person must take
+  /// because the browser will not let anyone install an extension for them.
+  const openBrowserStore = (browserId: string): void => {
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    setSettingsError(undefined);
+    void service.browserOpenStore(browserId).catch((error: unknown) => {
+      if (isCurrent(service, generation)) setSettingsError(bridgeError(error).message);
+    });
+  };
+
+  /// Re-registers the host for one browser, then re-reads the cards from the
+  /// answer so a repaired row flips immediately.
+  const repairBrowser = async (browserId: string): Promise<void> => {
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    setSettingsError(undefined);
+    try {
+      await service.browserRepair(browserId);
+      if (!isCurrent(service, generation)) return;
+      const next = await service.browserStatus();
+      if (isCurrent(service, generation)) setBrowsers(next);
     } catch (error: unknown) {
       if (isCurrent(service, generation)) setSettingsError(bridgeError(error).message);
     }
@@ -1784,8 +1835,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         projectName={currentProject?.name}
         defaultProjectName={defaultProject?.name}
         hookSnippets={hookSnippets}
+        browsers={browsers}
         onTurnOnRecording={() => void applyRecordingEnabled(true)}
         onConnectAgent={(source) => void registerHook(source)}
+        onConnectBrowser={openBrowserStore}
+        onRepairBrowser={(browserId) => void repairBrowser(browserId)}
       />
     </main>
   );

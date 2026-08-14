@@ -909,6 +909,32 @@ pub fn record_capture_paused(dir: &Path, collection_id: &str) -> io::Result<()> 
     })
 }
 
+/// Writes the extension's unmatched-origin tally so the desktop can surface it
+/// as URL-rule suggestions. Called by `clock-in-browser-host` on the
+/// extension's `tally` message; the desktop reads it back through
+/// `read_suggestions`. Guarded by the admitted collection like every other
+/// host write, so a stale extension process cannot scribble over a newer one's
+/// tally.
+pub fn record_tally(
+    dir: &Path,
+    collection_id: &str,
+    week_start: u64,
+    entries: &[TallyEntry],
+) -> io::Result<()> {
+    let spool = browser_spool_path(dir);
+    spool::with_lock(&spool, || {
+        if admitted_collection_id_locked(dir).as_deref() != Some(collection_id) {
+            return Ok(());
+        }
+        let body = serde_json::to_vec_pretty(&serde_json::json!({
+            "weekStart": week_start,
+            "entries": entries,
+        }))
+        .map_err(io::Error::other)?;
+        write_if_changed_locked(&dir.join("unmatched-tally.json"), &body)
+    })
+}
+
 pub fn capture_is_paused(dir: &Path) -> bool {
     let spool = browser_spool_path(dir);
     spool::with_lock(&spool, || {
@@ -1256,7 +1282,7 @@ fn unique_temp(path: &Path) -> PathBuf {
 }
 
 /// One suggestion the tally earns: an unmatched origin and its focused seconds.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TallyEntry {
     pub origin: String,

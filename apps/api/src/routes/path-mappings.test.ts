@@ -191,7 +191,7 @@ describe("path-mapping routes", () => {
     await expect(duplicate.json()).resolves.toEqual({ error: { code: "conflict", message: "A path mapping already exists for this prefix." } });
   });
 
-  it("accepts url_rule patterns through the shared contract and stores them as path_prefix while browser support is deferred", async () => {
+  it("stores url_rule patterns under their kind for browser attribution", async () => {
     const headers = { authorization: bearerHeader, "content-type": "application/json" };
     const app = createTestApp();
 
@@ -200,7 +200,7 @@ describe("path-mapping routes", () => {
     });
     expect(created.status).toBe(200);
     await expect(created.json()).resolves.toEqual({
-      id: expect.any(String), kind: "path_prefix", pathPrefix: "github.com/acme/*", repoUrl: null, projectId: ids.project,
+      id: expect.any(String), kind: "url_rule", pathPrefix: "github.com/acme/*", repoUrl: null, projectId: ids.project,
     });
 
     // A duplicate pattern conflicts, exactly like duplicate prefixes.
@@ -219,7 +219,7 @@ describe("path-mapping routes", () => {
     }
   });
 
-  it("updates a path mapping pathPrefix and ignores kind changes", async () => {
+  it("updates a path mapping's pattern while preserving its kind when none is sent", async () => {
     const headers = { authorization: bearerHeader, "content-type": "application/json" };
     const app = createTestApp();
 

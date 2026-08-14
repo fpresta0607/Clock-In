@@ -2,7 +2,7 @@ import { useEffect } from "react";
 
 import { AgentRuntimeIcon } from "./agent-icons.js";
 import { sourceLabel } from "./agent-sources.js";
-import type { MonitorStatus } from "./bridge.js";
+import type { BrowserHealth, MonitorStatus } from "./bridge.js";
 
 /// What the panel says is happening right now. `paused` is "switched on but
 /// the host is not running the tasks" (signed out, unsupported platform);
@@ -77,8 +77,14 @@ type RecordingPanelProps = {
   /// Paste-it-yourself instructions from a `Connect` that could not merge,
   /// keyed by CLI source.
   hookSnippets: Readonly<Record<string, string>>;
+  /// One card per installed browser, in the state order a setup flows through.
+  browsers: ReadonlyArray<BrowserHealth>;
   onTurnOnRecording: () => void;
   onConnectAgent: (source: string) => void;
+  /// The [Add extension] click: open that browser's store page.
+  onConnectBrowser: (browserId: string) => void;
+  /// The [Repair] click: re-register the host for that browser.
+  onRepairBrowser: (browserId: string) => void;
 };
 
 /**
@@ -94,8 +100,11 @@ export const RecordingPanel = ({
   projectName,
   defaultProjectName,
   hookSnippets,
+  browsers,
   onTurnOnRecording,
   onConnectAgent,
+  onConnectBrowser,
+  onRepairBrowser,
 }: RecordingPanelProps) => {
   useEffect(() => {
     if (!open) return undefined;
@@ -113,6 +122,9 @@ export const RecordingPanel = ({
     ? 0
     : status.segmentBacklog + status.agentBacklog + status.sessionBacklog;
   const current = status?.currentSession ?? null;
+  // A browser without a released extension id is not installed to connect, so
+  // it contributes no card.
+  const visibleBrowsers = browsers.filter((browser) => browser.state !== "disabled");
 
   return (
     <div className="modal-overlay recording-overlay" onClick={onClose}>
@@ -209,7 +221,42 @@ export const RecordingPanel = ({
                 </li>
               ))}
             </ul>
-            <p className="subtle">Nothing else is connected. Clock-In does not watch your web browser.</p>
+            {visibleBrowsers.length === 0 ? (
+              <p className="subtle">Nothing else is connected. Clock-In does not watch your web browser.</p>
+            ) : (
+              <ul className="source-list">
+                {visibleBrowsers.map((browser) => (
+                  <li key={browser.browser} className="source-row">
+                    <span className="source-name">{browser.label}</span>
+                    {browser.state === "connected" ? (
+                      <span className="source-state is-on">Connected</span>
+                    ) : browser.state === "registered" ? (
+                      <>
+                        <span className="source-state is-off">Not connected</span>
+                        <button
+                          type="button"
+                          className="source-fix"
+                          onClick={() => onConnectBrowser(browser.browser)}
+                        >
+                          Add extension
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="source-state is-off">Needs a hand</span>
+                        <button
+                          type="button"
+                          className="source-fix"
+                          onClick={() => onRepairBrowser(browser.browser)}
+                        >
+                          Repair
+                        </button>
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
           </>
         )}
 

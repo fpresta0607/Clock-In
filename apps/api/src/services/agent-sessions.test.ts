@@ -50,9 +50,11 @@ class MemoryAgentSessions implements AgentSessionRepository {
       organizationId: input.organizationId,
       userId: input.userId,
       source: input.source,
+      model: input.model,
       externalSessionId: input.externalSessionId,
       projectId: input.projectId,
       cwd: input.cwd,
+      ruleId: input.ruleId,
       status: "running",
       startedAt: input.occurredAt,
       endedAt: null,
@@ -81,9 +83,11 @@ class MemoryAgentSessions implements AgentSessionRepository {
       organizationId: input.organizationId,
       userId: input.userId,
       source: input.source,
+      model: input.model,
       externalSessionId: input.externalSessionId,
       projectId: input.projectId,
       cwd: input.cwd,
+      ruleId: input.ruleId,
       status: "ended",
       startedAt: input.occurredAt,
       endedAt: input.occurredAt,
@@ -155,6 +159,7 @@ function event(overrides: Partial<AgentSessionEventInput> = {}): AgentSessionEve
     event: "started",
     occurredAt: new Date("2026-08-06T13:30:00.000Z"),
     cwd: "C:/dev/clock-in",
+    ruleId: null,
     ...overrides,
   };
 }
@@ -177,7 +182,7 @@ function createService(options: {
   return { agentSessions, service };
 }
 
-const mapped = { id: "f1c7e513-b094-4d4c-ae55-21790ae019a4", organizationId: ids.organization, userId: ids.user, pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project };
+const mapped: PathMappingRecord = { id: "f1c7e513-b094-4d4c-ae55-21790ae019a4", organizationId: ids.organization, userId: ids.user, kind: "path_prefix", pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project };
 
 describe("agent-session service", () => {
   it("starts a running row attributed by cwd and linked to a matching running timer", async () => {

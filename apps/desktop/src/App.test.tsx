@@ -125,6 +125,9 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   // The default is "the host cannot report": every recording surface stays
   // quiet rather than claiming something it cannot see.
   monitorStatus: vi.fn().mockRejectedValue({ kind: "unknown", message: "Recording unavailable" }),
+  browserStatus: vi.fn().mockResolvedValue([]),
+  browserRepair: vi.fn().mockRejectedValue({ kind: "unknown", message: "Repair unavailable" }),
+  browserOpenStore: vi.fn().mockResolvedValue(undefined),
   sessionSelectProject: vi.fn().mockResolvedValue(status),
   hookRegister: vi.fn().mockResolvedValue({ status: "registered", configPath: "C:/Users/dev/.claude/settings.json" }),
   monitorSetEnabled: vi.fn().mockResolvedValue(settings),

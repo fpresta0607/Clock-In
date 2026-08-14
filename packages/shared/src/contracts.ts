@@ -449,17 +449,24 @@ export const agentSessionEventSchema = z
   })
   .strict()
   .superRefine((event, ctx) => {
-    if (event.ruleId !== undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Agent events carry a cwd and no ruleId.",
-      });
-    }
-    if (event.cwd === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Agent events carry a cwd and no ruleId.",
-      });
+    // Browser spans carry a `ruleId` and no `cwd`; agent events carry a `cwd`
+    // and no `ruleId`. Exactly one of the two, and the presence of `ruleId` is
+    // reserved for the `browser` source so a hook payload cannot smuggle a
+    // rule past the cwd resolver.
+    if (event.source === "browser") {
+      if (event.ruleId === undefined || event.cwd !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Browser spans carry a ruleId and no cwd.",
+        });
+      }
+    } else {
+      if (event.cwd === undefined || event.ruleId !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Agent events carry a cwd and no ruleId.",
+        });
+      }
     }
   });
 

@@ -502,6 +502,16 @@ pub fn active_browser_dir() -> Option<PathBuf> {
     active_identity().map(|identity| evidence_paths(&identity).browser_dir)
 }
 
+/// The browser directory both sides of the handoff use: the app writes the
+/// rules file and drains the browser spool here, and `clock-in-browser-host`
+/// reads rules and appends span verdicts here. Same identity-namespaced
+/// resolution as `agent_spool_path`, so the host and the app cannot disagree
+/// about where a browser span lives — exactly the class of bug where the host
+/// exits 0, writes where the uploader never looks, and browser time vanishes.
+pub fn browser_dir() -> PathBuf {
+    active_browser_dir().unwrap_or_else(default_browser_dir)
+}
+
 /// Which agent runtime produced an event.
 ///
 /// Deliberately not an enum. The roster in `agent_runtimes` decides what
@@ -964,6 +974,22 @@ pub fn truncate_acked(path: &Path, acked_bytes: u64) -> SpoolResult<()> {
             return Ok(());
         }
         rewrite(path, &content[acked_bytes as usize..])
+    })
+}
+
+/// Removes a spool and every generation and quarantine sibling under the
+/// interprocess lock. This is deliberate evidence destruction — a browser
+/// collection being revoked, say — not a drain: the whole spool goes, so a
+/// later re-enrollment cannot resurface stale spans.
+pub fn discard_locked(path: &Path) -> SpoolResult<()> {
+    with_lock(path, || {
+        for candidate in all_spool_paths_locked(path)? {
+            remove_if_exists(&candidate)?;
+        }
+        for tag in [".partial", ".corrupt"] {
+            remove_if_exists(&sibling(path, tag))?;
+        }
+        Ok(())
     })
 }
 

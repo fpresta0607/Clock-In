@@ -362,18 +362,19 @@ describe("Drizzle path-mapping repository", () => {
     await expect(repository.create({
       organizationId: input.organizationId,
       userId: input.userId,
+      kind: "path_prefix",
       pathPrefix: "C:/dev/clock-in",
       repoUrl: null,
       projectId: input.projectId,
     })).rejects.toMatchObject({ conflict: "path_prefix" });
   });
 
-  it("silently drops an unrecognized stored kind in favor of the default", async () => {
+  it("surfaces the stored mapping kind", async () => {
     const row = {
       id: "d1c7e513-b094-4d4c-ae55-21790ae019a4",
       organizationId: input.organizationId,
       userId: input.userId,
-      kind: "glob" as const,
+      kind: "url_rule" as const,
       pathPrefix: "example.com",
       repoUrl: null,
       projectId: input.projectId,
@@ -390,7 +391,7 @@ describe("Drizzle path-mapping repository", () => {
     const record = await repository.findById(subject, row.id);
     expect(record).not.toBeNull();
     expect(record!.pathPrefix).toBe("example.com");
-    expect(record).not.toHaveProperty("kind");
+    expect(record!.kind).toBe("url_rule");
   });
 
   it("lists mappings for a subject without a transaction-level membership guard", async () => {

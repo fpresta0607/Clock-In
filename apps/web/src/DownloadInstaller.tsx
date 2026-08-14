@@ -7,7 +7,7 @@ const downloadBase = "https://github.com/fpresta0607/Clock-In/releases/download/
  *
  * They are constants, not a GitHub API lookup, because
  * `.github/workflows/unsigned-test-installers.yml` republishes the
- * `unsigned-latest` prerelease under these exact file names on every run. The
+ * `unsigned-latest` release under these exact file names on every run. The
  * tag never moves and the names never change, so the newest build is always
  * behind the same URL. That buys us a link with no request, no loading state,
  * no empty-href flash, and nothing to break when GitHub's 60-per-hour

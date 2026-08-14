@@ -262,10 +262,28 @@ struct AgentEventBatchResponse {
 #[serde(rename_all = "camelCase")]
 pub struct PathMapping {
     pub id: String,
+    /// How the mapping matches: a filesystem path prefix (agent cwds), or a
+    /// browser URL rule (extension span verdicts). The two kinds share the
+    /// list endpoint but answer different questions, so the desktop must tell
+    /// them apart rather than running one matcher over both.
+    #[serde(default)]
+    pub kind: MappingKind,
     pub path_prefix: String,
     #[serde(default)]
     pub repo_url: Option<String>,
     pub project_id: String,
+}
+
+/// The two mapping kinds the server models. Kept beside `PathMapping` because
+/// the desktop reads both kinds from the one endpoint and filters per use.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MappingKind {
+    /// Matches an agent working directory by longest path-prefix.
+    #[default]
+    PathPrefix,
+    /// Matches a browser tab by URL-rule pattern; never a filesystem path.
+    UrlRule,
 }
 
 #[derive(Deserialize)]

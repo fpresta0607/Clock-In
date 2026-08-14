@@ -7,7 +7,11 @@
 mod agent_runtimes;
 mod api;
 mod app_icons;
+// Shared with the `clock-in-browser-host` binary; the host calls these from
+// its own `main`, and the app calls them to register the host and drain spans.
+pub mod browser;
 mod monitor;
+pub mod native_messaging;
 mod quota;
 mod recovery;
 mod uploader;
@@ -197,6 +201,14 @@ impl AppState {
         self.monitor.carry_over(&carried, &user_id);
         self.clear_recovery_for(&user_id).await?;
         self.monitor.ensure_running().await;
+        // Browser attribution is best-effort: recording must proceed even if
+        // the host cannot be enabled for this account right now.
+        if let Err(error) = browser::enable_collection(&spool::browser_dir(), &user_id) {
+            eprintln!(
+                "clock-in: could not enable browser attribution: {}",
+                error.message
+            );
+        }
         Ok(())
     }
 
@@ -370,6 +382,12 @@ async fn auth_logout(state: State<'_, AppState>) -> ApiResult<()> {
     state.monitor.stop().await;
     state.clear_session_token();
     state.monitor.clear_account();
+    if let Err(error) = browser::deactivate_collection(&spool::browser_dir()) {
+        eprintln!(
+            "clock-in: could not disable browser attribution: {}",
+            error.message
+        );
+    }
     Ok(())
 }
 
@@ -389,6 +407,59 @@ async fn session_select_project(
 #[tauri::command]
 async fn monitor_status(state: State<'_, AppState>) -> ApiResult<MonitorStatus> {
     Ok(state.monitor.status().await)
+}
+
+/// The browser cards' health: one entry per installed browser, in the state
+/// order a setup flows through. Only installed browsers appear, so an empty
+/// list means no supported browser is on this machine.
+#[tauri::command]
+async fn browser_status() -> Vec<browser::BrowserHealth> {
+    browser::health_all(&spool::browser_dir())
+}
+
+/// The [Fix] button's repair: re-register the host, then report the resulting
+/// health so the card updates from the answer rather than a second poll.
+#[tauri::command]
+async fn browser_repair(browser_id: String) -> ApiResult<browser::BrowserHealth> {
+    browser::repair(&spool::browser_dir(), &browser_id)
+}
+
+/// The [Add extension] button: open that browser's store page in the system
+/// browser. The host cannot install the extension for a person (no one may,
+/// by the browsers' design), so this is the one step that must leave the app.
+#[tauri::command]
+async fn browser_open_store(browser_id: String) -> ApiResult<()> {
+    let browser = browser::Browser::from_id(&browser_id)
+        .ok_or_else(|| BridgeError::new(ErrorKind::Validation, "Unknown browser."))?;
+    open_url(browser.store_url())
+        .map_err(|_| BridgeError::unknown("The extension store page could not be opened."))
+}
+
+/// Opens a URL in the OS default browser. Hand-rolled rather than a new
+/// dependency: the app targets one desktop at a time and these three
+/// invocations cover it.
+fn open_url(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/c", "start", "", url])
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+    }
 }
 
 /// Opt-in hook registration for one agent CLI, triggered from the settings
@@ -770,6 +841,12 @@ pub fn run() {
                 monitor,
                 quota: quota::QuotaMonitor::new(),
             });
+
+            // The browser host registers itself silently on every launch; a
+            // broken registration surfaces on the browser card, never blocks
+            // startup.
+            browser::ensure_registered(&spool::browser_dir());
+
             build_tray(app.handle())?;
 
             // The app keeps the machine's hours, so it registers to start
@@ -799,6 +876,9 @@ pub fn run() {
             org_join,
             session_select_project,
             monitor_status,
+            browser_status,
+            browser_repair,
+            browser_open_store,
             quota_status,
             hook_register,
             monitor_set_enabled,
