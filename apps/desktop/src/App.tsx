@@ -59,8 +59,8 @@ type AppRow = {
 const TOP_APP_ROWS = 8;
 
 /// Heaviest-first app rows for the Today card: agent CLIs fold into one row
-/// that never folds further into "Everything else" (its by-agent note needs
-/// the row to anchor to), and everything else past the top rows folds into
+/// that never folds further into "Everything else" (so the agent runtimes
+/// stay visible), and everything else past the top rows folds into
 /// "Everything else". Which executables count as an agent comes from the
 /// shared runtime roster, so a newly declared CLI folds in without a second
 /// list to remember.
@@ -88,8 +88,8 @@ const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
   }
   rows.sort((a, b) => b.durationSeconds - a.durationSeconds || a.label.localeCompare(b.label));
   if (rows.length <= TOP_APP_ROWS) return rows;
-  // The agent row never folds into the tail: the fold would strip the row
-  // that anchors the by-agent note and misfile the runtimes as background.
+  // The agent row never folds into the tail: the fold would hide the agent
+  // runtimes inside "Everything else".
   const kept = [...rows.slice(0, TOP_APP_ROWS), ...rows.slice(TOP_APP_ROWS).filter((row) => row.agent)];
   const rest = rows.slice(TOP_APP_ROWS).filter((row) => !row.agent)
     .reduce((sum, row) => sum + row.durationSeconds, 0);

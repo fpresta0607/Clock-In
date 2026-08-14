@@ -138,14 +138,25 @@ The leaderboard reports three measurements, deliberately distinct:
   leverage to show.
 
 Active time is then partitioned by **concurrency** — the share with no agent (t0), exactly
-one (t1), two (t2), or three-plus (t3+). An agent still working while the person is away
-feeds agent time only, never the person's hours. The per-agent split (Claude vs Codex, read
-from the data roster — nothing hardcoded) sums to agent time and renders as a muted note
-under each runtime's app row on both surfaces — a model names its part, and a null model
-falls back to the source label; a runtime that only ran in the background gets a row of its
-own. The concurrency split sums to active time and keeps its own line. One shared module,
+one (t1), two (t2), or three-plus (t3+). Both dashboards render that split as labeled rows,
+not one cramped sentence: **Human work** is the t0 bucket (no agent running), and the t1/t2/t3+
+rows are the agent-assisted share — still the person's hours, split by how many agents ran
+beside them at once. An agent still working while the person is away feeds agent time only,
+never the person's hours.
+
+The per-agent split (Claude vs Codex, read from the data roster — nothing hardcoded) is now an
+**agent-sessions table**, not a muted note: each (runtime, model) pair shows how many sessions
+ran, the peak number at once, the total runtime, and the median session length, with runtime
+and model as independent columns never derived from each other. The concurrency split sums to
+active time and the agent split sums to agent time; one shared module,
 `packages/shared/src/intervals.ts`, computes all of it so the invariants
 (`active = t0+t1+t2+t3+`, `agent = Σ n·tn + away`) hold everywhere.
+
+Both surfaces also chart active time and agent time per hour — agents in green, the person in
+gray — as lightweight SVG with no chart library. Hours are bucketed to the viewer's local
+midnight-to-midnight calendar, never UTC. The web dashboard reuses its existing
+today/7d/30d/90d range filter for the graph; **All time** is unbounded and has no graph — its
+full history lives in the CSV export. The desktop app charts the course of the day.
 
 The board lists every member of the workspace, not just the people with recorded time: a
 teammate whose range has no evidence reads as `0s`, never as missing.
