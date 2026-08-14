@@ -100,14 +100,14 @@ const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
 /// The human/agent split laid out as labeled rows instead of one cramped
 /// sentence: active time up top (Solo is now "Human work"), agent runtime
 /// below, and the leverage ratio as the agent-side headline.
-const MemberBreakdown = ({ stats }: { stats: MeStats }) => {
+const MemberBreakdown = ({ stats, self }: { stats: MeStats; self: boolean }) => {
   const { activeSeconds, agentSeconds, concurrency } = stats;
   const awaySeconds = concurrency.awaySeconds;
   const presentAgentSeconds = Math.max(0, agentSeconds - awaySeconds);
   const ratio = leverage(stats);
   return (
     <div className="breakdown" data-testid="breakdown">
-      <p className="group-label">Your active time — the hours you were at this computer</p>
+      <p className="group-label">{self ? "Your active time — the hours you were at this computer" : "Active time — the hours they were at this computer"}</p>
       <div className="metric-row is-headline">
         <span className="metric-name">Active time</span>
         <span className="metric-value">{formatHuman(activeSeconds)}</span>
@@ -140,15 +140,15 @@ const MemberBreakdown = ({ stats }: { stats: MeStats }) => {
       )}
       {agentSeconds > 0 && (
         <>
-          <p className="group-label">Agent runtime — summed, may exceed your hours</p>
+          <p className="group-label">{self ? "Agent runtime — summed, may exceed your hours" : "Agent runtime — summed, may exceed their hours"}</p>
           <div className="metric-row is-subtotal">
-            <span className="metric-name">While you were there</span>
+            <span className="metric-name">{self ? "While you were there" : "While they were there"}</span>
             <span className="metric-value">{formatHuman(presentAgentSeconds)}</span>
           </div>
           {awaySeconds > 0 && (
             <div className="metric-row">
               <span className="metric-swatch swatch-away" aria-hidden="true" />
-              <span className="metric-name">Agents while away <span className="metric-hint">(never your hours)</span></span>
+              <span className="metric-name">Agents while away <span className="metric-hint">({self ? "never your hours" : "never their hours"})</span></span>
               <span className="metric-value">{formatHuman(awaySeconds)}</span>
             </div>
           )}
@@ -1506,7 +1506,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                 <p className="today-total"><strong>{formatHuman(boardTotalSeconds)}</strong> recorded</p>
                 {boardMeasurement !== undefined && (
                   <>
-                    <MemberBreakdown stats={boardMeasurement} />
+                    <MemberBreakdown stats={boardMeasurement} self={viewingSelf} />
                     <AgentSessionsTable byAgent={boardMeasurement.byAgent} />
                   </>
                 )}

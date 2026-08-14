@@ -325,6 +325,11 @@ const nonnegativeInteger = (value: unknown): number => {
   return value as number;
 };
 
+const optionalNonnegativeInteger = (value: unknown): number => {
+  if (value === undefined || value === null) return 0;
+  return nonnegativeInteger(value);
+};
+
 const decodeUser = (value: unknown): TimerUser => {
   const candidate = record(value);
   return { id: uuid(candidate.id), email: string(candidate.email), name: string(candidate.name) };
@@ -610,9 +615,9 @@ const decodeAgentSplit = (value: unknown): MeStatsAgentSplit => {
     source: string(candidate.source),
     model: stringOrNull(candidate.model ?? null),
     durationSeconds: nonnegativeInteger(candidate.durationSeconds),
-    sessionCount: nonnegativeInteger(candidate.sessionCount),
-    maxConcurrent: nonnegativeInteger(candidate.maxConcurrent),
-    medianSeconds: nonnegativeInteger(candidate.medianSeconds),
+    sessionCount: optionalNonnegativeInteger(candidate.sessionCount),
+    maxConcurrent: optionalNonnegativeInteger(candidate.maxConcurrent),
+    medianSeconds: optionalNonnegativeInteger(candidate.medianSeconds),
   };
 };
 
@@ -632,7 +637,8 @@ export const decodeMeStats = (value: unknown): MeStats => {
   const apps = candidate.apps;
   const byAgent = candidate.byAgent;
   const hourly = candidate.hourly;
-  if (!Array.isArray(projects) || !Array.isArray(apps) || !Array.isArray(byAgent) || !Array.isArray(hourly)) invalidResponse();
+  if (!Array.isArray(projects) || !Array.isArray(apps) || !Array.isArray(byAgent)) invalidResponse();
+  if (hourly !== undefined && hourly !== null && !Array.isArray(hourly)) invalidResponse();
   const totalDurationSeconds = nonnegativeInteger(candidate.totalDurationSeconds);
   const attributedSeconds = nonnegativeInteger(candidate.attributedSeconds);
   if (attributedSeconds > totalDurationSeconds) invalidResponse();
@@ -645,7 +651,7 @@ export const decodeMeStats = (value: unknown): MeStats => {
     agentSeconds: nonnegativeInteger(candidate.agentSeconds),
     concurrency: decodeConcurrency(candidate.concurrency),
     byAgent: (byAgent as unknown[]).map(decodeAgentSplit),
-    hourly: (hourly as unknown[]).map(decodeHourlyBucket),
+    hourly: (Array.isArray(hourly) ? hourly : []).map(decodeHourlyBucket),
     projects: (projects as unknown[]).map(decodeMeStatsProject),
     apps: (apps as unknown[]).map(decodeMeStatsApp),
   };

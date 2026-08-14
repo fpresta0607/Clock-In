@@ -105,14 +105,14 @@ type HourlyBucket = MeStatsResponse["hourly"][number];
 /// The human/agent split laid out as labeled rows instead of one cramped
 /// sentence: active time up top (Solo is now "Human work"), agent runtime
 /// below, and the leverage ratio as the agent-side headline.
-const MemberBreakdown = ({ stats }: { stats: MeStatsResponse }) => {
+const MemberBreakdown = ({ stats, self }: { stats: MeStatsResponse; self: boolean }) => {
   const { activeSeconds, agentSeconds, concurrency } = stats;
   const awaySeconds = concurrency.awaySeconds;
   const presentAgentSeconds = Math.max(0, agentSeconds - awaySeconds);
   const ratio = leverage(stats);
   return (
     <div className="breakdown" data-testid="breakdown">
-      <p className="group-label">Your active time — the hours you were at this computer</p>
+      <p className="group-label">{self ? "Your active time — the hours you were at this computer" : "Active time — the hours they were at this computer"}</p>
       <div className="metric-row is-headline">
         <span className="metric-name">Active time</span>
         <span className="metric-value">{formatHumanDuration(activeSeconds)}</span>
@@ -145,15 +145,15 @@ const MemberBreakdown = ({ stats }: { stats: MeStatsResponse }) => {
       )}
       {agentSeconds > 0 && (
         <>
-          <p className="group-label">Agent runtime — summed, may exceed your hours</p>
+          <p className="group-label">{self ? "Agent runtime — summed, may exceed your hours" : "Agent runtime — summed, may exceed their hours"}</p>
           <div className="metric-row is-subtotal">
-            <span className="metric-name">While you were there</span>
+            <span className="metric-name">{self ? "While you were there" : "While they were there"}</span>
             <span className="metric-value">{formatHumanDuration(presentAgentSeconds)}</span>
           </div>
           {awaySeconds > 0 && (
             <div className="metric-row">
               <span className="metric-swatch swatch-away" aria-hidden="true" />
-              <span className="metric-name">Agents while away <span className="metric-hint">(never your hours)</span></span>
+              <span className="metric-name">Agents while away <span className="metric-hint">({self ? "never your hours" : "never their hours"})</span></span>
               <span className="metric-value">{formatHumanDuration(awaySeconds)}</span>
             </div>
           )}
@@ -207,7 +207,7 @@ const AgentSessionsTable = ({ byAgent }: { byAgent: MeStatsResponse["byAgent"] }
 /// Two-line SVG chart - agents in the brand green, the person in gray. No
 /// chart library: a fixed viewBox and two polylines are all a day needs, and
 /// the server already buckets to the caller's local hours.
-const HourlyGraph = ({ buckets }: { buckets: readonly HourlyBucket[] }) => {
+const HourlyGraph = ({ buckets, caption, personLabel = "You" }: { buckets: readonly HourlyBucket[]; caption?: string; personLabel?: string }) => {
   if (buckets.length === 0) return null;
   const width = 640;
   const height = 190;
@@ -232,6 +232,7 @@ const HourlyGraph = ({ buckets }: { buckets: readonly HourlyBucket[] }) => {
   });
   return (
     <div className="graph" data-testid="hourly-graph">
+      {caption !== undefined && <p className="graph-caption">{caption}</p>}
       <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Hourly active and agent time">
         <line x1={margin.left} y1={y(0)} x2={width - margin.right} y2={y(0)} stroke="rgba(163,179,194,.25)" />
         <line x1={margin.left} y1={y(yMax)} x2={width - margin.right} y2={y(yMax)} stroke="rgba(163,179,194,.12)" />
@@ -245,7 +246,7 @@ const HourlyGraph = ({ buckets }: { buckets: readonly HourlyBucket[] }) => {
       </svg>
       <ul className="legend">
         <li><span className="legend-line legend-agents" aria-hidden="true" />Agents</li>
-        <li><span className="legend-line legend-humans" aria-hidden="true" />You</li>
+        <li><span className="legend-line legend-humans" aria-hidden="true" />{personLabel}</li>
       </ul>
     </div>
   );
@@ -404,6 +405,7 @@ export const App = ({ client }: AppProps) => {
 
   // The drill-down: one member's breakdown for the scope and range on screen.
   const viewedId = member?.id ?? selfId;
+  const viewingSelf = member === undefined || member.id === selfId;
   useEffect(() => {
     if (!signedIn || !preferencesReady || viewedId === undefined) return undefined;
     let cancelled = false;
@@ -775,9 +777,13 @@ export const App = ({ client }: AppProps) => {
               <p className="subtle" role="status">Loading…</p>
             ) : (
               <>
-                <MemberBreakdown stats={memberStats} />
+                <MemberBreakdown stats={memberStats} self={viewingSelf} />
                 <AgentSessionsTable byAgent={memberStats.byAgent} />
-                <HourlyGraph buckets={memberStats.hourly} />
+                <HourlyGraph
+                  buckets={memberStats.hourly}
+                  caption={range === "all" ? "Last 90 days" : undefined}
+                  personLabel={viewingSelf ? "You" : (member?.name ?? "Person")}
+                />
                 {memberStats.projects.length > 0 && (
                   <ul className="stat-list">
                     {memberStats.projects.filter((entry) => entry.durationSeconds > 0).map((entry) => (

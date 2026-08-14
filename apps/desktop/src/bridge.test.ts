@@ -193,4 +193,24 @@ describe("defaultBridge", () => {
       userId: ids.user,
     });
   });
+
+  it("tolerates a stats payload from an API that predates hourly and session details", async () => {
+    invoke.mockResolvedValueOnce({
+      filters: {},
+      totalDurationSeconds: 0,
+      attributedSeconds: 0,
+      unattributedSeconds: 0,
+      activeSeconds: 0,
+      agentSeconds: 0,
+      concurrency: { t0Seconds: 0, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
+      byAgent: [{ source: "claude_code", model: null, durationSeconds: 0 }],
+      projects: [],
+      apps: [],
+    });
+
+    await expect(defaultBridge.meStats(undefined, undefined)).resolves.toMatchObject({
+      hourly: [],
+      byAgent: [{ source: "claude_code", model: null, durationSeconds: 0, sessionCount: 0, maxConcurrent: 0, medianSeconds: 0 }],
+    });
+  });
 });
