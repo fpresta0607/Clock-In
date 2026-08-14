@@ -341,7 +341,7 @@ jobs:
           title="Unsigned test build $VERSION"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --title "$title" --notes-file release-notes.md \
-              --target "${{ github.sha }}"
+              --prerelease=false --target "${{ github.sha }}"
           else
             gh release create "$TAG" --title "$title" --notes-file release-notes.md \
               --target "${{ github.sha }}"

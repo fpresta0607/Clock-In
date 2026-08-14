@@ -11,12 +11,14 @@
 use std::io::{self, BufWriter};
 use std::path::Path;
 
+use chrono::DateTime;
 use clock_in_desktop_lib::browser::{
     self, ExtensionNamespaceCapacity, ExtensionNamespaceReservationAcknowledgement, TallyEntry,
 };
 use clock_in_desktop_lib::native_messaging::{self, Frame};
 use clock_in_desktop_lib::spool::{self, AgentEventKind, SpoolEvent};
 use serde_json::{json, Map, Value};
+use uuid::Uuid;
 
 fn main() {
     let dir = spool::browser_dir();
@@ -153,7 +155,11 @@ fn span_reply(dir: &Path, message: &Value) -> Option<Value> {
     let external_session_id = event.get("externalSessionId")?.as_str()?;
     let rule_id = event.get("ruleId")?.as_str()?;
     let occurred_at = event.get("occurredAt")?.as_str()?;
-    if external_session_id.is_empty() || rule_id.is_empty() || occurred_at.is_empty() {
+    if external_session_id.is_empty()
+        || external_session_id.len() > 200
+        || Uuid::parse_str(rule_id).is_err()
+        || DateTime::parse_from_rfc3339(occurred_at).is_err()
+    {
         return None;
     }
 
@@ -302,7 +308,7 @@ mod tests {
                 "event": {
                     "event": "started",
                     "externalSessionId": "s1",
-                    "ruleId": "r1",
+                    "ruleId": "00000000-0000-0000-0000-000000000001",
                     "occurredAt": "2026-08-06T13:30:00.000Z"
                 },
             }),

@@ -977,20 +977,18 @@ pub fn truncate_acked(path: &Path, acked_bytes: u64) -> SpoolResult<()> {
     })
 }
 
-/// Removes a spool and every generation and quarantine sibling under the
-/// interprocess lock. This is deliberate evidence destruction — a browser
-/// collection being revoked, say — not a drain: the whole spool goes, so a
-/// later re-enrollment cannot resurface stale spans.
+/// Removes a spool and every generation and quarantine sibling, assuming the
+/// caller already holds the interprocess lock. This is deliberate evidence
+/// destruction — a browser collection being revoked, say — not a drain: the
+/// whole spool goes, so a later re-enrollment cannot resurface stale spans.
 pub fn discard_locked(path: &Path) -> SpoolResult<()> {
-    with_lock(path, || {
-        for candidate in all_spool_paths_locked(path)? {
-            remove_if_exists(&candidate)?;
-        }
-        for tag in [".partial", ".corrupt"] {
-            remove_if_exists(&sibling(path, tag))?;
-        }
-        Ok(())
-    })
+    for candidate in all_spool_paths_locked(path)? {
+        remove_if_exists(&candidate)?;
+    }
+    for tag in [".partial", ".corrupt"] {
+        remove_if_exists(&sibling(path, tag))?;
+    }
+    Ok(())
 }
 
 /// Where the spool lives unless `CLOCK_IN_SPOOL` says otherwise:
