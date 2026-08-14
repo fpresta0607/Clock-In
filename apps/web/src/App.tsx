@@ -192,10 +192,10 @@ const AgentSessionsTable = ({ byAgent }: { byAgent: MeStatsResponse["byAgent"] }
                 {split.model ?? agentRuntimeLabel(split.source)}
                 {split.model !== null && <span className="metric-hint"> · {agentRuntimeLabel(split.source)}</span>}
               </td>
-              <td className="numeric">{split.sessionCount}</td>
-              <td className="numeric">{split.maxConcurrent}</td>
+              <td className="numeric">{split.sessionCount ?? 0}</td>
+              <td className="numeric">{split.maxConcurrent ?? 0}</td>
               <td className="numeric">{formatHumanDuration(split.durationSeconds)}</td>
-              <td className="numeric">{formatHumanDuration(split.medianSeconds)}</td>
+              <td className="numeric">{formatHumanDuration(split.medianSeconds ?? 0)}</td>
             </tr>
           ))}
         </tbody>
@@ -207,7 +207,7 @@ const AgentSessionsTable = ({ byAgent }: { byAgent: MeStatsResponse["byAgent"] }
 /// Two-line SVG chart - agents in the brand green, the person in gray. No
 /// chart library: a fixed viewBox and two polylines are all a day needs, and
 /// the server already buckets to the caller's local hours.
-const HourlyGraph = ({ buckets, caption, personLabel = "You" }: { buckets: readonly HourlyBucket[]; caption?: string; personLabel?: string }) => {
+const HourlyGraph = ({ buckets, personLabel = "You" }: { buckets: readonly HourlyBucket[]; personLabel?: string }) => {
   if (buckets.length === 0) return null;
   const width = 640;
   const height = 190;
@@ -232,7 +232,6 @@ const HourlyGraph = ({ buckets, caption, personLabel = "You" }: { buckets: reado
   });
   return (
     <div className="graph" data-testid="hourly-graph">
-      {caption !== undefined && <p className="graph-caption">{caption}</p>}
       <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Hourly active and agent time">
         <line x1={margin.left} y1={y(0)} x2={width - margin.right} y2={y(0)} stroke="rgba(163,179,194,.25)" />
         <line x1={margin.left} y1={y(yMax)} x2={width - margin.right} y2={y(yMax)} stroke="rgba(163,179,194,.12)" />
@@ -780,8 +779,7 @@ export const App = ({ client }: AppProps) => {
                 <MemberBreakdown stats={memberStats} self={viewingSelf} />
                 <AgentSessionsTable byAgent={memberStats.byAgent} />
                 <HourlyGraph
-                  buckets={memberStats.hourly}
-                  caption={range === "all" ? "Last 90 days" : undefined}
+                  buckets={memberStats.hourly ?? []}
                   personLabel={viewingSelf ? "You" : (member?.name ?? "Person")}
                 />
                 {memberStats.projects.length > 0 && (

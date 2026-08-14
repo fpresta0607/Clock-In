@@ -551,6 +551,23 @@ describe("me/stats", () => {
     }
   });
 
+  it("leaves the unbounded all-time range without an hourly graph", async () => {
+    const hour = (h: number): Date => new Date(Date.UTC(2026, 7, 5, h));
+    const reports = new Reports();
+    reports.presenceIntervals = [
+      { user: { id: ids.user, name: "Alex" }, startedAt: hour(9), endedAt: hour(11) },
+    ];
+    reports.agentIntervals = [
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
+    ];
+    const service = createReportService({ reports, reaper: silentReaper });
+
+    const result = await service.meStats(subject, {});
+
+    expect(result.hourly).toEqual([]);
+    expect(result.activeSeconds).toBe(7_200);
+  });
+
   it("reads a named teammate's stats instead of the caller's when asked", async () => {
     const reports = new Reports([], new Set([ids.user, ids.otherUser]));
     const service = createReportService({ reports, reaper: silentReaper });

@@ -246,7 +246,6 @@ a.download-secondary:hover { color: #ffffff; }
 
 /* Hourly line graphs, lightweight SVG, two lines + legend. */
 .graph { margin-top: 14px; }
-.graph-caption { margin: 0 0 6px; color: var(--text-secondary); font-size: .74rem; }
 .graph svg { display: block; width: 100%; height: auto; }
 .legend { display: flex; gap: 16px; flex-wrap: wrap; margin: 4px 0 0; padding: 0; list-style: none; color: var(--text-secondary); font-size: .74rem; }
 .legend li { display: flex; align-items: center; gap: 6px; }

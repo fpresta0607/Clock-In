@@ -214,22 +214,19 @@ function medianDurationSeconds(intervals: readonly Interval[]): number {
 /**
  * One hour of the caller's local calendar at a time. Bounded ranges tile from
  * their start instant - which the dashboards send as the viewer's local
- * midnight - so bucket `k` is local hour `k`. Unbounded ("all time") anchors at
- * the earliest evidence, capped to the trailing 90 days so the series stays
- * bounded the way the named 90d range is.
+ * midnight - so bucket `k` is local hour `k`. The unbounded "all time" range
+ * returns no buckets; its full history lives in the CSV export instead.
  */
 function hourlySeries(
   working: readonly Interval[],
   agents: readonly Interval[],
   range: Partial<Interval>,
 ): HourlyBucket[] {
+  if (range.start === undefined || range.end === undefined) return [];
   const evidence = [...working, ...agents];
   if (evidence.length === 0) return [];
-  const spanStart = Math.min(...evidence.map((interval) => interval.start));
-  const spanEnd = Math.max(...evidence.map((interval) => interval.end));
-  const ninetyDaysMs = 90 * 24 * 60 * 60 * 1_000;
-  const start = range.start ?? Math.max(spanStart, spanEnd - ninetyDaysMs);
-  const end = range.end ?? spanEnd;
+  const start = range.start;
+  const end = range.end;
   if (start >= end) return [];
   const buckets: HourlyBucket[] = [];
   for (let cursor = start; cursor < end; cursor += 60 * 60 * 1_000) {

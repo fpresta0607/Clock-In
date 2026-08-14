@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+import { type MeStatsResponse } from "@clock-in/shared";
 import { App, buildAppRows, rangeQuery } from "./App.js";
 import { ClientError, type Client } from "./client.js";
 import { windowsInstallerUrl } from "./DownloadInstaller.js";
@@ -391,6 +392,24 @@ describe("dashboard", () => {
     expect(stats.getAllByText("Claude Code").length).toBeGreaterThan(0);
     expect(stats.getByText("VS Code")).toBeInTheDocument();
     expect(stats.getByText(/30m of that landed in the default project/)).toBeInTheDocument();
+  });
+
+  it("renders an older API response that lacks the hourly series and per-session counts", async () => {
+    const olderStats = {
+      ...memberStats,
+      hourly: undefined,
+      byAgent: [{ source: "claude_code", model: "claude-fable-5", durationSeconds: 3_000 }],
+    } as unknown as MeStatsResponse;
+    await signIn(clientFor({ meStats: vi.fn().mockResolvedValue(olderStats) }));
+
+    expect(await screen.findByRole("heading", { name: "SIQstack" })).toBeInTheDocument();
+    const stats = within(await screen.findByRole("region", { name: /Alex · Last 30 days/ }));
+    const sessions = stats.getByTestId("agent-sessions");
+    expect(sessions).toHaveTextContent("claude-fable-5");
+    const cells = within(sessions).getAllByRole("cell").map((cell) => cell.textContent?.trim());
+    expect(cells).toContain("0");
+    expect(cells).toContain("0s");
+    expect(stats.queryByTestId("hourly-graph")).not.toBeInTheDocument();
   });
 
   it("labels 3+ concurrency and away time in plain words", async () => {
