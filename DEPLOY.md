@@ -220,7 +220,7 @@ Neon → Clock-In → Auth → Configuration:
 
 The repo is public, so release assets are downloadable by anyone. Until code
 signing exists, the site's **Download for Windows** button does not point here:
-it points at the `unsigned-latest` prerelease described under *Unsigned test
+it points at the `unsigned-latest` release described under *Unsigned test
 installers* below.
 
 Set these **repository variables** (Settings → Secrets and variables → Actions →
@@ -266,20 +266,21 @@ start procurement before the release, not after:
 - **Windows:** an OV/EV code-signing certificate (~$200-600/yr)
 - **macOS:** Apple Developer Program ($99/yr) for signing and notarization
 
-Both desktop binaries (the app and `clock-in-hook`) sign with the same
-certificate. `clock-in-browser-host` will ship with the phase-3 browser
-extension; until that lands, only `clock-in-hook` is built. On Windows the
+The three desktop binaries (the app, `clock-in-hook`, and
+`clock-in-browser-host`) sign with the same certificate. On Windows the
 workflow imports the `.pfx` into the runner's certificate store, or uses the
-configured store thumbprint directly, then signs the helper with `signtool`
+configured store thumbprint directly, then signs the helpers with `signtool`
 and configures Tauri to sign the app and installers with that thumbprint; on
 macOS the bundler deep-signs everything inside the `.app` and notarizes it.
 
-The helper ships inside the installer via `externalBin` in
-`apps/desktop/src-tauri/tauri.conf.json`: the workflow stages it as
-`src-tauri/binaries/clock-in-hook-<target-triple>` before the bundler runs, and
-the bundler installs it beside the app executable. That sibling rule is how the
-app finds it at runtime — hook registration quotes the `clock-in-hook` path
-beside the running app.
+The helpers ship inside the installer via `externalBin` in
+`apps/desktop/src-tauri/tauri.conf.json`: the workflow stages them as
+`src-tauri/binaries/clock-in-hook-<target-triple>` and
+`src-tauri/binaries/clock-in-browser-host-<target-triple>` before the bundler
+runs, and the bundler installs them beside the app executable. That sibling
+rule is how the app finds them at runtime — hook registration quotes the
+`clock-in-hook` path beside the running app, and the native-messaging manifest
+points at the `clock-in-browser-host` path beside it.
 
 Set these under Settings → Secrets and variables → Actions → **Secrets**:
 
@@ -338,7 +339,7 @@ tagged release still builds both.
 
 #### The permanent download URL
 
-A `workflow_dispatch` run force-updates the **`unsigned-latest` prerelease** and
+A `workflow_dispatch` run force-updates the **`unsigned-latest` release** and
 clobbers its assets, so these two URLs always serve the newest build and never
 need touching:
 
@@ -355,7 +356,7 @@ release title, the release notes, and the installed app, not in the URL.
 
 **Do not** link a workflow-run artifact from anywhere public. GitHub requires
 authentication to download one, so an artifact URL is a dead link for a
-signed-out visitor. That is the whole reason for the prerelease.
+signed-out visitor. That is the whole reason for the fixed release.
 
 The run artifacts (`UNSIGNED-TEST-BUILD-windows-<run number>` and `-macos-`)
 still exist for branch pushes and for grabbing a build that was never

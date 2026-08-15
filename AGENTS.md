@@ -90,7 +90,9 @@ timer once said RECORDING above a card reading "Turn on recording in settings".
   migrates on deploy, so this is always a deliberate, separate step.
 - `clock-in-hook` and the desktop uploader must resolve the spool through the same
   `spool::agent_spool_path()`. When they disagreed, the hook exited 0, wrote nothing
-  the uploader could see, and every agent event vanished silently.
+  the uploader could see, and every agent event vanished silently. The browser host
+  and the app share the same rule for `spool::browser_dir()`, so the two cannot
+  drift apart the same way.
 - The site's **Download for Windows** button is a hard-coded
   `releases/download/unsigned-latest/<fixed asset name>` URL, kept true by the `publish`
   job in `unsigned-test-installers.yml`. That job runs on `workflow_dispatch` only, so a

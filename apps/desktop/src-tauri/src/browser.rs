@@ -813,6 +813,10 @@ fn revoke_collection_authorization_locked(dir: &Path) -> io::Result<()> {
     write_if_changed_locked(&collection_authorization_path(dir), b"{}")
 }
 
+/// Enables browser collection for the signed-in account. The desktop signs in
+/// with a personal token and does not track the organization id, so the local
+/// evidence namespace uses the literal `"legacy"` organization slot; the server
+/// still attributes spans by the signed-in token, not by this namespace.
 pub fn enable_collection(dir: &Path, account_id: &str) -> ApiResult<()> {
     let Some(identity) = spool::EvidenceIdentity::new(account_id, "legacy") else {
         return Err(BridgeError::new(
