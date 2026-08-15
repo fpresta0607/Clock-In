@@ -13,6 +13,7 @@ import type {
   AgentRepository,
   AgentShiftRecord,
   ReportQuery,
+  ReportRepository,
   ShiftCommitRecord,
   ShiftCommitRepository,
 } from "../repositories.js";
@@ -31,6 +32,8 @@ export interface AgentServiceDependencies {
   reaper: AgentSessionReaper;
   /** Without it, the paystub's commit record stays at zeros and null heldRate. */
   shiftCommits?: ShiftCommitRepository;
+  /** Membership lookups for owner changes; ownerUserId must be a member of the org. */
+  reports: ReportRepository;
   clock?: () => Date;
 }
 
@@ -123,6 +126,10 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
         createdAt: existing.createdAt.toISOString(),
       });
       if (!merged.success) throw new AppError("validation_error", "The resulting agent is invalid.");
+      if (input.ownerUserId !== undefined) {
+        const owner = await dependencies.reports.findUserForOrganization(subject, input.ownerUserId);
+        if (owner === null) throw new AppError("not_found", "User not found.");
+      }
       const updated = await dependencies.agents.update(subject, agentId, { ...input, updatedAt: clock() });
       if (updated === null) throw new AppError("not_found", "Agent not found.");
       return updated;
