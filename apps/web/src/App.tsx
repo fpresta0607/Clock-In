@@ -8,6 +8,7 @@ import {
   leverage,
   type Agent,
   type AgentPaystubResponse,
+  type AgentsReportResponse,
   type LeaderboardEntry,
   type MeStatsResponse,
   type Organization,
@@ -288,6 +289,8 @@ export const App = ({ client }: AppProps) => {
   const [boardTab, setBoardTab] = useState<"people" | "agents">("people");
   const [agents, setAgents] = useState<readonly Agent[]>([]);
   const [agentsFailed, setAgentsFailed] = useState(false);
+  const [agentsReport, setAgentsReport] = useState<AgentsReportResponse | undefined>();
+  const [agentsReportFailed, setAgentsReportFailed] = useState(false);
   const [agentBusyId, setAgentBusyId] = useState<string | undefined>();
   const [selectedAgentId, setSelectedAgentId] = useState<string | undefined>();
   const [paystub, setPaystub] = useState<AgentPaystubResponse | undefined>();
@@ -462,6 +465,30 @@ export const App = ({ client }: AppProps) => {
       cancelled = true;
     };
   }, [client, signedIn, preferencesReady, boardTab, expireSession]);
+
+  // The pay-run report: every roster agent's hours, shifts, and held share
+  // over the range on screen, plus the headcount line above the list.
+  useEffect(() => {
+    if (!signedIn || !preferencesReady || boardTab !== "agents") return undefined;
+    let cancelled = false;
+    setAgentsReportFailed(false);
+    client.agentsReport(scopeParams(rangeQuery(range))).then(
+      (result) => {
+        if (!cancelled) setAgentsReport(result);
+      },
+      (error: unknown) => {
+        if (cancelled) return;
+        if (error instanceof ClientError && error.kind === "auth") {
+          expireSession();
+          return;
+        }
+        setAgentsReportFailed(true);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [client, signedIn, preferencesReady, boardTab, range, scopeParams, expireSession]);
 
   // The paystub: one agent's shifts, hours, and commit record over the range
   // on screen. Same detail region the member breakdown uses.
@@ -827,6 +854,8 @@ export const App = ({ client }: AppProps) => {
             paystub={paystub}
             paystubFailed={paystubFailed}
             rangeLabel={rangeSentence[range]}
+            agentsReport={agentsReport}
+            agentsReportFailed={agentsReportFailed}
           />
         ) : boardFailed ? (
           <p className="subtle">Could not load hours for this range.</p>
@@ -1012,11 +1041,12 @@ type RosterTabProps = {
   paystub: AgentPaystubResponse | undefined;
   paystubFailed: boolean;
   rangeLabel: string;
+  agentsReport: AgentsReportResponse | undefined;
+  agentsReportFailed: boolean;
 };
 
 /// The roster in the board's own grammar, with an agent's paystub in the
-/// detail region below. Hours/shifts/commits columns stay "-" until the
-/// pay-run report feeds them.
+/// detail region below. Hours come from the pay-run report, keyed by agent id.
 const RosterTab = ({
   agents,
   agentsFailed,
@@ -1027,10 +1057,19 @@ const RosterTab = ({
   paystub,
   paystubFailed,
   rangeLabel,
+  agentsReport,
+  agentsReportFailed,
 }: RosterTabProps) => {
   const selected = agents.find((agent) => agent.id === selectedAgentId);
+  const rowsByAgentId = new Map(agentsReport?.rows.map((row) => [row.agent.id, row]));
   return (
     <>
+      {agentsReport !== undefined && !agentsReportFailed && (
+        <p className="subtle" data-testid="roster-headcount">
+          Headcount {agentsReport.headcount.total}
+          {agentsReport.headcount.anonymous > 0 && ` - ${agentsReport.headcount.anonymous} anonymous`}
+        </p>
+      )}
       {agentsFailed ? (
         <p className="subtle">Could not load the roster.</p>
       ) : agents.length === 0 ? (
@@ -1057,7 +1096,11 @@ const RosterTab = ({
                   {agent.status === "retired" && <span className="you-tag"> retired</span>}
                 </span>
                 <span className="board-times">
-                  <span className="board-hours">-</span>
+                  <span className="board-hours">
+                    {rowsByAgentId.get(agent.id)?.agentSeconds !== undefined
+                      ? formatHumanDuration(rowsByAgentId.get(agent.id)!.agentSeconds)
+                      : "-"}
+                  </span>
                   <span className="board-agent">
                     {agentRuntimeLabel(agent.source)} · {agent.owner.name}
                   </span>

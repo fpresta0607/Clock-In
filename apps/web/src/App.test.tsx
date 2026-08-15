@@ -82,6 +82,22 @@ const paystub = {
   trend: [{ periodStartAt: "2026-07-30T00:00:00.000Z", agentSeconds: 5_400, shiftCount: 2, heldRate: null }],
 };
 
+const agentsReportResponse = {
+  filters: {},
+  headcount: { total: 1, anonymous: 1, registered: 0, retired: 0 },
+  rows: [{
+    agent: rosterAgent,
+    agentSeconds: 5_400,
+    shiftCount: 2,
+    commitsRecorded: 0,
+    commitsPending: 0,
+    commitsMerged: 0,
+    commitsReverted: 0,
+    commitsOrphaned: 0,
+    heldRate: null,
+  }],
+};
+
 function clientFor(overrides: Partial<Client> = {}): Client {
   return {
     hasSession: false,
@@ -103,6 +119,7 @@ function clientFor(overrides: Partial<Client> = {}): Client {
     patchAgent: vi.fn().mockResolvedValue({ ...rosterAgent, status: "registered" }),
     mergeAgents: vi.fn().mockResolvedValue(undefined),
     agentPaystub: vi.fn().mockResolvedValue(paystub),
+    agentsReport: vi.fn().mockResolvedValue(agentsReportResponse),
     ...overrides,
   } as unknown as Client;
 }
@@ -682,8 +699,8 @@ describe("the roster tab", () => {
     const row = within(roster).getByText("Claude Code @ General").closest("li");
     expect(row).toHaveClass("is-anonymous");
     expect(row).toHaveTextContent("Claude Code · Alex");
-    // No pay-run data yet: the hours column is a dash, never a fake zero.
-    expect(within(row as HTMLElement).getByText("-")).toBeInTheDocument();
+    // The pay-run report's hours land on the matching roster row.
+    await waitFor(() => expect(row).toHaveTextContent("1h 30m"));
     expect(within(row as HTMLElement).getByRole("button", { name: "Register" })).toBeInTheDocument();
   });
 
@@ -730,6 +747,32 @@ describe("the roster tab", () => {
     expect(within(detail).getByTestId("paystub-trend")).toHaveTextContent("2 shifts");
     // Nothing decided yet reads as pending, not 0%.
     expect(detail).toHaveTextContent("pending");
+  });
+
+  it("shows the roster's hours from the pay-run report and a headcount line", async () => {
+    const agentsReport = vi.fn().mockResolvedValue(agentsReportResponse);
+    await signIn(clientFor({ agentsReport }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+    await userEvent.setup().click(screen.getByRole("button", { name: "Agents" }));
+
+    await waitFor(() => expect(agentsReport).toHaveBeenCalled());
+    expect(await screen.findByTestId("roster-headcount")).toHaveTextContent("Headcount 1 - 1 anonymous");
+    const row = screen.getByText("Claude Code @ General").closest("li");
+    expect(row).toHaveTextContent("1h 30m");
+  });
+
+  it("omits the anonymous count from the headcount once every agent is named", async () => {
+    const agentsReport = vi.fn().mockResolvedValue({
+      ...agentsReportResponse,
+      headcount: { total: 1, anonymous: 0, registered: 1, retired: 0 },
+    });
+    await signIn(clientFor({ agentsReport }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+    await userEvent.setup().click(screen.getByRole("button", { name: "Agents" }));
+
+    const headcount = await screen.findByTestId("roster-headcount");
+    expect(headcount).toHaveTextContent("Headcount 1");
+    expect(headcount).not.toHaveTextContent("anonymous");
   });
 
   it("renders a verification badge per commit and a held share once some are decided", async () => {

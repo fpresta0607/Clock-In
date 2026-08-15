@@ -4,6 +4,9 @@ import { createApp } from "../app.js";
 import { createTestAuth } from "../test-tokens.js";
 import { parseEnv } from "../env.js";
 import type {
+  AgentIntervalRecord,
+  AgentRecord,
+  AgentRepository,
   AgentSessionRepository,
   PathMappingRepository,
   ProjectRepository,
@@ -75,6 +78,10 @@ class Reports implements ReportRepository {
   public async readSiteTotalsForMember(): Promise<never> {
     throw new Error("not used by these routes");
   }
+  public agentIntervals: AgentIntervalRecord[] = [];
+  public async readAgentIntervals() {
+    return this.agentIntervals;
+  }
 }
 
 /** Report routes reap stale agent sessions before report aggregation; nothing else is used. */
@@ -101,7 +108,13 @@ class PathMappings implements Partial<PathMappingRepository> {
   public async listForSubject() { return []; }
 }
 
-function app(reports = new Reports(), agentSessions = new AgentSessions()) {
+/** The pay-run report's roster; empty by default so these tests are unaffected unless they seed one. */
+class Agents implements Partial<AgentRepository> {
+  public constructor(public records: AgentRecord[] = []) {}
+  public async listForOrganization() { return this.records; }
+}
+
+function app(reports = new Reports(), agentSessions = new AgentSessions(), agents = new Agents()) {
   return createApp({
     config,
     keys,
@@ -112,6 +125,7 @@ function app(reports = new Reports(), agentSessions = new AgentSessions()) {
     projectRepository: new Projects() as ProjectRepository,
     sessionRepository: new Timers() as SessionRepository,
     pathMappingRepository: new PathMappings() as PathMappingRepository,
+    agentRepository: agents as AgentRepository,
   });
 }
 
@@ -165,5 +179,42 @@ describe("report routes", () => {
     expect(response.status).toBe(500);
     expect(response.headers.get("content-type")).toContain("application/json");
     await expect(response.text()).resolves.not.toContain("sessionId,userId");
+  });
+
+  it("returns the pay-run report with every roster agent and a headcount", async () => {
+    const reports = new Reports();
+    reports.agentIntervals = [{
+      user: { id: ids.user, name: "Alex" },
+      source: "claude_code",
+      model: null,
+      projectId: ids.project,
+      agentId: "e1c7e513-b094-4d4c-ae55-21790ae019a4",
+      startedAt: new Date("2026-08-06T14:00:00.000Z"),
+      endedAt: new Date("2026-08-06T15:00:00.000Z"),
+    }];
+    const agentRecord: AgentRecord = {
+      id: "e1c7e513-b094-4d4c-ae55-21790ae019a4",
+      organizationId: ids.organization,
+      name: "Claude Code @ Timer",
+      source: "claude_code",
+      status: "anonymous",
+      owner: { id: ids.user, name: "Alex" },
+      project: { id: ids.project, name: "Timer" },
+      createdAt: new Date("2026-08-01T00:00:00.000Z"),
+    };
+    const response = await app(reports, new AgentSessions(), new Agents([agentRecord]))
+      .request("http://api.test/reports/agents", { headers: { authorization: bearerHeader } });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      headcount: { total: 1, anonymous: 1, registered: 0, retired: 0 },
+      rows: [{ agent: { id: agentRecord.id, name: "Claude Code @ Timer" }, agentSeconds: 3_600, shiftCount: 1, heldRate: null }],
+    });
+  });
+
+  it("rejects a pay-run scope naming a project outside the workspace", async () => {
+    const response = await app().request(`http://api.test/reports/agents?scope=${ids.outsideProject}`, { headers: { authorization: bearerHeader } });
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual({ error: { code: "not_found", message: "Project not found." } });
   });
 });

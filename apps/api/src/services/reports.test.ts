@@ -4,6 +4,9 @@ import type { ReportFilters } from "@clock-in/shared";
 import type { AuthenticatedSubject } from "../auth.js";
 import type {
   AgentIntervalRecord,
+  AgentRecord,
+  AgentRepository,
+  AgentShiftRecord,
   AppTotalRecord,
   LeaderboardRowRecord,
   PresenceIntervalRecord,
@@ -13,6 +16,8 @@ import type {
   ReportRepository,
   ReportRowRecord,
   SessionIntervalRecord,
+  ShiftCommitCountsRecord,
+  ShiftCommitRepository,
   SiteTotalRecord,
 } from "../repositories.js";
 import { createReportService } from "./reports.js";
@@ -24,6 +29,7 @@ const ids = {
   project: "a1c7e513-b094-4d4c-ae55-21790ae019a4",
   otherProject: "b1c7e513-b094-4d4c-ae55-21790ae019a4",
   session: "c1c7e513-b094-4d4c-ae55-21790ae019a4",
+  otherAgent: "d1c7e513-b094-4d4c-ae55-21790ae019a4",
 };
 const subject: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.user, role: "member" };
 
@@ -117,6 +123,66 @@ class Reports implements ReportRepository {
   }
 }
 
+function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
+  return {
+    id: ids.session,
+    organizationId: ids.organization,
+    name: "Claude Code @ Timer",
+    source: "claude_code",
+    status: "anonymous",
+    owner: { id: ids.user, name: "Alex" },
+    project: { id: ids.project, name: "Timer" },
+    createdAt: new Date("2026-08-01T00:00:00.000Z"),
+    ...overrides,
+  };
+}
+
+/** The pay-run report's roster; empty by default so existing report/leaderboard/meStats tests are unaffected. */
+class Agents implements AgentRepository {
+  public constructor(public records: AgentRecord[] = []) {}
+  public async upsertForKey(): Promise<{ id: string }> {
+    throw new Error("not used");
+  }
+  public async listForOrganization(subject: AuthenticatedSubject): Promise<AgentRecord[]> {
+    return this.records.filter((record) => record.organizationId === subject.organizationId);
+  }
+  public async findById(): Promise<AgentRecord | null> {
+    throw new Error("not used");
+  }
+  public async update(): Promise<AgentRecord | null> {
+    throw new Error("not used");
+  }
+  public async merge(): Promise<void> {
+    throw new Error("not used");
+  }
+  public async listSessionsForAgent(): Promise<AgentShiftRecord[]> {
+    throw new Error("not used");
+  }
+}
+
+const agents = new Agents();
+
+class ShiftCommits implements ShiftCommitRepository {
+  public lastCountsQuery: ReportQuery | null = null;
+  public constructor(public counts: ShiftCommitCountsRecord[] = []) {}
+  public async findByClientId(): ReturnType<ShiftCommitRepository["findByClientId"]> {
+    throw new Error("not used");
+  }
+  public async insert(): ReturnType<ShiftCommitRepository["insert"]> {
+    throw new Error("not used");
+  }
+  public async advanceVerification(): ReturnType<ShiftCommitRepository["advanceVerification"]> {
+    throw new Error("not used");
+  }
+  public async countsByAgent(_subject: AuthenticatedSubject, query: ReportQuery): Promise<ShiftCommitCountsRecord[]> {
+    this.lastCountsQuery = query;
+    return this.counts;
+  }
+  public async listForAgent(): ReturnType<ShiftCommitRepository["listForAgent"]> {
+    throw new Error("not used");
+  }
+}
+
 const noMeasurement = {
   activeSeconds: 0,
   agentSeconds: 0,
@@ -127,7 +193,7 @@ const noMeasurement = {
 describe("report service", () => {
   it("scopes report queries to the authenticated organization and normalizes inclusive UTC calendar bounds", async () => {
     const reports = new Reports([row({ id: ids.otherProject, durationSeconds: 60, startedAt: new Date("2026-08-06T16:00:00.000Z") }), row()]);
-    const service = createReportService({ reports, reaper: silentReaper });
+    const service = createReportService({ reports, reaper: silentReaper, agents });
 
     await expect(service.list(subject, { from: "2026-08-01", to: "2026-08-06", projectId: ids.project, userId: ids.user, page: 1, pageSize: 50 })).resolves.toMatchObject({
       filters: { from: "2026-08-01", to: "2026-08-06", projectId: ids.project, userId: ids.user, page: 1, pageSize: 50 },
@@ -146,12 +212,12 @@ describe("report service", () => {
   });
 
   it("returns an empty report with a zero total", async () => {
-    await expect(createReportService({ reports: new Reports(), reaper: silentReaper }).list(subject, { page: 1, pageSize: 50 })).resolves.toEqual({ filters: { page: 1, pageSize: 50 }, totalDurationSeconds: 0, pagination: { page: 1, pageSize: 50, totalRows: 0, totalPages: 0 }, rows: [] });
+    await expect(createReportService({ reports: new Reports(), reaper: silentReaper, agents }).list(subject, { page: 1, pageSize: 50 })).resolves.toEqual({ filters: { page: 1, pageSize: 50 }, totalDurationSeconds: 0, pagination: { page: 1, pageSize: 50, totalRows: 0, totalPages: 0 }, rows: [] });
   });
 
   it("passes device-local instant bounds as an exact clipped report range", async () => {
     const reports = new Reports([row()]);
-    const service = createReportService({ reports, reaper: silentReaper });
+    const service = createReportService({ reports, reaper: silentReaper, agents });
 
     const result = await service.list(subject, {
       fromAt: "2026-03-08T06:00:00.000Z",
@@ -171,24 +237,24 @@ describe("report service", () => {
   });
 
   it("rejects reversed or excessive date ranges", async () => {
-    const service = createReportService({ reports: new Reports(), reaper: silentReaper });
+    const service = createReportService({ reports: new Reports(), reaper: silentReaper, agents });
     await expect(service.list(subject, { from: "2026-08-07", to: "2026-08-06", page: 1, pageSize: 50 })).rejects.toMatchObject({ code: "validation_error" });
     await expect(service.list(subject, { from: "2025-01-01", to: "2026-01-02", page: 1, pageSize: 50 })).rejects.toMatchObject({ code: "validation_error" });
   });
 
   it("defends the repository from pathological page offsets", async () => {
-    const service = createReportService({ reports: new Reports(), reaper: silentReaper });
+    const service = createReportService({ reports: new Reports(), reaper: silentReaper, agents });
     await expect(service.list(subject, { page: 10_001, pageSize: 1 } as ReportFilters)).rejects.toMatchObject({ code: "validation_error" });
   });
 
   it("returns stable not_found for project and user filters outside the subject organization", async () => {
-    const service = createReportService({ reports: new Reports([], new Set()), reaper: silentReaper });
+    const service = createReportService({ reports: new Reports([], new Set()), reaper: silentReaper, agents });
     await expect(service.list(subject, { projectId: ids.otherProject, page: 1, pageSize: 50 })).rejects.toMatchObject({ code: "not_found", message: "Project not found." });
     await expect(service.list(subject, { userId: ids.otherUser, page: 1, pageSize: 50 })).rejects.toMatchObject({ code: "not_found", message: "User not found." });
   });
 
   it("rejects unsafe report duration totals", async () => {
-    const service = createReportService({ reports: new Reports([row({ durationSeconds: Number.MAX_SAFE_INTEGER }), row({ id: ids.otherProject, durationSeconds: 1 })]), reaper: silentReaper });
+    const service = createReportService({ reports: new Reports([row({ durationSeconds: Number.MAX_SAFE_INTEGER }), row({ id: ids.otherProject, durationSeconds: 1 })]), reaper: silentReaper, agents });
     await expect(service.list(subject, { page: 1, pageSize: 50 })).rejects.toThrow(RangeError);
   });
 
@@ -197,7 +263,7 @@ describe("report service", () => {
       row({ id: "b1c7e513-b094-4d4c-ae55-21790ae019a4", startedAt: new Date("2026-08-06T14:00:00.000Z") }),
       row({ id: "a1c7e513-b094-4d4c-ae55-21790ae019a4", startedAt: new Date("2026-08-06T14:00:00.000Z"), durationSeconds: 60 }),
     ]);
-    const result = await createReportService({ reports, reaper: silentReaper }).list(subject, { page: 2, pageSize: 1 });
+    const result = await createReportService({ reports, reaper: silentReaper, agents }).list(subject, { page: 2, pageSize: 1 });
 
     expect(result).toMatchObject({
       totalDurationSeconds: 3_600,
@@ -212,12 +278,12 @@ describe("report service", () => {
       oversized.exportReads += 1;
       return { summary: { totalRows: 10_001, totalDurationSeconds: 0 }, rows: [] };
     };
-    const oversizedService = createReportService({ reports: oversized, reaper: silentReaper });
+    const oversizedService = createReportService({ reports: oversized, reaper: silentReaper, agents });
     await expect(oversizedService.export(subject, { page: 1, pageSize: 50 })).rejects.toMatchObject({ code: "validation_error" });
     expect(oversized.exportReads).toBe(1);
 
     const exported = new Reports([row()]);
-    const exportService = createReportService({ reports: exported, reaper: silentReaper });
+    const exportService = createReportService({ reports: exported, reaper: silentReaper, agents });
     const result = await exportService.export(subject, { page: 1, pageSize: 50 });
     expect(result.rows).toHaveLength(1);
     expect(exported.exportReads).toBe(1);
@@ -225,7 +291,7 @@ describe("report service", () => {
 
   it("closes stale agent sessions before every report aggregation", async () => {
     const reaper = new Reaper();
-    const service = createReportService({ reports: new Reports(), reaper });
+    const service = createReportService({ reports: new Reports(), reaper, agents });
 
     await service.list(subject, { page: 1, pageSize: 50 });
     await service.export(subject, { page: 1, pageSize: 50 });
@@ -241,7 +307,7 @@ describe("report service", () => {
       row({ id: ids.otherProject, attribution: "default" }),
       row({ id: ids.session, attribution: "manual" }),
     ]);
-    const result = await createReportService({ reports, reaper: silentReaper }).list(subject, { page: 1, pageSize: 50 });
+    const result = await createReportService({ reports, reaper: silentReaper, agents }).list(subject, { page: 1, pageSize: 50 });
 
     expect(result.rows.map((record) => [record.attributedSeconds, record.unattributedSeconds])).toEqual([
       [3_540, 0],
@@ -252,7 +318,7 @@ describe("report service", () => {
 
   it("never lets a row's two halves disagree with its duration", async () => {
     const reports = new Reports([row({ durationSeconds: 3_540, attribution: "default" })]);
-    const result = await createReportService({ reports, reaper: silentReaper }).list(subject, { page: 1, pageSize: 50 });
+    const result = await createReportService({ reports, reaper: silentReaper, agents }).list(subject, { page: 1, pageSize: 50 });
 
     const [only] = result.rows;
     expect((only?.attributedSeconds ?? 0) + (only?.unattributedSeconds ?? 0)).toBe(only?.durationSeconds);
@@ -273,7 +339,7 @@ describe("leaderboard", () => {
       entry(ids.user, "Alex", 7_200, 3, 5_400),
       entry(ids.otherUser, "Sam", 3_600, 1, "3600"),
     ];
-    const service = createReportService({ reports, reaper: silentReaper });
+    const service = createReportService({ reports, reaper: silentReaper, agents });
 
     const result = await service.leaderboard(subject, {});
 
@@ -306,7 +372,7 @@ describe("leaderboard", () => {
       { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
       { user: { id: ids.user, name: "Alex" }, source: "codex", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
     ];
-    const service = createReportService({ reports, reaper: silentReaper });
+    const service = createReportService({ reports, reaper: silentReaper, agents });
 
     const result = await service.leaderboard(subject, {});
 
@@ -334,7 +400,7 @@ describe("leaderboard", () => {
       entry(ids.otherUser, "Sam", 3_600, 1),
       entry(ids.project, "Jo", 60, 1),
     ];
-    const service = createReportService({ reports, reaper: silentReaper });
+    const service = createReportService({ reports, reaper: silentReaper, agents });
 
     const result = await service.leaderboard(subject, {});
 
@@ -352,7 +418,7 @@ describe("leaderboard", () => {
     reports.sessionIntervals = [
       { user: { id: ids.user, name: "Alex" }, projectId: ids.project, attribution: "selected", startedAt: hour(9), stoppedAt: hour(10) },
     ];
-    const service = createReportService({ reports, reaper: silentReaper });
+    const service = createReportService({ reports, reaper: silentReaper, agents });
 
     const result = await service.leaderboard(subject, { scope: ids.project });
 
@@ -370,7 +436,7 @@ describe("leaderboard", () => {
       { id: ids.user, name: "Alex" },
       { id: ids.otherUser, name: "Sam" },
     ];
-    const service = createReportService({ reports, reaper: silentReaper });
+    const service = createReportService({ reports, reaper: silentReaper, agents });
 
     const result = await service.leaderboard(subject, {});
 
@@ -382,7 +448,7 @@ describe("leaderboard", () => {
 
   it("maps the unassigned scope onto default-attributed sessions", async () => {
     const reports = new Reports();
-    const service = createReportService({ reports, reaper: silentReaper });
+    const service = createReportService({ reports, reaper: silentReaper, agents });
 
     await service.leaderboard(subject, { scope: "unassigned" });
 
@@ -391,7 +457,7 @@ describe("leaderboard", () => {
   });
 
   it("refuses a scope naming a project outside the workspace", async () => {
-    const service = createReportService({ reports: new Reports([], new Set()), reaper: silentReaper });
+    const service = createReportService({ reports: new Reports([], new Set()), reaper: silentReaper, agents });
 
     await expect(service.leaderboard(subject, { scope: ids.otherProject }))
       .rejects.toMatchObject({ code: "not_found", message: "Project not found." });
@@ -399,7 +465,7 @@ describe("leaderboard", () => {
 
   it("carries the dashboard scope into the session list and the export", async () => {
     const reports = new Reports();
-    const service = createReportService({ reports, reaper: silentReaper });
+    const service = createReportService({ reports, reaper: silentReaper, agents });
 
     await service.list(subject, { scope: ids.project, page: 1, pageSize: 50 });
     expect(reports.lastPage?.query.projectId).toBe(ids.project);
@@ -412,7 +478,7 @@ describe("leaderboard", () => {
   it("reads postgres sum strings and a null total without losing precision", async () => {
     const reports = new Reports();
     reports.leaderboardRows = [entry(ids.user, "Alex", "9007199254740990", 2), entry(ids.otherUser, "Sam", null, 0, null)];
-    const service = createReportService({ reports, reaper: silentReaper });
+    const service = createReportService({ reports, reaper: silentReaper, agents });
 
     const result = await service.leaderboard(subject, {});
 
@@ -424,7 +490,7 @@ describe("leaderboard", () => {
 
   it("applies the same inclusive calendar bounds the reports use", async () => {
     const reports = new Reports();
-    const service = createReportService({ reports, reaper: silentReaper });
+    const service = createReportService({ reports, reaper: silentReaper, agents });
 
     await service.leaderboard(subject, { from: "2026-08-01", to: "2026-08-06" });
 
@@ -434,7 +500,7 @@ describe("leaderboard", () => {
 
   it("uses device-local instant bounds for clipped leaderboard totals", async () => {
     const reports = new Reports();
-    const service = createReportService({ reports, reaper: silentReaper });
+    const service = createReportService({ reports, reaper: silentReaper, agents });
 
     await service.leaderboard(subject, {
       fromAt: "2026-03-08T06:00:00.000Z",
@@ -449,7 +515,7 @@ describe("leaderboard", () => {
 
   it("rejects a range wider than a year and returns an empty board for no activity", async () => {
     const reports = new Reports();
-    const service = createReportService({ reports, reaper: silentReaper });
+    const service = createReportService({ reports, reaper: silentReaper, agents });
 
     await expect(service.leaderboard(subject, { from: "2024-01-01", to: "2026-01-01" })).rejects.toMatchObject({
       code: "validation_error",
@@ -478,7 +544,7 @@ describe("me/stats", () => {
       { mapping: { id: "01c7e513-b094-4d4c-ae55-21790ae019a4", pattern: "github.com/acme/*", projectId: ids.project }, durationSeconds: "900" },
     ];
     const reaper = new Reaper();
-    const service = createReportService({ reports, reaper });
+    const service = createReportService({ reports, reaper, agents });
 
     const result = await service.meStats(subject, { from: "2026-08-01", to: "2026-08-06" });
 
@@ -500,6 +566,7 @@ describe("me/stats", () => {
       sites: [
         { mapping: { id: "01c7e513-b094-4d4c-ae55-21790ae019a4", pattern: "github.com/acme/*", projectId: ids.project }, durationSeconds: 900 },
       ],
+      agents: [],
     });
     // Without a userId filter, the repository read is pinned to the caller.
     expect(reports.lastProjectTotalsQuery).toEqual({
@@ -513,9 +580,9 @@ describe("me/stats", () => {
   });
 
   it("returns an empty stats response when the caller recorded nothing", async () => {
-    const result = await createReportService({ reports: new Reports(), reaper: silentReaper }).meStats(subject, {});
+    const result = await createReportService({ reports: new Reports(), reaper: silentReaper, agents }).meStats(subject, {});
 
-    expect(result).toEqual({ filters: {}, totalDurationSeconds: 0, attributedSeconds: 0, unattributedSeconds: 0, ...noMeasurement, hourly: [], projects: [], apps: [], sites: [] });
+    expect(result).toEqual({ filters: {}, totalDurationSeconds: 0, attributedSeconds: 0, unattributedSeconds: 0, ...noMeasurement, hourly: [], projects: [], apps: [], sites: [], agents: [] });
   });
 
   it("buckets active and agent time by the caller's local hours, collapsing overlap but summing parallelism", async () => {
@@ -532,7 +599,7 @@ describe("me/stats", () => {
       { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
       { user: { id: ids.user, name: "Alex" }, source: "codex", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
     ];
-    const service = createReportService({ reports, reaper: silentReaper });
+    const service = createReportService({ reports, reaper: silentReaper, agents });
 
     const result = await service.meStats(subject, {
       fromAt: "2026-08-05T00:00:00.000Z",
@@ -560,7 +627,7 @@ describe("me/stats", () => {
     reports.agentIntervals = [
       { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
     ];
-    const service = createReportService({ reports, reaper: silentReaper });
+    const service = createReportService({ reports, reaper: silentReaper, agents });
 
     const result = await service.meStats(subject, {});
 
@@ -570,7 +637,7 @@ describe("me/stats", () => {
 
   it("reads a named teammate's stats instead of the caller's when asked", async () => {
     const reports = new Reports([], new Set([ids.user, ids.otherUser]));
-    const service = createReportService({ reports, reaper: silentReaper });
+    const service = createReportService({ reports, reaper: silentReaper, agents });
 
     await service.meStats(subject, { userId: ids.otherUser });
 
@@ -579,16 +646,111 @@ describe("me/stats", () => {
   });
 
   it("refuses a stats userId from outside the workspace, like the org report does", async () => {
-    const service = createReportService({ reports: new Reports([], new Set()), reaper: silentReaper });
+    const service = createReportService({ reports: new Reports([], new Set()), reaper: silentReaper, agents });
 
     await expect(service.meStats(subject, { userId: ids.otherUser }))
       .rejects.toMatchObject({ code: "not_found", message: "User not found." });
   });
 
   it("rejects reversed or excessive date ranges like the org reports do", async () => {
-    const service = createReportService({ reports: new Reports(), reaper: silentReaper });
+    const service = createReportService({ reports: new Reports(), reaper: silentReaper, agents });
 
     await expect(service.meStats(subject, { from: "2026-08-07", to: "2026-08-06" })).rejects.toMatchObject({ code: "validation_error" });
     await expect(service.meStats(subject, { from: "2025-01-01", to: "2026-01-02" })).rejects.toMatchObject({ code: "validation_error" });
+  });
+
+  it("carries the caller's own agent rows, scoped exactly like the org-wide pay-run report", async () => {
+    const reports = new Reports();
+    reports.agentIntervals = [
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+      // A teammate's shift under a different roster identity must never surface here.
+      { user: { id: ids.otherUser, name: "Sam" }, source: "codex", model: null, projectId: ids.project, agentId: ids.otherAgent, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+    ];
+    const roster = new Agents([agentRecord({ id: ids.session }), agentRecord({ id: ids.otherAgent, source: "codex" })]);
+    const shiftCommits = new ShiftCommits([{ agentId: ids.session, recorded: 2, pending: 0, merged: 2, reverted: 0, orphaned: 0 }]);
+    const service = createReportService({ reports, reaper: silentReaper, agents: roster, shiftCommits });
+
+    const result = await service.meStats(subject, {});
+
+    expect(result.agents).toEqual([{
+      agent: { id: ids.session, name: "Claude Code @ Timer", source: "claude_code", status: "anonymous", project: { id: ids.project, name: "Timer" }, createdAt: "2026-08-01T00:00:00.000Z" },
+      agentSeconds: 3_600,
+      shiftCount: 1,
+      commitsRecorded: 2,
+      commitsPending: 0,
+      commitsMerged: 2,
+      commitsReverted: 0,
+      commitsOrphaned: 0,
+      heldRate: 1,
+    }]);
+  });
+});
+
+describe("agents report", () => {
+  it("lists every roster agent with hours, shifts, and held share - zero-activity agents included", async () => {
+    const reports = new Reports();
+    reports.agentIntervals = [
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+    ];
+    const roster = new Agents([
+      agentRecord({ id: ids.session }),
+      agentRecord({ id: ids.otherAgent, name: "Codex @ Side", source: "codex", status: "registered" }),
+    ]);
+    const shiftCommits = new ShiftCommits([{ agentId: ids.session, recorded: 3, pending: 1, merged: 1, reverted: 1, orphaned: 0 }]);
+    const service = createReportService({ reports, reaper: silentReaper, agents: roster, shiftCommits });
+
+    const result = await service.agentsReport(subject, {});
+
+    expect(result.rows).toEqual([
+      {
+        agent: { id: ids.session, name: "Claude Code @ Timer", source: "claude_code", status: "anonymous", owner: { id: ids.user, name: "Alex" }, project: { id: ids.project, name: "Timer" }, createdAt: "2026-08-01T00:00:00.000Z" },
+        agentSeconds: 3_600,
+        shiftCount: 1,
+        commitsRecorded: 3,
+        commitsPending: 1,
+        commitsMerged: 1,
+        commitsReverted: 1,
+        commitsOrphaned: 0,
+        // merged / decided (merged + reverted + orphaned); "orphaned" decides too.
+        heldRate: 0.5,
+      },
+      {
+        // A registered agent with nothing in range still gets a row: zeros and a null rate, never absence.
+        agent: { id: ids.otherAgent, name: "Codex @ Side", source: "codex", status: "registered", owner: { id: ids.user, name: "Alex" }, project: { id: ids.project, name: "Timer" }, createdAt: "2026-08-01T00:00:00.000Z" },
+        agentSeconds: 0,
+        shiftCount: 0,
+        commitsRecorded: 0,
+        commitsPending: 0,
+        commitsMerged: 0,
+        commitsReverted: 0,
+        commitsOrphaned: 0,
+        heldRate: null,
+      },
+    ]);
+    expect(result.headcount).toEqual({ total: 2, anonymous: 1, registered: 1, retired: 0 });
+  });
+
+  it("works with no commit repository configured, reaps stale sessions first, and rejects a scope outside the workspace", async () => {
+    const reaper = new Reaper();
+    const roster = new Agents([agentRecord()]);
+    const service = createReportService({ reports: new Reports(), reaper, agents: roster });
+
+    const result = await service.agentsReport(subject, {});
+    expect(result.rows).toEqual([{
+      agent: { id: ids.session, name: "Claude Code @ Timer", source: "claude_code", status: "anonymous", owner: { id: ids.user, name: "Alex" }, project: { id: ids.project, name: "Timer" }, createdAt: "2026-08-01T00:00:00.000Z" },
+      agentSeconds: 0,
+      shiftCount: 0,
+      commitsRecorded: 0,
+      commitsPending: 0,
+      commitsMerged: 0,
+      commitsReverted: 0,
+      commitsOrphaned: 0,
+      heldRate: null,
+    }]);
+    expect(reaper.subjects).toEqual([subject]);
+
+    const outsideScopeService = createReportService({ reports: new Reports([], new Set()), reaper: silentReaper, agents });
+    await expect(outsideScopeService.agentsReport(subject, { scope: ids.otherProject }))
+      .rejects.toMatchObject({ code: "not_found" });
   });
 });
