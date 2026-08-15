@@ -95,10 +95,19 @@ function asSessionRecord(row: typeof timeSessions.$inferSelect): SessionRecord {
   };
 }
 
+/**
+ * The violated unique's name, or null when the error is something else.
+ * Drizzle wraps a driver error in its own `DrizzleQueryError`, so the
+ * PostgreSQL fields can be one level down; a unique *index* reports its index
+ * name here exactly as a unique constraint reports its constraint name.
+ */
 function uniqueConstraint(error: unknown): string | null {
-  if (typeof error !== "object" || error === null) return null;
-  const record = error as Record<string, unknown>;
-  return record.code === "23505" && typeof record.constraint_name === "string" ? record.constraint_name : null;
+  for (const candidate of [error, (error as { cause?: unknown } | null)?.cause]) {
+    if (typeof candidate !== "object" || candidate === null) continue;
+    const record = candidate as Record<string, unknown>;
+    if (record.code === "23505" && typeof record.constraint_name === "string") return record.constraint_name;
+  }
+  return null;
 }
 
 function mapCreateError(error: unknown): SessionRepositoryError | null {
@@ -182,15 +191,22 @@ export class DrizzleProjectRepository implements ProjectRepository {
       .select({ sessionCount: count(timeSessions.id), durationSeconds: sum(timeSessions.durationSeconds) })
       .from(timeSessions)
       .where(and(eq(timeSessions.organizationId, subject.organizationId), eq(timeSessions.projectId, projectId)));
-    const [agents] = await this.db
+    const [shifts] = await this.db
       .select({ agentSessionCount: count(agentSessions.id) })
       .from(agentSessions)
       .where(and(eq(agentSessions.organizationId, subject.organizationId), eq(agentSessions.projectId, projectId)));
+    // Roster identities hold the project through a restrict FK, so an admin
+    // has to see them before confirming: deleting moves or retires them.
+    const [identities] = await this.db
+      .select({ agentCount: count(agents.id) })
+      .from(agents)
+      .where(and(eq(agents.organizationId, subject.organizationId), eq(agents.projectId, projectId)));
     const durationSeconds = sessions?.durationSeconds;
     return {
       sessionCount: Number(sessions?.sessionCount ?? 0),
       durationSeconds: durationSeconds === null || durationSeconds === undefined ? 0 : Number(durationSeconds),
-      agentSessionCount: Number(agents?.agentSessionCount ?? 0),
+      agentSessionCount: Number(shifts?.agentSessionCount ?? 0),
+      agentCount: Number(identities?.agentCount ?? 0),
     };
   }
 
@@ -222,6 +238,34 @@ export class DrizzleProjectRepository implements ProjectRepository {
           .delete(agentSessions)
           .where(and(eq(agentSessions.organizationId, subject.organizationId), eq(agentSessions.projectId, projectId)));
       }
+      // agents_organization_project_fk is ON DELETE restrict, so every roster
+      // identity has to leave the project before it can go. Re-point the ones
+      // whose key is free at the destination (a merge-style NOT EXISTS, like
+      // the one merge uses for shift_commits) - a retired row is already
+      // outside the partial identity index and always moves.
+      await tx.execute(sql`
+        update agents set project_id = ${reassignTo}::uuid, updated_at = now()
+        where organization_id = ${subject.organizationId}::uuid
+          and project_id = ${projectId}::uuid
+          and (
+            status = 'retired'
+            or not exists (
+              select 1 from agents as holder
+              where holder.organization_id = agents.organization_id
+                and holder.source = agents.source
+                and holder.project_id is not distinct from ${reassignTo}::uuid
+                and holder.status <> 'retired'
+                and holder.id <> agents.id
+            )
+          )
+      `);
+      // Whatever is left collided with a live identity at the destination.
+      // Retiring it releases its key and lets the project go; its shifts and
+      // commits stay attached to it, and the live identity takes the next one.
+      await tx
+        .update(agents)
+        .set({ projectId: reassignTo, status: "retired", updatedAt: sql`now()` })
+        .where(and(eq(agents.organizationId, subject.organizationId), eq(agents.projectId, projectId)));
       await tx
         .delete(projectPathMappings)
         .where(and(eq(projectPathMappings.organizationId, subject.organizationId), eq(projectPathMappings.projectId, projectId)));
@@ -1218,6 +1262,13 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
   }
 }
 
+/** Either half of the partial identity key: assigned agents, or the unassigned one per source. */
+function identityKeyConstraint(error: unknown): boolean {
+  const constraint = uniqueConstraint(error);
+  return constraint === "agents_organization_source_project_unique"
+    || constraint === "agents_organization_source_unassigned_unique";
+}
+
 function asAgentRecord(row: { agent: typeof agents.$inferSelect; ownerName: string; projectName: string | null }): AgentRecord {
   return {
     id: row.agent.id,
@@ -1236,6 +1287,10 @@ export class DrizzleAgentRepository implements AgentRepository {
   public constructor(private readonly db: DatabaseConnection["db"]) {}
 
   public async upsertForKey(input: UpsertAgentForKey): Promise<{ id: string }> {
+    // Both halves of the identity key are partial indexes excluding retired
+    // rows, so the arbiter carries the same predicate; an unassigned sighting
+    // arbitrates on the index that collapses null projects onto one row.
+    const unassigned = input.projectId === null;
     const rows = await this.db
       .insert(agents)
       .values({
@@ -1250,7 +1305,12 @@ export class DrizzleAgentRepository implements AgentRepository {
         name: sql`${input.name} || ' @ ' || coalesce((select ${projects.name} from ${projects} where ${projects.organizationId} = ${input.organizationId} and ${projects.id} = ${input.projectId}), 'unassigned')`,
       })
       .onConflictDoUpdate({
-        target: [agents.organizationId, agents.source, agents.projectId],
+        target: unassigned
+          ? [agents.organizationId, agents.source]
+          : [agents.organizationId, agents.source, agents.projectId],
+        targetWhere: unassigned
+          ? sql`${agents.projectId} is null and ${agents.status} <> 'retired'`
+          : sql`${agents.status} <> 'retired'`,
         set: { updatedAt: input.now },
       })
       .returning({ id: agents.id });
@@ -1280,16 +1340,26 @@ export class DrizzleAgentRepository implements AgentRepository {
   }
 
   public async update(subject: AuthenticatedSubject, agentId: string, patch: AgentUpdatePatch): Promise<AgentRecord | null> {
-    const rows = await this.db
-      .update(agents)
-      .set({
-        ...(patch.name === undefined ? {} : { name: patch.name }),
-        ...(patch.status === undefined ? {} : { status: patch.status }),
-        ...(patch.ownerUserId === undefined ? {} : { ownerUserId: patch.ownerUserId }),
-        updatedAt: patch.updatedAt,
-      })
-      .where(and(eq(agents.organizationId, subject.organizationId), eq(agents.id, agentId)))
-      .returning({ id: agents.id });
+    let rows;
+    try {
+      rows = await this.db
+        .update(agents)
+        .set({
+          ...(patch.name === undefined ? {} : { name: patch.name }),
+          ...(patch.status === undefined ? {} : { status: patch.status }),
+          ...(patch.ownerUserId === undefined ? {} : { ownerUserId: patch.ownerUserId }),
+          updatedAt: patch.updatedAt,
+        })
+        .where(and(eq(agents.organizationId, subject.organizationId), eq(agents.id, agentId)))
+        .returning({ id: agents.id });
+    } catch (error) {
+      // Retiring released this identity's key and a later shift claimed it,
+      // so bringing the row back would collide with the live agent.
+      if (identityKeyConstraint(error)) {
+        throw new AppError("conflict", "Another agent already holds this identity; merge them instead.");
+      }
+      throw error;
+    }
     if (rows[0] === undefined) return null;
     return this.findById(subject, agentId);
   }
@@ -1411,6 +1481,9 @@ export class DrizzleShiftCommitRepository implements ShiftCommitRepository {
       .set({ verification, verifiedAt, updatedAt: now })
       .where(and(
         eq(shiftCommits.organizationId, subject.organizationId),
+        // Every sibling write carries the caller; a verdict on someone else's
+        // commit is never something this endpoint should be able to write.
+        eq(shiftCommits.userId, subject.userId),
         eq(shiftCommits.id, commitId),
         // Terminal states never move again; a replayed decision is a no-op.
         eq(shiftCommits.verification, "pending"),

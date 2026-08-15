@@ -1262,7 +1262,7 @@ const ManageProjects = ({ client, projects, onChanged, onClose }: ManageProjects
                             setBusy(false);
                             // An empty project has nothing to guard: it goes
                             // on the click. Only recorded time needs the ask.
-                            if (usage.sessionCount === 0 && usage.agentSessionCount === 0) {
+                            if (usage.sessionCount === 0 && usage.agentSessionCount === 0 && usage.agentCount === 0) {
                               void act(() => client.deleteProject(project.id, { reassignTo: null }));
                               return;
                             }
@@ -1306,6 +1306,12 @@ const ManageProjects = ({ client, projects, onChanged, onClose }: ManageProjects
               <strong>{deleting.usage.sessionCount} sessions</strong> ({formatHumanDuration(deleting.usage.durationSeconds)})
               and {deleting.usage.agentSessionCount} agent sessions, unless they move first.
             </p>
+            {deleting.usage.agentCount > 0 && (
+              <p className="subtle">
+                {deleting.usage.agentCount} roster {deleting.usage.agentCount === 1 ? "agent moves" : "agents move"} with it,
+                or retires where another agent already works the destination.
+              </p>
+            )}
             <label>
               What happens to its sessions?
               <select value={reassignTo} onChange={(event) => setReassignTo(event.target.value)}>

@@ -31,6 +31,8 @@ export interface ProjectUsageRecord {
   sessionCount: number;
   durationSeconds: number;
   agentSessionCount: number;
+  /** Roster identities filed under the project; deleting moves or retires them. */
+  agentCount: number;
 }
 
 export interface ProjectRepository {

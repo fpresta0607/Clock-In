@@ -249,6 +249,57 @@ integration(integrationDescription, () => {
     expect(statsBody.apps).toEqual([{ processName: "code.exe", durationSeconds: 90 }]);
   }, 60_000);
 
+  // The whole roster hangs off this one endpoint, and it is the first thing a
+  // schema the migration chain cannot rebuild takes down: the ingest reads
+  // project_path_mappings with an explicit column list taken from schema.ts,
+  // so a column that lives in schema.ts but in no migration turns every agent
+  // event into a 500. This database was built by replaying the chain.
+  it("resolves a shift against a database the migration chain built, and mints its roster identity", async () => {
+    const agentUserId = randomUUID();
+    const agentHeaders = {
+      authorization: await auth.bearer(agentUserId, { email: "roster@clock-in.test", name: "Roster User" }),
+      "content-type": "application/json",
+    };
+    await app.request("/me", { headers: agentHeaders });
+    const projects = (await (await app.request("/projects", { headers: agentHeaders })).json()).projects;
+    const projectId = projects[0].id;
+
+    const mapping = await app.request("/path-mappings", {
+      method: "POST",
+      headers: agentHeaders,
+      body: JSON.stringify({ pathPrefix: "C:/dev/roster", projectId }),
+    });
+    expect(mapping.status).toBe(200);
+    expect(await mapping.json()).toMatchObject({ kind: "path_prefix" });
+
+    const externalSessionId = randomUUID();
+    const startedAt = new Date(Date.now() - 120_000).toISOString();
+    const events = await app.request("/agent-sessions", {
+      method: "POST",
+      headers: agentHeaders,
+      body: JSON.stringify({
+        events: [
+          { source: "claude_code", externalSessionId, event: "started", occurredAt: startedAt, cwd: "C:/dev/roster/app" },
+          { source: "claude_code", externalSessionId, event: "ended", occurredAt: new Date().toISOString(), cwd: "C:/dev/roster/app" },
+        ],
+      }),
+    });
+
+    expect(events.status).toBe(200);
+    const results = (await events.json()).results;
+    expect(results.every((row: { accepted: boolean }) => row.accepted)).toBe(true);
+
+    // The shift resolved to the mapped project and minted the identity that
+    // the roster, the paystub and the pay run all read.
+    const roster = await app.request("/agents", { headers: agentHeaders });
+    expect(roster.status).toBe(200);
+    expect((await roster.json()).agents).toEqual([expect.objectContaining({
+      source: "claude_code",
+      status: "anonymous",
+      project: { id: projectId, name: projects[0].name },
+    })]);
+  }, 60_000);
+
   it("bootstraps a legacy workspace with one first-admin claim and keeps a member's new project private", async () => {
     const organizationId = randomUUID();
     const firstUserId = randomUUID();

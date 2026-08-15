@@ -55,7 +55,7 @@ class MemoryProjects implements ProjectRepository {
     return record;
   }
   public async usageForOrganization() {
-    return { sessionCount: 3, durationSeconds: 5_400, agentSessionCount: 1 };
+    return { sessionCount: 3, durationSeconds: 5_400, agentSessionCount: 1, agentCount: 2 };
   }
   public async deleteForOrganization(_subject: { organizationId: string }, projectId: string, reassignTo: string | null) {
     this.deleted.push({ projectId, reassignTo });
@@ -192,7 +192,7 @@ describe("project routes", () => {
 
     const usage = await app.request(`http://api.test/projects/${doomed?.id}/usage`, { headers: { authorization: bearerHeader } });
     expect(usage.status).toBe(200);
-    await expect(usage.json()).resolves.toEqual({ sessionCount: 3, durationSeconds: 5_400, agentSessionCount: 1 });
+    await expect(usage.json()).resolves.toEqual({ sessionCount: 3, durationSeconds: 5_400, agentSessionCount: 1, agentCount: 2 });
 
     // Deleting reaches other members' sessions, so a plain member may not.
     const refused = await app.request(`http://api.test/projects/${doomed?.id}`, {

@@ -1,0 +1,3 @@
+ALTER TABLE "agents" DROP CONSTRAINT "agents_organization_source_project_unique";--> statement-breakpoint
+CREATE UNIQUE INDEX "agents_organization_source_project_unique" ON "agents" USING btree ("organization_id","source","project_id") WHERE "agents"."status" <> 'retired';--> statement-breakpoint
+CREATE UNIQUE INDEX "agents_organization_source_unassigned_unique" ON "agents" USING btree ("organization_id","source") WHERE "agents"."project_id" is null and "agents"."status" <> 'retired';

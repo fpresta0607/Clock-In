@@ -680,7 +680,7 @@ describe("project management", () => {
     const deleteProject = vi.fn().mockResolvedValue(undefined);
     const person = await signIn(clientFor({
       projects: vi.fn().mockResolvedValue({ projects: webProjects, selectedProjectId: null }),
-      projectUsage: vi.fn().mockResolvedValue({ sessionCount: 0, durationSeconds: 0, agentSessionCount: 0 }),
+      projectUsage: vi.fn().mockResolvedValue({ sessionCount: 0, durationSeconds: 0, agentSessionCount: 0, agentCount: 0 }),
       deleteProject,
     }));
     await screen.findByRole("heading", { name: "SIQstack" });
@@ -697,7 +697,7 @@ describe("project management", () => {
   it("shows counts and a move-or-delete choice instead of a typed name", async () => {
     const person = await signIn(clientFor({
       projects: vi.fn().mockResolvedValue({ projects: webProjects, selectedProjectId: null }),
-      projectUsage: vi.fn().mockResolvedValue({ sessionCount: 2, durationSeconds: 3_600, agentSessionCount: 5 }),
+      projectUsage: vi.fn().mockResolvedValue({ sessionCount: 2, durationSeconds: 3_600, agentSessionCount: 5, agentCount: 3 }),
     }));
     await screen.findByRole("heading", { name: "SIQstack" });
     await person.click(screen.getByRole("button", { name: "Projects" }));
@@ -709,6 +709,9 @@ describe("project management", () => {
     await within(dialog).findByText("What happens to its sessions?");
     expect(dialog).toHaveTextContent("2 sessions");
     expect(dialog).toHaveTextContent("5 agent sessions");
+    // The roster identities hold the project through a restrict FK, so the
+    // admin sees them before confirming rather than after a 500.
+    expect(dialog).toHaveTextContent("3 roster agents move with it");
     expect(within(dialog).queryByLabelText(/type the project's name to confirm/i)).not.toBeInTheDocument();
     await waitFor(() => expect(within(dialog).getByRole("button", { name: "Delete Client" })).toBeEnabled());
   });

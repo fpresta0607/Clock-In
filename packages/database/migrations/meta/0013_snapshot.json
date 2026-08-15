@@ -1,6 +1,6 @@
 {
-  "id": "18844aea-889e-4a71-b78e-b514d2fbc240",
-  "prevId": "91c394f3-debd-44e5-b929-1e38b402ad77",
+  "id": "2ec854ed-31cf-458b-90c2-e986d1294890",
+  "prevId": "74f8272a-6cc1-4044-b8db-5979ee334529",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -475,6 +475,56 @@
         }
       },
       "indexes": {
+        "agents_organization_source_project_unique": {
+          "name": "agents_organization_source_project_unique",
+          "columns": [
+            {
+              "expression": "organization_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "source",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"agents\".\"status\" <> 'retired'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "agents_organization_source_unassigned_unique": {
+          "name": "agents_organization_source_unassigned_unique",
+          "columns": [
+            {
+              "expression": "organization_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "source",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"agents\".\"project_id\" is null and \"agents\".\"status\" <> 'retired'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "agents_organization_id_idx": {
           "name": "agents_organization_id_idx",
           "columns": [
@@ -544,15 +594,6 @@
           "columns": [
             "organization_id",
             "id"
-          ]
-        },
-        "agents_organization_source_project_unique": {
-          "name": "agents_organization_source_project_unique",
-          "nullsNotDistinct": true,
-          "columns": [
-            "organization_id",
-            "source",
-            "project_id"
           ]
         }
       },
@@ -861,6 +902,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'path_prefix'"
+        },
         "path_prefix": {
           "name": "path_prefix",
           "type": "text",
@@ -944,6 +992,10 @@
         "project_path_mappings_path_prefix_length_valid": {
           "name": "project_path_mappings_path_prefix_length_valid",
           "value": "char_length(\"project_path_mappings\".\"path_prefix\") between 1 and 500"
+        },
+        "project_path_mappings_kind_valid": {
+          "name": "project_path_mappings_kind_valid",
+          "value": "\"project_path_mappings\".\"kind\" in ('path_prefix', 'url_rule')"
         }
       },
       "isRLSEnabled": false

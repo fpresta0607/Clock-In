@@ -294,9 +294,19 @@ export const agents = pgTable(
   (table) => [
     // Composite-FK target so shift rows stay inside the tenant.
     unique("agents_organization_id_id_unique").on(table.organizationId, table.id),
-    unique("agents_organization_source_project_unique")
+    // The identity key, in two partial indexes because a nullable project
+    // needs both halves: one for assigned agents, one collapsing every
+    // unassigned sighting of a source onto a single row (a plain unique
+    // treats NULLs as distinct, which would mint an identity per shift).
+    // Both exclude retired rows, so retiring - by hand or as the loser of a
+    // merge - releases the key and the next shift mints a fresh identity
+    // instead of resurrecting the retired one.
+    uniqueIndex("agents_organization_source_project_unique")
       .on(table.organizationId, table.source, table.projectId)
-      .nullsNotDistinct(),
+      .where(sql`${table.status} <> 'retired'`),
+    uniqueIndex("agents_organization_source_unassigned_unique")
+      .on(table.organizationId, table.source)
+      .where(sql`${table.projectId} is null and ${table.status} <> 'retired'`),
     foreignKey({
       columns: [table.organizationId, table.ownerUserId],
       foreignColumns: [users.organizationId, users.id],

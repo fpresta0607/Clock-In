@@ -85,6 +85,20 @@
       "when": 1786782607681,
       "tag": "0011_roster_shift_commits",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1786812827443,
+      "tag": "0012_path_mapping_kind",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1786812877838,
+      "tag": "0013_agent_identity_key_releases_on_retire",
+      "breakpoints": true
     }
   ]
 }
