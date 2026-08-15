@@ -4,6 +4,7 @@ import { generateInviteCode, type AgentSource } from "@clock-in/shared";
 import { and, asc, count, desc, eq, gt, gte, isNotNull, lt, ne, or, sql, sum } from "drizzle-orm";
 import {
   activitySegments,
+  agents,
   agentSessions,
   organizationAdminClaims,
   organizations,
@@ -32,8 +33,12 @@ import {
   type ActivitySegmentInsert,
   type ActivitySegmentRepository,
   type AgentIntervalRecord,
+  type AgentRecord,
+  type AgentRepository,
   type AgentSessionRecord,
   type AgentSessionRepository,
+  type AgentUpdatePatch,
+  type UpsertAgentForKey,
   type AppTotalRecord,
   type PresenceIntervalRecord,
   type ProjectUsageRecord,
@@ -1050,6 +1055,7 @@ function asAgentSessionRecord(row: typeof agentSessions.$inferSelect): AgentSess
     projectId: row.projectId,
     cwd: row.cwd,
     ruleId: row.ruleId,
+    agentId: row.agentId,
     status: row.status,
     startedAt: row.startedAt,
     endedAt: row.endedAt,
@@ -1090,6 +1096,7 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         cwd: input.cwd,
         ruleId: input.ruleId,
         projectId: input.projectId,
+        agentId: input.agentId,
         linkedSessionId: input.linkedSessionId,
         status: "running",
         startedAt: input.occurredAt,
@@ -1104,6 +1111,9 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         // resumed on a different model — but never blanks one already recorded.
         set: {
           ...(input.model === null ? {} : { model: input.model }),
+          // The first assignment wins: a shift never changes identity, and a
+          // replay carrying null never blanks one already stamped.
+          agentId: sql`coalesce(${agentSessions.agentId}, ${input.agentId})`,
           lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${input.occurredAt.toISOString()}::timestamptz)`,
           updatedAt: input.receivedAt,
         },
@@ -1144,6 +1154,7 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         cwd: input.cwd,
         ruleId: input.ruleId,
         projectId: input.projectId,
+        agentId: input.agentId,
         status: "ended",
         startedAt: input.occurredAt,
         endedAt: input.occurredAt,
@@ -1183,6 +1194,96 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
       ))
       .returning({ id: agentSessions.id });
     return rows.length;
+  }
+}
+
+function asAgentRecord(row: { agent: typeof agents.$inferSelect; ownerName: string; projectName: string | null }): AgentRecord {
+  return {
+    id: row.agent.id,
+    organizationId: row.agent.organizationId,
+    name: row.agent.name,
+    source: row.agent.source,
+    status: row.agent.status,
+    owner: { id: row.agent.ownerUserId, name: row.ownerName },
+    // The restrict FK keeps the project alive while the agent points at it.
+    project: row.agent.projectId === null ? null : { id: row.agent.projectId, name: row.projectName! },
+    createdAt: row.agent.createdAt,
+  };
+}
+
+export class DrizzleAgentRepository implements AgentRepository {
+  public constructor(private readonly db: DatabaseConnection["db"]) {}
+
+  public async upsertForKey(input: UpsertAgentForKey): Promise<{ id: string }> {
+    const rows = await this.db
+      .insert(agents)
+      .values({
+        organizationId: input.organizationId,
+        ownerUserId: input.ownerUserId,
+        projectId: input.projectId,
+        source: input.source,
+        // The default name is composed in the insert path so the project's
+        // name lands without another round trip; a null project reads as
+        // "unassigned". A replay only touches updatedAt - the name, owner
+        // and status a member may have set are never overwritten.
+        name: sql`${input.name} || ' @ ' || coalesce((select ${projects.name} from ${projects} where ${projects.organizationId} = ${input.organizationId} and ${projects.id} = ${input.projectId}), 'unassigned')`,
+      })
+      .onConflictDoUpdate({
+        target: [agents.organizationId, agents.source, agents.projectId],
+        set: { updatedAt: input.now },
+      })
+      .returning({ id: agents.id });
+    return { id: rows[0]!.id };
+  }
+
+  private selectJoined() {
+    return this.db
+      .select({ agent: agents, ownerName: users.name, projectName: projects.name })
+      .from(agents)
+      .innerJoin(users, and(eq(users.organizationId, agents.organizationId), eq(users.id, agents.ownerUserId)))
+      .leftJoin(projects, and(eq(projects.organizationId, agents.organizationId), eq(projects.id, agents.projectId)));
+  }
+
+  public async listForOrganization(subject: AuthenticatedSubject): Promise<AgentRecord[]> {
+    const rows = await this.selectJoined()
+      .where(eq(agents.organizationId, subject.organizationId))
+      .orderBy(asc(agents.name), asc(agents.id));
+    return rows.map(asAgentRecord);
+  }
+
+  public async findById(subject: AuthenticatedSubject, agentId: string): Promise<AgentRecord | null> {
+    const rows = await this.selectJoined()
+      .where(and(eq(agents.organizationId, subject.organizationId), eq(agents.id, agentId)))
+      .limit(1);
+    return rows[0] === undefined ? null : asAgentRecord(rows[0]);
+  }
+
+  public async update(subject: AuthenticatedSubject, agentId: string, patch: AgentUpdatePatch): Promise<AgentRecord | null> {
+    const rows = await this.db
+      .update(agents)
+      .set({
+        ...(patch.name === undefined ? {} : { name: patch.name }),
+        ...(patch.status === undefined ? {} : { status: patch.status }),
+        ...(patch.ownerUserId === undefined ? {} : { ownerUserId: patch.ownerUserId }),
+        updatedAt: patch.updatedAt,
+      })
+      .where(and(eq(agents.organizationId, subject.organizationId), eq(agents.id, agentId)))
+      .returning({ id: agents.id });
+    if (rows[0] === undefined) return null;
+    return this.findById(subject, agentId);
+  }
+
+  public async merge(subject: AuthenticatedSubject, winnerId: string, loserId: string): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      await tx
+        .update(agentSessions)
+        .set({ agentId: winnerId, updatedAt: sql`now()` })
+        .where(and(eq(agentSessions.organizationId, subject.organizationId), eq(agentSessions.agentId, loserId)));
+      await tx
+        .update(agents)
+        .set({ status: "retired", updatedAt: sql`now()` })
+        .where(and(eq(agents.organizationId, subject.organizationId), eq(agents.id, loserId)));
+    });
   }
 }
 

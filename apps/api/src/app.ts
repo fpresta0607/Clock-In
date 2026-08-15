@@ -20,6 +20,7 @@ import type { AppConfig } from "./env.js";
 import { AppError, handleAppError, jsonError } from "./errors.js";
 import type {
   ActivitySegmentRepository,
+  AgentRepository,
   AgentSessionRepository,
   PathMappingRepository,
   ProjectRepository,
@@ -61,6 +62,7 @@ export interface CreateAppDependencies {
   sessionRepository?: SessionRepository;
   activitySegmentRepository?: ActivitySegmentRepository;
   agentSessionRepository?: AgentSessionRepository;
+  agentRepository?: AgentRepository;
   pathMappingRepository?: PathMappingRepository;
   viewPreferencesRepository?: ViewPreferencesRepository;
 }
@@ -309,6 +311,7 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
       agentSessions: dependencies.agentSessionRepository,
       pathMappings: dependencies.pathMappingRepository,
       sessions: dependencies.sessionRepository,
+      ...(dependencies.agentRepository === undefined ? {} : { agents: dependencies.agentRepository }),
       clock,
     });
     app.use("/agent-sessions", authenticate);

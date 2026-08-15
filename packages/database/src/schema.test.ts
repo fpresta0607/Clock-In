@@ -4,6 +4,7 @@ import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
 
 import {
   activitySegments,
+  agents,
   agentSessions,
   organizations,
   projectMemberships,
@@ -188,6 +189,49 @@ describe("database schema", () => {
     expect(userTimelineIndex?.config.where).toBeUndefined();
   });
 
+  it("defines roster agents as one durable identity per source and project", () => {
+    expect(agents.id.primary).toBe(true);
+    expect(agents.organizationId.notNull).toBe(true);
+    expect(agents.ownerUserId.notNull).toBe(true);
+    // Null means unassigned work; the identity key still holds through it.
+    expect(agents.projectId.notNull).toBe(false);
+    expect(agents.projectId.columnType).toBe("PgUUID");
+    expect(agents.source.notNull).toBe(true);
+    expect(agents.source.columnType).toBe("PgText");
+    expect(agents.name.notNull).toBe(true);
+    expect(agents.status.notNull).toBe(true);
+    expect(agents.status.default).toBe("anonymous");
+    expect(agents.createdAt.notNull).toBe(true);
+    expect(agents.updatedAt.notNull).toBe(true);
+    expect(agents.createdAt.withTimezone).toBe(true);
+    expect(agents.updatedAt.withTimezone).toBe(true);
+
+    const config = getTableConfig(agents);
+    // organizations reference + owner and project composite FKs.
+    expect(config.foreignKeys).toHaveLength(3);
+    const identityUnique = config.uniqueConstraints.find(
+      (constraint) => constraint.name === "agents_organization_source_project_unique",
+    );
+    expect(identityUnique).toBeDefined();
+    expect(identityUnique!.columns.map((column) => column.name)).toEqual([
+      "organization_id",
+      "source",
+      "project_id",
+    ]);
+    // Two null-project sightings are one agent, not one per upsert (PG >= 15).
+    expect(identityUnique!.nullsNotDistinct).toBe(true);
+    expect(config.uniqueConstraints.map((constraint) => constraint.name)).toContain(
+      "agents_organization_id_id_unique",
+    );
+    expect(config.checks.map((constraint) => constraint.name)).toEqual(
+      expect.arrayContaining(["agents_status_valid", "agents_source_valid", "agents_name_length_valid"]),
+    );
+    // The source shape rule matches agent_sessions': the same id must land in both.
+    const sourceCheck = config.checks.find((constraint) => constraint.name === "agents_source_valid");
+    expect(new PgDialect().sqlToQuery(sourceCheck!.value).sql).toContain("'^[a-z][a-z0-9_]*$'");
+    expect(config.indexes.map((index) => index.config.name)).toContain("agents_organization_id_idx");
+  });
+
   it("defines upsertable agent sessions with status-consistent timestamps", () => {
     expect(agentSessions.id.primary).toBe(true);
     expect(agentSessions.organizationId.notNull).toBe(true);
@@ -206,6 +250,9 @@ describe("database schema", () => {
     expect(agentSessions.cwd.notNull).toBe(false);
     expect(agentSessions.ruleId.notNull).toBe(false);
     expect(agentSessions.ruleId.columnType).toBe("PgUUID");
+    // The roster identity: legacy rows stay null and are never backfilled.
+    expect(agentSessions.agentId.notNull).toBe(false);
+    expect(agentSessions.agentId.columnType).toBe("PgUUID");
     expect(agentSessions.status.notNull).toBe(true);
     expect(agentSessions.status.enumValues).toEqual(["running", "ended"]);
     expect(agentSessions.startedAt.notNull).toBe(true);
@@ -218,7 +265,10 @@ describe("database schema", () => {
     expect(agentSessions.updatedAt.notNull).toBe(true);
 
     const config = getTableConfig(agentSessions);
-    expect(config.foreignKeys).toHaveLength(3);
+    expect(config.foreignKeys).toHaveLength(4);
+    expect(
+      config.foreignKeys.some((key) => key.getName() === "agent_sessions_organization_agent_fk"),
+    ).toBe(true);
     expect(config.uniqueConstraints.map((constraint) => constraint.name)).toContain(
       "agent_sessions_organization_user_source_external_unique",
     );

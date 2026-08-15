@@ -1,7 +1,8 @@
-import type { AgentSessionEventBatchResponse, AgentSource } from "@clock-in/shared";
+import { agentRuntimeLabel, type AgentSessionEventBatchResponse, type AgentSource } from "@clock-in/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import type {
+  AgentRepository,
   AgentSessionRepository,
   PathMappingRepository,
   SessionRepository,
@@ -10,6 +11,13 @@ import { resolveProjectForCwd, resolveProjectForRule, type PathMappingCandidate 
 
 const futureEventToleranceMs = 30_000;
 const defaultStaleThresholdMs = 6 * 60 * 60 * 1_000;
+
+/**
+ * Whether a source mints a roster identity. Browser spans are excluded by
+ * decision: a browser tab is evidence of attention, not a worker on the
+ * payroll.
+ */
+export const rosterEligibleSource = (source: AgentSource): boolean => source !== "browser";
 
 export interface AgentSessionEventInput {
   source: AgentSource;
@@ -32,6 +40,8 @@ export interface AgentSessionServiceDependencies {
   agentSessions: AgentSessionRepository;
   pathMappings: PathMappingRepository;
   sessions: SessionRepository;
+  /** Optional so older wirings keep working; without it no identity is stamped. */
+  agents?: AgentRepository;
   clock?: () => Date;
   staleThresholdMs?: number;
 }
@@ -83,6 +93,30 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
         return mappings;
       };
 
+      // One roster upsert per (source, project) per batch: five events from
+      // the same agent mint or find its identity once.
+      const agentIds = new Map<string, Promise<string>>();
+      const resolveAgent = (source: AgentSource, projectId: string | null): Promise<string | null> => {
+        const agentsRepository = dependencies.agents;
+        if (agentsRepository === undefined || !rosterEligibleSource(source)) return Promise.resolve(null);
+        const key = `${source}|${projectId ?? ""}`;
+        let pending = agentIds.get(key);
+        if (pending === undefined) {
+          pending = agentsRepository
+            .upsertForKey({
+              organizationId: subject.organizationId,
+              ownerUserId: subject.userId,
+              source,
+              projectId,
+              name: agentRuntimeLabel(source),
+              now,
+            })
+            .then((result) => result.id);
+          agentIds.set(key, pending);
+        }
+        return pending;
+      };
+
       const results: AgentSessionEventBatchResponse["results"] = [];
       const resolveProject = (event: AgentSessionEventInput, mappings: PathMappingCandidate[]): string | null =>
         event.source === "browser"
@@ -115,6 +149,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
             cwd: event.cwd,
             ruleId: event.ruleId,
             projectId,
+            agentId: await resolveAgent(event.source, projectId),
             linkedSessionId,
             occurredAt: event.occurredAt,
             receivedAt: now,
@@ -133,6 +168,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
               cwd: event.cwd,
               ruleId: event.ruleId,
               projectId,
+              agentId: await resolveAgent(event.source, projectId),
               occurredAt: event.occurredAt,
               receivedAt: now,
             });

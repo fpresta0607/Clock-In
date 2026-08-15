@@ -271,6 +271,49 @@ export const activitySegments = pgTable(
   ],
 );
 
+// Durable worker identities on the roster, one per (source, project) per
+// organization. Distinct from the agent-runtime roster in packages/shared:
+// that file declares runtimes, this table records the workers built on them.
+// Rows are minted anonymous on first sight and only ever advance to
+// registered or retired by member action; a merge re-points shifts and
+// retires the loser rather than deleting anything.
+export const agents = pgTable(
+  "agents",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    ownerUserId: uuid("owner_user_id").notNull(),
+    // Null means the agent works unassigned; nullsNotDistinct keeps that a
+    // single identity rather than one per sighting (PG >= 15).
+    projectId: uuid("project_id"),
+    source: text("source").notNull(),
+    name: text("name").notNull(),
+    status: text("status").$type<"anonymous" | "registered" | "retired">().default("anonymous").notNull(),
+    ...auditColumns,
+  },
+  (table) => [
+    // Composite-FK target so shift rows stay inside the tenant.
+    unique("agents_organization_id_id_unique").on(table.organizationId, table.id),
+    unique("agents_organization_source_project_unique")
+      .on(table.organizationId, table.source, table.projectId)
+      .nullsNotDistinct(),
+    foreignKey({
+      columns: [table.organizationId, table.ownerUserId],
+      foreignColumns: [users.organizationId, users.id],
+      name: "agents_organization_owner_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.organizationId, table.projectId],
+      foreignColumns: [projects.organizationId, projects.id],
+      name: "agents_organization_project_fk",
+    }).onDelete("restrict"),
+    check("agents_status_valid", sql`${table.status} in ('anonymous', 'registered', 'retired')`),
+    check("agents_source_valid", sql`${table.source} ~ '^[a-z][a-z0-9_]*$' and char_length(${table.source}) <= 40`),
+    check("agents_name_length_valid", sql`char_length(${table.name}) between 1 and 200`),
+    index("agents_organization_id_idx").on(table.organizationId),
+  ],
+);
+
 // Agent CLI sessions reported by clock-in-hook. Upserted on
 // (organization, user, source, external session id); end-before-start is tolerated.
 export const agentSessions = pgTable(
@@ -296,6 +339,9 @@ export const agentSessions = pgTable(
     // url-rule mapping id below attributes them instead.
     cwd: text("cwd"),
     ruleId: uuid("rule_id"),
+    // The roster identity this shift belongs to. Legacy rows stay null and
+    // are never backfilled; null also covers roster-ineligible sources.
+    agentId: uuid("agent_id"),
     status: agentSessionStatus("status").default("running").notNull(),
     startedAt: timestamp("started_at", { mode: "date", withTimezone: true }).notNull(),
     endedAt: timestamp("ended_at", { mode: "date", withTimezone: true }),
@@ -320,6 +366,11 @@ export const agentSessions = pgTable(
       columns: [table.organizationId, table.projectId],
       foreignColumns: [projects.organizationId, projects.id],
       name: "agent_sessions_organization_project_fk",
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.organizationId, table.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+      name: "agent_sessions_organization_agent_fk",
     }).onDelete("restrict"),
     check(
       "agent_sessions_status_fields_valid",
