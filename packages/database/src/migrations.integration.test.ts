@@ -17,12 +17,18 @@ const integrationDescription = databaseUrl
   : "initial PostgreSQL migration (skipped: TEST_DATABASE_URL is not set)";
 const migrationsFolder = fileURLToPath(new URL("../migrations", import.meta.url));
 
-async function migrationsThrough(index: number): Promise<string> {
+/**
+ * A copy of the chain with its newest migration left out, so the seeded rows
+ * below are already in place when that migration runs. Derived from the
+ * journal rather than a pinned index: the point is always "the newest
+ * migration, against a populated database", whatever the newest one is.
+ */
+async function migrationsBeforeTheNewest(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "clock-in-migrations-"));
   const metadata = JSON.parse(await readFile(join(migrationsFolder, "meta", "_journal.json"), "utf8")) as {
     entries: Array<{ idx: number; tag: string }>;
   };
-  const entries = metadata.entries.filter((entry) => entry.idx <= index);
+  const entries = metadata.entries.slice(0, -1);
   await mkdir(join(directory, "meta"));
   await writeFile(join(directory, "meta", "_journal.json"), JSON.stringify({ ...metadata, entries }));
   await Promise.all(entries.map(async (entry) => {
@@ -37,14 +43,14 @@ async function migrationsThrough(index: number): Promise<string> {
 integration(integrationDescription, () => {
   let disposable: DisposableTestDatabase | undefined;
   let database = undefined as unknown as DatabaseConnection;
-  let preBackfillMigrations: string | undefined;
+  let earlierMigrations: string | undefined;
 
   beforeAll(async () => {
     if (!databaseUrl) return;
     disposable = await createDisposableTestDatabase(databaseUrl, "migrations");
     database = disposable.database;
-    preBackfillMigrations = await migrationsThrough(12);
-    await runMigrations(database, { migrationsFolder: preBackfillMigrations });
+    earlierMigrations = await migrationsBeforeTheNewest();
+    await runMigrations(database, { migrationsFolder: earlierMigrations });
   });
 
   afterAll(async () => {
@@ -52,7 +58,7 @@ integration(integrationDescription, () => {
     let directoryError: unknown;
     let cleanupError: unknown;
     try {
-      if (preBackfillMigrations !== undefined) await rm(preBackfillMigrations, { recursive: true, force: true });
+      if (earlierMigrations !== undefined) await rm(earlierMigrations, { recursive: true, force: true });
     } catch (error) {
       directoryError = error;
     } finally {
@@ -66,7 +72,7 @@ integration(integrationDescription, () => {
     if (cleanupError !== undefined) throw cleanupError;
   });
 
-  it("backfills legacy defaults and memberships without assigning administrators or timer devices", async () => {
+  it("replays onto a populated workspace without inventing defaults, administrators, or timer devices", async () => {
     if (!database) return;
     const legacyOrganizationId = randomUUID();
     const legacyFirstUserId = randomUUID();
@@ -124,20 +130,23 @@ integration(integrationDescription, () => {
 
     await runMigrations(database);
 
+    // A migration no longer repairs a legacy workspace with a starter
+    // project: the desktop app creates one at sign-in when the account has
+    // none, so the chain leaves the workspace exactly as it found it.
     const legacyDefaults = await database.client`
       select id, name from projects
       where organization_id = ${legacyOrganizationId} and is_default and not archived
     `;
-    expect(legacyDefaults).toEqual([expect.objectContaining({ name: "General Work" })]);
+    expect(legacyDefaults).toEqual([]);
     const legacyRoles = await database.client`
       select role from users where organization_id = ${legacyOrganizationId} order by role
     `;
     expect(legacyRoles.map((user) => user.role)).toEqual(["member", "member"]);
     const legacyMemberships = await database.client`
-      select user_id from project_memberships
-      where organization_id = ${legacyOrganizationId} and project_id = ${legacyDefaults[0]!.id}
+      select project_id, user_id from project_memberships
+      where organization_id = ${legacyOrganizationId}
     `;
-    expect(legacyMemberships).toHaveLength(2);
+    expect(legacyMemberships).toEqual([{ project_id: legacyTimedProjectId, user_id: legacyFirstUserId }]);
     const legacyClaims = await database.client`
       select user_id from organization_admin_claims where organization_id = ${legacyOrganizationId}
     `;
@@ -147,22 +156,24 @@ integration(integrationDescription, () => {
       where organization_id = ${existingOrganizationId} and is_default and not archived
     `;
     expect(existingDefaults).toEqual([{ id: existingProjectId, name: "Existing Default" }]);
+    // Memberships are not backfilled either: the project keeps whatever
+    // access it already had, which here is none.
     const existingMemberships = await database.client`
       select user_id from project_memberships
       where organization_id = ${existingOrganizationId} and project_id = ${existingProjectId}
     `;
-    expect(existingMemberships).toEqual([{ user_id: existingUserId }]);
+    expect(existingMemberships).toEqual([]);
     const legacySession = await database.client`
       select device_id from time_sessions where id = ${legacySessionId}
     `;
     expect(legacySession).toEqual([{ device_id: null }]);
 
+    // A second run is a no-op rather than a second helping of anything.
     await runMigrations(database);
-    const rerunDefaults = await database.client`
-      select id from projects
-      where organization_id = ${legacyOrganizationId} and is_default and not archived
+    const rerunProjects = await database.client`
+      select id from projects where organization_id = ${legacyOrganizationId}
     `;
-    expect(rerunDefaults).toHaveLength(1);
+    expect(rerunProjects).toEqual([{ id: legacyTimedProjectId }]);
   });
 
   it("enforces tenant foreign keys and a single running session per user", async () => {
@@ -260,13 +271,15 @@ integration(integrationDescription, () => {
     `;
     expect(span?.cwd).toBeNull();
     expect(span?.rule_id).toMatch(/^[0-9a-f-]{36}$/i);
+    // An ended span carries the instant it ended; the status check makes the
+    // half-set row unrepresentable rather than merely discouraged.
     await expect(database.client`
       insert into agent_sessions (organization_id, user_id, source, external_session_id, status, started_at, ended_at, last_event_at)
-      values (${organizationId}, ${userId}, 'browser', 'span-3', 'stale', now() - interval '10 minutes', now() - interval '5 minutes', now() - interval '5 minutes')
+      values (${organizationId}, ${userId}, 'browser', 'span-3', 'ended', now() - interval '10 minutes', now() - interval '5 minutes', now() - interval '5 minutes')
     `).resolves.toBeDefined();
     await expect(database.client`
       insert into agent_sessions (organization_id, user_id, source, external_session_id, status, started_at, last_event_at)
-      values (${organizationId}, ${userId}, 'browser', 'span-4', 'stale', now(), now())
+      values (${organizationId}, ${userId}, 'browser', 'span-4', 'ended', now(), now())
     `).rejects.toThrow();
 
     // kind defaults to a path prefix, and the (org, user, prefix) uniqueness spans both kinds.
