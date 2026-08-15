@@ -813,6 +813,10 @@ fn revoke_collection_authorization_locked(dir: &Path) -> io::Result<()> {
     write_if_changed_locked(&collection_authorization_path(dir), b"{}")
 }
 
+/// Enables browser collection for the signed-in account. The desktop signs in
+/// with a personal token and does not track the organization id, so the local
+/// evidence namespace uses the literal `"legacy"` organization slot; the server
+/// still attributes spans by the signed-in token, not by this namespace.
 pub fn enable_collection(dir: &Path, account_id: &str) -> ApiResult<()> {
     let Some(identity) = spool::EvidenceIdentity::new(account_id, "legacy") else {
         return Err(BridgeError::new(
@@ -906,6 +910,32 @@ pub fn record_capture_paused(dir: &Path, collection_id: &str) -> io::Result<()> 
         let body = serde_json::to_vec(&serde_json::json!({ "collectionId": collection_id }))
             .map_err(io::Error::other)?;
         write_if_changed_locked(&capture_paused_path(dir), &body)
+    })
+}
+
+/// Writes the extension's unmatched-origin tally so the desktop can surface it
+/// as URL-rule suggestions. Called by `clock-in-browser-host` on the
+/// extension's `tally` message; the desktop reads it back through
+/// `read_suggestions`. Guarded by the admitted collection like every other
+/// host write, so a stale extension process cannot scribble over a newer one's
+/// tally.
+pub fn record_tally(
+    dir: &Path,
+    collection_id: &str,
+    week_start: u64,
+    entries: &[TallyEntry],
+) -> io::Result<()> {
+    let spool = browser_spool_path(dir);
+    spool::with_lock(&spool, || {
+        if admitted_collection_id_locked(dir).as_deref() != Some(collection_id) {
+            return Ok(());
+        }
+        let body = serde_json::to_vec_pretty(&serde_json::json!({
+            "weekStart": week_start,
+            "entries": entries,
+        }))
+        .map_err(io::Error::other)?;
+        write_if_changed_locked(&dir.join("unmatched-tally.json"), &body)
     })
 }
 
@@ -1256,7 +1286,7 @@ fn unique_temp(path: &Path) -> PathBuf {
 }
 
 /// One suggestion the tally earns: an unmatched origin and its focused seconds.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TallyEntry {
     pub origin: String,

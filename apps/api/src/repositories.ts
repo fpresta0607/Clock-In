@@ -273,7 +273,9 @@ export interface AgentSessionRecord {
   model: string | null;
   externalSessionId: string;
   projectId: string | null;
-  cwd: string;
+  cwd: string | null;
+  /** The matched url-rule mapping id for browser spans; null for agent events. */
+  ruleId: string | null;
   status: "running" | "ended";
   startedAt: Date;
   endedAt: Date | null;
@@ -287,7 +289,8 @@ export interface UpsertStartedAgentSession {
   source: AgentSource;
   model: string | null;
   externalSessionId: string;
-  cwd: string;
+  cwd: string | null;
+  ruleId: string | null;
   projectId: string | null;
   linkedSessionId: string | null;
   occurredAt: Date;
@@ -300,7 +303,8 @@ export interface InsertEndedAgentSession {
   source: AgentSource;
   model: string | null;
   externalSessionId: string;
-  cwd: string;
+  cwd: string | null;
+  ruleId: string | null;
   projectId: string | null;
   occurredAt: Date;
   receivedAt: Date;
@@ -324,6 +328,7 @@ export interface PathMappingRecord {
   id: string;
   organizationId: string;
   userId: string;
+  kind: "path_prefix" | "url_rule";
   pathPrefix: string;
   repoUrl: string | null;
   projectId: string;
@@ -332,12 +337,14 @@ export interface PathMappingRecord {
 export interface CreatePathMapping {
   organizationId: string;
   userId: string;
+  kind: "path_prefix" | "url_rule";
   pathPrefix: string;
   repoUrl: string | null;
   projectId: string;
 }
 
 export interface UpdatePathMapping {
+  kind?: "path_prefix" | "url_rule";
   pathPrefix?: string;
   repoUrl?: string | null;
   projectId?: string;

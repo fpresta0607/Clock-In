@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizePath, resolveProjectForCwd } from "./attribution.js";
+import { normalizePath, resolveProjectForCwd, resolveProjectForRule, type PathMappingCandidate } from "./attribution.js";
 
 const projectA = "a1c7e513-b094-4d4c-ae55-21790ae019a4";
 const projectB = "b1c7e513-b094-4d4c-ae55-21790ae019a4";
+
+let serial = 0;
+function mapping(pathPrefix: string, projectId: string, kind: "path_prefix" | "url_rule" = "path_prefix"): PathMappingCandidate {
+  serial += 1;
+  return { id: `m${serial}`, kind, pathPrefix, projectId };
+}
 
 describe("normalizePath", () => {
   it("unifies case and separators and strips trailing separators", () => {
@@ -17,32 +23,32 @@ describe("normalizePath", () => {
 describe("resolveProjectForCwd", () => {
   it("returns null with no mappings or no match", () => {
     expect(resolveProjectForCwd("C:/dev/clock-in", [])).toBeNull();
-    expect(resolveProjectForCwd("C:/other/place", [{ pathPrefix: "C:/dev", projectId: projectA }])).toBeNull();
+    expect(resolveProjectForCwd("C:/other/place", [mapping("C:/dev", projectA)])).toBeNull();
   });
 
   it("matches exactly, case-insensitively and across slash styles", () => {
-    const mappings = [{ pathPrefix: "C:\\Dev\\Clock-In", projectId: projectA }];
+    const mappings = [mapping("C:\\Dev\\Clock-In", projectA)];
     expect(resolveProjectForCwd("c:/dev/clock-in", mappings)).toBe(projectA);
     expect(resolveProjectForCwd("C:/DEV/CLOCK-IN/", mappings)).toBe(projectA);
   });
 
   it("matches subdirectories but only on path-segment boundaries", () => {
-    const mappings = [{ pathPrefix: "C:/dev/clock", projectId: projectA }];
+    const mappings = [mapping("C:/dev/clock", projectA)];
     expect(resolveProjectForCwd("c:/dev/clock/packages/shared", mappings)).toBe(projectA);
     expect(resolveProjectForCwd("C:/dev/clock-in-extra", mappings)).toBeNull();
     expect(resolveProjectForCwd("C:/dev/clocks", mappings)).toBeNull();
   });
 
   it("ignores a trailing separator on the stored prefix", () => {
-    const mappings = [{ pathPrefix: "C:/dev/clock-in/", projectId: projectA }];
+    const mappings = [mapping("C:/dev/clock-in/", projectA)];
     expect(resolveProjectForCwd("c:/dev/clock-in", mappings)).toBe(projectA);
     expect(resolveProjectForCwd("c:/dev/clock-in/apps", mappings)).toBe(projectA);
   });
 
   it("picks the longest matching prefix", () => {
     const mappings = [
-      { pathPrefix: "C:/dev", projectId: projectA },
-      { pathPrefix: "C:/dev/clock-in", projectId: projectB },
+      mapping("C:/dev", projectA),
+      mapping("C:/dev/clock-in", projectB),
     ];
     expect(resolveProjectForCwd("c:/dev/clock-in/apps/api", mappings)).toBe(projectB);
     expect(resolveProjectForCwd("c:/dev/other", mappings)).toBe(projectA);
@@ -50,35 +56,55 @@ describe("resolveProjectForCwd", () => {
 
   it("rejects equal-length ties as ambiguous, unless they name the same project", () => {
     const ambiguous = [
-      { pathPrefix: "C:/dev/clock-in", projectId: projectA },
-      { pathPrefix: "c:\\dev\\clock-in\\", projectId: projectB },
+      mapping("C:/dev/clock-in", projectA),
+      mapping("c:\\dev\\clock-in\\", projectB),
     ];
     expect(resolveProjectForCwd("c:/dev/clock-in", ambiguous)).toBeNull();
 
     const agreeing = [
-      { pathPrefix: "C:/dev/clock-in", projectId: projectA },
-      { pathPrefix: "c:\\dev\\clock-in\\", projectId: projectA },
+      mapping("C:/dev/clock-in", projectA),
+      mapping("c:\\dev\\clock-in\\", projectA),
     ];
     expect(resolveProjectForCwd("c:/dev/clock-in", agreeing)).toBe(projectA);
   });
 
   it("prefers an unambiguous longer match over an ambiguous shorter one", () => {
     const mappings = [
-      { pathPrefix: "C:/dev", projectId: projectA },
-      { pathPrefix: "c:\\dev", projectId: projectB },
-      { pathPrefix: "C:/dev/clock-in", projectId: projectB },
+      mapping("C:/dev", projectA),
+      mapping("c:\\dev", projectB),
+      mapping("C:/dev/clock-in", projectB),
     ];
     expect(resolveProjectForCwd("c:/dev/clock-in", mappings)).toBe(projectB);
   });
 
   it("ignores shorter matches that arrive after the longest one, in any input order", () => {
     const longestFirst = [
-      { pathPrefix: "C:/dev/clock-in", projectId: projectB },
-      { pathPrefix: "C:/dev", projectId: projectA },
+      mapping("C:/dev/clock-in", projectB),
+      mapping("C:/dev", projectA),
     ];
     expect(resolveProjectForCwd("C:/dev/clock-in/apps", longestFirst)).toBe(projectB);
     expect(resolveProjectForCwd("C:/dev/clock-in/apps", [...longestFirst].reverse())).toBe(projectB);
   });
+
+  it("never matches a url_rule pattern against a working directory", () => {
+    const mappings = [mapping("C:/dev/clock-in", projectA, "url_rule")];
+    expect(resolveProjectForCwd("c:/dev/clock-in", mappings)).toBeNull();
+  });
 });
 
+describe("resolveProjectForRule", () => {
+  it("resolves a browser span's rule id to its url_rule mapping's project", () => {
+    const rule = mapping("github.com/acme/*", projectA, "url_rule");
+    expect(resolveProjectForRule(rule.id, [rule])).toBe(projectA);
+  });
 
+  it("returns null for an unknown or deleted rule id", () => {
+    const rule = mapping("github.com/acme/*", projectA, "url_rule");
+    expect(resolveProjectForRule("missing-rule-id", [rule])).toBeNull();
+  });
+
+  it("never resolves a path_prefix mapping id, even when the id matches", () => {
+    const prefix = mapping("C:/dev", projectA);
+    expect(resolveProjectForRule(prefix.id, [prefix])).toBeNull();
+  });
+});

@@ -18,7 +18,7 @@ const mappingIdSchema = z.string().uuid();
 function asMapping(record: PathMappingRecord): ProjectPathMapping {
   return projectPathMappingSchema.parse({
     id: record.id,
-    kind: "path_prefix",
+    kind: record.kind,
     pathPrefix: record.pathPrefix,
     repoUrl: record.repoUrl,
     projectId: record.projectId,
@@ -49,6 +49,7 @@ export function createPathMappingRoutes(service: PathMappingService): Hono<ApiEn
     const input = pathMappingCreateRequestSchema.safeParse(await requestBody(context));
     if (!input.success) throw new AppError("validation_error", "Invalid request body.");
     const created = await service.create(getAuthenticatedSubject(context), {
+      kind: input.data.kind,
       pathPrefix: input.data.pathPrefix,
       ...(input.data.repoUrl === undefined ? {} : { repoUrl: input.data.repoUrl }),
       projectId: input.data.projectId,
@@ -60,6 +61,7 @@ export function createPathMappingRoutes(service: PathMappingService): Hono<ApiEn
     const input = pathMappingUpdateRequestSchema.safeParse(await requestBody(context));
     if (!input.success) throw new AppError("validation_error", "Invalid request body.");
     const updated = await service.update(getAuthenticatedSubject(context), id, {
+      ...(input.data.kind === undefined ? {} : { kind: input.data.kind }),
       ...(input.data.pathPrefix === undefined ? {} : { pathPrefix: input.data.pathPrefix }),
       ...(input.data.repoUrl === undefined ? {} : { repoUrl: input.data.repoUrl }),
       ...(input.data.projectId === undefined ? {} : { projectId: input.data.projectId }),

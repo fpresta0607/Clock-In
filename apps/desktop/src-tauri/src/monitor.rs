@@ -874,6 +874,17 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Caches the mappings the drain resolves cwds against and rewrites the
+/// browser rules file the host serves. One write per refresh, skipped when
+/// nothing changed; a failed rules write is logged, never fatal, because a
+/// stale rule set beats a stopped monitor.
+pub(crate) fn set_mappings(shared: &Arc<Mutex<MonitorShared>>, mappings: Vec<PathMapping>) {
+    if let Err(error) = crate::browser::write_rules_file(&crate::spool::browser_dir(), &mappings) {
+        eprintln!("clock-in: could not write the browser rules file: {error}");
+    }
+    lock(shared).mappings = mappings;
+}
+
 /// Session events the event thread pushes between polls. Bounded so a monitor
 /// left disabled cannot grow it; lock/suspend events are rare, so the cap
 /// never bites in practice.
@@ -1592,7 +1603,7 @@ impl Monitor {
     }
 
     pub fn cache_mappings(&self, mappings: Vec<PathMapping>) {
-        lock(&self.shared).mappings = mappings;
+        set_mappings(&self.shared, mappings);
     }
 
     pub async fn status(&self) -> MonitorStatus {

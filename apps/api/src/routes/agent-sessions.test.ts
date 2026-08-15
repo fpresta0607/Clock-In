@@ -75,6 +75,7 @@ class MemoryAgentSessions implements AgentSessionRepository {
       externalSessionId: input.externalSessionId,
       projectId: input.projectId,
       cwd: input.cwd,
+      ruleId: input.ruleId,
       status: "running",
       startedAt: input.occurredAt,
       endedAt: null,
@@ -106,6 +107,7 @@ class MemoryAgentSessions implements AgentSessionRepository {
       externalSessionId: input.externalSessionId,
       projectId: input.projectId,
       cwd: input.cwd,
+      ruleId: input.ruleId,
       status: "ended",
       startedAt: input.occurredAt,
       endedAt: input.occurredAt,
@@ -177,10 +179,10 @@ function runningTimer() {
 function createTestApp(agentSessions = new MemoryAgentSessions(), options: { withMapping?: boolean; withTimer?: boolean; withUrlRule?: boolean } = {}) {
   const mappings: PathMappingRecord[] = [];
   if (options.withMapping === true) {
-    mappings.push({ id: "e1c7e513-b094-4d4c-ae55-21790ae019a4", organizationId: ids.organization, userId: ids.user, pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project });
+    mappings.push({ id: "e1c7e513-b094-4d4c-ae55-21790ae019a4", organizationId: ids.organization, userId: ids.user, kind: "path_prefix", pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project });
   }
   if (options.withUrlRule === true) {
-    mappings.push({ id: "01c7e513-b094-4d4c-ae55-21790ae019a4", organizationId: ids.organization, userId: ids.user, pathPrefix: "github.com/acme/*", repoUrl: null, projectId: ids.project });
+    mappings.push({ id: "01c7e513-b094-4d4c-ae55-21790ae019a4", organizationId: ids.organization, userId: ids.user, kind: "url_rule", pathPrefix: "github.com/acme/*", repoUrl: null, projectId: ids.project });
   }
   return createApp({
     config,
@@ -274,6 +276,35 @@ describe("agent-session routes", () => {
     });
     expect(response.status).toBe(200);
     expect(agentSessions.records[0]).toMatchObject({ source: "agent_9", projectId: ids.project });
+  });
+
+  it("attributes browser spans by their matched rule id, with no cwd", async () => {
+    const headers = { authorization: bearerHeader, "content-type": "application/json" };
+    const agentSessions = new MemoryAgentSessions();
+    const app = createTestApp(agentSessions, { withUrlRule: true });
+
+    const response = await app.request("http://api.test/agent-sessions", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        events: [{ source: "browser", externalSessionId: "span-1", event: "started", occurredAt: "2026-08-06T13:30:00.000Z", ruleId: "01c7e513-b094-4d4c-ae55-21790ae019a4" }],
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(agentSessions.records[0]).toMatchObject({
+      source: "browser",
+      ruleId: "01c7e513-b094-4d4c-ae55-21790ae019a4",
+      projectId: ids.project,
+      cwd: null,
+    });
+
+    // A browser span for a deleted rule resolves to no project, not a guess.
+    const unknown = await app.request("http://api.test/agent-sessions", {
+      method: "POST", headers,
+      body: JSON.stringify({ events: [{ source: "browser", externalSessionId: "span-2", event: "started", occurredAt: "2026-08-06T13:35:00.000Z", ruleId: "c1c7e513-b094-4d4c-ae55-21790ae019a4" }] }),
+    });
+    expect(unknown.status).toBe(200);
+    expect(agentSessions.records[1]).toMatchObject({ projectId: null, ruleId: "c1c7e513-b094-4d4c-ae55-21790ae019a4" });
   });
 
   it("keeps the model beside the runtime and never derives one from the other", async () => {

@@ -10,12 +10,14 @@ import {
 } from "../repositories.js";
 
 export interface CreatePathMappingInput {
+  kind: "path_prefix" | "url_rule";
   pathPrefix: string;
   repoUrl?: string | null;
   projectId: string;
 }
 
 export interface UpdatePathMappingInput {
+  kind?: "path_prefix" | "url_rule";
   pathPrefix?: string;
   repoUrl?: string | null;
   projectId?: string;
@@ -61,6 +63,7 @@ export function createPathMappingService(dependencies: PathMappingServiceDepende
         return await dependencies.pathMappings.create({
           organizationId: subject.organizationId,
           userId: subject.userId,
+          kind: input.kind,
           pathPrefix: input.pathPrefix,
           repoUrl: input.repoUrl ?? null,
           projectId: input.projectId,
@@ -85,7 +88,7 @@ export function createPathMappingService(dependencies: PathMappingServiceDepende
       // with a filesystem pattern (silently breaking cwd attribution).
       const merged = projectPathMappingSchema.safeParse({
         id: existing.id,
-        kind: "path_prefix",
+        kind: input.kind ?? existing.kind,
         pathPrefix: input.pathPrefix ?? existing.pathPrefix,
         repoUrl: input.repoUrl === undefined ? existing.repoUrl : input.repoUrl,
         projectId: input.projectId ?? existing.projectId,

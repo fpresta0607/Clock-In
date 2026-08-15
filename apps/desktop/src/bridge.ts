@@ -113,6 +113,24 @@ export type AgentSessionRow = {
   since: string;
 };
 
+/// How one browser's connection stands. Only installed browsers appear.
+export type BrowserHealthState =
+  | "disabled"
+  | "never-registered"
+  | "binary-missing"
+  | "registered"
+  | "connected";
+
+export type BrowserHealth = {
+  /// The stable wire id (`chrome`, `edge`, `firefox`).
+  browser: string;
+  /// The plain name the card shows.
+  label: string;
+  state: BrowserHealthState;
+  /// The store page the [Add extension] button opens.
+  storeUrl: string;
+};
+
 /// One limit a coding-agent provider reports — a rolling session window, a
 /// weekly window, or a per-model bound. Several apply at once; the smallest is
 /// what the dial shows.
@@ -255,6 +273,12 @@ export interface TimerBridge {
   preferencesSet(input: { scope?: string; range?: string }): Promise<ViewPreferences>;
   orgJoin(inviteCode: string): Promise<OrganizationOverview>;
   monitorStatus(): Promise<MonitorStatus>;
+  /// One card per installed browser, for the "what's switched on" list.
+  browserStatus(): Promise<BrowserHealth[]>;
+  /// Re-registers the host for one browser and reports the resulting health.
+  browserRepair(browserId: string): Promise<BrowserHealth>;
+  /// Opens one browser's extension store page in the system browser.
+  browserOpenStore(browserId: string): Promise<void>;
   /// Pins recording to one project, or clears the pin with `null`.
   sessionSelectProject(projectId: string | null): Promise<MonitorStatus>;
   hookRegister(source: string): Promise<HookRegisterResult>;
@@ -568,6 +592,29 @@ export const decodeMonitorStatus = (value: unknown): MonitorStatus => {
   };
 };
 
+const decodeBrowserHealth = (value: unknown): BrowserHealth => {
+  const candidate = record(value);
+  const state = string(candidate.state);
+  if (
+    state !== "disabled"
+    && state !== "never-registered"
+    && state !== "binary-missing"
+    && state !== "registered"
+    && state !== "connected"
+  ) invalidResponse();
+  return {
+    browser: string(candidate.browser),
+    label: string(candidate.label),
+    state: state as BrowserHealthState,
+    storeUrl: string(candidate.storeUrl),
+  };
+};
+
+const decodeBrowserHealthList = (value: unknown): BrowserHealth[] => {
+  if (!Array.isArray(value)) invalidResponse();
+  return (value as unknown[]).map(decodeBrowserHealth);
+};
+
 export const decodeMonitorSettings = (value: unknown): MonitorSettings => {
   const candidate = record(value);
   return {
@@ -696,6 +743,9 @@ export const defaultBridge: TimerBridge = {
   preferencesSet: (input) => invokeDecoded("preferences_set", decodeViewPreferences, { input }),
   orgJoin: (inviteCode) => invokeDecoded("org_join", decodeOrganizationOverview, { input: { inviteCode } }),
   monitorStatus: () => invokeDecoded("monitor_status", decodeMonitorStatus),
+  browserStatus: () => invokeDecoded("browser_status", decodeBrowserHealthList),
+  browserRepair: (browserId) => invokeDecoded("browser_repair", decodeBrowserHealth, { browserId }),
+  browserOpenStore: (browserId) => invokeDecoded("browser_open_store", decodeVoid, { browserId }),
   sessionSelectProject: (projectId) => invokeDecoded("session_select_project", decodeMonitorStatus, { projectId }),
   hookRegister: (source) => invokeDecoded("hook_register", decodeHookRegisterResult, { source }),
   monitorSetEnabled: (enabled) => invokeDecoded("monitor_set_enabled", decodeMonitorSettings, { enabled }),

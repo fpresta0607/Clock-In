@@ -52,7 +52,7 @@ const publishedRelease = (): PublishedRelease => {
   const assetNames = [...staging.matchAll(/^\s*take\s+'[^']*'\s+(\S+)\s*$/gm)]
     .flatMap(([, name]) => (name === undefined ? [] : [name]));
   const [, stagingDir = ""] = /cp "\$found" "([^/"]+)\//.exec(staging) ?? [];
-  const [, uploadGlob = ""] = /gh release upload "\$TAG" (\S+)/.exec(scriptOf("Publish the prerelease")) ?? [];
+  const [, uploadGlob = ""] = /gh release upload "\$TAG" (\S+)/.exec(scriptOf("Publish the release")) ?? [];
 
   return { tag: publish?.env?.TAG ?? "", assetNames, stagingDir, uploadGlob };
 };

@@ -68,6 +68,7 @@ class MemoryPathMappings implements PathMappingRepository {
     if (existing === null) return null;
     const updated: PathMappingRecord = {
       ...existing,
+      kind: input.kind ?? existing.kind,
       pathPrefix: input.pathPrefix ?? existing.pathPrefix,
       repoUrl: input.repoUrl === undefined ? existing.repoUrl : input.repoUrl,
       projectId: input.projectId ?? existing.projectId,
@@ -94,6 +95,7 @@ function existingMapping(overrides: Partial<PathMappingRecord> = {}): PathMappin
     id: ids.mapping,
     organizationId: ids.organization,
     userId: ids.user,
+    kind: "path_prefix",
     pathPrefix: "C:/dev/clock-in",
     repoUrl: null,
     projectId: ids.project,
@@ -113,46 +115,46 @@ describe("path-mapping service", () => {
   it("creates a mapping for an active membership project", async () => {
     const { pathMappings, service } = createService();
 
-    const created = await service.create(subject, { pathPrefix: "C:/dev/clock-in", projectId: ids.project });
+    const created = await service.create(subject, { kind: "path_prefix", pathPrefix: "C:/dev/clock-in", projectId: ids.project });
 
-    expect(created).toMatchObject({ pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project, userId: ids.user });
+    expect(created).toMatchObject({ kind: "path_prefix", pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project, userId: ids.user });
     expect(pathMappings.records).toHaveLength(1);
   });
 
   it("creates a mapping with url-rule compatible pattern", async () => {
     const { service } = createService();
 
-    const created = await service.create(subject, { pathPrefix: "github.com/acme/*", projectId: ids.project });
+    const created = await service.create(subject, { kind: "url_rule", pathPrefix: "github.com/acme/*", projectId: ids.project });
 
-    expect(created).toMatchObject({ pathPrefix: "github.com/acme/*", projectId: ids.project });
+    expect(created).toMatchObject({ kind: "url_rule", pathPrefix: "github.com/acme/*", projectId: ids.project });
   });
 
   it("rejects a duplicate pattern, exactly like duplicate prefixes", async () => {
     const { service } = createService([
-      existingMapping({ pathPrefix: "github.com/acme/*" }),
+      existingMapping({ kind: "url_rule", pathPrefix: "github.com/acme/*" }),
     ]);
 
-    await expect(service.create(subject, { pathPrefix: "github.com/acme/*", projectId: ids.project }))
+    await expect(service.create(subject, { kind: "url_rule", pathPrefix: "github.com/acme/*", projectId: ids.project }))
       .rejects.toMatchObject({ code: "conflict", status: 409 });
   });
 
   it("requires the project to be an accessible, active membership project", async () => {
     const { service } = createService();
 
-    await expect(service.create(subject, { pathPrefix: "C:/x", projectId: "f1c7e513-b094-4d4c-ae55-21790ae019a4" }))
+    await expect(service.create(subject, { kind: "path_prefix", pathPrefix: "C:/x", projectId: "f1c7e513-b094-4d4c-ae55-21790ae019a4" }))
       .rejects.toMatchObject({ code: "not_found", status: 404 });
-    await expect(service.create(subject, { pathPrefix: "C:/x", projectId: ids.archivedProject }))
+    await expect(service.create(subject, { kind: "path_prefix", pathPrefix: "C:/x", projectId: ids.archivedProject }))
       .rejects.toMatchObject({ code: "project_archived", status: 409 });
   });
 
   it("rejects a duplicate prefix, including a unique-constraint race", async () => {
     const { pathMappings, service } = createService([existingMapping()]);
 
-    await expect(service.create(subject, { pathPrefix: "C:/dev/clock-in", projectId: ids.project }))
+    await expect(service.create(subject, { kind: "path_prefix", pathPrefix: "C:/dev/clock-in", projectId: ids.project }))
       .rejects.toMatchObject({ code: "conflict", status: 409 });
 
     pathMappings.nextCreateError = new PathMappingRepositoryError("path_prefix");
-    await expect(service.create(subject, { pathPrefix: "C:/dev/other", projectId: ids.project }))
+    await expect(service.create(subject, { kind: "path_prefix", pathPrefix: "C:/dev/other", projectId: ids.project }))
       .rejects.toMatchObject({ code: "conflict", status: 409 });
   });
 

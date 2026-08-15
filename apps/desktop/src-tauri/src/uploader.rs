@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use crate::api::{ApiClient, PathMapping};
+use crate::api::{ApiClient, MappingKind, PathMapping};
 use crate::monitor::{
     advance_sessions, iso8601, lock, parse_iso8601, unix_now, ActiveAgent, AgentTracking,
     MonitorShared, ObservedSession, SeenAgentEvent, SegmentRecord,
@@ -78,12 +78,28 @@ pub(crate) async fn upload_once(
     // Refresh the local mapping cache before the drain resolves suggestions.
     // A failed refresh keeps last pass's cache — stale mappings beat none.
     if let Ok(mappings) = client.path_mappings(&token).await {
-        lock(shared).mappings = mappings;
+        crate::monitor::set_mappings(shared, mappings);
     } else {
         complete = false;
     }
 
+    // Keep the browser collection admitted: the authorization expires after
+    // ten minutes and this pass runs every five. Best-effort, like the rest of
+    // the maintenance — a stale or absent collection just reports disabled.
+    if let Err(error) = crate::browser::renew_collection_authorization(&spool::browser_dir()) {
+        eprintln!(
+            "clock-in: could not renew browser attribution: {}",
+            error.message
+        );
+    }
+
     complete &= upload_agent_spool(client, &token, agent_path).await;
+    complete &= upload_agent_spool(
+        client,
+        &token,
+        &spool::browser_dir().join("browser-spool.jsonl"),
+    )
+    .await;
     complete &= upload_sessions(client, &token, sessions_path).await;
 
     if complete {
@@ -368,6 +384,12 @@ pub fn resolve_project(cwd: &str, mappings: &[PathMapping]) -> Option<String> {
     let mut best: Vec<&PathMapping> = Vec::new();
     let mut best_length: Option<usize> = None;
     for mapping in mappings {
+        // URL rules match browser tabs, never an agent's working directory;
+        // running them through the path-prefix matcher would file `cwd` under
+        // a website pattern. Only path-prefix mappings participate here.
+        if mapping.kind != MappingKind::PathPrefix {
+            continue;
+        }
         let prefix = normalize_path(&mapping.path_prefix);
         if !matches_boundary(&cwd, &prefix) {
             continue;
@@ -641,6 +663,7 @@ mod tests {
     fn mapping(id: &str, prefix: &str, project: &str) -> PathMapping {
         PathMapping {
             id: id.to_string(),
+            kind: MappingKind::PathPrefix,
             path_prefix: prefix.to_string(),
             repo_url: None,
             project_id: project.to_string(),

@@ -37,10 +37,13 @@ const panelFor = (overrides: Partial<Parameters<typeof RecordingPanel>[0]> = {})
     onClose: vi.fn(),
     status,
     hookSnippets: {},
+    browsers: [],
     projectName: "Field work",
     defaultProjectName: "Field work",
     onTurnOnRecording: vi.fn(),
     onConnectAgent: vi.fn(),
+    onConnectBrowser: vi.fn(),
+    onRepairBrowser: vi.fn(),
     ...overrides,
   };
   render(<RecordingPanel {...props} />);
@@ -152,6 +155,44 @@ describe("RecordingPanel", () => {
     panelFor();
 
     const panel = screen.getByRole("dialog", { name: "What Clock-In is recording" });
+    expect(within(panel).getByText(/does not watch your web browser/)).toBeInTheDocument();
+  });
+
+  it("shows each browser with its connection state and the one action that finishes it", async () => {
+    const person = userEvent.setup();
+    const props = panelFor({
+      browsers: [
+        { browser: "chrome", label: "Chrome", state: "registered", storeUrl: "https://chromewebstore.google.com/" },
+        { browser: "edge", label: "Edge", state: "connected", storeUrl: "https://microsoftedge.microsoft.com/addons/" },
+        { browser: "firefox", label: "Firefox", state: "never-registered", storeUrl: "https://addons.mozilla.org/" },
+      ],
+    });
+
+    const panel = screen.getByRole("dialog", { name: "What Clock-In is recording" });
+    const chrome = within(panel).getByText("Chrome").closest("li") as HTMLElement;
+    expect(chrome).toHaveTextContent("Not connected");
+    await person.click(within(chrome).getByRole("button", { name: "Add extension" }));
+    expect(props.onConnectBrowser).toHaveBeenCalledWith("chrome");
+
+    const edge = within(panel).getByText("Edge").closest("li") as HTMLElement;
+    expect(edge).toHaveTextContent("Connected");
+    expect(within(edge).queryByRole("button")).not.toBeInTheDocument();
+
+    const firefox = within(panel).getByText("Firefox").closest("li") as HTMLElement;
+    expect(firefox).toHaveTextContent("Needs a hand");
+    await person.click(within(firefox).getByRole("button", { name: "Repair" }));
+    expect(props.onRepairBrowser).toHaveBeenCalledWith("firefox");
+  });
+
+  it("keeps a disabled browser off the card list", () => {
+    panelFor({
+      browsers: [
+        { browser: "chrome", label: "Chrome", state: "disabled", storeUrl: "https://chromewebstore.google.com/" },
+      ],
+    });
+
+    const panel = screen.getByRole("dialog", { name: "What Clock-In is recording" });
+    expect(within(panel).queryByText("Chrome")).not.toBeInTheDocument();
     expect(within(panel).getByText(/does not watch your web browser/)).toBeInTheDocument();
   });
 

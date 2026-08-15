@@ -35,6 +35,10 @@ decides the hours:
   runtime is recorded beside the model it was driving without either being read off the other.
   Which runtimes Clock-In knows by name is a roster, not a schema: see
   [**Agent hooks**](#agent-hooks).
+- **Browser spans.** A small browser extension matches the active tab against the user's own
+  URL rules locally and reports only the verdict — which rule matched, for how long — to a
+  native-messaging host the desktop registers. The URL, page title, and browsing history never
+  leave the browser.
 
 Reports measure three things, deliberately distinct: **active time** — the union of a
 person's working intervals, overlaps collapsed, which can never exceed wall clock and is what
@@ -57,8 +61,10 @@ flowchart LR
     subgraph WS["Your workstation"]
         CLI["Agent CLIs<br/>Claude Code · Codex · Cursor<br/>Pi · opencode · Kimi Code · …"] -->|"JSON on stdin"| HOOK["clock-in-hook"]
         OS["OS signals<br/>idle · foreground process<br/>lock · suspend"] --> MON["Activity monitor<br/>30s poll"]
+        EXT["Browser extension<br/>Chrome · Edge · Firefox"] -->|"native messaging"| HOST["clock-in-browser-host"]
         HOOK --> SPOOL[("Local spool<br/>append-only")]
         MON --> SPOOL
+        HOST --> SPOOL
         SPOOL --> APP["Clock-In desktop<br/>Tauri 2 + React"]
     end
 
@@ -69,8 +75,9 @@ flowchart LR
     AUTH -.->|"JWT"| WEB
 ```
 
-The spool is the load-bearing idea, and there are three of them: activity segments, agent
-events, and finished sessions. `clock-in-hook` holds no credentials and opens no sockets — it
+The spool is the load-bearing idea, and there are four of them: activity segments, agent
+events, browser spans, and finished sessions. `clock-in-hook` holds no credentials and opens
+no sockets — it
 appends one line under an interprocess lock and exits, so a hook can never slow down or block
 the agent CLI, and events recorded while the desktop app is closed survive until it next runs.
 Uploads are idempotent on client-generated ids, so a crash mid-upload replays instead of
@@ -201,7 +208,7 @@ build can finish and upload work it already started; no shipped client calls the
 
 ### How the evidence reaches the server
 
-Three local spools, one discipline. Each is append-only, drained in two phases
+Four local spools, one discipline. Each is append-only, drained in two phases
 (read, then truncate only what the server acknowledged), and idempotent on a
 client-generated id, so a crash mid-upload replays rather than losing or
 duplicating anything.
@@ -210,6 +217,7 @@ duplicating anything.
 |---|---|---|
 | activity segments | the 30-second monitor tick | `POST /activity/segments` |
 | agent events | `clock-in-hook`, one line per lifecycle event | `POST /agent-sessions` |
+| browser spans | `clock-in-browser-host`, one line per span verdict | `POST /agent-sessions` |
 | finished sessions | the session tracker, as each one closes | `POST /sessions/observed` |
 
 `clock-in-hook` is the reason agent evidence survives everything: agent CLIs run
@@ -217,7 +225,10 @@ it from their lifecycle hooks, it appends one line under an interprocess lock (a
 advisory `File::try_lock` on a sibling `.lock` sentinel, so a holder that dies
 mid-append releases it) and exits. It holds no credentials and opens no sockets,
 so a hook can never slow down or block the CLI, and events recorded while the
-desktop app is closed wait on disk until it next runs.
+desktop app is closed wait on disk until it next runs. `clock-in-browser-host`
+keeps the same posture — the browser launches it, it holds no credentials and
+opens no sockets, and browser spans recorded while the desktop app is closed
+wait on disk until it next runs.
 
 Uploads run every five minutes in batches of up to 500. A session older than the
 **seven-day** freshness bound is refused rather than backfilled, and per-row
@@ -264,15 +275,18 @@ Not by policy, but because the code never reads it:
 - **Screenshots**, of any kind.
 - **Window titles.** The foreground query returns a process name and stops there.
 - **Input content.** Clock-In never records anything typed into a form, chat, or document.
-- **URLs, browsing history, or page content.** Nothing in the product talks to a browser.
+- **URLs, browsing history, or page content.** The browser extension matches the active tab
+  against the user's own URL rules inside the browser and reports only which rule matched;
+  the URL, page title, and browsing history never leave the browser.
 - **Document names, file contents, message or email bodies.**
 - **Injection.** Clock-In never reaches inside or controls another app. The monitor is read-only
   Win32 queries plus broadcasts delivered to Clock-In's own hidden window.
 
 What *is* collected: coarse activity segments with timestamps, the foreground process name, agent
-session boundaries with their working directory, and the start and end of each session the monitor
-observed. A working directory can contain a user name, so it is shown only to the owning user and
-org admins, and is redacted from logs.
+session boundaries with their working directory, browser spans naming which URL rule matched and
+for how long, and the start and end of each session the monitor observed. A working directory can
+contain a user name, so it is shown only to the owning user and org admins, and is redacted from
+logs.
 
 ## Repository layout
 
@@ -283,8 +297,9 @@ A pnpm workspace. Contracts flow down; nothing flows back up.
 | **`packages/shared`** | Zod contracts shared by every client and the API, the interval/time model (`intervals.ts`), invite-code and duration helpers, and the SIQstack brand stylesheet both frontends import. |
 | **`packages/database`** | Drizzle schema, SQL migrations, the connection factory, and the migration runner. |
 | **`apps/api`** | Hono API: env validation, Neon Auth JWT verification, services (sessions, activity, agent sessions, attribution, reports), Drizzle repositories, CSV export. |
-| **`apps/desktop`** | The tray app. React UI over a Tauri 2 Rust host: `monitor.rs` (activity), `spool.rs` (shared with the hook binary), `uploader.rs`, `recovery.rs`, the All stats overlay, and the `clock-in-hook` bin target. |
+| **`apps/desktop`** | The tray app. React UI over a Tauri 2 Rust host: `monitor.rs` (activity), `spool.rs` (shared with the helper binaries), `uploader.rs`, `recovery.rs`, the All stats overlay, and the `clock-in-hook` and `clock-in-browser-host` bin targets. |
 | **`apps/web`** | The dashboard: sign-up/sign-in, clickable team leaderboard with per-member breakdowns, project management, installer downloads. |
+| **`apps/browser-extension`** | The Manifest V3 browser extension: matches the active tab against the user's URL rules locally and reports only the verdict to the desktop's native-messaging host. |
 
 Routes stay thin, services own the rules, repositories own SQL. Every service is tested
 against explicit fakes, so the behavior suite needs no database.
@@ -497,25 +512,26 @@ rejected and why.
 
 - [Phase 1 design](docs/plans/2026-08-06-phase-1-design.md) — the manual timer, its data model, and its guardrails (the timer it describes has since been retired)
 - [Phase 2 design](docs/plans/2026-08-07-phase-2-design.md) — evidence, attribution, and the anti-manipulation stance
-- [Phase 3 design](docs/plans/2026-08-09-phase-3-design.md): browser attribution, monitor precision, and the grandmother test (designed, not built)
+- [Phase 3 design](docs/plans/2026-08-09-phase-3-design.md): browser attribution (built), monitor precision, and the grandmother test
 - [Phase 1](docs/plans/2026-08-06-phase-1-implementation.md) · [Phase 2](docs/plans/2026-08-07-phase-2-implementation.md) · [Phase 3](docs/plans/2026-08-09-phase-3-implementation.md) implementation plans
 
 ## Status and known gaps
 
-Recording is automatic; phase 3 is designed and not started. What's deliberately not built
-yet:
+Recording is automatic. Browser attribution is built; the monitor-precision half of phase 3 is
+still designed and not started. What's deliberately not built yet:
 
 - **Recording is Windows-only.** The `ActivitySource` trait admits macOS and Linux
   implementations, and without one there are no session boundaries to record. Installers are
   built for Windows and macOS today, but a macOS install records nothing until that lands.
-- **Nothing but an agent names a project by itself.** A foreground process name proves the
-  machine was working, not what it was working on, so time with no agent and no pinned project
-  lands in the default project and reads as unattributed.
+- **A foreground process name alone names no project.** It proves the machine was working, not
+  what it was working on; only an agent's working directory, a matched browser rule, or a pinned
+  project names one, and time with none of those lands in the default project and reads as
+  unattributed.
 - **One project at a time.** Concurrent agent sessions in different projects do not split a
   session; the last one to report wins, and the boundary between them is a session close.
 - **No signing credentials yet** — paid certificates are needed for a real release (see
   DEPLOY.md). Until they arrive, the **Unsigned test installers** workflow is the
-  distributable: it republishes the `unsigned-latest` prerelease under fixed asset names,
+  distributable: it republishes the `unsigned-latest` release under fixed asset names,
   which is what the dashboard's **Download for Windows** button links. Windows SmartScreen
   warns, macOS needs `xattr`. Windows debug builds carry the auto-updater
   (see DEPLOY.md); macOS updates are still by hand.
