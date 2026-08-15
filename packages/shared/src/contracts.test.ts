@@ -3,6 +3,15 @@ import { describe, expect, it } from "vitest";
 import { agentRuntimeIds } from "./agent-runtimes.js";
 import {
   activitySegmentBatchRequestSchema,
+  agentMergeRequestSchema,
+  agentPatchRequestSchema,
+  agentPaystubFiltersSchema,
+  agentPaystubResponseSchema,
+  agentSchema,
+  agentsListResponseSchema,
+  agentStatusValues,
+  shiftCommitVerificationValues,
+  shiftCommitViewSchema,
   activitySegmentBatchResponseSchema,
   activitySegmentKindValues,
   activitySegmentUploadSchema,
@@ -696,6 +705,109 @@ describe("personal stats contracts", () => {
     expect(() => meStatsResponseSchema.parse({
       ...stats,
       sites: [{ mapping: { id: ids.user, pattern: "x".repeat(501), projectId: null }, durationSeconds: 60 }],
+    })).toThrow();
+  });
+});
+
+describe("roster agent contracts", () => {
+  const agent = {
+    id: ids.session,
+    name: "Claude Code @ Website redesign",
+    source: "claude_code",
+    status: "anonymous",
+    owner: { id: ids.user, name: "Alex Morgan" },
+    project: { id: ids.project, name: "Website redesign" },
+    createdAt: startedAt,
+  };
+
+  it("covers every agent status and accepts a listed agent", () => {
+    expect(agentStatusValues).toEqual(["anonymous", "registered", "retired"]);
+    expect(() => agentSchema.parse(agent)).not.toThrow();
+    expect(() => agentSchema.parse({ ...agent, project: null })).not.toThrow();
+    expect(() => agentsListResponseSchema.parse({ agents: [agent] })).not.toThrow();
+  });
+
+  it("rejects malformed agents", () => {
+    expect(() => agentSchema.parse({ ...agent, name: "" })).toThrow();
+    expect(() => agentSchema.parse({ ...agent, name: "x".repeat(201) })).toThrow();
+    expect(() => agentSchema.parse({ ...agent, status: "fired" })).toThrow();
+    expect(() => agentSchema.parse({ ...agent, source: "Claude Code" })).toThrow();
+    expect(() => agentSchema.parse({ ...agent, extra: true })).toThrow();
+  });
+
+  it("requires at least one field on a patch and refuses anonymous as a target", () => {
+    expect(() => agentPatchRequestSchema.parse({ name: "Reviewer" })).not.toThrow();
+    expect(() => agentPatchRequestSchema.parse({ status: "registered", ownerUserId: ids.user })).not.toThrow();
+    expect(() => agentPatchRequestSchema.parse({})).toThrow();
+    // Anonymous is where agents start, never where a patch sends them.
+    expect(() => agentPatchRequestSchema.parse({ status: "anonymous" })).toThrow();
+    expect(() => agentPatchRequestSchema.parse({ name: "Reviewer", extra: true })).toThrow();
+  });
+
+  it("names the merge loser in the body; the path names the winner", () => {
+    expect(() => agentMergeRequestSchema.parse({ loserId: ids.session })).not.toThrow();
+    expect(() => agentMergeRequestSchema.parse({})).toThrow();
+    expect(() => agentMergeRequestSchema.parse({ loserId: "not-a-uuid" })).toThrow();
+  });
+
+  it("takes paystub bounds like every other report filter", () => {
+    expect(() => agentPaystubFiltersSchema.parse({})).not.toThrow();
+    expect(() => agentPaystubFiltersSchema.parse({ fromAt: startedAt, toExclusiveAt: stoppedAt })).not.toThrow();
+    // Instant bounds arrive together and never mixed with calendar dates.
+    expect(() => agentPaystubFiltersSchema.parse({ fromAt: startedAt })).toThrow();
+    expect(() => agentPaystubFiltersSchema.parse({ from: "2026-08-06", fromAt: startedAt, toExclusiveAt: stoppedAt })).toThrow();
+  });
+
+  it("accepts a complete paystub, commit record included", () => {
+    expect(shiftCommitVerificationValues).toEqual(["pending", "merged", "reverted", "orphaned"]);
+    const commit = {
+      id: ids.client,
+      repoRoot: "C:/dev/clock-in",
+      branch: "feat/roster",
+      sha: "a".repeat(40),
+      subject: "feat(api): roster agents",
+      authoredAt: startedAt,
+      verification: "merged",
+      verifiedAt: stoppedAt,
+    };
+    expect(() => shiftCommitViewSchema.parse(commit)).not.toThrow();
+    expect(() => shiftCommitViewSchema.parse({ ...commit, branch: null, verification: "pending", verifiedAt: null })).not.toThrow();
+    expect(() => shiftCommitViewSchema.parse({ ...commit, sha: "xyz" })).toThrow();
+
+    const paystub = {
+      agent,
+      filters: { fromAt: startedAt, toExclusiveAt: stoppedAt },
+      totals: {
+        agentSeconds: 3_600,
+        shiftCount: 1,
+        commitsRecorded: 1,
+        commitsPending: 0,
+        commitsMerged: 1,
+        commitsReverted: 0,
+        commitsOrphaned: 0,
+        heldRate: 1,
+      },
+      shifts: [{
+        id: ids.session,
+        startedAt,
+        endedAt: stoppedAt,
+        model: "claude-fable-5",
+        durationSeconds: 3_600,
+        commits: [commit],
+      }],
+      trend: [{ periodStartAt: startedAt, agentSeconds: 3_600, shiftCount: 1, heldRate: 1 }],
+    };
+    expect(() => agentPaystubResponseSchema.parse(paystub)).not.toThrow();
+    // Before any commit capture exists the same shape carries zeros and nulls.
+    expect(() => agentPaystubResponseSchema.parse({
+      ...paystub,
+      totals: { ...paystub.totals, commitsRecorded: 0, commitsMerged: 0, heldRate: null },
+      shifts: [{ ...paystub.shifts[0], commits: [] }],
+      trend: [{ periodStartAt: startedAt, agentSeconds: 0, shiftCount: 0, heldRate: null }],
+    })).not.toThrow();
+    expect(() => agentPaystubResponseSchema.parse({
+      ...paystub,
+      totals: { ...paystub.totals, heldRate: 1.5 },
     })).toThrow();
   });
 });

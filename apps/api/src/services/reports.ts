@@ -69,7 +69,8 @@ function utcStart(date: string): Date {
 
 type ReportRangeFilters = Pick<ReportFilters, "from" | "to" | "fromAt" | "toExclusiveAt">;
 
-function normalizedQuery(filters: ReportRangeFilters & Partial<Pick<ReportFilters, "projectId" | "userId">>): ReportQuery {
+/** Shared range normalization; the agents paystub and pay-run reuse the exact reporting rules. */
+export function normalizedQuery(filters: ReportRangeFilters & Partial<Pick<ReportFilters, "projectId" | "userId">>): ReportQuery {
   const hasInstantBoundary = filters.fromAt !== undefined || filters.toExclusiveAt !== undefined;
   if (hasInstantBoundary) {
     if (filters.from !== undefined || filters.to !== undefined || filters.fromAt === undefined || filters.toExclusiveAt === undefined) {

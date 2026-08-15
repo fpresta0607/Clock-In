@@ -29,6 +29,7 @@ import type {
   ViewPreferencesRepository,
 } from "./repositories.js";
 import { createActivityRoutes } from "./routes/activity.js";
+import { createAgentRoutes } from "./routes/agents.js";
 import { createAgentSessionRoutes } from "./routes/agent-sessions.js";
 import { createMeStatsRoutes } from "./routes/me-stats.js";
 import { createPathMappingRoutes } from "./routes/path-mappings.js";
@@ -38,6 +39,7 @@ import { createReportRoutes } from "./routes/reports.js";
 import { createSessionRoutes } from "./routes/sessions.js";
 import { createActivityService } from "./services/activity.js";
 import { createAgentSessionReaper, createAgentSessionService } from "./services/agent-sessions.js";
+import { createAgentService } from "./services/agents.js";
 import { createPathMappingService } from "./services/path-mappings.js";
 import { createReportService } from "./services/reports.js";
 import { createSessionService } from "./services/sessions.js";
@@ -317,6 +319,19 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
     app.use("/agent-sessions", authenticate);
     app.use("/agent-sessions/*", authenticate);
     app.route("/agent-sessions", createAgentSessionRoutes(agentSessionService));
+  }
+  if (dependencies.agentRepository !== undefined) {
+    if (dependencies.agentSessionRepository === undefined) {
+      throw new Error("An agent session repository is required for agent routes.");
+    }
+    const agentService = createAgentService({
+      agents: dependencies.agentRepository,
+      reaper: createAgentSessionReaper({ agentSessions: dependencies.agentSessionRepository, clock }),
+      clock,
+    });
+    app.use("/agents", authenticate);
+    app.use("/agents/*", authenticate);
+    app.route("/agents", createAgentRoutes(agentService));
   }
   if (dependencies.pathMappingRepository !== undefined) {
     if (dependencies.projectRepository === undefined) {

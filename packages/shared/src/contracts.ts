@@ -488,6 +488,117 @@ export const agentSessionEventBatchResponseSchema = z
   })
   .strict();
 
+/**
+ * A roster agent's standing. Everything starts `anonymous` when first seen;
+ * a member registering it is a naming ceremony, and `retired` is where merged
+ * losers and decommissioned workers go - rows are never deleted.
+ */
+export const agentStatusValues = ["anonymous", "registered", "retired"] as const;
+export const agentStatusSchema = z.enum(agentStatusValues);
+
+export const agentSchema = z
+  .object({
+    id: idSchema,
+    name: z.string().min(1).max(200),
+    source: agentSourceSchema,
+    status: agentStatusSchema,
+    owner: z.object({ id: idSchema, name: z.string().min(1) }).strict(),
+    project: z.object({ id: idSchema, name: z.string().min(1) }).strict().nullable(),
+    createdAt: timestampSchema,
+  })
+  .strict();
+
+export const agentsListResponseSchema = z.object({ agents: z.array(agentSchema) }).strict();
+
+/** Rename, register/retire, or hand the agent to another member. */
+export const agentPatchRequestSchema = z
+  .object({
+    name: z.string().trim().min(1).max(200).optional(),
+    status: z.enum(["registered", "retired"]).optional(),
+    ownerUserId: idSchema.optional(),
+  })
+  .strict()
+  .refine((value) => value.name !== undefined || value.status !== undefined || value.ownerUserId !== undefined);
+
+/** POST /agents/:id/merge - the path's :id is the winner. */
+export const agentMergeRequestSchema = z.object({ loserId: idSchema }).strict();
+
+export const agentPaystubFiltersSchema = z
+  .object({
+    from: dateSchema.optional(),
+    to: dateSchema.optional(),
+    fromAt: timestampSchema.optional(),
+    toExclusiveAt: timestampSchema.optional(),
+  })
+  .strict()
+  .superRefine(validateCalendarAndInstantBounds);
+
+/**
+ * Whether a shift commit held: `pending` until the desktop's local read-only
+ * verification decides, then terminally `merged`, `reverted`, or `orphaned`.
+ */
+export const shiftCommitVerificationValues = ["pending", "merged", "reverted", "orphaned"] as const;
+export const shiftCommitVerificationSchema = z.enum(shiftCommitVerificationValues);
+
+export const shiftCommitViewSchema = z
+  .object({
+    id: idSchema,
+    repoRoot: z.string().min(1).max(1_000),
+    branch: z.string().min(1).max(500).nullable(),
+    sha: z.string().regex(/^[0-9a-f]{40,64}$/),
+    subject: z.string().max(500),
+    authoredAt: timestampSchema,
+    verification: shiftCommitVerificationSchema,
+    verifiedAt: timestampSchema.nullable(),
+  })
+  .strict();
+
+const heldRateSchema = z.number().min(0).max(1).nullable();
+
+/**
+ * One agent's pay period: hours, shifts, and the commits it recorded with how
+ * they held up. Commit counts are all zero and heldRate null until shift
+ * commits exist - the schema ships complete so the web parses one shape.
+ */
+export const agentPaystubResponseSchema = z
+  .object({
+    agent: agentSchema,
+    filters: agentPaystubFiltersSchema,
+    totals: z
+      .object({
+        agentSeconds: z.number().int().nonnegative().safe(),
+        shiftCount: z.number().int().nonnegative().safe(),
+        commitsRecorded: z.number().int().nonnegative().safe(),
+        commitsPending: z.number().int().nonnegative().safe(),
+        commitsMerged: z.number().int().nonnegative().safe(),
+        commitsReverted: z.number().int().nonnegative().safe(),
+        commitsOrphaned: z.number().int().nonnegative().safe(),
+        /** merged / decided; null while nothing has been decided. */
+        heldRate: heldRateSchema,
+      })
+      .strict(),
+    shifts: z.array(z
+      .object({
+        id: idSchema,
+        startedAt: timestampSchema,
+        endedAt: timestampSchema.nullable(),
+        model: z.string().min(1).max(200).nullable(),
+        durationSeconds: z.number().int().nonnegative().safe(),
+        commits: z.array(shiftCommitViewSchema),
+      })
+      .strict()),
+    /** Six weekly buckets, oldest first, computed server-side. */
+    trend: z.array(z
+      .object({
+        periodStartAt: timestampSchema,
+        agentSeconds: z.number().int().nonnegative().safe(),
+        shiftCount: z.number().int().nonnegative().safe(),
+        heldRate: heldRateSchema,
+      })
+      .strict()),
+  })
+  .strict();
+
 export const pathMappingKindValues = ["path_prefix", "url_rule"] as const;
 export const pathMappingKindSchema = z.enum(pathMappingKindValues);
 
@@ -664,6 +775,15 @@ export type AgentSessionEvent = z.infer<typeof agentSessionEventSchema>;
 export type AgentSessionEventBatchRequest = z.infer<typeof agentSessionEventBatchRequestSchema>;
 export type AgentSessionEventBatchResponse = z.infer<typeof agentSessionEventBatchResponseSchema>;
 export type AgentSource = z.infer<typeof agentSourceSchema>;
+export type Agent = z.infer<typeof agentSchema>;
+export type AgentStatus = z.infer<typeof agentStatusSchema>;
+export type AgentsListResponse = z.infer<typeof agentsListResponseSchema>;
+export type AgentPatchRequest = z.infer<typeof agentPatchRequestSchema>;
+export type AgentMergeRequest = z.infer<typeof agentMergeRequestSchema>;
+export type AgentPaystubFilters = z.infer<typeof agentPaystubFiltersSchema>;
+export type AgentPaystubResponse = z.infer<typeof agentPaystubResponseSchema>;
+export type ShiftCommitVerification = z.infer<typeof shiftCommitVerificationSchema>;
+export type ShiftCommitView = z.infer<typeof shiftCommitViewSchema>;
 export type ApiError = z.infer<typeof apiErrorSchema>;
 export type ApiErrorCode = z.infer<typeof apiErrorCodeSchema>;
 export type CurrentSessionResponse = z.infer<typeof currentSessionResponseSchema>;

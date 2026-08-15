@@ -83,6 +83,19 @@ a.primary { display: inline-block; text-decoration: none; }
 .board-times { display: grid; justify-items: end; gap: 1px; }
 .board-agent { color: var(--text-secondary); font-size: .74rem; font-variant-numeric: tabular-nums; }
 
+/* The roster tab: anonymous rows sit greyed beside their one-click Register
+   until a member claims them; registered rows read at full weight. */
+.board-list li.is-anonymous { display: flex; align-items: center; gap: 8px; }
+.board-list li.is-anonymous .board-choice { flex: 1; min-width: 0; opacity: .55; }
+.register-button { flex: none; }
+
+/* Commit verification badges on the paystub. */
+.verify-badge { margin-left: 8px; border-radius: 999px; padding: 1px 8px; font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; }
+.verify-badge.is-pending { background: rgba(163, 179, 194, .16); color: var(--text-secondary); }
+.verify-badge.is-merged { background: rgba(0, 229, 155, .16); color: var(--accent-green); }
+.verify-badge.is-reverted { background: rgba(221, 93, 79, .16); color: var(--red); }
+.verify-badge.is-orphaned { background: rgba(168, 85, 247, .16); color: var(--accent-purple); }
+
 /* Scope + range: one quiet row of filters between the masthead and the cards. */
 .control-bar { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
 .scope-picker select { min-width: 170px; padding: 7px 10px; font-size: .84rem; }

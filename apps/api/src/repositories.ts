@@ -299,6 +299,16 @@ export interface AgentUpdatePatch {
   updatedAt: Date;
 }
 
+/** One shift on an agent's paystub; a running shift's effective end is its last event. */
+export interface AgentShiftRecord {
+  id: string;
+  model: string | null;
+  status: "running" | "ended";
+  startedAt: Date;
+  endedAt: Date | null;
+  lastEventAt: Date;
+}
+
 export interface AgentRepository {
   /** Mints or finds the identity for (org, source, project); replay yields the same id. */
   upsertForKey(input: UpsertAgentForKey): Promise<{ id: string }>;
@@ -308,6 +318,8 @@ export interface AgentRepository {
   update(subject: AuthenticatedSubject, agentId: string, patch: AgentUpdatePatch): Promise<AgentRecord | null>;
   /** Re-points the loser's shifts at the winner and retires the loser, in one transaction. */
   merge(subject: AuthenticatedSubject, winnerId: string, loserId: string): Promise<void>;
+  /** This agent's shifts overlapping the range, newest first; running shifts overlap up to lastEventAt. */
+  listSessionsForAgent(subject: AuthenticatedSubject, agentId: string, query: ReportQuery): Promise<AgentShiftRecord[]>;
 }
 
 export interface AgentSessionRecord {
