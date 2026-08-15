@@ -246,6 +246,8 @@ export const projectUsageResponseSchema = z
     sessionCount: z.number().int().nonnegative().safe(),
     durationSeconds: z.number().int().nonnegative().safe(),
     agentSessionCount: z.number().int().nonnegative().safe(),
+    /** Roster identities filed under the project; they move with it or retire. */
+    agentCount: z.number().int().nonnegative().safe(),
   })
   .strict();
 

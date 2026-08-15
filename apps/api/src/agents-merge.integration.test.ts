@@ -88,4 +88,22 @@ integration("agent merge re-points shift_commits", () => {
     const loser = await agents.findById(subject, loserId);
     expect(loser?.status).toBe("retired");
   });
+
+  // The merge above is what makes this case exist: retiring the loser has to
+  // release its identity key, or the very next codex shift conflicts back
+  // onto the retired row and the merge is undone before anyone sees it.
+  it("gives the next shift on the loser's key a fresh identity, not the retired one", async () => {
+    const minted = await agents.upsertForKey({
+      organizationId,
+      ownerUserId,
+      source: "codex",
+      projectId: null,
+      name: "Codex",
+      now: new Date(),
+    });
+
+    expect(minted.id).not.toBe(loserId);
+    expect((await agents.findById(subject, minted.id))?.status).toBe("anonymous");
+    expect((await agents.findById(subject, loserId))?.status).toBe("retired");
+  });
 });

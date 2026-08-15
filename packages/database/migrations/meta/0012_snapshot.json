@@ -1,6 +1,6 @@
 {
-  "id": "18844aea-889e-4a71-b78e-b514d2fbc240",
-  "prevId": "91c394f3-debd-44e5-b929-1e38b402ad77",
+  "id": "74f8272a-6cc1-4044-b8db-5979ee334529",
+  "prevId": "18844aea-889e-4a71-b78e-b514d2fbc240",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -861,6 +861,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'path_prefix'"
+        },
         "path_prefix": {
           "name": "path_prefix",
           "type": "text",
@@ -944,6 +951,10 @@
         "project_path_mappings_path_prefix_length_valid": {
           "name": "project_path_mappings_path_prefix_length_valid",
           "value": "char_length(\"project_path_mappings\".\"path_prefix\") between 1 and 500"
+        },
+        "project_path_mappings_kind_valid": {
+          "name": "project_path_mappings_kind_valid",
+          "value": "\"project_path_mappings\".\"kind\" in ('path_prefix', 'url_rule')"
         }
       },
       "isRLSEnabled": false

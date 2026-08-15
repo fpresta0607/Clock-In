@@ -210,20 +210,37 @@ describe("database schema", () => {
     const config = getTableConfig(agents);
     // organizations reference + owner and project composite FKs.
     expect(config.foreignKeys).toHaveLength(3);
-    const identityUnique = config.uniqueConstraints.find(
-      (constraint) => constraint.name === "agents_organization_source_project_unique",
+    // The identity key is two partial unique indexes rather than one
+    // constraint: retiring an agent has to release its key so the next shift
+    // mints a fresh identity instead of resurrecting the retired one.
+    const identityIndex = config.indexes.find(
+      (index) => index.config.name === "agents_organization_source_project_unique",
     );
-    expect(identityUnique).toBeDefined();
-    expect(identityUnique!.columns.map((column) => column.name)).toEqual([
+    expect(identityIndex).toBeDefined();
+    expect(identityIndex!.config.unique).toBe(true);
+    expect(identityIndex!.config.columns.map((column) => (column as { name: string }).name)).toEqual([
       "organization_id",
       "source",
       "project_id",
     ]);
-    // Two null-project sightings are one agent, not one per upsert (PG >= 15).
-    expect(identityUnique!.nullsNotDistinct).toBe(true);
-    expect(config.uniqueConstraints.map((constraint) => constraint.name)).toContain(
-      "agents_organization_id_id_unique",
+    expect(new PgDialect().sqlToQuery(identityIndex!.config.where!).sql).toContain("<> 'retired'");
+    // Two null-project sightings are one agent, not one per upsert: a plain
+    // unique treats nulls as distinct, so the unassigned half is its own index.
+    const unassignedIndex = config.indexes.find(
+      (index) => index.config.name === "agents_organization_source_unassigned_unique",
     );
+    expect(unassignedIndex).toBeDefined();
+    expect(unassignedIndex!.config.unique).toBe(true);
+    expect(unassignedIndex!.config.columns.map((column) => (column as { name: string }).name)).toEqual([
+      "organization_id",
+      "source",
+    ]);
+    const unassignedWhere = new PgDialect().sqlToQuery(unassignedIndex!.config.where!).sql;
+    expect(unassignedWhere).toContain("is null");
+    expect(unassignedWhere).toContain("<> 'retired'");
+    expect(config.uniqueConstraints.map((constraint) => constraint.name)).toEqual([
+      "agents_organization_id_id_unique",
+    ]);
     expect(config.checks.map((constraint) => constraint.name)).toEqual(
       expect.arrayContaining(["agents_status_valid", "agents_source_valid", "agents_name_length_valid"]),
     );
