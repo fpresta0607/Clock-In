@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::browser::write_if_changed_locked;
-use crate::git_evidence;
-use crate::monitor::{parse_iso8601, unix_now};
+use crate::git_evidence::{self, Verification};
+use crate::monitor::{iso8601, parse_iso8601, unix_now};
 use crate::spool::{self, AgentEventKind, AgentSource};
 
 /// How long an opened window waits for its `Ended` line before it counts as
@@ -326,10 +326,73 @@ pub fn mark_rejected(shift_commits_path: &Path, client_ids: &[String]) {
     });
 }
 
+fn verification_label(verification: Verification) -> &'static str {
+    match verification {
+        Verification::Merged => "merged",
+        Verification::Reverted => "reverted",
+        Verification::Orphaned => "orphaned",
+        Verification::Pending => "pending",
+    }
+}
+
+/// Checks every pending, unrejected entry whose repo is still on disk against
+/// the repo's current state, and records whatever git decides. A missing
+/// repo directory leaves the entry untouched — pending is a legitimate
+/// steady state, not a failure. A decided entry is marked unsynced so the
+/// next upload pass replays it with its new verdict.
+pub async fn run_verification_pass(shift_commits_path: &Path) {
+    let candidates: Vec<CommitEntry> = spool::with_lock(shift_commits_path, || {
+        Ok(read_registry(shift_commits_path)
+            .into_iter()
+            .filter(|entry| {
+                entry.verification == "pending"
+                    && !entry.rejected
+                    && Path::new(&entry.repo_root).is_dir()
+            })
+            .collect())
+    })
+    .unwrap_or_default();
+    if candidates.is_empty() {
+        return;
+    }
+
+    let mut decisions: Vec<(String, Verification)> = Vec::new();
+    for entry in &candidates {
+        let outcome =
+            git_evidence::verify(Path::new(&entry.repo_root), &entry.sha, &entry.authored_at).await;
+        if outcome != Verification::Pending {
+            decisions.push((entry.client_id.clone(), outcome));
+        }
+    }
+    if decisions.is_empty() {
+        return;
+    }
+
+    let now = unix_now();
+    let _ = spool::with_lock(shift_commits_path, || {
+        let mut registry = read_registry(shift_commits_path);
+        for (client_id, outcome) in &decisions {
+            if let Some(entry) = registry
+                .iter_mut()
+                .find(|entry| &entry.client_id == client_id)
+            {
+                if entry.verification != "pending" {
+                    // Already decided by a concurrent pass.
+                    continue;
+                }
+                entry.verification = verification_label(*outcome).to_string();
+                entry.verified_at = Some(iso8601(now));
+                entry.synced = false;
+            }
+        }
+        prune_decided_and_synced(&mut registry, now);
+        write_registry(shift_commits_path, &registry)
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::monitor::iso8601;
     use crate::spool::SpoolEvent;
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -619,6 +682,70 @@ mod tests {
         assert!(two.rejected && !two.synced);
 
         assert_eq!(unsynced(&commits_path), Vec::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn pending_entry(client_id: &str, repo_root: String, sha: String) -> CommitEntry {
+        CommitEntry {
+            client_id: client_id.to_string(),
+            source: source(),
+            external_session_id: "session-1".to_string(),
+            repo_root,
+            branch: None,
+            sha,
+            subject: "did work".to_string(),
+            authored_at: iso8601(1_700_000_000),
+            verification: "pending".to_string(),
+            verified_at: None,
+            synced: true,
+            rejected: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_verification_pass_leaves_a_deleted_repo_directory_untouched() {
+        let dir = temp_dir("deleted-dir");
+        let commits_path = dir.join("shift-commits.json");
+        let entry = pending_entry(
+            "c1",
+            dir.join("gone").to_string_lossy().into_owned(),
+            "a".repeat(40),
+        );
+        write_registry(&commits_path, std::slice::from_ref(&entry)).expect("registry writes");
+
+        run_verification_pass(&commits_path).await;
+
+        assert_eq!(read_registry(&commits_path), vec![entry]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_verification_pass_only_touches_entries_it_actually_decides() {
+        let dir = temp_dir("flip-once");
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir creates");
+        init_repo_with_commit(&repo, 1_700_000_000).await;
+
+        let commits_path = dir.join("shift-commits.json");
+        let entry = pending_entry("c1", repo.to_string_lossy().into_owned(), "f".repeat(40));
+        write_registry(&commits_path, &[entry]).expect("registry writes");
+
+        run_verification_pass(&commits_path).await;
+        let after_first = read_registry(&commits_path);
+        assert_eq!(after_first[0].verification, "orphaned");
+        assert!(
+            !after_first[0].synced,
+            "a genuine decision flips synced to false so it replays"
+        );
+        assert!(after_first[0].verified_at.is_some());
+
+        run_verification_pass(&commits_path).await;
+        let after_second = read_registry(&commits_path);
+        assert_eq!(
+            after_second, after_first,
+            "an already-decided entry is untouched by a later pass"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

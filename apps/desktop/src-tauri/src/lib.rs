@@ -773,6 +773,24 @@ fn spawn_update_checks(handle: tauri::AppHandle) {
     });
 }
 
+/// git only runs on a shift's `Ended` line and here, once a day — never on
+/// the monitor's per-tick polling.
+const VERIFICATION_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 3_600);
+
+/// Verifies captured shift commits at launch and then once a day, for the
+/// lifetime of the app. Re-resolves the active identity's path every pass,
+/// so an account switch mid-run verifies that account's evidence, not
+/// whichever account was signed in when the app started. A decided
+/// verdict rides the next five-minute upload pass, not this one.
+fn spawn_verification_checks() {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            shift_commits::run_verification_pass(&spool::shift_commits_path()).await;
+            tokio::time::sleep(VERIFICATION_CHECK_INTERVAL).await;
+        }
+    });
+}
+
 /// The login autostart launches with `--hidden`, so a second `--hidden`
 /// launch is the OS pointing at the already-running tray app, not a person
 /// asking for the window. Only a hand launch (no `--hidden`) surfaces it.
@@ -812,6 +830,7 @@ pub fn run() {
         })
         .setup(|app| {
             spawn_update_checks(app.handle().clone());
+            spawn_verification_checks();
             let recovery_path = app
                 .path()
                 .app_data_dir()

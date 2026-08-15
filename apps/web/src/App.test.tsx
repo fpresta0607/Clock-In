@@ -731,4 +731,48 @@ describe("the roster tab", () => {
     // Nothing decided yet reads as pending, not 0%.
     expect(detail).toHaveTextContent("pending");
   });
+
+  it("renders a verification badge per commit and a held share once some are decided", async () => {
+    const decidedPaystub = {
+      ...paystub,
+      totals: { ...paystub.totals, heldRate: 0.5 },
+      shifts: [{
+        ...paystub.shifts[0],
+        commits: [
+          {
+            id: "00000000-0000-4000-8000-0000000000c1",
+            repoRoot: "C:/dev/clock-in",
+            branch: "main",
+            sha: "a".repeat(40),
+            subject: "shipped the roster tab",
+            authoredAt: "2026-08-06T10:30:00.000Z",
+            verification: "merged",
+            verifiedAt: "2026-08-07T09:00:00.000Z",
+          },
+          {
+            id: "00000000-0000-4000-8000-0000000000c2",
+            repoRoot: "C:/dev/clock-in",
+            branch: "main",
+            sha: "b".repeat(40),
+            subject: "reverted commit",
+            authoredAt: "2026-08-06T10:45:00.000Z",
+            verification: "reverted",
+            verifiedAt: "2026-08-07T09:05:00.000Z",
+          },
+        ],
+      }],
+    };
+    const agentPaystub = vi.fn().mockResolvedValue(decidedPaystub);
+    const person = await signIn(clientFor({ agentPaystub }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+    await person.click(await screen.findByRole("button", { name: /Claude Code @ General/ }));
+
+    const detail = await screen.findByTestId("agent-paystub");
+    const shifts = within(detail).getByTestId("paystub-shifts");
+    expect(shifts.querySelector(".verify-badge.is-merged")).toHaveTextContent("merged");
+    expect(shifts.querySelector(".verify-badge.is-reverted")).toHaveTextContent("reverted");
+    // Half of two decided commits held, so the paystub reports 50%, not "pending".
+    expect(detail).toHaveTextContent("50%");
+  });
 });

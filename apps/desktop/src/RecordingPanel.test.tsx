@@ -212,12 +212,14 @@ describe("RecordingPanel", () => {
     expect(kept).toHaveTextContent("away from it");
     expect(kept).toHaveTextContent("The name only.");
     expect(kept).toHaveTextContent("which folder it worked in");
+    expect(kept).toHaveTextContent("titles of commits made during the shift");
     expect(kept).not.toHaveTextContent(/press start/i);
 
     const never = within(panel).getByRole("heading", { name: "Clock-In never writes down" }).nextElementSibling;
     expect(never).toHaveTextContent("Not one keystroke.");
     expect(never).toHaveTextContent("Pictures of your screen.");
     expect(never).toHaveTextContent("titles of your windows");
+    expect(never).toHaveTextContent("the one exception, listed above");
     expect(never).toHaveTextContent("Web addresses");
     expect(never).toHaveTextContent("inside your files");
   });
