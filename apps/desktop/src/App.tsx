@@ -1728,6 +1728,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                       <span>Keep recording while an AI tool is working</span>
                       <input type="checkbox" checked={settings.agentOverrideEnabled} onChange={(event) => void applySettings({ agentOverrideEnabled: event.target.checked })} />
                     </label>
+                    <label className="toggle-row">
+                      <span>Add the Clock-In extension to my browsers automatically</span>
+                      <input type="checkbox" checked={settings.browserAutoInstall} onChange={(event) => void applySettings({ browserAutoInstall: event.target.checked })} />
+                    </label>
                   </div>
                   <button className="link-button privacy-open" type="button" onClick={() => setRecordingOpen(true)}>
                     See exactly what&apos;s recorded — and what never is

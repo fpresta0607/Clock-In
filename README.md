@@ -489,6 +489,11 @@ them.
   rather than discarded, and earlier hours stay exactly where they are.
 - The desktop app's **What Clock-In is recording** panel states, live, what is switched on and
   what is being collected, and offers the one button that changes it.
+- The browser extension is installed by default through the Chrome/Edge force-install policy, so
+  per-site project attribution works with zero clicks; the settings toggle "Add the Clock-In
+  extension to my browsers automatically" is the opt-out, and switching it off removes the policy
+  entry, which uninstalls the extension. The extension still reports only which of the user's own
+  URL rules matched - the URL, page title, and browsing history never leave the browser.
 - A working directory can contain a user name, so it's shown only to the owning user and org
   admins, and redacted from logs like session descriptions are.
 - `clock-in-hook` holds no credentials and opens no sockets. The spool file is its entire

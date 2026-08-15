@@ -12,6 +12,15 @@
 //! to the app executable (both ship as `externalBin` siblings, exactly like
 //! `clock-in-hook`), so registration resolves it with the same
 //! "beside the running app" rule the hook registration uses.
+//!
+//! The other half is getting the extension onto the machine: for Chrome and
+//! Edge the app maintains an `ExtensionInstallForcelist` policy entry under
+//! HKCU, so the browser force-installs the extension from its store on next
+//! launch. The settings toggle strips the entry again, and removing it is
+//! what uninstalls the extension. Firefox has no store-free force-install
+//! policy, so it keeps the manual store flow. Every policy path gates on the
+//! build-time extension ids, exactly like registration, so an unsigned build
+//! without them touches nothing.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -84,6 +93,28 @@ impl Browser {
             Browser::Firefox => r"Software\Mozilla\NativeMessagingHosts",
         };
         format!(r"{root}\{HOST_NAME}")
+    }
+
+    /// The HKCU ExtensionInstallForcelist policy key the browser honors, when
+    /// it has one. Firefox's policy needs a signed-XPI install URL that only
+    /// exists once there is an AMO listing, so it keeps the manual flow.
+    fn policy_key_path(self) -> Option<String> {
+        let path = match self {
+            Browser::Chrome => r"Software\Policies\Google\Chrome\ExtensionInstallForcelist",
+            Browser::Edge => r"Software\Policies\Microsoft\Edge\ExtensionInstallForcelist",
+            Browser::Firefox => return None,
+        };
+        Some(path.to_string())
+    }
+
+    /// The update URL a forcelist entry points the browser at: the store the
+    /// extension is published on.
+    fn update_url(self) -> Option<&'static str> {
+        match self {
+            Browser::Chrome => Some("https://clients2.google.com/service/update2/crx"),
+            Browser::Edge => Some("https://edge.microsoft.com/extensionwebstorebase/v1/crx"),
+            Browser::Firefox => None,
+        }
     }
 
     /// The page [Connect] opens after a released extension is configured.
@@ -1045,6 +1076,102 @@ fn unregister(dir: &Path, browser: Browser) -> io::Result<()> {
     registry::remove_key(&browser.registry_key_path())
 }
 
+/// One forcelist entry's value: the extension id and the update URL the
+/// browser installs from, joined the way the policy expects.
+fn forcelist_value(browser: Browser, extension_id: &str) -> Option<String> {
+    browser
+        .update_url()
+        .map(|update_url| format!("{extension_id};{update_url}"))
+}
+
+/// Whether a forcelist value is one of ours, matched on the id prefix so a
+/// stale update URL still counts as ours.
+fn is_ours(value: &str, ours_id: &str) -> bool {
+    value
+        .strip_prefix(ours_id)
+        .is_some_and(|rest| rest.starts_with(';'))
+}
+
+/// The forcelist with our entry present exactly once: stale copies of our id
+/// drop out, ours lands at the end, and everything renumbers from "1" because
+/// browsers read the values sequentially and stop at the first gap. Other
+/// entries' data is never touched.
+fn merge_forcelist(
+    existing: &[(String, String)],
+    ours_id: &str,
+    ours_value: &str,
+) -> Vec<(String, String)> {
+    let mut kept: Vec<String> = existing
+        .iter()
+        .filter(|(_, value)| !is_ours(value, ours_id))
+        .map(|(_, value)| value.clone())
+        .collect();
+    kept.push(ours_value.to_string());
+    renumber_forcelist(kept)
+}
+
+/// The forcelist without our entries, renumbered. An empty result means the
+/// whole key should be deleted.
+fn strip_from_forcelist(existing: &[(String, String)], ours_id: &str) -> Vec<(String, String)> {
+    renumber_forcelist(
+        existing
+            .iter()
+            .filter(|(_, value)| !is_ours(value, ours_id))
+            .map(|(_, value)| value.clone())
+            .collect(),
+    )
+}
+
+fn renumber_forcelist(values: Vec<String>) -> Vec<(String, String)> {
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| ((index + 1).to_string(), value))
+        .collect()
+}
+
+/// Adds or strips Clock-In's force-install policy entry for every detected
+/// browser with a released extension id compiled in. Enabled merges our entry
+/// into the browser's ExtensionInstallForcelist so the extension installs on
+/// next launch; disabled strips it, which uninstalls the extension. Silent
+/// and idempotent like [ensure_registered]: a failure is logged and never
+/// fails the app.
+pub fn sync_extension_policies(enabled: bool) {
+    for browser in detected_browsers() {
+        let (Some(extension_id), Some(key)) = (extension_id(browser), browser.policy_key_path())
+        else {
+            continue;
+        };
+        if let Err(error) = sync_extension_policy(browser, &key, extension_id, enabled) {
+            eprintln!(
+                "clock-in: could not sync the extension install policy for {}: {error}",
+                browser.id()
+            );
+        }
+    }
+}
+
+fn sync_extension_policy(
+    browser: Browser,
+    key: &str,
+    extension_id: &str,
+    enabled: bool,
+) -> io::Result<()> {
+    let existing = registry::read_values(key);
+    let next = if enabled {
+        let Some(value) = forcelist_value(browser, extension_id) else {
+            return Ok(());
+        };
+        merge_forcelist(&existing, extension_id, &value)
+    } else {
+        strip_from_forcelist(&existing, extension_id)
+    };
+    if next == existing {
+        return Ok(());
+    }
+    registry::write_values(key, &next)
+}
+
 /// The [Fix] button's repair: register again, then report the resulting
 /// health so the card updates from the answer, not a second poll.
 pub fn repair(dir: &Path, browser_id: &str) -> ApiResult<BrowserHealth> {
@@ -1518,8 +1645,8 @@ mod registry {
 
     use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegOpenKeyExW, RegQueryValueExW,
-        RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ,
+        RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegDeleteValueW, RegEnumValueW, RegOpenKeyExW,
+        RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ,
     };
 
     fn wide(text: &str) -> Vec<u16> {
@@ -1621,6 +1748,163 @@ mod registry {
             String::from_utf16(&buffer).ok()
         }
     }
+
+    /// Every named REG_SZ value under `key` as (name, data) pairs, in
+    /// enumeration order. The default value is skipped, and an absent or
+    /// unreadable key reads as empty.
+    pub fn read_values(key: &str) -> Vec<(String, String)> {
+        let mut values = Vec::new();
+        unsafe {
+            let mut handle: HKEY = std::ptr::null_mut();
+            let path = wide(key);
+            if RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_READ, &mut handle)
+                != ERROR_SUCCESS
+            {
+                return values;
+            }
+            let mut index = 0u32;
+            loop {
+                // Value names can legally run to 16383 chars, so size the
+                // buffer for that rather than truncating a foreign entry.
+                let mut name = vec![0u16; 16384];
+                let mut name_len = name.len() as u32;
+                let mut kind = 0u32;
+                let mut data_len = 0u32;
+                let status = RegEnumValueW(
+                    handle,
+                    index,
+                    name.as_mut_ptr(),
+                    &mut name_len,
+                    std::ptr::null_mut(),
+                    &mut kind,
+                    std::ptr::null_mut(),
+                    &mut data_len,
+                );
+                if status != ERROR_SUCCESS {
+                    break;
+                }
+                index += 1;
+                if name_len == 0 || kind != REG_SZ || data_len == 0 || !data_len.is_multiple_of(2) {
+                    continue;
+                }
+                let mut data = vec![0u16; (data_len as usize) / 2];
+                let mut name_len = name.len() as u32;
+                let status = RegEnumValueW(
+                    handle,
+                    index - 1,
+                    name.as_mut_ptr(),
+                    &mut name_len,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    data.as_mut_ptr() as *mut u8,
+                    &mut data_len,
+                );
+                if status != ERROR_SUCCESS {
+                    continue;
+                }
+                name.truncate(name_len as usize);
+                data.truncate((data_len as usize) / 2);
+                if data.last() == Some(&0) {
+                    data.pop();
+                }
+                if let (Ok(name), Ok(data)) = (String::from_utf16(&name), String::from_utf16(&data))
+                {
+                    values.push((name, data));
+                }
+            }
+            let _ = RegCloseKey(handle);
+        }
+        values
+    }
+
+    /// Replaces the key's values with `values`: creates the key, sets each
+    /// named REG_SZ, and deletes any stale numbered values beyond the new
+    /// count. An empty list deletes the whole key.
+    pub fn write_values(key: &str, values: &[(String, String)]) -> io::Result<()> {
+        if values.is_empty() {
+            return remove_key(key);
+        }
+        unsafe {
+            let mut handle: HKEY = std::ptr::null_mut();
+            let path = wide(key);
+            let status = RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                KEY_READ | KEY_WRITE,
+                std::ptr::null(),
+                &mut handle,
+                std::ptr::null_mut(),
+            );
+            if status != ERROR_SUCCESS {
+                return Err(io::Error::from_raw_os_error(status as i32));
+            }
+            let result = (|| {
+                for (name, value) in values {
+                    let name = wide(name);
+                    let data = wide(value);
+                    let data_bytes =
+                        std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2);
+                    let status = RegSetValueExW(
+                        handle,
+                        name.as_ptr(),
+                        0,
+                        REG_SZ,
+                        data_bytes.as_ptr(),
+                        data_bytes.len() as u32,
+                    );
+                    if status != ERROR_SUCCESS {
+                        return Err(io::Error::from_raw_os_error(status as i32));
+                    }
+                }
+                // A shorter list leaves stale numbered values behind, and a
+                // browser reads sequentially from "1", so anything numbered
+                // beyond the new count has to go. Collect first: deleting
+                // mid-enumeration would shift the indexes.
+                let mut stale = Vec::new();
+                let mut index = 0u32;
+                loop {
+                    let mut name = vec![0u16; 16384];
+                    let mut name_len = name.len() as u32;
+                    let status = RegEnumValueW(
+                        handle,
+                        index,
+                        name.as_mut_ptr(),
+                        &mut name_len,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    );
+                    if status != ERROR_SUCCESS {
+                        break;
+                    }
+                    index += 1;
+                    name.truncate(name_len as usize);
+                    if let Ok(name) = String::from_utf16(&name) {
+                        if name
+                            .parse::<u32>()
+                            .is_ok_and(|number| number as usize > values.len())
+                        {
+                            stale.push(name);
+                        }
+                    }
+                }
+                for name in stale {
+                    let name = wide(&name);
+                    let status = RegDeleteValueW(handle, name.as_ptr());
+                    if status != ERROR_SUCCESS {
+                        return Err(io::Error::from_raw_os_error(status as i32));
+                    }
+                }
+                Ok(())
+            })();
+            let _ = RegCloseKey(handle);
+            result
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -1637,6 +1921,14 @@ mod registry {
 
     pub fn read_key(_key: &str) -> Option<String> {
         None
+    }
+
+    pub fn read_values(_key: &str) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    pub fn write_values(_key: &str, _values: &[(String, String)]) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -1724,6 +2016,159 @@ mod tests {
             Browser::Firefox.registry_key_path(),
             r"Software\Mozilla\NativeMessagingHosts\com.clock_in.browser_host"
         );
+    }
+
+    #[test]
+    fn policy_key_paths_cover_chrome_and_edge_only() {
+        assert_eq!(
+            Browser::Chrome.policy_key_path().as_deref(),
+            Some(r"Software\Policies\Google\Chrome\ExtensionInstallForcelist")
+        );
+        assert_eq!(
+            Browser::Edge.policy_key_path().as_deref(),
+            Some(r"Software\Policies\Microsoft\Edge\ExtensionInstallForcelist")
+        );
+        assert_eq!(Browser::Firefox.policy_key_path(), None);
+    }
+
+    #[test]
+    fn forcelist_value_joins_the_id_and_the_store_update_url() {
+        let id = "abcdefghijklmnopabcdefghijklmnop";
+        assert_eq!(
+            forcelist_value(Browser::Chrome, id).as_deref(),
+            Some(
+                "abcdefghijklmnopabcdefghijklmnop;https://clients2.google.com/service/update2/crx"
+            )
+        );
+        assert_eq!(
+            forcelist_value(Browser::Edge, id).as_deref(),
+            Some(
+                "abcdefghijklmnopabcdefghijklmnop;https://edge.microsoft.com/extensionwebstorebase/v1/crx"
+            )
+        );
+        assert_eq!(forcelist_value(Browser::Firefox, id), None);
+    }
+
+    #[test]
+    fn merge_forcelist_appends_at_the_next_free_index() {
+        let ours_id = "abcdefghijklmnopabcdefghijklmnop";
+        let ours = forcelist_value(Browser::Chrome, ours_id).expect("chrome has an update URL");
+        let existing = vec![
+            (
+                "1".to_string(),
+                "ponmlkjihgfedcbaponmlkjihgfedcba;https://foreign.example/crx".to_string(),
+            ),
+            (
+                "2".to_string(),
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;https://other.example/crx".to_string(),
+            ),
+        ];
+
+        let merged = merge_forcelist(&existing, ours_id, &ours);
+
+        assert_eq!(
+            merged,
+            vec![
+                ("1".to_string(), existing[0].1.clone()),
+                ("2".to_string(), existing[1].1.clone()),
+                ("3".to_string(), ours),
+            ],
+            "foreign entries keep their data and ours lands after them"
+        );
+    }
+
+    #[test]
+    fn merge_forcelist_dedupes_a_stale_copy_of_our_id() {
+        let ours_id = "abcdefghijklmnopabcdefghijklmnop";
+        let ours = forcelist_value(Browser::Chrome, ours_id).expect("chrome has an update URL");
+        let existing = vec![
+            (
+                "1".to_string(),
+                format!("{ours_id};https://a-long-retired-update-url.example/crx"),
+            ),
+            (
+                "2".to_string(),
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;https://other.example/crx".to_string(),
+            ),
+        ];
+
+        let merged = merge_forcelist(&existing, ours_id, &ours);
+
+        assert_eq!(
+            merged,
+            vec![
+                (
+                    "1".to_string(),
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;https://other.example/crx".to_string(),
+                ),
+                ("2".to_string(), ours),
+            ],
+            "the stale copy drops out and the survivors renumber from 1"
+        );
+    }
+
+    #[test]
+    fn merge_forcelist_does_not_match_an_id_that_only_shares_a_prefix() {
+        let ours_id = "abcdefghijklmnopabcdefghijklmnop";
+        let ours = forcelist_value(Browser::Chrome, ours_id).expect("chrome has an update URL");
+        let existing = vec![(
+            "1".to_string(),
+            format!("{ours_id}ff;https://other.example/crx"),
+        )];
+
+        let merged = merge_forcelist(&existing, ours_id, &ours);
+
+        assert_eq!(merged.len(), 2, "a longer foreign id is not ours");
+        assert_eq!(
+            merged[0].1,
+            format!("{ours_id}ff;https://other.example/crx")
+        );
+    }
+
+    #[test]
+    fn strip_from_forcelist_renumbers_the_survivors() {
+        let ours_id = "abcdefghijklmnopabcdefghijklmnop";
+        let existing = vec![
+            (
+                "1".to_string(),
+                forcelist_value(Browser::Chrome, ours_id).expect("chrome has an update URL"),
+            ),
+            (
+                "2".to_string(),
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;https://other.example/crx".to_string(),
+            ),
+            (
+                "3".to_string(),
+                "ponmlkjihgfedcbaponmlkjihgfedcba;https://foreign.example/crx".to_string(),
+            ),
+        ];
+
+        let stripped = strip_from_forcelist(&existing, ours_id);
+
+        assert_eq!(
+            stripped,
+            vec![
+                (
+                    "1".to_string(),
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;https://other.example/crx".to_string(),
+                ),
+                (
+                    "2".to_string(),
+                    "ponmlkjihgfedcbaponmlkjihgfedcba;https://foreign.example/crx".to_string(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn strip_from_forcelist_returns_empty_to_signal_key_deletion() {
+        let ours_id = "abcdefghijklmnopabcdefghijklmnop";
+        let existing = vec![(
+            "1".to_string(),
+            forcelist_value(Browser::Chrome, ours_id).expect("chrome has an update URL"),
+        )];
+
+        assert!(strip_from_forcelist(&existing, ours_id).is_empty());
     }
 
     #[test]

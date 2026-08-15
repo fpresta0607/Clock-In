@@ -496,7 +496,11 @@ async fn settings_update(
     state: State<'_, AppState>,
     input: SettingsPatch,
 ) -> ApiResult<MonitorSettings> {
-    state.monitor.apply_patch(&input).await
+    let next = state.monitor.apply_patch(&input).await?;
+    if input.browser_auto_install.is_some() {
+        browser::sync_extension_policies(next.browser_auto_install);
+    }
+    Ok(next)
 }
 
 #[tauri::command]
@@ -878,6 +882,7 @@ pub fn run() {
                 recovery: Arc::clone(&recovery),
             });
 
+            let browser_auto_install = monitor.settings().browser_auto_install;
             app.manage(AppState {
                 client,
                 recovery,
@@ -890,6 +895,11 @@ pub fn run() {
             // broken registration surfaces on the browser card, never blocks
             // startup.
             browser::ensure_registered(&spool::browser_dir());
+
+            // Same posture for the extension force-install policy: syncing on
+            // every launch repairs a policy entry deleted by hand while the
+            // setting is on, and strips it when the user opted out.
+            browser::sync_extension_policies(browser_auto_install);
 
             build_tray(app.handle())?;
 

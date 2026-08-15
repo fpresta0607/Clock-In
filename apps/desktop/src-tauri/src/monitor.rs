@@ -407,6 +407,10 @@ pub struct MonitorSettings {
     /// Keep the session open through idle and lock while an agent session is
     /// running — an overnight agent run is legitimate unattended work.
     pub agent_override_enabled: bool,
+    /// Add the browser extension through the browsers' force-install policy.
+    /// Switching it off strips the policy entry, which uninstalls the
+    /// extension; the native-host registration is unaffected either way.
+    pub browser_auto_install: bool,
     /// Stable per-install device id stamped on every segment; generated once.
     pub device_id: String,
 }
@@ -417,6 +421,7 @@ impl Default for MonitorSettings {
             enabled: true,
             away_threshold_minutes: 10,
             agent_override_enabled: true,
+            browser_auto_install: true,
             device_id: String::new(),
         }
     }
@@ -443,6 +448,9 @@ impl MonitorSettings {
             agent_override_enabled: patch
                 .agent_override_enabled
                 .unwrap_or(self.agent_override_enabled),
+            browser_auto_install: patch
+                .browser_auto_install
+                .unwrap_or(self.browser_auto_install),
             device_id: self.device_id.clone(),
         }
     }
@@ -455,6 +463,7 @@ pub struct SettingsPatch {
     pub enabled: Option<bool>,
     pub away_threshold_minutes: Option<u32>,
     pub agent_override_enabled: Option<bool>,
+    pub browser_auto_install: Option<bool>,
 }
 
 /// What the drain side reports about agent activity. In-memory only: after a
@@ -3356,11 +3365,16 @@ mod tests {
         assert!(defaults.enabled);
         assert_eq!(defaults.away_threshold_minutes, 10);
         assert!(defaults.agent_override_enabled);
+        assert!(defaults.browser_auto_install);
 
         let parsed: MonitorSettings =
             serde_json::from_str(r#"{"enabled": false}"#).expect("partial settings parse");
         assert!(!parsed.enabled);
         assert_eq!(parsed.away_threshold_minutes, 10);
+        assert!(
+            parsed.browser_auto_install,
+            "a settings file written before the field existed keeps the default"
+        );
     }
 
     #[test]
