@@ -89,6 +89,8 @@ class MemoryAgents implements AgentRepository {
 class MemoryShiftCommits implements ShiftCommitRepository {
   public readonly records: ShiftCommitRecord[] = [];
   public readonly advances: { commitId: string; verification: string }[] = [];
+  /** Stands in for a row the database itself refuses: a check or a foreign key. */
+  public rejectSha: string | undefined;
 
   public async findByClientId(current: AuthenticatedSubject, clientId: string): Promise<ShiftCommitRecord | null> {
     return this.records.find((row) => row.organizationId === current.organizationId
@@ -96,6 +98,9 @@ class MemoryShiftCommits implements ShiftCommitRepository {
   }
 
   public async insert(input: InsertShiftCommit): Promise<"inserted" | "duplicate"> {
+    if (this.rejectSha !== undefined && input.sha === this.rejectSha) {
+      throw Object.assign(new Error("check constraint violated"), { code: "23514" });
+    }
     const clientDuplicate = this.records.some((row) => row.organizationId === input.organizationId
       && row.userId === input.userId && row.clientId === input.clientId);
     const agentShaDuplicate = this.records.some((row) => row.organizationId === input.organizationId
@@ -252,5 +257,47 @@ describe("shift-commit service", () => {
 
     const withVerifiedAt = await service.ingest(subject, [commitUpload({ verifiedAt: "2026-08-06T13:00:00.000Z" })]);
     expect(withVerifiedAt.rejected).toHaveLength(1);
+  });
+
+  // A payroll timestamp with no sanity bound could be stamped in any year the
+  // client liked; a verification happens after its commit and by now.
+  it("rejects a verifiedAt outside the commit's own lifetime", async () => {
+    const { service, shiftCommits } = createService();
+
+    const inTheFuture = await service.ingest(subject, [commitUpload({
+      verification: "merged",
+      verifiedAt: "2099-01-01T00:00:00.000Z",
+    })]);
+    expect(inTheFuture.rejected).toEqual([{ clientId: expect.any(String), reason: "verifiedAt is out of bounds" }]);
+
+    const beforeTheCommit = await service.ingest(subject, [commitUpload({
+      verification: "merged",
+      verifiedAt: "2019-01-01T00:00:00.000Z",
+    })]);
+    expect(beforeTheCommit.rejected).toHaveLength(1);
+    expect(shiftCommits.records).toHaveLength(0);
+
+    // Clock skew between two machines is not a forgery: a few hours either
+    // way still records.
+    const skewed = await service.ingest(subject, [commitUpload({
+      verification: "merged",
+      verifiedAt: "2026-08-06T09:00:00.000Z",
+    })]);
+    expect(skewed).toEqual({ accepted: 1, rejected: [] });
+  });
+
+  // README: "per-row refusals never fail a batch". A 500 here would wedge the
+  // client, which replays the identical batch every five minutes forever.
+  it("rejects one row the database refuses without failing the rest of the batch", async () => {
+    const shiftCommits = new MemoryShiftCommits();
+    const poison = commitUpload({ sha: "b".repeat(40) });
+    shiftCommits.rejectSha = "b".repeat(40);
+    const { service } = createService({ shiftCommits });
+
+    const outcome = await service.ingest(subject, [commitUpload(), poison, commitUpload({ sha: "c".repeat(40) })]);
+
+    expect(outcome.accepted).toBe(2);
+    expect(outcome.rejected).toEqual([{ clientId: poison.clientId, reason: "the commit could not be recorded" }]);
+    expect(shiftCommits.records.map((record) => record.sha)).toEqual(["a".repeat(40), "c".repeat(40)]);
   });
 });

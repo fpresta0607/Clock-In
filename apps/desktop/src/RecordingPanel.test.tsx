@@ -212,7 +212,10 @@ describe("RecordingPanel", () => {
     expect(kept).toHaveTextContent("away from it");
     expect(kept).toHaveTextContent("The name only.");
     expect(kept).toHaveTextContent("which folder it worked in");
-    expect(kept).toHaveTextContent("titles of commits made during the shift");
+    // The sentence has to name everything that leaves the machine, repository
+    // folder included, and who can see it.
+    expect(kept).toHaveTextContent("title, commit id, and repository folder of each commit");
+    expect(kept).toHaveTextContent("shown only to you and your workspace's admins");
     expect(kept).not.toHaveTextContent(/press start/i);
 
     const never = within(panel).getByRole("heading", { name: "Clock-In never writes down" }).nextElementSibling;

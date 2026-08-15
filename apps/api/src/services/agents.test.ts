@@ -16,6 +16,7 @@ import { createAgentService } from "./agents.js";
 const ids = {
   organization: "0e59dfd6-3d1f-4795-9420-3ab65f0df843",
   user: "e1c7e513-b094-4d4c-ae55-21790ae019a4",
+  otherUser: "f1c7e513-b094-4d4c-ae55-21790ae019a4",
   agent: "a1c7e513-b094-4d4c-ae55-21790ae019a4",
   otherAgent: "b1c7e513-b094-4d4c-ae55-21790ae019a4",
   project: "c1c7e513-b094-4d4c-ae55-21790ae019a4",
@@ -225,5 +226,45 @@ describe("agent service", () => {
   it("answers an unknown paystub agent with not_found", async () => {
     const { service } = createService(new MemoryAgents());
     await expect(service.paystub(member, ids.agent, {})).rejects.toBeInstanceOf(AppError);
+  });
+
+  it("refuses an owner change from a member who owns nothing here", async () => {
+    const agents = new MemoryAgents([agentRecord({ owner: { id: ids.otherUser, name: "Blair" } })]);
+    const { service } = createService(agents, new Map([[ids.user, "Alex"], [ids.otherUser, "Blair"]]));
+
+    await expect(service.patch(member, ids.agent, { ownerUserId: ids.user })).rejects.toBeInstanceOf(AppError);
+    expect(agents.patches).toHaveLength(0);
+    // An admin, and the owner themselves, still may.
+    await expect(service.patch(admin, ids.agent, { ownerUserId: ids.user })).resolves.toMatchObject({
+      owner: { id: ids.user },
+    });
+  });
+
+  // The roster row counts shifts with `clipInterval`, which drops a
+  // zero-length one; the paystub totals and its trend have to agree, or the
+  // same agent and range reconcile to two different numbers.
+  it("counts a zero-length shift the way the roster report does: not at all", async () => {
+    const agents = new MemoryAgents([agentRecord()]);
+    const instant = new Date("2026-08-06T12:00:00.000Z");
+    agents.shifts = [
+      shift(),
+      shift({
+        id: "d4c7e513-b094-4d4c-ae55-21790ae019a4",
+        startedAt: instant,
+        endedAt: instant,
+        lastEventAt: instant,
+      }),
+    ];
+    const { service } = createService(agents);
+
+    const paystub = await service.paystub(member, ids.agent, {
+      fromAt: "2026-08-06T09:00:00.000Z",
+      toExclusiveAt: "2026-08-06T14:00:00.000Z",
+    });
+
+    expect(paystub.totals.shiftCount).toBe(1);
+    expect(paystub.trend[5]).toMatchObject({ shiftCount: 1 });
+    // The shift is still listed - it happened, it just has no duration.
+    expect(paystub.shifts).toHaveLength(2);
   });
 });
