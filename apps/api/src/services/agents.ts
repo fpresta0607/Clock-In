@@ -71,6 +71,16 @@ function clippedSeconds(shift: AgentShiftRecord, range: Partial<Interval>): numb
   return clipped === null ? 0 : Math.round((clipped.end - clipped.start) / 1_000);
 }
 
+/**
+ * Shifts counted the way the pay-run report counts them: one per shift that
+ * actually overlaps the range. `clipInterval` drops a zero-length shift (an
+ * `Ended` event with no `Started` records one), so the paystub totals, the
+ * paystub trend and the roster row all reconcile on the same number.
+ */
+function countShifts(shifts: readonly AgentShiftRecord[], range: Partial<Interval>): number {
+  return shifts.filter((shift) => clipInterval(shiftInterval(shift), range) !== null).length;
+}
+
 function rangeOf(query: ReportQuery): Partial<Interval> {
   return {
     ...(query.from === undefined ? {} : { start: query.from.getTime() }),
@@ -78,10 +88,17 @@ function rangeOf(query: ReportQuery): Partial<Interval> {
   };
 }
 
-function asCommitView(record: ShiftCommitRecord): AgentPaystubResponse["shifts"][number]["commits"][number] {
+/**
+ * A repo root is a working directory, and a working directory can carry a
+ * user name, so it follows the same rule as every other one: the owning user
+ * and workspace admins see it, everyone else gets the commit without it. The
+ * server still stores it - the (agent, repo, sha) unique needs it - this is a
+ * projection, not a schema change.
+ */
+function asCommitView(record: ShiftCommitRecord, showRepoRoot: boolean): AgentPaystubResponse["shifts"][number]["commits"][number] {
   return {
     id: record.id,
-    repoRoot: record.repoRoot,
+    ...(showRepoRoot ? { repoRoot: record.repoRoot } : {}),
     branch: record.branch,
     sha: record.sha,
     subject: record.subject,
@@ -114,6 +131,12 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
 
     async patch(subject: AuthenticatedSubject, agentId: string, input: AgentPatchInput): Promise<AgentRecord> {
       const existing = await requireAgent(subject, agentId);
+      // Renaming and retiring are open to any member, but ownership is what
+      // the pay run attributes hours to, so it moves under the same gate as a
+      // merge - or by the owner handing it on themselves.
+      if (input.ownerUserId !== undefined && subject.role !== "admin" && existing.owner.id !== subject.userId) {
+        throw new AppError("forbidden", "Only a workspace administrator or the current owner can reassign an agent.");
+      }
       // The request schema validates fields in isolation; the merged record is
       // re-validated whole, the same rule the path-mapping patch follows.
       const merged = agentSchema.safeParse({
@@ -164,13 +187,14 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
         commitsBySession.set(commit.agentSessionId, existing);
       }
 
+      const showRepoRoot = subject.role === "admin" || agent.owner.id === subject.userId;
       const shiftViews = shifts.map((shift) => ({
         id: shift.id,
         startedAt: shift.startedAt.toISOString(),
         endedAt: shift.endedAt === null ? null : shift.endedAt.toISOString(),
         model: shift.model,
         durationSeconds: clippedSeconds(shift, range),
-        commits: (commitsBySession.get(shift.id) ?? []).map(asCommitView),
+        commits: (commitsBySession.get(shift.id) ?? []).map((commit) => asCommitView(commit, showRepoRoot)),
       }));
 
       // Six weekly buckets ending at the range's end (or now, unbounded),
@@ -197,7 +221,7 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
         return {
           periodStartAt: new Date(bucket.start).toISOString(),
           agentSeconds: seconds.reduce((sum, value) => sum + value, 0),
-          shiftCount: seconds.filter((value) => value > 0).length,
+          shiftCount: countShifts(trendShifts, bucket),
           heldRate: heldRateOf(bucketCommits),
         };
       });
@@ -207,7 +231,7 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
         filters,
         totals: {
           agentSeconds: shiftViews.reduce((sum, shift) => sum + shift.durationSeconds, 0),
-          shiftCount: shiftViews.length,
+          shiftCount: countShifts(shifts, range),
           commitsRecorded: commits.length,
           commitsPending: commits.filter((commit) => commit.verification === "pending").length,
           commitsMerged: commits.filter((commit) => commit.verification === "merged").length,

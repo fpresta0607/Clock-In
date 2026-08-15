@@ -240,13 +240,23 @@ An agent's identity is durable across sessions, keyed by **(source, project)** p
 organization — the same Claude Code instance working the same project is one
 roster entry, not a new row per shift. Each `agent_sessions` row is that
 identity's shift. For a shift in a git repo, the desktop app captures the
-branch and the titles of the commits authored during it, once the shift ends.
-Verification happens later, locally, and read-only: once a day the app checks
-each captured commit against the repo already on disk — merged into the
-default branch, explicitly reverted, no longer reachable from any local ref
-(orphaned), or still undecided — without ever fetching or pulling. Nothing is
-pushed, fetched, or written to the repo at any point; verification only reads
+branch, and the title, commit id and repository path of the commits the shift
+added, once the shift ends. "Added" is bounded three ways: the commits reachable
+from `HEAD` but not from the commit `HEAD` sat on when the shift opened,
+committed by this machine's own git identity, and authored inside the shift —
+so a `git pull` part-way through a shift never credits a teammate's work to the
+agent. Verification happens later, locally, and read-only: once a day the app
+checks each captured commit against the repo already on disk — merged into the
+default branch (by ancestry, or by the patch or commit id a squash or rebase
+merge leaves behind), explicitly reverted, no longer reachable from any local
+ref (orphaned), or still undecided — without ever fetching or pulling. Nothing
+is pushed, fetched, or written to the repo at any point; verification only reads
 refs and history that are already there.
+
+**The held rate is self-reported.** Verification runs on the machine that ran
+the shift and the server records its verdict as given: it is evidence about the
+work, attested by the same machine that did the work, and it is presented that
+way rather than as an independent audit.
 
 ### The OS monitor, in detail
 
@@ -299,9 +309,10 @@ Not by policy, but because the code never reads it:
 What *is* collected: coarse activity segments with timestamps, the foreground process name, agent
 session boundaries with their working directory, browser spans naming which URL rule matched and
 for how long, the start and end of each session the monitor observed, and — for an AI coding shift
-in a git repo — the branch name and the commit titles captured once the shift ends (see *Roster:
-agents as identities*). A working directory can contain a user name, so it is shown only to the
-owning user and org admins, and is redacted from logs.
+in a git repo — the branch name, and the title, commit id and repository path of each commit
+captured once the shift ends (see *Roster: agents as identities*). A working directory can contain
+a user name, so both it and a repository path are shown only to the owning user and org admins,
+and are redacted from logs.
 
 ## Repository layout
 
@@ -495,7 +506,9 @@ them.
   entry, which uninstalls the extension. The extension still reports only which of the user's own
   URL rules matched - the URL, page title, and browsing history never leave the browser.
 - A working directory can contain a user name, so it's shown only to the owning user and org
-  admins, and redacted from logs like session descriptions are.
+  admins, and redacted from logs like session descriptions are. A captured commit's repository
+  path is a working directory and follows the same rule: a paystub read by anyone else carries
+  the commit without it.
 - `clock-in-hook` holds no credentials and opens no sockets. The spool file is its entire
   interface.
 - The desktop app never persists the session token: Rust keeps it in the OS credential store,

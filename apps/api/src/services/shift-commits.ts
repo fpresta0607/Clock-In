@@ -24,6 +24,13 @@ export interface ShiftCommitService {
 /** Retryable: the shift has not landed on the server yet; the client keeps the row unsynced. */
 export const unknownSessionReason = "unknown_session";
 
+/**
+ * How far a client's clock may disagree with the server's before its
+ * verification timestamp stops being credible. Payroll timestamps need a
+ * sanity bound; skew between two machines needs room.
+ */
+const clockSkewAllowanceMs = 24 * 60 * 60 * 1_000;
+
 export function createShiftCommitService(dependencies: ShiftCommitServiceDependencies): ShiftCommitService {
   const clock = dependencies.clock ?? (() => new Date());
 
@@ -52,6 +59,18 @@ export function createShiftCommitService(dependencies: ShiftCommitServiceDepende
         if ((commit.verification === "pending") !== (commit.verifiedAt === undefined)) {
           rejected.push({ clientId: commit.clientId, reason: "verification and verifiedAt disagree" });
           continue;
+        }
+
+        // A verification happens after the commit it judges and no later than
+        // now, both within one machine's worth of clock skew. Unbounded, a
+        // client could stamp a payroll timestamp in any year it liked.
+        if (commit.verifiedAt !== undefined) {
+          const verifiedAt = new Date(commit.verifiedAt).getTime();
+          const authoredAt = new Date(commit.authoredAt).getTime();
+          if (verifiedAt > now.getTime() + clockSkewAllowanceMs || verifiedAt < authoredAt - clockSkewAllowanceMs) {
+            rejected.push({ clientId: commit.clientId, reason: "verifiedAt is out of bounds" });
+            continue;
+          }
         }
 
         const session = await resolveSession(commit.source, commit.externalSessionId);
@@ -101,22 +120,30 @@ export function createShiftCommitService(dependencies: ShiftCommitServiceDepende
 
         // "duplicate" means one of the two uniques absorbed the row - a
         // replay racing itself or the same agent recording the same commit
-        // from another shift. Both are accepted no-ops.
-        await dependencies.shiftCommits.insert({
-          organizationId: subject.organizationId,
-          userId: session.userId,
-          agentId,
-          agentSessionId: session.id,
-          clientId: commit.clientId,
-          repoRoot: commit.repoRoot,
-          branch: commit.branch ?? null,
-          sha: commit.sha,
-          subject: commit.subject,
-          authoredAt: new Date(commit.authoredAt),
-          verification: commit.verification,
-          verifiedAt: commit.verifiedAt === undefined ? null : new Date(commit.verifiedAt),
-          recordedAt: now,
-        });
+        // from another shift. Both are accepted no-ops. Anything the database
+        // refuses outright (a check or a foreign key) is one row's problem:
+        // per-row refusals never fail a batch, and a 500 here would wedge the
+        // client into replaying the same batch forever.
+        try {
+          await dependencies.shiftCommits.insert({
+            organizationId: subject.organizationId,
+            userId: session.userId,
+            agentId,
+            agentSessionId: session.id,
+            clientId: commit.clientId,
+            repoRoot: commit.repoRoot,
+            branch: commit.branch ?? null,
+            sha: commit.sha,
+            subject: commit.subject,
+            authoredAt: new Date(commit.authoredAt),
+            verification: commit.verification,
+            verifiedAt: commit.verifiedAt === undefined ? null : new Date(commit.verifiedAt),
+            recordedAt: now,
+          });
+        } catch {
+          rejected.push({ clientId: commit.clientId, reason: "the commit could not be recorded" });
+          continue;
+        }
         accepted += 1;
       }
 

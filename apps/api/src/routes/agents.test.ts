@@ -11,6 +11,8 @@ import type {
   PathMappingRepository,
   ReportQuery,
   SessionRepository,
+  ShiftCommitRecord,
+  ShiftCommitRepository,
   UpsertAgentForKey,
 } from "../repositories.js";
 import { createTestAuth } from "../test-tokens.js";
@@ -23,6 +25,8 @@ const ids = {
   agent: "a1c7e513-b094-4d4c-ae55-21790ae019a4",
   loser: "b1c7e513-b094-4d4c-ae55-21790ae019a4",
   project: "c1c7e513-b094-4d4c-ae55-21790ae019a4",
+  shift: "d1c7e513-b094-4d4c-ae55-21790ae019a4",
+  commit: "e2c7e513-b094-4d4c-ae55-21790ae019a4",
 };
 const config = parseEnv({
   DATABASE_URL: "postgres://clock_in:password@localhost:5432/clock_in",
@@ -106,6 +110,50 @@ class MemoryAgents implements AgentRepository {
   }
 }
 
+function shiftCommitRecord(overrides: Partial<ShiftCommitRecord> = {}): ShiftCommitRecord {
+  return {
+    id: ids.commit,
+    organizationId: ids.organization,
+    userId: ids.member,
+    agentId: ids.agent,
+    agentSessionId: ids.shift,
+    clientId: "f3c7e513-b094-4d4c-ae55-21790ae019a4",
+    repoRoot: "C:/dev/clock-in",
+    branch: "main",
+    sha: "a".repeat(40),
+    subject: "did work",
+    authoredAt: new Date("2026-08-06T10:30:00.000Z"),
+    verification: "pending",
+    verifiedAt: null,
+    ...overrides,
+  };
+}
+
+/** Only the paystub's read side is exercised by these routes. */
+class MemoryShiftCommits implements ShiftCommitRepository {
+  public constructor(private readonly records: ShiftCommitRecord[] = []) {}
+
+  public async findByClientId(): Promise<ShiftCommitRecord | null> {
+    return null;
+  }
+
+  public async insert(): Promise<"inserted" | "duplicate"> {
+    throw new Error("not used");
+  }
+
+  public async advanceVerification(): Promise<boolean> {
+    throw new Error("not used");
+  }
+
+  public async countsByAgent(): Promise<never[]> {
+    return [];
+  }
+
+  public async listForAgent(_subject: { organizationId: string }, agentId: string): Promise<ShiftCommitRecord[]> {
+    return this.records.filter((record) => record.agentId === agentId);
+  }
+}
+
 /** Only reapStale is exercised by these routes. */
 const reaperOnlySessions = {
   reapStale: async () => 0,
@@ -139,7 +187,7 @@ const emptyProjects = {
   createForMember: async (): Promise<never> => { throw new Error("not used"); },
 } as unknown as import("../repositories.js").ProjectRepository;
 
-function createTestApp(agents = new MemoryAgents([agentRecord()])) {
+function createTestApp(agents = new MemoryAgents([agentRecord()]), shiftCommits?: ShiftCommitRepository) {
   const app = createApp({
     config,
     keys,
@@ -147,6 +195,7 @@ function createTestApp(agents = new MemoryAgents([agentRecord()])) {
     clock: () => new Date("2026-08-06T14:00:00.000Z"),
     agentSessionRepository: reaperOnlySessions,
     agentRepository: agents,
+    ...(shiftCommits === undefined ? {} : { shiftCommitRepository: shiftCommits }),
     reportRepository: membershipReports,
     pathMappingRepository: emptyPathMappings,
     sessionRepository: idleSessions,
@@ -269,5 +318,84 @@ describe("agent routes", () => {
 
     const missing = await app.request(`http://api.test/agents/${ids.loser}/paystub`, { headers: { authorization: memberHeader } });
     expect(missing.status).toBe(404);
+  });
+
+  // Renaming and retiring are open to any member, but ownership decides who
+  // the pay run credits, so moving it needs the same gate a merge has.
+  it("refuses a member's owner reassignment with 403 and leaves the owner alone", async () => {
+    const agents = new MemoryAgents([agentRecord()]);
+    const { app } = createTestApp(agents);
+
+    const refused = await app.request(`http://api.test/agents/${ids.agent}`, {
+      method: "PATCH",
+      headers: { authorization: memberHeader, "content-type": "application/json" },
+      body: JSON.stringify({ ownerUserId: ids.member }),
+    });
+
+    expect(refused.status).toBe(403);
+    expect(agents.records[0]!.owner.id).toBe(ids.admin);
+  });
+
+  it("lets an admin, and the current owner, reassign an owner", async () => {
+    const agents = new MemoryAgents([agentRecord()]);
+    const { app } = createTestApp(agents);
+
+    const byAdmin = await app.request(`http://api.test/agents/${ids.agent}`, {
+      method: "PATCH",
+      headers: { authorization: adminHeader, "content-type": "application/json" },
+      body: JSON.stringify({ ownerUserId: ids.member }),
+    });
+    expect(byAdmin.status).toBe(200);
+    await expect(byAdmin.json()).resolves.toMatchObject({ owner: { id: ids.member } });
+
+    // Blair now owns it, so Blair may hand it back without being an admin.
+    const byOwner = await app.request(`http://api.test/agents/${ids.agent}`, {
+      method: "PATCH",
+      headers: { authorization: memberHeader, "content-type": "application/json" },
+      body: JSON.stringify({ ownerUserId: ids.admin }),
+    });
+    expect(byOwner.status).toBe(200);
+    await expect(byOwner.json()).resolves.toMatchObject({ owner: { id: ids.admin } });
+  });
+
+  // A repo root is a working directory, and README promises those reach only
+  // the owning user and workspace admins.
+  it("sends the repo root to the owner and an admin, and withholds it from other members", async () => {
+    const agents = new MemoryAgents([agentRecord({ owner: { id: ids.member, name: "Blair" } })]);
+    agents.shifts = [{
+      id: ids.shift,
+      model: null,
+      status: "ended",
+      startedAt: new Date("2026-08-06T10:00:00.000Z"),
+      endedAt: new Date("2026-08-06T11:00:00.000Z"),
+      lastEventAt: new Date("2026-08-06T11:00:00.000Z"),
+    }];
+    const { app } = createTestApp(agents, new MemoryShiftCommits([shiftCommitRecord()]));
+    const query = "fromAt=2026-08-06T00%3A00%3A00.000Z&toExclusiveAt=2026-08-07T00%3A00%3A00.000Z";
+
+    const owner = await app.request(`http://api.test/agents/${ids.agent}/paystub?${query}`, {
+      headers: { authorization: memberHeader },
+    });
+    expect(owner.status).toBe(200);
+    expect((await owner.json()).shifts[0].commits[0]).toMatchObject({ repoRoot: "C:/dev/clock-in" });
+
+    // The admin owns nothing here and still sees it: admins always do.
+    const admin = await app.request(`http://api.test/agents/${ids.agent}/paystub?${query}`, {
+      headers: { authorization: adminHeader },
+    });
+    expect(admin.status).toBe(200);
+    expect((await admin.json()).shifts[0].commits[0]).toMatchObject({ repoRoot: "C:/dev/clock-in" });
+
+    const stranger = new MemoryAgents([agentRecord({ owner: { id: ids.admin, name: "Alex" } })]);
+    stranger.shifts = agents.shifts;
+    const other = createTestApp(stranger, new MemoryShiftCommits([shiftCommitRecord()])).app;
+    const response = await other.request(`http://api.test/agents/${ids.agent}/paystub?${query}`, {
+      headers: { authorization: memberHeader },
+    });
+    expect(response.status).toBe(200);
+    const commit = (await response.json()).shifts[0].commits[0];
+    expect(commit.repoRoot).toBeUndefined();
+    // Absent, not blanked: the rest of the commit still reports.
+    expect(commit).toMatchObject({ sha: "a".repeat(40), subject: "did work", branch: "main" });
   });
 });

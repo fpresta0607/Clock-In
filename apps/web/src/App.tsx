@@ -1146,7 +1146,10 @@ const RosterTab = ({
                   <span className="metric-value">{paystub.totals.commitsRecorded}</span>
                 </div>
                 <div className="metric-row">
-                  <span className="metric-name">Held rate</span>
+                  <span className="metric-name">
+                    Held rate
+                    <span className="metric-hint"> · self-reported by the machine that ran the shift</span>
+                  </span>
                   <span className="metric-value">
                     {paystub.totals.heldRate === null ? "pending" : `${Math.round(paystub.totals.heldRate * 100)}%`}
                   </span>

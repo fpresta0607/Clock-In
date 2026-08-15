@@ -76,10 +76,23 @@ timer once said RECORDING above a card reading "Turn on recording in settings".
   parse into something surprising.
 - Migrations are generated, never hand-written: change `packages/database/src/schema.ts`,
   then `pnpm exec drizzle-kit generate --name <slug>` from `packages/database`. The
-  drizzle snapshots under `migrations/meta` have drifted ahead of the SQL files, so a
-  database built only from `migrations/*.sql` does not match `schema.ts`; a generated
-  migration therefore picks up leftovers from earlier features. Check what a fresh
-  `drizzle-kit generate` emits before assuming it is only your change.
+  snapshots under `migrations/meta` had drifted ahead of the SQL files, so a database
+  built only from `migrations/*.sql` did not match `schema.ts` and `generate` - which
+  diffs against the newest snapshot, never against a real database - could not see it.
+  `0012_path_mapping_kind` closed the last of that drift, and CI now replays the whole
+  chain against a PostgreSQL service container, which is what keeps it closed. Still read
+  the emitted SQL before assuming it is only your change.
+- The held rate is client-attested by design: `POST /shift-commits` records the desktop
+  app's `verification` and `verified_at` as given and nothing corroborates them
+  server-side (the plan below lists GitHub App/webhooks as a dead model). It is evidence
+  about the work from the machine that did the work, so every surface saying "held"
+  labels it that way - the paystub metric and README's roster section. Do not let it
+  quietly become an input to pay without revisiting that decision.
+- A repo root is a working directory, so the paystub sends `shiftCommitViewSchema.repoRoot`
+  only to the agent's owner and workspace admins and omits it for everyone else
+  (`services/agents.ts`). The disclosure sentence naming what leaves the machine is
+  duplicated word for word in `apps/web/src/HelpModal.tsx`, `apps/desktop/src/RecordingPanel.tsx`
+  and README's "What is never collected"; change what is sent and all three change with it.
 - The migration folder is not a description of production. Production's
   `drizzle.__drizzle_migrations` holds entries whose hashes match no file on `main`,
   because phase 3 applied migrations that were later rewritten here. Drizzle selects

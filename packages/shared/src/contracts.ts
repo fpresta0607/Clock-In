@@ -545,7 +545,11 @@ export const shiftCommitVerificationSchema = z.enum(shiftCommitVerificationValue
 export const shiftCommitViewSchema = z
   .object({
     id: idSchema,
-    repoRoot: z.string().min(1).max(1_000),
+    /**
+     * A working directory, so it reaches only the agent's owner and workspace
+     * admins; absent for everyone else rather than blanked.
+     */
+    repoRoot: z.string().min(1).max(1_000).optional(),
     branch: z.string().min(1).max(500).nullable(),
     sha: z.string().regex(/^[0-9a-f]{40,64}$/),
     subject: z.string().max(500),
