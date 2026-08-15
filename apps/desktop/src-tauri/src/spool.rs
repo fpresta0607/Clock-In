@@ -70,6 +70,8 @@ pub struct EvidencePaths {
     pub segments_path: PathBuf,
     pub browser_dir: PathBuf,
     pub recovery_path: PathBuf,
+    pub shift_windows_path: PathBuf,
+    pub shift_commits_path: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,6 +130,8 @@ fn evidence_paths_at(root: &Path, identity: &EvidenceIdentity) -> EvidencePaths 
         agent_path: browser_dir.join("agent-spool.jsonl"),
         segments_path: browser_dir.join("segments-spool.jsonl"),
         recovery_path: browser_dir.join("recovery.json"),
+        shift_windows_path: browser_dir.join("shift-windows.json"),
+        shift_commits_path: browser_dir.join("shift-commits.json"),
         browser_dir,
     }
 }
@@ -510,6 +514,38 @@ pub fn active_browser_dir() -> Option<PathBuf> {
 /// exits 0, writes where the uploader never looks, and browser time vanishes.
 pub fn browser_dir() -> PathBuf {
     active_browser_dir().unwrap_or_else(default_browser_dir)
+}
+
+pub fn active_shift_windows_path() -> Option<PathBuf> {
+    active_identity().map(|identity| evidence_paths(&identity).shift_windows_path)
+}
+
+/// The shift-window sidecar both `Started` and `Ended` capture use: a
+/// `Started` line opens a window here, and the matching `Ended` line closes
+/// it and triggers git discovery. Same identity-namespaced resolution as
+/// `agent_spool_path`, so a shift's open half and its close half never land
+/// in different accounts' evidence.
+pub fn shift_windows_path() -> PathBuf {
+    active_shift_windows_path().unwrap_or_else(default_shift_windows_path)
+}
+
+pub fn default_shift_windows_path() -> PathBuf {
+    default_browser_dir().join("shift-windows.json")
+}
+
+pub fn active_shift_commits_path() -> Option<PathBuf> {
+    active_identity().map(|identity| evidence_paths(&identity).shift_commits_path)
+}
+
+/// The durable shift-commit registry: captured commits, their verification
+/// state, and what has synced to the server. Unlike the spools it does not
+/// truncate; entries are pruned once decided and synced.
+pub fn shift_commits_path() -> PathBuf {
+    active_shift_commits_path().unwrap_or_else(default_shift_commits_path)
+}
+
+pub fn default_shift_commits_path() -> PathBuf {
+    default_browser_dir().join("shift-commits.json")
 }
 
 /// Which agent runtime produced an event.
@@ -1243,12 +1279,38 @@ fn namespace_has_pending_evidence_while_leased(dir: &Path) -> SpoolResult<bool> 
     }
     match std::fs::read(dir.join("recovery.json")) {
         Ok(bytes) => match serde_json::from_slice::<crate::recovery::RecoveryState>(&bytes) {
-            Ok(recovery) => Ok(!recovery.open_sessions.is_empty()),
-            Err(_) => Ok(true),
+            Ok(recovery) => {
+                if !recovery.open_sessions.is_empty() {
+                    return Ok(true);
+                }
+            }
+            Err(_) => return Ok(true),
         },
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
+    Ok(shift_commits_have_unsynced_evidence(dir))
+}
+
+/// A commit still waiting on an upload verdict, decoded without depending on
+/// `shift_commits`'s full row shape — unknown fields are ignored by serde, so
+/// this stays correct as that shape grows. Read-only and best-effort: a
+/// missing or unreadable file just means there is nothing pending yet.
+#[derive(serde::Deserialize)]
+struct PendingShiftCommitProbe {
+    #[serde(default)]
+    synced: bool,
+    #[serde(default)]
+    rejected: bool,
+}
+
+fn shift_commits_have_unsynced_evidence(dir: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(dir.join("shift-commits.json")) else {
+        return false;
+    };
+    serde_json::from_slice::<Vec<PendingShiftCommitProbe>>(&bytes)
+        .map(|entries| entries.iter().any(|entry| !entry.synced && !entry.rejected))
+        .unwrap_or(false)
 }
 
 fn pending_spool_paths_while_leased(path: &Path) -> SpoolResult<Vec<PathBuf>> {

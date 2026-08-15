@@ -8,7 +8,14 @@ import {
 
 import type { AuthenticatedSubject } from "../auth.js";
 import { AppError } from "../errors.js";
-import type { AgentRecord, AgentRepository, AgentShiftRecord, ReportQuery } from "../repositories.js";
+import type {
+  AgentRecord,
+  AgentRepository,
+  AgentShiftRecord,
+  ReportQuery,
+  ShiftCommitRecord,
+  ShiftCommitRepository,
+} from "../repositories.js";
 import type { AgentSessionReaper } from "./agent-sessions.js";
 import { normalizedQuery } from "./reports.js";
 
@@ -22,6 +29,8 @@ export interface AgentServiceDependencies {
   agents: AgentRepository;
   /** Paystub reads close stale shifts first, like every other report path. */
   reaper: AgentSessionReaper;
+  /** Without it, the paystub's commit record stays at zeros and null heldRate. */
+  shiftCommits?: ShiftCommitRepository;
   clock?: () => Date;
 }
 
@@ -64,6 +73,26 @@ function rangeOf(query: ReportQuery): Partial<Interval> {
     ...(query.from === undefined ? {} : { start: query.from.getTime() }),
     ...(query.toExclusive === undefined ? {} : { end: query.toExclusive.getTime() }),
   };
+}
+
+function asCommitView(record: ShiftCommitRecord): AgentPaystubResponse["shifts"][number]["commits"][number] {
+  return {
+    id: record.id,
+    repoRoot: record.repoRoot,
+    branch: record.branch,
+    sha: record.sha,
+    subject: record.subject,
+    authoredAt: record.authoredAt.toISOString(),
+    verification: record.verification,
+    verifiedAt: record.verifiedAt === null ? null : record.verifiedAt.toISOString(),
+  };
+}
+
+/** merged / decided; null while nothing has been decided - "pending", not 0%. */
+function heldRateOf(commits: readonly ShiftCommitRecord[]): number | null {
+  const merged = commits.filter((commit) => commit.verification === "merged").length;
+  const decided = commits.filter((commit) => commit.verification !== "pending").length;
+  return decided === 0 ? null : merged / decided;
 }
 
 export function createAgentService(dependencies: AgentServiceDependencies): AgentService {
@@ -118,38 +147,51 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
       const query = normalizedQuery(filters);
       const range = rangeOf(query);
       const shifts = await dependencies.agents.listSessionsForAgent(subject, agentId, query);
+      const commits = dependencies.shiftCommits === undefined
+        ? []
+        : await dependencies.shiftCommits.listForAgent(subject, agentId, query);
+      const commitsBySession = new Map<string, ShiftCommitRecord[]>();
+      for (const commit of commits) {
+        const existing = commitsBySession.get(commit.agentSessionId) ?? [];
+        existing.push(commit);
+        commitsBySession.set(commit.agentSessionId, existing);
+      }
 
-      // Commit facts arrive with shift-commit capture; until that data
-      // exists the counts are zero and heldRate null - the schema is
-      // complete from day one so the web parses a single shape.
       const shiftViews = shifts.map((shift) => ({
         id: shift.id,
         startedAt: shift.startedAt.toISOString(),
         endedAt: shift.endedAt === null ? null : shift.endedAt.toISOString(),
         model: shift.model,
         durationSeconds: clippedSeconds(shift, range),
-        commits: [],
+        commits: (commitsBySession.get(shift.id) ?? []).map(asCommitView),
       }));
 
       // Six weekly buckets ending at the range's end (or now, unbounded),
       // oldest first, read from their own window rather than the filter's.
       const anchor = query.toExclusive?.getTime() ?? clock().getTime();
-      const trendStart = new Date(anchor - trendWeeks * weekMs);
-      const trendShifts = await dependencies.agents.listSessionsForAgent(subject, agentId, {
-        from: trendStart,
+      const trendQuery: ReportQuery = {
+        from: new Date(anchor - trendWeeks * weekMs),
         toExclusive: new Date(anchor),
-      });
+      };
+      const trendShifts = await dependencies.agents.listSessionsForAgent(subject, agentId, trendQuery);
+      const trendCommits = dependencies.shiftCommits === undefined
+        ? []
+        : await dependencies.shiftCommits.listForAgent(subject, agentId, trendQuery);
       const trend = Array.from({ length: trendWeeks }, (_, index) => {
         const bucket = {
           start: anchor - (trendWeeks - index) * weekMs,
           end: anchor - (trendWeeks - index - 1) * weekMs,
         };
         const seconds = trendShifts.map((shift) => clippedSeconds(shift, bucket));
+        const bucketCommits = trendCommits.filter((commit) => {
+          const authored = commit.authoredAt.getTime();
+          return authored >= bucket.start && authored < bucket.end;
+        });
         return {
           periodStartAt: new Date(bucket.start).toISOString(),
           agentSeconds: seconds.reduce((sum, value) => sum + value, 0),
           shiftCount: seconds.filter((value) => value > 0).length,
-          heldRate: null,
+          heldRate: heldRateOf(bucketCommits),
         };
       });
 
@@ -159,12 +201,12 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
         totals: {
           agentSeconds: shiftViews.reduce((sum, shift) => sum + shift.durationSeconds, 0),
           shiftCount: shiftViews.length,
-          commitsRecorded: 0,
-          commitsPending: 0,
-          commitsMerged: 0,
-          commitsReverted: 0,
-          commitsOrphaned: 0,
-          heldRate: null,
+          commitsRecorded: commits.length,
+          commitsPending: commits.filter((commit) => commit.verification === "pending").length,
+          commitsMerged: commits.filter((commit) => commit.verification === "merged").length,
+          commitsReverted: commits.filter((commit) => commit.verification === "reverted").length,
+          commitsOrphaned: commits.filter((commit) => commit.verification === "orphaned").length,
+          heldRate: heldRateOf(commits),
         },
         shifts: shiftViews,
         trend,

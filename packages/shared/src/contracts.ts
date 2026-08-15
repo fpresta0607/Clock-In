@@ -599,6 +599,45 @@ export const agentPaystubResponseSchema = z
   })
   .strict();
 
+/**
+ * One commit captured during an agent's shift, uploaded by the desktop app.
+ * `clientId` makes replays idempotent, exactly as it does for activity
+ * segments. `verifiedAt` travels with a decided verification and never with
+ * `pending` - rows that disagree are rejected individually, not the batch.
+ */
+export const shiftCommitUploadSchema = z
+  .object({
+    clientId: idSchema,
+    source: agentSourceSchema,
+    externalSessionId: z.string().min(1).max(200),
+    repoRoot: z.string().min(1).max(1_000),
+    branch: z.string().min(1).max(500).optional(),
+    sha: z.string().regex(/^[0-9a-f]{40,64}$/),
+    subject: z.string().max(500),
+    authoredAt: timestampSchema,
+    verification: shiftCommitVerificationSchema,
+    verifiedAt: timestampSchema.optional(),
+  })
+  .strict();
+
+export const shiftCommitBatchRequestSchema = z
+  .object({
+    commits: z.array(shiftCommitUploadSchema).min(1).max(500),
+  })
+  .strict();
+
+/**
+ * Per-row accepted/rejected. The reason `"unknown_session"` is retryable: the
+ * commit's shift has not landed on the server yet, so the client keeps the row
+ * unsynced and uploads it again next pass. Every other reason is permanent.
+ */
+export const shiftCommitBatchResponseSchema = z
+  .object({
+    accepted: z.number().int().nonnegative(),
+    rejected: z.array(z.object({ clientId: idSchema, reason: z.string().min(1) }).strict()),
+  })
+  .strict();
+
 export const pathMappingKindValues = ["path_prefix", "url_rule"] as const;
 export const pathMappingKindSchema = z.enum(pathMappingKindValues);
 
@@ -784,6 +823,9 @@ export type AgentPaystubFilters = z.infer<typeof agentPaystubFiltersSchema>;
 export type AgentPaystubResponse = z.infer<typeof agentPaystubResponseSchema>;
 export type ShiftCommitVerification = z.infer<typeof shiftCommitVerificationSchema>;
 export type ShiftCommitView = z.infer<typeof shiftCommitViewSchema>;
+export type ShiftCommitUpload = z.infer<typeof shiftCommitUploadSchema>;
+export type ShiftCommitBatchRequest = z.infer<typeof shiftCommitBatchRequestSchema>;
+export type ShiftCommitBatchResponse = z.infer<typeof shiftCommitBatchResponseSchema>;
 export type ApiError = z.infer<typeof apiErrorSchema>;
 export type ApiErrorCode = z.infer<typeof apiErrorCodeSchema>;
 export type CurrentSessionResponse = z.infer<typeof currentSessionResponseSchema>;

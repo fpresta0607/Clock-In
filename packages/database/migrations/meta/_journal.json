@@ -78,6 +78,13 @@
       "when": 1786780773898,
       "tag": "0010_roster_agents",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1786782607681,
+      "tag": "0011_roster_shift_commits",
+      "breakpoints": true
     }
   ]
 }

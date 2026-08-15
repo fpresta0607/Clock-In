@@ -10,6 +10,9 @@ import {
   agentSchema,
   agentsListResponseSchema,
   agentStatusValues,
+  shiftCommitBatchRequestSchema,
+  shiftCommitBatchResponseSchema,
+  shiftCommitUploadSchema,
   shiftCommitVerificationValues,
   shiftCommitViewSchema,
   activitySegmentBatchResponseSchema,
@@ -809,5 +812,45 @@ describe("roster agent contracts", () => {
       ...paystub,
       totals: { ...paystub.totals, heldRate: 1.5 },
     })).toThrow();
+  });
+});
+
+describe("shift commit upload contracts", () => {
+  const upload = {
+    clientId: ids.client,
+    source: "claude_code",
+    externalSessionId: "session-1",
+    repoRoot: "C:/dev/clock-in",
+    branch: "feat/roster",
+    sha: "a".repeat(40),
+    subject: "feat(api): shift commits",
+    authoredAt: startedAt,
+    verification: "pending",
+  };
+
+  it("accepts a decided upload and a pending one without a branch", () => {
+    expect(() => shiftCommitUploadSchema.parse(upload)).not.toThrow();
+    expect(() => shiftCommitUploadSchema.parse({
+      ...upload,
+      branch: undefined,
+      verification: "merged",
+      verifiedAt: stoppedAt,
+    })).not.toThrow();
+  });
+
+  it("rejects an unshaped sha and unknown fields", () => {
+    expect(() => shiftCommitUploadSchema.parse({ ...upload, sha: "not-a-sha" })).toThrow();
+    expect(() => shiftCommitUploadSchema.parse({ ...upload, extra: true })).toThrow();
+  });
+
+  it("accepts a bounded batch and a per-commit accepted/rejected response", () => {
+    expect(() => shiftCommitBatchRequestSchema.parse({ commits: [upload] })).not.toThrow();
+    expect(() => shiftCommitBatchRequestSchema.parse({ commits: [] })).toThrow();
+    expect(() => shiftCommitBatchRequestSchema.parse({ commits: Array.from({ length: 501 }, () => upload) })).toThrow();
+    expect(() => shiftCommitBatchResponseSchema.parse({
+      accepted: 1,
+      // unknown_session is the one retryable reason; the client keeps the row unsynced.
+      rejected: [{ clientId: ids.client, reason: "unknown_session" }],
+    })).not.toThrow();
   });
 });

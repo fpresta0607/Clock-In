@@ -384,6 +384,78 @@ export interface AgentSessionRepository {
   advanceLastEvent(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, occurredAt: Date, now: Date): Promise<boolean>;
   /** Closes running rows whose lastEventAt is older than cutoff, ending them at lastEventAt. Returns the reaped count. */
   reapStale(subject: AuthenticatedSubject, cutoff: Date, now: Date): Promise<number>;
+  /**
+   * Assigns an identity to a session whose agent_id is still null - how a
+   * shift that started before the roster existed takes commits after it. The
+   * guard keeps the first assignment: an already-stamped row never changes.
+   */
+  stampAgent(subject: AuthenticatedSubject, sessionId: string, agentId: string, now: Date): Promise<void>;
+}
+
+export type ShiftCommitVerificationState = "pending" | "merged" | "reverted" | "orphaned";
+
+export interface ShiftCommitRecord {
+  id: string;
+  organizationId: string;
+  userId: string;
+  agentId: string;
+  agentSessionId: string;
+  clientId: string;
+  repoRoot: string;
+  branch: string | null;
+  sha: string;
+  subject: string;
+  authoredAt: Date;
+  verification: ShiftCommitVerificationState;
+  verifiedAt: Date | null;
+}
+
+export interface InsertShiftCommit {
+  organizationId: string;
+  userId: string;
+  agentId: string;
+  agentSessionId: string;
+  clientId: string;
+  repoRoot: string;
+  branch: string | null;
+  sha: string;
+  subject: string;
+  authoredAt: Date;
+  verification: ShiftCommitVerificationState;
+  verifiedAt: Date | null;
+  recordedAt: Date;
+}
+
+/** One agent's commit tally over a range, for the pay-run report and paystub totals. */
+export interface ShiftCommitCountsRecord {
+  agentId: string;
+  recorded: number | string | bigint;
+  pending: number | string | bigint;
+  merged: number | string | bigint;
+  reverted: number | string | bigint;
+  orphaned: number | string | bigint;
+}
+
+export interface ShiftCommitRepository {
+  findByClientId(subject: AuthenticatedSubject, clientId: string): Promise<ShiftCommitRecord | null>;
+  /**
+   * Inserts with ON CONFLICT DO NOTHING and no target: whichever unique
+   * absorbs the row - client replay or same-agent same-sha - the answer is
+   * "duplicate", which the service treats as an accepted no-op.
+   */
+  insert(input: InsertShiftCommit): Promise<"inserted" | "duplicate">;
+  /** Advances pending -> decided, setting verifiedAt once; a decided row never moves again. */
+  advanceVerification(
+    subject: AuthenticatedSubject,
+    commitId: string,
+    verification: Exclude<ShiftCommitVerificationState, "pending">,
+    verifiedAt: Date,
+    now: Date,
+  ): Promise<boolean>;
+  /** Per-agent commit tallies over the range (authoredAt bounds). */
+  countsByAgent(subject: AuthenticatedSubject, query: ReportQuery): Promise<ShiftCommitCountsRecord[]>;
+  /** One agent's commits in the range (authoredAt bounds), for the paystub. */
+  listForAgent(subject: AuthenticatedSubject, agentId: string, query: ReportQuery): Promise<ShiftCommitRecord[]>;
 }
 
 export interface PathMappingRecord {

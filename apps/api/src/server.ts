@@ -11,6 +11,7 @@ import {
   DrizzleProjectRepository,
   DrizzleReportRepository,
   DrizzleSessionRepository,
+  DrizzleShiftCommitRepository,
   DrizzleViewPreferencesRepository,
 } from "./drizzle-repositories.js";
 import { parseEnv } from "./env.js";
@@ -30,6 +31,7 @@ const server = serveApp(
     activitySegmentRepository: new DrizzleActivitySegmentRepository(db),
     agentSessionRepository: new DrizzleAgentSessionRepository(db),
     agentRepository: new DrizzleAgentRepository(db),
+    shiftCommitRepository: new DrizzleShiftCommitRepository(db),
     pathMappingRepository: new DrizzlePathMappingRepository(db),
     viewPreferencesRepository: new DrizzleViewPreferencesRepository(db),
   }),

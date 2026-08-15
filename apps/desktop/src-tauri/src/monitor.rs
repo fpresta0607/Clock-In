@@ -1423,6 +1423,8 @@ pub struct MonitorConfig {
     pub agent_path: PathBuf,
     pub sessions_path: PathBuf,
     pub recovery_path: PathBuf,
+    pub shift_windows_path: PathBuf,
+    pub shift_commits_path: PathBuf,
     pub recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
 }
 
@@ -1448,6 +1450,8 @@ pub struct Monitor {
     // Written by the Windows-gated poll task, which persists the open session.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     recovery_path: PathBuf,
+    shift_windows_path: PathBuf,
+    shift_commits_path: PathBuf,
     recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
     tasks: tokio::sync::Mutex<Option<MonitorTasks>>,
     upload_now: Arc<Notify>,
@@ -1479,6 +1483,8 @@ impl Monitor {
             sessions_path_base: config.sessions_path,
             client: config.client,
             recovery_path: config.recovery_path,
+            shift_windows_path: config.shift_windows_path,
+            shift_commits_path: config.shift_commits_path,
             recovery: config.recovery,
             tasks: tokio::sync::Mutex::new(None),
             upload_now: Arc::new(Notify::new()),
@@ -1523,9 +1529,13 @@ impl Monitor {
         let upload = tokio::spawn(crate::uploader::upload_loop(
             Arc::clone(&self.shared),
             self.client.clone(),
-            self.segments_path.clone(),
-            self.agent_path.clone(),
-            self.session_spool_path(),
+            crate::uploader::UploadPaths {
+                segments_path: self.segments_path.clone(),
+                agent_path: self.agent_path.clone(),
+                sessions_path: self.session_spool_path(),
+                shift_windows_path: self.shift_windows_path.clone(),
+                shift_commits_path: self.shift_commits_path.clone(),
+            },
             Arc::clone(&self.upload_now),
         ));
         *guard = Some(MonitorTasks { poll, upload });
@@ -1768,15 +1778,16 @@ impl Monitor {
     /// moments before quit must reach the server now, not at the next
     /// launch. The timeout keeps an offline quit prompt.
     pub async fn upload_flush(&self) {
+        let paths = crate::uploader::UploadPaths {
+            segments_path: self.segments_path.clone(),
+            agent_path: self.agent_path.clone(),
+            sessions_path: self.session_spool_path(),
+            shift_windows_path: self.shift_windows_path.clone(),
+            shift_commits_path: self.shift_commits_path.clone(),
+        };
         let _ = tokio::time::timeout(
             Duration::from_secs(EXIT_UPLOAD_FLUSH_SECONDS),
-            crate::uploader::upload_once(
-                &self.shared,
-                &self.client,
-                &self.segments_path,
-                &self.agent_path,
-                &self.session_spool_path(),
-            ),
+            crate::uploader::upload_once(&self.shared, &self.client, &paths),
         )
         .await;
     }
@@ -3482,6 +3493,8 @@ mod tests {
             agent_path: dir.join("agent-spool.jsonl"),
             sessions_path: dir.join("sessions-spool.jsonl"),
             recovery_path: dir.join("recovery.json"),
+            shift_windows_path: dir.join("shift-windows.json"),
+            shift_commits_path: dir.join("shift-commits.json"),
             recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
         });
 
@@ -3530,6 +3543,8 @@ mod tests {
             agent_path: dir.join("agent-spool.jsonl"),
             sessions_path: dir.join("sessions-spool.jsonl"),
             recovery_path: dir.join("recovery.json"),
+            shift_windows_path: dir.join("shift-windows.json"),
+            shift_commits_path: dir.join("shift-commits.json"),
             recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
         });
 
@@ -3564,6 +3579,8 @@ mod tests {
             agent_path: dir.join("agent-spool.jsonl"),
             sessions_path: dir.join("sessions-spool.jsonl"),
             recovery_path: dir.join("recovery.json"),
+            shift_windows_path: dir.join("shift-windows.json"),
+            shift_commits_path: dir.join("shift-commits.json"),
             recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
         });
 

@@ -26,6 +26,7 @@ import type {
   ProjectRepository,
   ReportRepository,
   SessionRepository,
+  ShiftCommitRepository,
   ViewPreferencesRepository,
 } from "./repositories.js";
 import { createActivityRoutes } from "./routes/activity.js";
@@ -37,12 +38,14 @@ import { createPreferencesRoutes } from "./routes/preferences.js";
 import { createProjectRoutes } from "./routes/projects.js";
 import { createReportRoutes } from "./routes/reports.js";
 import { createSessionRoutes } from "./routes/sessions.js";
+import { createShiftCommitRoutes } from "./routes/shift-commits.js";
 import { createActivityService } from "./services/activity.js";
 import { createAgentSessionReaper, createAgentSessionService } from "./services/agent-sessions.js";
 import { createAgentService } from "./services/agents.js";
 import { createPathMappingService } from "./services/path-mappings.js";
 import { createReportService } from "./services/reports.js";
 import { createSessionService } from "./services/sessions.js";
+import { createShiftCommitService } from "./services/shift-commits.js";
 
 export interface AppVariables {
   authenticatedSubject: AuthenticatedSubject;
@@ -65,6 +68,7 @@ export interface CreateAppDependencies {
   activitySegmentRepository?: ActivitySegmentRepository;
   agentSessionRepository?: AgentSessionRepository;
   agentRepository?: AgentRepository;
+  shiftCommitRepository?: ShiftCommitRepository;
   pathMappingRepository?: PathMappingRepository;
   viewPreferencesRepository?: ViewPreferencesRepository;
 }
@@ -327,11 +331,26 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
     const agentService = createAgentService({
       agents: dependencies.agentRepository,
       reaper: createAgentSessionReaper({ agentSessions: dependencies.agentSessionRepository, clock }),
+      ...(dependencies.shiftCommitRepository === undefined ? {} : { shiftCommits: dependencies.shiftCommitRepository }),
       clock,
     });
     app.use("/agents", authenticate);
     app.use("/agents/*", authenticate);
     app.route("/agents", createAgentRoutes(agentService));
+  }
+  if (dependencies.shiftCommitRepository !== undefined) {
+    if (dependencies.agentSessionRepository === undefined) {
+      throw new Error("An agent session repository is required for shift-commit routes.");
+    }
+    const shiftCommitService = createShiftCommitService({
+      shiftCommits: dependencies.shiftCommitRepository,
+      agentSessions: dependencies.agentSessionRepository,
+      ...(dependencies.agentRepository === undefined ? {} : { agents: dependencies.agentRepository }),
+      clock,
+    });
+    app.use("/shift-commits", authenticate);
+    app.use("/shift-commits/*", authenticate);
+    app.route("/shift-commits", createShiftCommitRoutes(shiftCommitService));
   }
   if (dependencies.pathMappingRepository !== undefined) {
     if (dependencies.projectRepository === undefined) {
