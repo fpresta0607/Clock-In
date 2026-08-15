@@ -69,6 +69,41 @@ describe("the agent runtime roster", () => {
     }
   });
 
+  it("declares per runtime whether its hook mechanism can name the model", () => {
+    // Claude Code's SessionStart/SessionEnd payloads carry no model key
+    // (verified live), Codex pipes that exact payload, and Cursor's
+    // registration passes only --source/--event with a payload mined for a
+    // session id and cwd: none of the merged mechanisms can name one.
+    expect(findAgentRuntime("claude_code")?.reportsModel).toBe("never");
+    expect(findAgentRuntime("codex")?.reportsModel).toBe("never");
+    expect(findAgentRuntime("cursor")?.reportsModel).toBe("never");
+    // Pi's extension passes ctx.model?.id on every event by design.
+    expect(findAgentRuntime("pi")?.reportsModel).toBe("always");
+    expect(findAgentRuntime("pi_signed")?.reportsModel).toBe("always");
+    // The rest are manual snippets whose mechanism is unconfirmed or whose
+    // events carry no model: reporting one depends on the user's wiring.
+    for (const id of ["kimi_code", "opencode", "grok", "muse", "copilot"]) {
+      expect(findAgentRuntime(id)?.reportsModel).toBe("sometimes");
+    }
+  });
+
+  it("keeps the unconfirmed mechanisms saying so while showing the --model flag", () => {
+    for (const id of ["kimi_code", "grok", "muse", "copilot"]) {
+      const snippet = agentRuntimeManualSnippet(id, "/opt/clock-in-hook");
+      expect(snippet).toContain("unconfirmed");
+      expect(snippet).toContain("--model");
+    }
+    // opencode's events genuinely carry no model, so its snippet shows none
+    // and says why instead of inventing a source for one.
+    const opencode = agentRuntimeManualSnippet("opencode", "/opt/clock-in-hook");
+    expect(opencode).toContain("unconfirmed");
+    expect(opencode).not.toContain("--model");
+    // Pi's extensions name the model through ctx.model?.id on every event.
+    for (const id of ["pi", "pi_signed"]) {
+      expect(agentRuntimeManualSnippet(id, "/opt/clock-in-hook")).toContain("--model");
+    }
+  });
+
   it("ships a mark for every declared runtime, sourced from original monochrome glyphs", () => {
     for (const runtime of agentRuntimes) {
       expect(runtime.icon).toBe(runtime.id);

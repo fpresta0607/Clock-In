@@ -569,13 +569,45 @@ describe("settings", () => {
     await person.click(await within(dialog).findByText("AI tools"));
 
     // Connected tools are a fact, not a control; only the add needs buttons.
-    expect(within(within(dialog).getByTestId("hook-connected")).getByText("Claude Code")).toBeInTheDocument();
+    const badge = within(within(dialog).getByTestId("hook-connected")).getByText("Claude Code");
+    expect(badge).toBeInTheDocument();
+    // No session has named a model, so the badge's second line is the dash:
+    // absence as absence, never a zero.
+    expect(badge.closest("li")).toHaveTextContent("-");
     expect(within(dialog).getAllByRole("button", { name: "Connect" })).toHaveLength(1);
 
     const picker = within(dialog).getByLabelText("Tool to connect");
     await person.selectOptions(picker, "codex");
     await person.click(within(dialog).getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(bridge.hookRegister).toHaveBeenCalledWith("codex"));
+  });
+
+  it("names the models a connected tool has driven and what an unconnected one can report", async () => {
+    const bridge = bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(status),
+      meStats: vi.fn().mockResolvedValue({
+        ...meStats,
+        byAgent: [
+          { source: "claude_code", model: "claude-fable-5", durationSeconds: 3_600, sessionCount: 2, maxConcurrent: 1, medianSeconds: 1_800 },
+          { source: "claude_code", model: null, durationSeconds: 600, sessionCount: 1, maxConcurrent: 1, medianSeconds: 600 },
+        ],
+      }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const dialog = await openSettings(person);
+    await person.click(await within(dialog).findByText("AI tools"));
+
+    // The badge's second line names the models seen, and a session that
+    // named none adds nothing to it.
+    const badge = await within(within(dialog).getByTestId("hook-connected")).findByText("Claude Code");
+    await waitFor(() => expect(badge.closest("li")).toHaveTextContent("claude-fable-5"));
+
+    // The picker says whether a runtime can report a model at all, straight
+    // from the roster's own declaration.
+    const picker = within(dialog).getByLabelText("Tool to connect");
+    expect(within(picker).getByRole("option", { name: "Codex · cannot name its model" })).toBeInTheDocument();
   });
 
   it("opens the what's-recorded panel from the recording group", async () => {

@@ -10,6 +10,7 @@
       "quotaProvider": "claude",
       "configPath": ".claude/settings.json",
       "registration": "claude_json",
+      "reportsModel": "never",
       "icon": "claude_code",
       "manualSnippet": []
     },
@@ -22,6 +23,7 @@
       "quotaProvider": "codex",
       "configPath": ".codex/hooks.json",
       "registration": "claude_json",
+      "reportsModel": "never",
       "icon": "codex",
       "manualSnippet": []
     },
@@ -34,6 +36,7 @@
       "quotaProvider": "cursor",
       "configPath": ".cursor/hooks.json",
       "registration": "cursor_json",
+      "reportsModel": "never",
       "icon": "cursor",
       "manualSnippet": []
     },
@@ -46,12 +49,13 @@
       "quotaProvider": "kimi",
       "configPath": ".kimi/config.toml",
       "registration": "manual",
+      "reportsModel": "sometimes",
       "icon": "kimi_code",
       "manualSnippet": [
         "# Kimi Code hooks live in config.toml, but their event coverage is",
         "# unconfirmed against the installed version. Wire its session events to",
         "# the hook binary, e.g.:",
-        "#   \"{command}\" --source kimi_code --event session-start --session-id <session> --cwd <dir>"
+        "#   \"{command}\" --source kimi_code --event session-start --session-id <session> --cwd <dir> --model <model>"
       ]
     },
     {
@@ -63,6 +67,7 @@
       "quotaProvider": null,
       "configPath": ".pi/agent/settings.json",
       "registration": "manual",
+      "reportsModel": "always",
       "icon": "pi",
       "manualSnippet": [
         "// Pi has no hook-command config: it fires session_start/session_shutdown",
@@ -94,6 +99,7 @@
       "quotaProvider": null,
       "configPath": ".pi/agent/settings.json",
       "registration": "manual",
+      "reportsModel": "always",
       "icon": "pi_signed",
       "manualSnippet": [
         "// pi-signed shares Pi's extension mechanism and its config directory, so",
@@ -124,12 +130,15 @@
       "quotaProvider": null,
       "configPath": ".config/opencode/opencode.json",
       "registration": "manual",
+      "reportsModel": "sometimes",
       "icon": "opencode",
       "manualSnippet": [
         "// opencode loads plugins from ~/.config/opencode/plugins/*.js. Save this",
         "// as clock-in.js there; opencode picks it up on its next start. It has no",
         "// session-end event, so session.idle reports a heartbeat and Clock-In",
         "// infers the boundary from the gaps, exactly as it does for Codex.",
+        "// Neither event names the model, and reading the configured one back is",
+        "// unconfirmed, so this reports none.",
         "import { spawn } from \"node:child_process\";",
         "const fire = (event, sessionId, directory) => {",
         "  const child = spawn(\"{command}\", [",
@@ -158,11 +167,12 @@
       "quotaProvider": "grok",
       "configPath": ".grok/settings.json",
       "registration": "manual",
+      "reportsModel": "sometimes",
       "icon": "grok",
       "manualSnippet": [
         "# Grok's hook mechanism is unconfirmed against any installed version.",
         "# Wire its session events to the hook binary, e.g.:",
-        "#   \"{command}\" --source grok --event session-start --session-id <session> --cwd <dir>"
+        "#   \"{command}\" --source grok --event session-start --session-id <session> --cwd <dir> --model <model>"
       ]
     },
     {
@@ -174,11 +184,12 @@
       "quotaProvider": null,
       "configPath": ".muse/settings.json",
       "registration": "manual",
+      "reportsModel": "sometimes",
       "icon": "muse",
       "manualSnippet": [
         "# Muse's hook mechanism is unconfirmed against any installed version.",
         "# Wire its session events to the hook binary, e.g.:",
-        "#   \"{command}\" --source muse --event session-start --session-id <session> --cwd <dir>"
+        "#   \"{command}\" --source muse --event session-start --session-id <session> --cwd <dir> --model <model>"
       ]
     },
     {
@@ -190,11 +201,12 @@
       "quotaProvider": "copilot",
       "configPath": ".copilot/config.json",
       "registration": "manual",
+      "reportsModel": "sometimes",
       "icon": "copilot",
       "manualSnippet": [
         "# GitHub Copilot's CLI hook mechanism is unconfirmed against any installed",
         "# version. Wire its session events to the hook binary, e.g.:",
-        "#   \"{command}\" --source copilot --event session-start --session-id <session> --cwd <dir>"
+        "#   \"{command}\" --source copilot --event session-start --session-id <session> --cwd <dir> --model <model>"
       ]
     }
   ]

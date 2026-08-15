@@ -407,6 +407,7 @@ select:disabled { opacity: .55; }
 .hook-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: .8rem; }
 .hook-badge { border: 1px solid var(--glass-border); border-radius: var(--radius); padding: 1px 8px; color: var(--text-secondary); font-size: .67rem; letter-spacing: .04em; }
 .hook-badge.is-detected { border-color: rgba(110, 231, 183, .45); color: var(--mint); }
+.hook-badge-models { display: block; color: var(--text-secondary); font-size: .62rem; letter-spacing: 0; }
 .hook-state { color: var(--mint); font-size: .76rem; }
 .hook-row button { border: 0; background: transparent; color: var(--text-secondary); font-size: .72rem; text-decoration: underline; text-underline-offset: 3px; }
 .hook-row button:hover { color: #ffffff; }

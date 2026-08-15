@@ -22,7 +22,15 @@ import {
 } from "./bridge.js";
 import { AgentRuntimeIcon } from "./agent-icons.js";
 import { QuotaDial } from "./QuotaDial.js";
-import { agentRuntimeForBinary, formatDuration, formatHumanDuration as formatHuman, friendlyAppName, leverage } from "@clock-in/shared";
+import {
+  agentRuntimeForBinary,
+  findAgentRuntime,
+  formatDuration,
+  formatHumanDuration as formatHuman,
+  friendlyAppName,
+  leverage,
+  type AgentRuntimeReportsModel,
+} from "@clock-in/shared";
 import { RecordingPanel, recordingState, type RecordingState } from "./RecordingPanel.js";
 import { WebGLShader } from "./WebGLShader.js";
 
@@ -285,6 +293,14 @@ const TODAY_EMPTY: Record<RecordingState, string> = {
   unknown: "Clock-In can't reach the recorder on this computer, so it can't say.",
 };
 
+/// What the AI-tools picker says about a runtime that is not connected yet:
+/// whether its hook mechanism can name the model it is driving at all.
+const REPORTS_MODEL_LABEL: Record<AgentRuntimeReportsModel, string> = {
+  always: "names its model",
+  sometimes: "can name its model",
+  never: "cannot name its model",
+};
+
 /// One app's share of the day, as the home surface renders it.
 type MeterRow = {
   key: string;
@@ -438,6 +454,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [newProjectError, setNewProjectError] = useState<string | undefined>();
   /// Manual hook-setup snippets returned by `hookRegister`, keyed by CLI source.
   const [hookSnippets, setHookSnippets] = useState<Readonly<Record<string, string>>>({});
+  /// The models each runtime has named, from the caller's all-time agent
+  /// splits; read while settings is open so the AI-tools group can say what
+  /// was seen. Advisory: a failed read keeps the last good list.
+  const [hookModelsSeen, setHookModelsSeen] = useState<Readonly<Record<string, readonly string[]>>>({});
   /// One card per installed browser, refreshed while the recording panel is open.
   const [browsers, setBrowsers] = useState<readonly BrowserHealth[]>([]);
   const latestBridge = useRef(bridge);
@@ -847,6 +867,33 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         if (!active || !isCurrent(service, generation)) return;
         const problem = bridgeError(error);
         if (problem.kind !== "auth") setSettingsError(problem.message);
+      },
+    );
+    return () => { active = false; };
+  }, [bridge, settingsOpen]);
+
+  // The AI-tools group names the models each connected runtime has reported,
+  // folded out of the caller's all-time agent splits; like the settings
+  // themselves, it reads only while the overlay is open.
+  useEffect(() => {
+    if (!settingsOpen) return undefined;
+    let active = true;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    void service.meStats().then(
+      (result) => {
+        if (!active || !isCurrent(service, generation)) return;
+        const seen: Record<string, string[]> = {};
+        for (const split of result.byAgent) {
+          if (split.model === null) continue;
+          const models = (seen[split.source] ??= []);
+          if (!models.includes(split.model)) models.push(split.model);
+        }
+        setHookModelsSeen(seen);
+      },
+      () => {
+        // Advisory only: a failed read keeps the last good list, and before
+        // the first one there is simply nothing to name.
       },
     );
     return () => { active = false; };
@@ -1745,11 +1792,17 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                     <summary>AI tools</summary>
                     {monitorStatus.hooks.some((hook) => hook.detected) && (
                       <ul className="hook-connected" data-testid="hook-connected">
-                        {monitorStatus.hooks.filter((hook) => hook.detected).map((hook) => (
-                          <li key={hook.source} className="hook-badge is-detected" title={hook.configPath}>
-                            {sourceLabel(hook.source)}
-                          </li>
-                        ))}
+                        {monitorStatus.hooks.filter((hook) => hook.detected).map((hook) => {
+                          const models = hookModelsSeen[hook.source] ?? [];
+                          return (
+                            <li key={hook.source} className="hook-badge is-detected" title={hook.configPath}>
+                              <span className="hook-badge-name">{sourceLabel(hook.source)}</span>
+                              {/* A runtime that has named no model shows the
+                                  dash: absence as absence, never a zero. */}
+                              <span className="hook-badge-models">{models.length > 0 ? models.join(", ") : "-"}</span>
+                            </li>
+                          );
+                        })}
                       </ul>
                     )}
                     {monitorStatus.hooks.some((hook) => !hook.detected) && (
@@ -1758,9 +1811,14 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                           <span className="visually-hidden">Tool to connect</span>
                           <select value={hookChoice} onChange={(event) => setHookChoice(event.target.value)}>
                             <option value="">Connect a tool…</option>
-                            {monitorStatus.hooks.filter((hook) => !hook.detected).map((hook) => (
-                              <option key={hook.source} value={hook.source}>{sourceLabel(hook.source)}</option>
-                            ))}
+                            {monitorStatus.hooks.filter((hook) => !hook.detected).map((hook) => {
+                              const reportsModel = findAgentRuntime(hook.source)?.reportsModel;
+                              return (
+                                <option key={hook.source} value={hook.source}>
+                                  {sourceLabel(hook.source)}{reportsModel !== undefined && ` · ${REPORTS_MODEL_LABEL[reportsModel]}`}
+                                </option>
+                              );
+                            })}
                           </select>
                         </label>
                         <button
