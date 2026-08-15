@@ -31,7 +31,7 @@ The complete path from nothing to tracking, as the user experiences it:
 3. One question: "Track your work time on this computer?" **[Turn on]** — the monitoring opt-in as a sentence, not a settings hunt.
 4. One card per detected browser: **[Connect Chrome]** opens the extension's store page; when the extension connects, the card flips to "Chrome is connected ✓" on its own.
 
-That is the entire ceremony: sign in, two buttons. Native-messaging host registration happens silently at first run for every detected browser and is re-checked and repaired on every launch — unlike agent-hook registration, which edits *another tool's* config and rightly stays opt-in, these HKCU keys are Clock-In's own, need no elevation, and are inert until the user installs the extension, so writing them needs no ceremony. Consent lives in step 3's toggle and in the store install the user performs in their own browser, not in the plumbing.
+That is the entire ceremony: sign in, two buttons. Native-messaging host registration happens silently at first run for every detected browser and is re-checked and repaired on every launch — unlike agent-hook registration, which edits *another tool's* config and rightly stays opt-in, these HKCU keys are Clock-In's own, need no elevation, and are inert until the user installs the extension, so writing them needs no ceremony. Consent lives in step 3's toggle and, for the extension, in the opt-out toggle for its automatic force-install (the store install is now automatic for Chrome/Edge; Firefox keeps the manual flow).
 
 ### Monitor precision groundwork
 
@@ -114,7 +114,7 @@ Rules flow outward: desktop settings → `project_path_mappings` (server) → ru
 - Incognito and guest windows are excluded unless the user flips the browser's own per-extension incognito toggle; Clock-In never asks for it.
 - Rule patterns can contain org and project names; they are redacted from logs like `cwd` and shown only to the owning user and org admins.
 - The whole signal is gated behind the same org-level policy switch as monitoring, off until enabled, and pausing monitoring also stops browser-span upload.
-- Enterprise rollout uses the browsers' own force-install policy (`ExtensionInstallForcelist`); Clock-In does not install extensions itself.
+- The desktop now writes the browsers' own force-install policy (`ExtensionInstallForcelist`, HKCU) itself, by default, with an opt-out toggle; see the README privacy section. Firefox has no such path until an AMO listing exists.
 
 ## Error handling
 
@@ -130,7 +130,7 @@ The manual checklist adds: register in Chrome and Edge, answer a suggestion, ver
 
 - **Firefox** needs its own signed build and native-messaging manifest path; ship Chrome/Edge first, Firefox when demand exists. Safari waits for macOS support entirely.
 - **Store distribution**: Chrome on Windows stable does not sideload, so the extension ships via the Web Store (unlisted) and Edge Add-ons; review latency becomes part of the release cadence.
-- **The two clicks that cannot be removed**: no native app may install a browser extension silently — the store-page visit and the browser's own "Add extension?" confirmation are the browsers' floor, not ours. Managed fleets can erase even those via force-install policy; for everyone else, the browser card's one button is the minimum the platform permits.
+- **Silent install**: Chrome/Edge force-install via the HKCU `ExtensionInstallForcelist` policy now removes the store clicks for everyone by default, with an opt-out toggle; Firefox still needs its AMO listing and keeps the manual flow.
 - **Signing logistics**: an OV/EV certificate and Apple Developer enrollment have lead time and identity-verification steps; they gate distribution to non-engineers, so they start before implementation does.
 - **Multi-profile browsers**: registration is per-user but extension install is per-profile; an unregistered profile is invisible, and the health badge cannot see profiles. Accepted; the monitor still records the browser as active.
 - **Path-bearing SPAs** that rewrite URLs without navigation events are covered by `tabs.onUpdated`, but sites that keep state out of the URL entirely (some editors) can only be matched at origin granularity.

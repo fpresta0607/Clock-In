@@ -247,7 +247,8 @@ The API and auth URL variables are required: the build **fails** rather than
 shipping an installer that points at localhost —
 `apps/desktop/src-tauri/build.rs` enforces that. Extension IDs are optional
 until their listings are released; without a valid ID, that browser's native
-messaging integration stays disabled.
+messaging integration stays disabled and no force-install policy is written,
+so the extension does not auto-install.
 
 ### Code signing and auto-update
 
@@ -429,7 +430,9 @@ artifact (the Chrome/Edge zip and the Firefox variant zip from
 
 After each store approves its listing, set the corresponding
 `CLOCK_IN_*_EXTENSION_ID` repository variable before building the next desktop
-release. The ID is compiled into that release's native-messaging manifest. A
+release. The ID is compiled into that release's native-messaging manifest and
+its force-install policy, so the same variable turns on the extension's
+connection and its automatic install (see **Force-install** below). A
 missing or invalid ID leaves that browser disabled and removes Clock-In's
 native-messaging registration, so pre-release placeholder IDs never authorize
 a production host.
@@ -443,13 +446,23 @@ feature that is still in review.
 **Firefox** needs its own signed build and its own native-messaging manifest
 path; ship Chrome/Edge first and submit Firefox when demand exists.
 
-**Managed fleets** skip the two store clicks entirely via the browsers' own
-force-install policy. Add
-`<extension-id>;https://clients2.google.com/service/update2/crx` to
-`ExtensionInstallForcelist` in the registry:
+**Force-install** skips the store clicks entirely via the browsers' own
+`ExtensionInstallForcelist` policy. Once the ID is compiled in, the desktop
+app writes this entry itself under HKCU (per user, no elevation), so the
+extension installs from the store on the next browser launch by default. The
+settings toggle "Add the Clock-In extension to my browsers automatically" is
+the opt-out; switching it off strips the policy entry, which uninstalls the
+extension.
 
-- Chrome: `HKLM\SOFTWARE\Policies\Google\Chrome\ExtensionInstallForcelist`
-- Edge: `HKLM\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist`
+- Chrome: `HKCU\Software\Policies\Google\Chrome\ExtensionInstallForcelist`
+- Edge: `HKCU\Software\Policies\Microsoft\Edge\ExtensionInstallForcelist`
+
+The entry value is `<extension-id>;<store-update-url>`: the app uses
+`https://clients2.google.com/service/update2/crx` for Chrome and
+`https://edge.microsoft.com/extensionwebstorebase/v1/crx` for Edge. A
+**managed fleet** that wants the install machine-wide for every Windows
+profile can set the same value under `HKLM` (swap `HKCU` for `HKLM` in the
+paths above).
 
 Force-install still pulls the package from the store update URL, so the
 listing must exist and stay published even when every install is managed.
