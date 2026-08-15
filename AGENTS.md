@@ -121,6 +121,18 @@ timer once said RECORDING above a card reading "Turn on recording in settings".
   for the desktop's own use 400s every agent-event batch, and `#[serde(skip_serializing)]`
   is not the escape hatch because the same impl writes the spool file. Anything local-only
   needs an explicit upload struct that projects only the contract's fields.
+- Spool-derived evidence (`shift_commits`, and anything modeled on it) is captured
+  from the uploader's `upload_once` pass on every platform - not the
+  `#[cfg(windows)]`-gated spool replay - and uploads only after the agent-spool
+  drains succeed that pass. `Started` and `Ended` lines can drain in different
+  passes, so a persisted sidecar (`shift-windows.json`) carries the open window
+  forward. A server rejection of `unknown_session` is retryable (the row stays
+  unsynced); every other rejection is permanent.
+- Bridge decoders show absence as absence: a stat the API may not send decodes to
+  `null` and renders `-`, never 0 (the deployed API can be older than the desktop
+  build). Background polls keep last-good data and surface a banner only after
+  several consecutive failures or when there is no data at all - a single failed
+  poll must never blip the UI.
 - The desktop force-installs the browser extension via the HKCU
   `ExtensionInstallForcelist` policy (`browser::sync_extension_policies`), but only
   when the store ids are compiled in (`CLOCK_IN_CHROME_EXTENSION_ID` /
