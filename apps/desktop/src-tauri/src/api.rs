@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::monitor::{ObservedSession, SegmentRecord};
-use crate::spool::SpoolEvent;
+use crate::spool::{AgentSource, SpoolEvent};
 
 /// Matches the `BridgeErrorKind` union the React bridge narrows on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,6 +238,34 @@ pub struct SegmentBatchOutcome {
 pub struct SegmentRejection {
     pub client_id: String,
     pub reason: String,
+}
+
+/// One captured commit, as `POST /shift-commits` accepts it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShiftCommitUpload {
+    pub client_id: String,
+    pub source: AgentSource,
+    pub external_session_id: String,
+    pub repo_root: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    pub sha: String,
+    pub subject: String,
+    pub authored_at: String,
+    pub verification: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<String>,
+}
+
+/// The server's verdict on an uploaded shift-commit batch. `unknown_session`
+/// is retryable (the shift may not have landed on the server yet); every
+/// other rejection reason is permanent.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShiftCommitBatchOutcome {
+    pub accepted: u32,
+    pub rejected: Vec<SegmentRejection>,
 }
 
 /// Per-event verdict from `/agent-sessions`.
@@ -817,6 +845,31 @@ impl ApiClient {
             .json()
             .await
             .map_err(|_| BridgeError::unknown("The segment upload response could not be read."))
+    }
+
+    /// Uploads one shift-commit batch (at most 500 rows; the caller chunks).
+    /// Idempotent on `clientId`; verification only ever advances forward, so a
+    /// replayed batch is always safe to resend.
+    pub async fn upload_shift_commits(
+        &self,
+        access_token: &str,
+        commits: &[ShiftCommitUpload],
+    ) -> ApiResult<ShiftCommitBatchOutcome> {
+        let response = self
+            .http
+            .post(format!("{}/shift-commits", self.api_base_url))
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({ "commits": commits }))
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+
+        if !response.status().is_success() {
+            return Err(classify(response.status().as_u16()));
+        }
+        response.json().await.map_err(|_| {
+            BridgeError::unknown("The shift-commit upload response could not be read.")
+        })
     }
 
     /// Uploads one drained agent-event batch (at most 500 rows; the caller chunks).

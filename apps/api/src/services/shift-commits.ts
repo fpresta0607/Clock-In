@@ -1,0 +1,126 @@
+import { agentRuntimeLabel, type ShiftCommitBatchResponse, type ShiftCommitUpload } from "@clock-in/shared";
+
+import type { AuthenticatedSubject } from "../auth.js";
+import type {
+  AgentRepository,
+  AgentSessionRecord,
+  AgentSessionRepository,
+  ShiftCommitRepository,
+} from "../repositories.js";
+import { rosterEligibleSource } from "./agent-sessions.js";
+
+export interface ShiftCommitServiceDependencies {
+  shiftCommits: ShiftCommitRepository;
+  agentSessions: AgentSessionRepository;
+  /** Without it, sessions that predate the roster cannot take commits. */
+  agents?: AgentRepository;
+  clock?: () => Date;
+}
+
+export interface ShiftCommitService {
+  ingest(subject: AuthenticatedSubject, commits: ShiftCommitUpload[]): Promise<ShiftCommitBatchResponse>;
+}
+
+/** Retryable: the shift has not landed on the server yet; the client keeps the row unsynced. */
+export const unknownSessionReason = "unknown_session";
+
+export function createShiftCommitService(dependencies: ShiftCommitServiceDependencies): ShiftCommitService {
+  const clock = dependencies.clock ?? (() => new Date());
+
+  return {
+    async ingest(subject: AuthenticatedSubject, commits: ShiftCommitUpload[]): Promise<ShiftCommitBatchResponse> {
+      const now = clock();
+      let accepted = 0;
+      const rejected: ShiftCommitBatchResponse["rejected"] = [];
+
+      // One session lookup per (source, externalSessionId) per batch: a
+      // shift's commits usually arrive together.
+      const sessions = new Map<string, Promise<AgentSessionRecord | null>>();
+      const resolveSession = (source: string, externalSessionId: string): Promise<AgentSessionRecord | null> => {
+        const key = `${source}|${externalSessionId}`;
+        let pending = sessions.get(key);
+        if (pending === undefined) {
+          pending = dependencies.agentSessions.findByExternalKey(subject, source, externalSessionId);
+          sessions.set(key, pending);
+        }
+        return pending;
+      };
+
+      for (const commit of commits) {
+        // verifiedAt travels with a decided verification and never with
+        // pending; a row that disagrees is wrong on its own, not the batch.
+        if ((commit.verification === "pending") !== (commit.verifiedAt === undefined)) {
+          rejected.push({ clientId: commit.clientId, reason: "verification and verifiedAt disagree" });
+          continue;
+        }
+
+        const session = await resolveSession(commit.source, commit.externalSessionId);
+        if (session === null) {
+          rejected.push({ clientId: commit.clientId, reason: unknownSessionReason });
+          continue;
+        }
+
+        let agentId = session.agentId;
+        if (agentId === null) {
+          // A shift that started before the roster existed still takes its
+          // commits: mint (or find) the identity and stamp the session now.
+          if (dependencies.agents === undefined || !rosterEligibleSource(commit.source)) {
+            rejected.push({ clientId: commit.clientId, reason: "session has no roster identity" });
+            continue;
+          }
+          const minted = await dependencies.agents.upsertForKey({
+            organizationId: subject.organizationId,
+            ownerUserId: session.userId,
+            source: commit.source,
+            projectId: session.projectId,
+            name: agentRuntimeLabel(commit.source),
+            now,
+          });
+          agentId = minted.id;
+          await dependencies.agentSessions.stampAgent(subject, session.id, agentId, now);
+          session.agentId = agentId;
+        }
+
+        const existing = await dependencies.shiftCommits.findByClientId(subject, commit.clientId);
+        if (existing !== null) {
+          // A replay is accepted; the only work left is a verification that
+          // decided since the row was first uploaded. Terminal states never
+          // move again, so a replayed decision is a no-op too.
+          if (existing.verification === "pending" && commit.verification !== "pending") {
+            await dependencies.shiftCommits.advanceVerification(
+              subject,
+              existing.id,
+              commit.verification,
+              new Date(commit.verifiedAt!),
+              now,
+            );
+          }
+          accepted += 1;
+          continue;
+        }
+
+        // "duplicate" means one of the two uniques absorbed the row - a
+        // replay racing itself or the same agent recording the same commit
+        // from another shift. Both are accepted no-ops.
+        await dependencies.shiftCommits.insert({
+          organizationId: subject.organizationId,
+          userId: session.userId,
+          agentId,
+          agentSessionId: session.id,
+          clientId: commit.clientId,
+          repoRoot: commit.repoRoot,
+          branch: commit.branch ?? null,
+          sha: commit.sha,
+          subject: commit.subject,
+          authoredAt: new Date(commit.authoredAt),
+          verification: commit.verification,
+          verifiedAt: commit.verifiedAt === undefined ? null : new Date(commit.verifiedAt),
+          recordedAt: now,
+        });
+        accepted += 1;
+      }
+
+      return { accepted, rejected };
+    },
+  };
+}

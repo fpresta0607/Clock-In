@@ -7,6 +7,7 @@ import {
   agents,
   agentSessions,
   organizations,
+  shiftCommits,
   projectMemberships,
   projectPathMappings,
   projects,
@@ -269,6 +270,10 @@ describe("database schema", () => {
     expect(
       config.foreignKeys.some((key) => key.getName() === "agent_sessions_organization_agent_fk"),
     ).toBe(true);
+    // Composite-FK target for shift_commits rows.
+    expect(config.uniqueConstraints.map((constraint) => constraint.name)).toContain(
+      "agent_sessions_organization_id_id_unique",
+    );
     expect(config.uniqueConstraints.map((constraint) => constraint.name)).toContain(
       "agent_sessions_organization_user_source_external_unique",
     );
@@ -286,6 +291,58 @@ describe("database schema", () => {
     );
     expect(userTimelineIndex?.config.unique).toBe(false);
     expect(userTimelineIndex?.config.where).toBeUndefined();
+  });
+
+  it("defines dedup-keyed shift commits with terminal-once verification", () => {
+    expect(shiftCommits.id.primary).toBe(true);
+    expect(shiftCommits.organizationId.notNull).toBe(true);
+    expect(shiftCommits.userId.notNull).toBe(true);
+    // Denormalized on purpose: the dedup uniques and the report join need them.
+    expect(shiftCommits.agentId.notNull).toBe(true);
+    expect(shiftCommits.agentSessionId.notNull).toBe(true);
+    expect(shiftCommits.clientId.notNull).toBe(true);
+    expect(shiftCommits.repoRoot.notNull).toBe(true);
+    // Null on a detached HEAD.
+    expect(shiftCommits.branch.notNull).toBe(false);
+    expect(shiftCommits.sha.notNull).toBe(true);
+    expect(shiftCommits.subject.notNull).toBe(true);
+    expect(shiftCommits.authoredAt.notNull).toBe(true);
+    expect(shiftCommits.authoredAt.withTimezone).toBe(true);
+    expect(shiftCommits.verification.notNull).toBe(true);
+    expect(shiftCommits.verification.default).toBe("pending");
+    expect(shiftCommits.verifiedAt.notNull).toBe(false);
+    expect(shiftCommits.recordedAt.notNull).toBe(true);
+    expect(shiftCommits.createdAt.notNull).toBe(true);
+    expect(shiftCommits.updatedAt.notNull).toBe(true);
+
+    const config = getTableConfig(shiftCommits);
+    expect(config.foreignKeys).toHaveLength(3);
+    for (const name of [
+      "shift_commits_organization_user_fk",
+      "shift_commits_organization_agent_fk",
+      "shift_commits_organization_session_fk",
+    ]) {
+      expect(config.foreignKeys.some((key) => key.getName() === name)).toBe(true);
+    }
+    // Replay idempotency and the same-agent-once / different-agents-each rule.
+    const uniqueNames = config.uniqueConstraints.map((constraint) => constraint.name);
+    expect(uniqueNames).toContain("shift_commits_organization_user_client_unique");
+    expect(uniqueNames).toContain("shift_commits_organization_agent_repo_sha_unique");
+    expect(config.checks.map((constraint) => constraint.name)).toEqual(
+      expect.arrayContaining([
+        "shift_commits_verification_valid",
+        "shift_commits_sha_valid",
+        "shift_commits_repo_root_length_valid",
+        "shift_commits_subject_length_valid",
+        "shift_commits_branch_length_valid",
+        "shift_commits_verified_at_consistent",
+      ]),
+    );
+    const consistency = config.checks.find((constraint) => constraint.name === "shift_commits_verified_at_consistent");
+    expect(new PgDialect().sqlToQuery(consistency!.value).sql).toContain("= 'pending')");
+    expect(config.indexes.map((index) => index.config.name)).toContain(
+      "shift_commits_organization_agent_authored_at_idx",
+    );
   });
 
   it("defines per-user project path mappings with unique prefixes", () => {

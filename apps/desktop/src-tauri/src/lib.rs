@@ -10,10 +10,12 @@ mod app_icons;
 // Shared with the `clock-in-browser-host` binary; the host calls these from
 // its own `main`, and the app calls them to register the host and drain spans.
 pub mod browser;
+mod git_evidence;
 mod monitor;
 pub mod native_messaging;
 mod quota;
 mod recovery;
+mod shift_commits;
 mod uploader;
 // Shared with the `clock-in-hook` binary; the uploader drains it from here.
 pub mod spool;
@@ -831,6 +833,8 @@ pub fn run() {
                 sessions_path: data_dir.join("sessions-spool.jsonl"),
                 agent_path: spool::agent_spool_path(),
                 recovery_path: recovery_path.clone(),
+                shift_windows_path: spool::shift_windows_path(),
+                shift_commits_path: spool::shift_commits_path(),
                 recovery: Arc::clone(&recovery),
             });
 

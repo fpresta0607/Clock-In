@@ -1258,7 +1258,7 @@ pub fn write_if_changed(path: &Path, content: &[u8]) -> io::Result<()> {
     spool::with_lock(path, || write_if_changed_locked(path, content))
 }
 
-fn write_if_changed_locked(path: &Path, content: &[u8]) -> io::Result<()> {
+pub(crate) fn write_if_changed_locked(path: &Path, content: &[u8]) -> io::Result<()> {
     if std::fs::read(path).is_ok_and(|existing| existing == content) {
         return Ok(());
     }

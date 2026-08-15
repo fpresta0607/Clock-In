@@ -357,6 +357,8 @@ export const agentSessions = pgTable(
       table.source,
       table.externalSessionId,
     ),
+    // Composite-FK target so shift_commits rows stay inside the tenant.
+    unique("agent_sessions_organization_id_id_unique").on(table.organizationId, table.id),
     foreignKey({
       columns: [table.organizationId, table.userId],
       foreignColumns: [users.organizationId, users.id],
@@ -388,6 +390,75 @@ export const agentSessions = pgTable(
     check("agent_sessions_source_valid", sql`${table.source} ~ '^[a-z][a-z0-9_]*$' and char_length(${table.source}) <= 40`),
     check("agent_sessions_model_length_valid", sql`${table.model} is null or char_length(${table.model}) between 1 and 200`),
     index("agent_sessions_organization_user_started_at_idx").on(table.organizationId, table.userId, table.startedAt),
+  ],
+);
+
+// Commits captured during an agent's shift by the desktop app (read-only git)
+// and later verified locally. Two uniques carry the whole dedup story:
+// (org, user, client_id) makes replayed uploads idempotent, and
+// (org, agent_id, repo_root, sha) means the same agent records a commit once
+// while different agents each record their own sighting of it.
+export const shiftCommits = pgTable(
+  "shift_commits",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    organizationId: uuid("organization_id").notNull(),
+    userId: uuid("user_id").notNull(),
+    agentId: uuid("agent_id").notNull(),
+    agentSessionId: uuid("agent_session_id").notNull(),
+    clientId: uuid("client_id").notNull(),
+    repoRoot: text("repo_root").notNull(),
+    // Null on a detached HEAD.
+    branch: text("branch"),
+    sha: text("sha").notNull(),
+    subject: text("subject").notNull(),
+    authoredAt: timestamp("authored_at", { mode: "date", withTimezone: true }).notNull(),
+    // Verification only ever advances pending -> merged|reverted|orphaned;
+    // verified_at is set once alongside it and never regresses.
+    verification: text("verification").$type<"pending" | "merged" | "reverted" | "orphaned">().default("pending").notNull(),
+    verifiedAt: timestamp("verified_at", { mode: "date", withTimezone: true }),
+    recordedAt: timestamp("recorded_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),
+    ...auditColumns,
+  },
+  (table) => [
+    unique("shift_commits_organization_user_client_unique").on(table.organizationId, table.userId, table.clientId),
+    unique("shift_commits_organization_agent_repo_sha_unique").on(
+      table.organizationId,
+      table.agentId,
+      table.repoRoot,
+      table.sha,
+    ),
+    foreignKey({
+      columns: [table.organizationId, table.userId],
+      foreignColumns: [users.organizationId, users.id],
+      name: "shift_commits_organization_user_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.organizationId, table.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+      name: "shift_commits_organization_agent_fk",
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.organizationId, table.agentSessionId],
+      foreignColumns: [agentSessions.organizationId, agentSessions.id],
+      name: "shift_commits_organization_session_fk",
+    }).onDelete("cascade"),
+    check(
+      "shift_commits_verification_valid",
+      sql`${table.verification} in ('pending', 'merged', 'reverted', 'orphaned')`,
+    ),
+    check("shift_commits_sha_valid", sql`${table.sha} ~ '^[0-9a-f]{40,64}$'`),
+    check("shift_commits_repo_root_length_valid", sql`char_length(${table.repoRoot}) between 1 and 1000`),
+    check("shift_commits_subject_length_valid", sql`char_length(${table.subject}) <= 500`),
+    check(
+      "shift_commits_branch_length_valid",
+      sql`${table.branch} is null or char_length(${table.branch}) between 1 and 500`,
+    ),
+    check(
+      "shift_commits_verified_at_consistent",
+      sql`(${table.verification} = 'pending') = (${table.verifiedAt} is null)`,
+    ),
+    index("shift_commits_organization_agent_authored_at_idx").on(table.organizationId, table.agentId, table.authoredAt),
   ],
 );
 

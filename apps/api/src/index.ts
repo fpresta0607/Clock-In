@@ -20,6 +20,7 @@ export {
   DrizzleProjectRepository,
   DrizzleReportRepository,
   DrizzleSessionRepository,
+  DrizzleShiftCommitRepository,
 } from "./drizzle-repositories.js";
 export { createActivityRoutes } from "./routes/activity.js";
 export { createAgentRoutes } from "./routes/agents.js";
@@ -29,6 +30,7 @@ export { createPathMappingRoutes } from "./routes/path-mappings.js";
 export { createProjectRoutes } from "./routes/projects.js";
 export { createReportRoutes } from "./routes/reports.js";
 export { createSessionRoutes } from "./routes/sessions.js";
+export { createShiftCommitRoutes } from "./routes/shift-commits.js";
 export { createActivityService } from "./services/activity.js";
 export { createAgentSessionReaper, createAgentSessionService, rosterEligibleSource } from "./services/agent-sessions.js";
 export { asAgentView, createAgentService } from "./services/agents.js";
@@ -38,6 +40,8 @@ export { createPathMappingService } from "./services/path-mappings.js";
 export { listProjects } from "./services/projects.js";
 export { createReportService } from "./services/reports.js";
 export { createSessionService } from "./services/sessions.js";
+export { createShiftCommitService, unknownSessionReason } from "./services/shift-commits.js";
+export type { ShiftCommitService, ShiftCommitServiceDependencies } from "./services/shift-commits.js";
 export { PathMappingRepositoryError, SessionRepositoryError } from "./repositories.js";
 export type {
   ActivitySegmentInsert,
@@ -53,6 +57,7 @@ export type {
   CreatePathMapping,
   CreateRunningSession,
   InsertEndedAgentSession,
+  InsertShiftCommit,
   PathMappingRecord,
   PathMappingRepository,
   PathMappingRepositoryConflict,
@@ -71,6 +76,10 @@ export type {
   SessionRecord,
   SessionRepository,
   SessionRepositoryConflict,
+  ShiftCommitCountsRecord,
+  ShiftCommitRecord,
+  ShiftCommitRepository,
+  ShiftCommitVerificationState,
   SiteTotalRecord,
   StopRunningSession,
   UpdatePathMapping,

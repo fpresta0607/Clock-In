@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import { generateInviteCode, type AgentSource } from "@clock-in/shared";
-import { and, asc, count, desc, eq, gt, gte, isNotNull, lt, ne, or, sql, sum } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lt, ne, or, sql, sum } from "drizzle-orm";
 import {
   activitySegments,
   agents,
@@ -11,6 +11,7 @@ import {
   projectMemberships,
   projectPathMappings,
   projects,
+  shiftCommits,
   timeSessions,
   userProjectSelections,
   users,
@@ -40,6 +41,11 @@ import {
   type AgentSessionRepository,
   type AgentUpdatePatch,
   type UpsertAgentForKey,
+  type InsertShiftCommit,
+  type ShiftCommitCountsRecord,
+  type ShiftCommitRecord,
+  type ShiftCommitRepository,
+  type ShiftCommitVerificationState,
   type AppTotalRecord,
   type PresenceIntervalRecord,
   type ProjectUsageRecord,
@@ -1196,6 +1202,18 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
       .returning({ id: agentSessions.id });
     return rows.length;
   }
+
+  public async stampAgent(subject: AuthenticatedSubject, sessionId: string, agentId: string, now: Date): Promise<void> {
+    await this.db
+      .update(agentSessions)
+      .set({ agentId, updatedAt: now })
+      .where(and(
+        eq(agentSessions.organizationId, subject.organizationId),
+        eq(agentSessions.userId, subject.userId),
+        eq(agentSessions.id, sessionId),
+        isNull(agentSessions.agentId),
+      ));
+  }
 }
 
 function asAgentRecord(row: { agent: typeof agents.$inferSelect; ownerName: string; projectName: string | null }): AgentRecord {
@@ -1307,6 +1325,116 @@ export class DrizzleAgentRepository implements AgentRepository {
       ))
       .orderBy(desc(agentSessions.startedAt), asc(agentSessions.id));
     return rows;
+  }
+}
+
+function asShiftCommitRecord(row: typeof shiftCommits.$inferSelect): ShiftCommitRecord {
+  return {
+    id: row.id,
+    organizationId: row.organizationId,
+    userId: row.userId,
+    agentId: row.agentId,
+    agentSessionId: row.agentSessionId,
+    clientId: row.clientId,
+    repoRoot: row.repoRoot,
+    branch: row.branch,
+    sha: row.sha,
+    subject: row.subject,
+    authoredAt: row.authoredAt,
+    verification: row.verification,
+    verifiedAt: row.verifiedAt,
+  };
+}
+
+export class DrizzleShiftCommitRepository implements ShiftCommitRepository {
+  public constructor(private readonly db: DatabaseConnection["db"]) {}
+
+  public async findByClientId(subject: AuthenticatedSubject, clientId: string): Promise<ShiftCommitRecord | null> {
+    const rows = await this.db.select().from(shiftCommits).where(and(
+      eq(shiftCommits.organizationId, subject.organizationId),
+      eq(shiftCommits.userId, subject.userId),
+      eq(shiftCommits.clientId, clientId),
+    )).limit(1);
+    return rows[0] === undefined ? null : asShiftCommitRecord(rows[0]);
+  }
+
+  public async insert(input: InsertShiftCommit): Promise<"inserted" | "duplicate"> {
+    // No conflict target on purpose: the client-replay unique and the
+    // same-agent same-sha unique both absorb the row into "duplicate".
+    const rows = await this.db
+      .insert(shiftCommits)
+      .values({
+        organizationId: input.organizationId,
+        userId: input.userId,
+        agentId: input.agentId,
+        agentSessionId: input.agentSessionId,
+        clientId: input.clientId,
+        repoRoot: input.repoRoot,
+        branch: input.branch,
+        sha: input.sha,
+        subject: input.subject,
+        authoredAt: input.authoredAt,
+        verification: input.verification,
+        verifiedAt: input.verifiedAt,
+        recordedAt: input.recordedAt,
+      })
+      .onConflictDoNothing()
+      .returning({ id: shiftCommits.id });
+    return rows.length > 0 ? "inserted" : "duplicate";
+  }
+
+  public async advanceVerification(
+    subject: AuthenticatedSubject,
+    commitId: string,
+    verification: Exclude<ShiftCommitVerificationState, "pending">,
+    verifiedAt: Date,
+    now: Date,
+  ): Promise<boolean> {
+    const rows = await this.db
+      .update(shiftCommits)
+      .set({ verification, verifiedAt, updatedAt: now })
+      .where(and(
+        eq(shiftCommits.organizationId, subject.organizationId),
+        eq(shiftCommits.id, commitId),
+        // Terminal states never move again; a replayed decision is a no-op.
+        eq(shiftCommits.verification, "pending"),
+      ))
+      .returning({ id: shiftCommits.id });
+    return rows.length > 0;
+  }
+
+  public async countsByAgent(subject: AuthenticatedSubject, query: ReportQuery): Promise<ShiftCommitCountsRecord[]> {
+    const rows = await this.db
+      .select({
+        agentId: shiftCommits.agentId,
+        recorded: count(),
+        pending: count(sql`case when ${shiftCommits.verification} = 'pending' then 1 end`),
+        merged: count(sql`case when ${shiftCommits.verification} = 'merged' then 1 end`),
+        reverted: count(sql`case when ${shiftCommits.verification} = 'reverted' then 1 end`),
+        orphaned: count(sql`case when ${shiftCommits.verification} = 'orphaned' then 1 end`),
+      })
+      .from(shiftCommits)
+      .where(and(
+        eq(shiftCommits.organizationId, subject.organizationId),
+        query.from === undefined ? undefined : gte(shiftCommits.authoredAt, query.from),
+        query.toExclusive === undefined ? undefined : lt(shiftCommits.authoredAt, query.toExclusive),
+      ))
+      .groupBy(shiftCommits.agentId);
+    return rows;
+  }
+
+  public async listForAgent(subject: AuthenticatedSubject, agentId: string, query: ReportQuery): Promise<ShiftCommitRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(shiftCommits)
+      .where(and(
+        eq(shiftCommits.organizationId, subject.organizationId),
+        eq(shiftCommits.agentId, agentId),
+        query.from === undefined ? undefined : gte(shiftCommits.authoredAt, query.from),
+        query.toExclusive === undefined ? undefined : lt(shiftCommits.authoredAt, query.toExclusive),
+      ))
+      .orderBy(asc(shiftCommits.authoredAt), asc(shiftCommits.id));
+    return rows.map(asShiftCommitRecord);
   }
 }
 

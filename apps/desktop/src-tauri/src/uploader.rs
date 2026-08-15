@@ -15,11 +15,12 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use crate::api::{ApiClient, MappingKind, PathMapping};
+use crate::api::{ApiClient, MappingKind, PathMapping, ShiftCommitUpload};
 use crate::monitor::{
     advance_sessions, iso8601, lock, parse_iso8601, unix_now, ActiveAgent, AgentTracking,
     MonitorShared, ObservedSession, SeenAgentEvent, SegmentRecord,
 };
+use crate::shift_commits;
 use crate::spool::{self, AgentEventKind, SpoolEvent};
 
 /// The server's batch bound for both upload routes.
@@ -29,12 +30,20 @@ const UPLOAD_BATCH_SIZE: usize = 500;
 /// the monitor noisy. Local agent events are replayed on every monitor poll.
 const UPLOAD_INTERVAL_SECONDS: u64 = 300;
 
+/// Every path an upload pass touches, bundled so `upload_loop`/`upload_once`
+/// take one argument instead of one per spool or sidecar.
+pub struct UploadPaths {
+    pub segments_path: PathBuf,
+    pub agent_path: PathBuf,
+    pub sessions_path: PathBuf,
+    pub shift_windows_path: PathBuf,
+    pub shift_commits_path: PathBuf,
+}
+
 pub async fn upload_loop(
     shared: Arc<Mutex<MonitorShared>>,
     client: ApiClient,
-    segments_path: PathBuf,
-    agent_path: PathBuf,
-    sessions_path: PathBuf,
+    paths: UploadPaths,
     upload_now: Arc<Notify>,
 ) {
     let mut tick = tokio::time::interval(Duration::from_secs(UPLOAD_INTERVAL_SECONDS));
@@ -44,14 +53,7 @@ pub async fn upload_loop(
             _ = tick.tick() => {}
             _ = upload_now.notified() => {}
         }
-        upload_once(
-            &shared,
-            &client,
-            &segments_path,
-            &agent_path,
-            &sessions_path,
-        )
-        .await;
+        upload_once(&shared, &client, &paths).await;
     }
 }
 
@@ -61,9 +63,7 @@ pub async fn upload_loop(
 pub(crate) async fn upload_once(
     shared: &Arc<Mutex<MonitorShared>>,
     client: &ApiClient,
-    segments_path: &Path,
-    agent_path: &Path,
-    sessions_path: &Path,
+    paths: &UploadPaths,
 ) {
     // Signed out: leave both spools for a session that can upload them.
     let Some(session) = crate::read_session_token() else {
@@ -73,7 +73,17 @@ pub(crate) async fn upload_once(
         return;
     };
 
-    let mut complete = upload_segments(client, &token, segments_path).await;
+    // Turns any newly-closed shift into shift-commit rows before this pass
+    // uploads them. Reads the agent spool without truncating it, so it never
+    // races the agent-spool drain below.
+    shift_commits::capture_from_spool(
+        &paths.agent_path,
+        &paths.shift_windows_path,
+        &paths.shift_commits_path,
+    )
+    .await;
+
+    let mut complete = upload_segments(client, &token, &paths.segments_path).await;
 
     // Refresh the local mapping cache before the drain resolves suggestions.
     // A failed refresh keeps last pass's cache — stale mappings beat none.
@@ -93,14 +103,23 @@ pub(crate) async fn upload_once(
         );
     }
 
-    complete &= upload_agent_spool(client, &token, agent_path).await;
-    complete &= upload_agent_spool(
+    let agent_spool_drained = upload_agent_spool(client, &token, &paths.agent_path).await;
+    let browser_spool_drained = upload_agent_spool(
         client,
         &token,
         &spool::browser_dir().join("browser-spool.jsonl"),
     )
     .await;
-    complete &= upload_sessions(client, &token, sessions_path).await;
+    complete &= agent_spool_drained;
+    complete &= browser_spool_drained;
+    complete &= upload_sessions(client, &token, &paths.sessions_path).await;
+
+    // Shift commits reference an agent session by external id; uploading them
+    // before both agent-spool drains have succeeded this pass would race a
+    // session that has not reached the server yet.
+    if agent_spool_drained && browser_spool_drained {
+        complete &= upload_shift_commits_spool(client, &token, &paths.shift_commits_path).await;
+    }
 
     if complete {
         lock(shared).last_upload_at = Some(iso8601(unix_now()));
@@ -181,6 +200,70 @@ async fn upload_agent_spool(client: &ApiClient, token: &str, path: &Path) -> boo
         }
     }
     spool::truncate_acked(path, pending.acked_bytes).is_ok()
+}
+
+/// Uploads every unsynced shift commit in batches. Accepted rows (including
+/// duplicates the server already had) are marked synced; a permanent
+/// rejection is marked rejected and dropped; `unknown_session` is retryable
+/// and left alone entirely, so it uploads again once the shift itself has
+/// landed. A transport failure marks nothing, so the whole batch replays
+/// identically next pass.
+async fn upload_shift_commits_spool(
+    client: &ApiClient,
+    token: &str,
+    shift_commits_path: &Path,
+) -> bool {
+    let pending = shift_commits::unsynced(shift_commits_path);
+    if pending.is_empty() {
+        return true;
+    }
+    for chunk in pending.chunks(UPLOAD_BATCH_SIZE) {
+        let uploads: Vec<ShiftCommitUpload> = chunk.iter().map(to_shift_commit_upload).collect();
+        let outcome = match client.upload_shift_commits(token, &uploads).await {
+            Ok(outcome) => outcome,
+            Err(_) => return false,
+        };
+        let rejected_ids: std::collections::HashSet<&str> = outcome
+            .rejected
+            .iter()
+            .map(|rejection| rejection.client_id.as_str())
+            .collect();
+        let permanent: Vec<String> = outcome
+            .rejected
+            .iter()
+            .filter(|rejection| rejection.reason != "unknown_session")
+            .map(|rejection| rejection.client_id.clone())
+            .collect();
+        if !permanent.is_empty() {
+            eprintln!(
+                "clock-in: the server rejected {} shift commit(s)",
+                permanent.len()
+            );
+        }
+        let accepted: Vec<String> = chunk
+            .iter()
+            .map(|entry| entry.client_id.clone())
+            .filter(|client_id| !rejected_ids.contains(client_id.as_str()))
+            .collect();
+        shift_commits::mark_synced(shift_commits_path, &accepted);
+        shift_commits::mark_rejected(shift_commits_path, &permanent);
+    }
+    true
+}
+
+fn to_shift_commit_upload(entry: &crate::shift_commits::CommitEntry) -> ShiftCommitUpload {
+    ShiftCommitUpload {
+        client_id: entry.client_id.clone(),
+        source: entry.source.clone(),
+        external_session_id: entry.external_session_id.clone(),
+        repo_root: entry.repo_root.clone(),
+        branch: entry.branch.clone(),
+        sha: entry.sha.clone(),
+        subject: entry.subject.clone(),
+        authored_at: entry.authored_at.clone(),
+        verification: entry.verification.clone(),
+        verified_at: entry.verified_at.clone(),
+    }
 }
 
 /// Replays every unseen event at its own timestamp, bracketing the lifecycle
@@ -658,6 +741,151 @@ mod tests {
 
     fn source(id: &str) -> spool::AgentSource {
         spool::AgentSource::parse(id).expect("the test names a well-shaped runtime")
+    }
+
+    fn one_commit_entry(client_id: &str, sha: &str) -> crate::shift_commits::CommitEntry {
+        crate::shift_commits::CommitEntry {
+            client_id: client_id.to_string(),
+            source: source("claude_code"),
+            external_session_id: "s1".to_string(),
+            repo_root: "C:/dev/clock-in".to_string(),
+            branch: Some("main".to_string()),
+            sha: sha.to_string(),
+            subject: "did work".to_string(),
+            authored_at: "2026-08-11T15:38:00Z".to_string(),
+            verification: "pending".to_string(),
+            verified_at: None,
+            synced: false,
+            rejected: false,
+        }
+    }
+
+    fn spool_one_shift_commit(path: &Path, client_id: &str, sha: &str) {
+        let entries = vec![one_commit_entry(client_id, sha)];
+        let bytes = serde_json::to_vec(&entries).expect("the registry encodes");
+        std::fs::write(path, bytes).expect("the registry writes");
+    }
+
+    fn read_shift_commits(path: &Path) -> Vec<crate::shift_commits::CommitEntry> {
+        serde_json::from_slice(&std::fs::read(path).expect("the registry reads"))
+            .expect("the registry decodes")
+    }
+
+    /// An accepted shift commit reaches `/shift-commits` in the contract's
+    /// shape and is marked synced, dropping it from the unsynced set.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_accepted_shift_commit_reaches_the_endpoint_and_is_marked_synced() {
+        let dir = temp_dir("shift-commit-accepted");
+        let path = dir.join("shift-commits.json");
+        let sha = "a".repeat(40);
+        spool_one_shift_commit(&path, "client-1", &sha);
+
+        let (port, server) = stub_server(200, r#"{"accepted":1,"rejected":[]}"#).await;
+        assert!(
+            upload_shift_commits_spool(&stub_client(port), "token", &path).await,
+            "an accepted batch reports success"
+        );
+
+        let request = server.await.expect("the stub finishes");
+        assert!(
+            request.starts_with("POST /shift-commits "),
+            "the batch goes to the shift-commits endpoint: {request}"
+        );
+        assert!(
+            request.contains("\"clientId\":\"client-1\"")
+                && request.contains(&format!("\"sha\":\"{sha}\""))
+                && request.contains("\"repoRoot\":\"C:/dev/clock-in\"")
+                && request.contains("\"externalSessionId\":\"s1\""),
+            "the wire payload carries the contract's field names: {request}"
+        );
+
+        assert!(
+            shift_commits::unsynced(&path).is_empty(),
+            "an accepted commit is marked synced"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `unknown_session` is retryable: the row stays unsynced (and
+    /// unrejected) so it uploads again once the shift itself has landed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unknown_session_rejection_survives_as_unsynced() {
+        let dir = temp_dir("shift-commit-unknown-session");
+        let path = dir.join("shift-commits.json");
+        let sha = "b".repeat(40);
+        spool_one_shift_commit(&path, "client-2", &sha);
+
+        let (port, server) = stub_server(
+            200,
+            r#"{"accepted":0,"rejected":[{"clientId":"client-2","reason":"unknown_session"}]}"#,
+        )
+        .await;
+        assert!(
+            upload_shift_commits_spool(&stub_client(port), "token", &path).await,
+            "the server responding at all is a completed pass"
+        );
+        let _ = server.await;
+
+        let entries = read_shift_commits(&path);
+        assert_eq!(entries.len(), 1);
+        assert!(
+            !entries[0].synced && !entries[0].rejected,
+            "unknown_session leaves the row retryable"
+        );
+        assert_eq!(shift_commits::unsynced(&path).len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Any other rejection reason is permanent: the row is marked rejected
+    /// and drops out of the unsynced set for good.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_permanent_rejection_is_marked_rejected_and_dropped_from_unsynced() {
+        let dir = temp_dir("shift-commit-rejected");
+        let path = dir.join("shift-commits.json");
+        let sha = "c".repeat(40);
+        spool_one_shift_commit(&path, "client-3", &sha);
+
+        let (port, server) = stub_server(
+            200,
+            r#"{"accepted":0,"rejected":[{"clientId":"client-3","reason":"validation_error"}]}"#,
+        )
+        .await;
+        assert!(upload_shift_commits_spool(&stub_client(port), "token", &path).await);
+        let _ = server.await;
+
+        let entries = read_shift_commits(&path);
+        assert!(entries[0].rejected && !entries[0].synced);
+        assert!(shift_commits::unsynced(&path).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A transport failure marks nothing, so the identical batch replays
+    /// next pass.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_transport_failure_marks_nothing() {
+        let dir = temp_dir("shift-commit-transport-error");
+        let path = dir.join("shift-commits.json");
+        let sha = "d".repeat(40);
+        spool_one_shift_commit(&path, "client-4", &sha);
+
+        let (port, server) = stub_server(500, r#"{"code":"internal_error"}"#).await;
+        assert!(
+            !upload_shift_commits_spool(&stub_client(port), "token", &path).await,
+            "a server error reports failure"
+        );
+        let _ = server.await;
+
+        let entries = read_shift_commits(&path);
+        assert!(
+            !entries[0].synced && !entries[0].rejected,
+            "nothing is marked on failure"
+        );
+        assert_eq!(shift_commits::unsynced(&path).len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn mapping(id: &str, prefix: &str, project: &str) -> PathMapping {

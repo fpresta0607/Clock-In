@@ -13,6 +13,7 @@ export {
   projectPathMappings,
   projects,
   sessionStatus,
+  shiftCommits,
   timeSessions,
   userProjectSelections,
   users,
