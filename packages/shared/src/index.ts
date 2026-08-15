@@ -157,10 +157,11 @@ export {
   agentRuntimeLabel,
   agentRuntimeManualSnippet,
   agentRuntimeRegistrationValues,
+  agentRuntimeReportsModelValues,
   agentRuntimes,
   findAgentRuntime,
 } from "./agent-runtimes.js";
-export type { AgentRuntime, AgentRuntimeRegistration } from "./agent-runtimes.js";
+export type { AgentRuntime, AgentRuntimeRegistration, AgentRuntimeReportsModel } from "./agent-runtimes.js";
 export {
   generateInviteCode,
   inviteCodeLength,

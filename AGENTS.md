@@ -133,6 +133,12 @@ timer once said RECORDING above a card reading "Turn on recording in settings".
   build). Background polls keep last-good data and surface a banner only after
   several consecutive failures or when there is no data at all - a single failed
   poll must never blip the UI.
+- Claude Code's SessionStart/SessionEnd hook payloads carry no model key (verified
+  live against Claude Code 2.1.233 on 2026-08-15: the payloads carry `session_id`,
+  `transcript_path`, `cwd`, `hook_event_name`, and `source`/`reason` only; `model`
+  is documented on the statusline JSON, not the session hooks). The payload's
+  `transcript_path` is the repair path: every assistant entry in the transcript
+  names its own model, so the desktop's transcript reader backfills it.
 - The desktop force-installs the browser extension via the HKCU
   `ExtensionInstallForcelist` policy (`browser::sync_extension_policies`), but only
   when the store ids are compiled in (`CLOCK_IN_CHROME_EXTENSION_ID` /

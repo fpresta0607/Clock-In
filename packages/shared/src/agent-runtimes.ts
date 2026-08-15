@@ -22,6 +22,10 @@ import registry from "./agent-runtimes.json" with { type: "json" };
 export const agentRuntimeRegistrationValues = ["claude_json", "cursor_json", "manual"] as const;
 export type AgentRuntimeRegistration = (typeof agentRuntimeRegistrationValues)[number];
 
+/** Whether a runtime's own hook mechanism names the model it is driving. */
+export const agentRuntimeReportsModelValues = ["always", "sometimes", "never"] as const;
+export type AgentRuntimeReportsModel = (typeof agentRuntimeReportsModelValues)[number];
+
 const agentRuntimeSchema = z
   .object({
     /** Canonical source id, snake_case; what `agent_sessions.source` stores. */
@@ -35,6 +39,13 @@ const agentRuntimeSchema = z
     /** Home-relative path to the config a hook registration lands in. */
     configPath: z.string().min(1),
     registration: z.enum(agentRuntimeRegistrationValues),
+    /**
+     * Whether the runtime's hook mechanism names the model it is driving:
+     * `always` by design on every event, `sometimes` when it depends on the
+     * user's wiring or an unconfirmed mechanism, `never` when the mechanism
+     * cannot name one. A hook that names no model records none, never a guess.
+     */
+    reportsModel: z.enum(agentRuntimeReportsModelValues),
     /**
      * Id of a vendored official icon, or `null` when no official asset could be
      * sourced cleanly — those runtimes get the generic agent treatment rather

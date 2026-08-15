@@ -465,15 +465,19 @@ A runtime is also never inferred from its model, nor a model from its runtime: `
 `deepseek-v4-pro` is the `pi` runtime, `agent_sessions.model` says what it was driving, and a
 hook that names no model records none rather than a guess.
 
-| CLI | Config | Signal quality | Registration |
-|---|---|---|---|
-| **Claude Code** | `~/.claude/settings.json` | true session boundaries (`SessionStart`/`SessionEnd`); `PostToolUse` heartbeats available with manual config | merged automatically |
-| **Codex** | `~/.codex/hooks.json` | true boundaries; same hook shape as Claude Code, told apart by the `--source` its registration passes | merged automatically |
-| **Cursor** | `~/.cursor/hooks.json` | true boundaries, IDE only — cloud agents never fire them | merged automatically |
-| **Pi** / **pi-signed** | `~/.pi/agent/extensions/` | true boundaries (`session_start`/`session_shutdown`); reports its model | extension to paste |
-| **opencode** | `~/.config/opencode/plugins/` | start is a true boundary; no end event, so `session.idle` heartbeats and gaps close it | plugin to paste |
-| **Kimi Code**, **Grok**, **Muse**, **GitHub Copilot** | per the roster | hook mechanism unconfirmed against any installed version | snippet to paste |
-| anything else | — | call `clock-in-hook --source <runtime> --event …` yourself | manual |
+| CLI | Config | Signal quality | Reports model | Registration |
+|---|---|---|---|---|
+| **Claude Code** | `~/.claude/settings.json` | true session boundaries (`SessionStart`/`SessionEnd`); `PostToolUse` heartbeats available with manual config | never | merged automatically |
+| **Codex** | `~/.codex/hooks.json` | true boundaries; same hook shape as Claude Code, told apart by the `--source` its registration passes | never | merged automatically |
+| **Cursor** | `~/.cursor/hooks.json` | true boundaries, IDE only — cloud agents never fire them | never | merged automatically |
+| **Pi** / **pi-signed** | `~/.pi/agent/extensions/` | true boundaries (`session_start`/`session_shutdown`); reports its model | always | extension to paste |
+| **opencode** | `~/.config/opencode/plugins/` | start is a true boundary; no end event, so `session.idle` heartbeats and gaps close it | sometimes | plugin to paste |
+| **Kimi Code**, **Grok**, **Muse**, **GitHub Copilot** | per the roster | hook mechanism unconfirmed against any installed version | sometimes | snippet to paste |
+| anything else | — | call `clock-in-hook --source <runtime> --event …` yourself; see [Wiring up your own orchestrator](#wiring-up-your-own-orchestrator) | up to you | manual |
+
+**Reports model** says whether the runtime's own hook mechanism can name the model it is
+driving: `always` by design on every event, `sometimes` when that depends on your wiring or
+on a mechanism not yet confirmed, `never` when the mechanism cannot name one.
 
 Runtimes are listed whether or not they are installed, so a machine that later grows one lights
 it up without a code change. Every runtime in the roster has a mark in the UI: opencode uses
@@ -485,6 +489,32 @@ runtime inside its own UI, and need no licence from anyone.
 Because `session-end` is never guaranteed (a crash, a `kill -9`), the server reaps agent
 sessions with no event for 6 hours and closes them at their last-seen timestamp. An `end` that
 arrives before its `start` is tolerated by upsert, not rejected.
+
+### Wiring up your own orchestrator
+
+Any harness that can run a command at a session's boundaries can record shifts: call the hook
+binary once at session start and once at session end.
+The full invocation:
+
+```
+clock-in-hook --source <runtime> --event session-start --session-id <id> --cwd <dir> \
+    [--model <model>] [--occurred-at <ISO8601>]
+```
+
+`--event` is `session-start`, `session-end`, or `heartbeat`; `--occurred-at` defaults to now.
+An empty `--model` value reads as absent, exactly as passing no flag does, so a runtime that
+cannot name its model passes nothing rather than branching its own wiring.
+
+A harness that counts tokens can report them on the same events with `--input-tokens`,
+`--output-tokens`, `--cache-creation-input-tokens`, and `--cache-read-input-tokens`.
+Each carries the cumulative total for the session so far, never a per-turn delta - Clock-In
+keeps the largest number it has seen - and an empty value reads as absent, exactly as
+`--model` does.
+
+The standing guarantee: `--source` needs no registration anywhere.
+An id the roster has never heard of is recorded under its own name, with no migration and no
+code change; declaring it in `packages/shared/src/agent-runtimes.json` only gives Clock-In
+more to say about it.
 
 ## Privacy
 
