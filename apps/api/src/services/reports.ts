@@ -475,13 +475,24 @@ function agentCommitCounts(counts: ShiftCommitCountsRecord | undefined): {
   };
 }
 
+/** One roster agent's intervals plus the distinct models they named, capped like the contract's rows. */
+interface AgentIntervals {
+  intervals: Interval[];
+  models: string[];
+}
+
+const agentModelsCap = 20;
+
 /** Roster agents' intervals grouped by agentId; legacy sessions with no roster identity carry no row to group into. */
-function intervalsByAgentId(intervals: readonly AgentIntervalRecord[]): Map<string, Interval[]> {
-  const grouped = new Map<string, Interval[]>();
+function intervalsByAgentId(intervals: readonly AgentIntervalRecord[]): Map<string, AgentIntervals> {
+  const grouped = new Map<string, AgentIntervals>();
   for (const row of intervals) {
     if (row.agentId === null) continue;
-    const existing = grouped.get(row.agentId) ?? [];
-    existing.push(asInterval(row.startedAt, row.endedAt));
+    const existing = grouped.get(row.agentId) ?? { intervals: [], models: [] };
+    existing.intervals.push(asInterval(row.startedAt, row.endedAt));
+    if (row.model !== null && !existing.models.includes(row.model) && existing.models.length < agentModelsCap) {
+      existing.models.push(row.model);
+    }
     grouped.set(row.agentId, existing);
   }
   return grouped;
@@ -620,8 +631,9 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
         .filter((agent): agent is AgentRecord => agent !== undefined)
         .map((agent) => ({
           agent: asMeStatsAgentView(agent),
-          ...agentHours(grouped.get(agent.id) ?? [], range),
+          ...agentHours(grouped.get(agent.id)?.intervals ?? [], range),
           ...agentCommitCounts(countsById.get(agent.id)),
+          models: grouped.get(agent.id)?.models ?? [],
         }));
 
       return {
@@ -654,15 +666,16 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       // interval data - decides which agents exist.
       const rows = roster.map((agent) => ({
         agent: asAgentReportView(agent),
-        ...agentHours(grouped.get(agent.id) ?? [], range),
+        ...agentHours(grouped.get(agent.id)?.intervals ?? [], range),
         ...agentCommitCounts(countsById.get(agent.id)),
+        models: grouped.get(agent.id)?.models ?? [],
       }));
       return {
         filters,
         headcount: {
           total: roster.length,
-          anonymous: roster.filter((agent) => agent.status === "anonymous").length,
-          registered: roster.filter((agent) => agent.status === "registered").length,
+          // Active is everyone still on the clock: anonymous and registered alike.
+          active: roster.filter((agent) => agent.status !== "retired").length,
           retired: roster.filter((agent) => agent.status === "retired").length,
         },
         rows,

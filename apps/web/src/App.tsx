@@ -170,9 +170,10 @@ const MemberBreakdown = ({ stats, self }: { stats: MeStatsResponse; self: boolea
   );
 };
 
-/// Which models actually ran, how many sessions that was, how many overlapped
-/// at once, and how long a session typically lasted - all already in the
-/// agent_sessions table, now presented rather than folded into a note.
+/// Which runtimes actually ran, with the model each was driving, how many
+/// sessions that was, how many overlapped at once, and how long a session
+/// typically lasted - all already in the agent_sessions table, now presented
+/// rather than folded into a note.
 const AgentSessionsTable = ({ byAgent }: { byAgent: MeStatsResponse["byAgent"] }) => {
   if (byAgent.length === 0) return null;
   return (
@@ -181,7 +182,8 @@ const AgentSessionsTable = ({ byAgent }: { byAgent: MeStatsResponse["byAgent"] }
       <table>
         <thead>
           <tr>
-            <th>Agent</th>
+            <th>Runtime</th>
+            <th>Model</th>
             <th className="numeric">Sessions</th>
             <th className="numeric">Max at once</th>
             <th className="numeric">Total</th>
@@ -191,10 +193,8 @@ const AgentSessionsTable = ({ byAgent }: { byAgent: MeStatsResponse["byAgent"] }
         <tbody>
           {byAgent.map((split) => (
             <tr key={`${split.source}|${split.model ?? ""}`}>
-              <td>
-                {split.model ?? agentRuntimeLabel(split.source)}
-                {split.model !== null && <span className="metric-hint"> · {agentRuntimeLabel(split.source)}</span>}
-              </td>
+              <td>{agentRuntimeLabel(split.source)}</td>
+              <td>{split.model ?? "-"}</td>
               <td className="numeric">{split.sessionCount ?? 0}</td>
               <td className="numeric">{split.maxConcurrent ?? 0}</td>
               <td className="numeric">{formatHumanDuration(split.durationSeconds)}</td>
@@ -442,8 +442,8 @@ export const App = ({ client }: AppProps) => {
     };
   }, [client, signedIn, preferencesReady, range, viewedId, scopeParams, expireSession]);
 
-  // The roster loads when its tab opens; renames and registrations patch the
-  // row in place rather than refetching the list.
+  // The roster loads when its tab opens; renames patch the row in place
+  // rather than refetching the list.
   useEffect(() => {
     if (!signedIn || !preferencesReady || boardTab !== "agents") return undefined;
     let cancelled = false;
@@ -606,16 +606,12 @@ export const App = ({ client }: AppProps) => {
     }
   };
 
-  /// One-click registration: the prefilled name and current owner are the
-  /// confirmation - the PATCH restates them beside the status change.
-  const registerAgent = async (agent: Agent): Promise<void> => {
+  /// Naming an agent is the registration ceremony: the rename goes alone and
+  /// the API marks an anonymous agent registered in the same write.
+  const renameAgent = async (agent: Agent, name: string): Promise<void> => {
     setAgentBusyId(agent.id);
     try {
-      const updated = await client.patchAgent(agent.id, {
-        status: "registered",
-        name: agent.name,
-        ownerUserId: agent.owner.id,
-      });
+      const updated = await client.patchAgent(agent.id, { name });
       setAgents((current) => current.map((row) => (row.id === updated.id ? updated : row)));
       setDataError(undefined);
     } catch (error: unknown) {
@@ -850,7 +846,7 @@ export const App = ({ client }: AppProps) => {
             agentBusyId={agentBusyId}
             selectedAgentId={selectedAgentId}
             onSelect={setSelectedAgentId}
-            onRegister={(agent) => void registerAgent(agent)}
+            onRename={(agent, name) => void renameAgent(agent, name)}
             paystub={paystub}
             paystubFailed={paystubFailed}
             rangeLabel={rangeSentence[range]}
@@ -1037,7 +1033,7 @@ type RosterTabProps = {
   agentBusyId: string | undefined;
   selectedAgentId: string | undefined;
   onSelect: (agentId: string) => void;
-  onRegister: (agent: Agent) => void;
+  onRename: (agent: Agent, name: string) => void;
   paystub: AgentPaystubResponse | undefined;
   paystubFailed: boolean;
   rangeLabel: string;
@@ -1053,13 +1049,15 @@ const RosterTab = ({
   agentBusyId,
   selectedAgentId,
   onSelect,
-  onRegister,
+  onRename,
   paystub,
   paystubFailed,
   rangeLabel,
   agentsReport,
   agentsReportFailed,
 }: RosterTabProps) => {
+  const [renamingId, setRenamingId] = useState<string | undefined>();
+  const [renameDraft, setRenameDraft] = useState("");
   const selected = agents.find((agent) => agent.id === selectedAgentId);
   const rowsByAgentId = new Map(agentsReport?.rows.map((row) => [row.agent.id, row]));
   return (
@@ -1067,7 +1065,7 @@ const RosterTab = ({
       {agentsReport !== undefined && !agentsReportFailed && (
         <p className="subtle" data-testid="roster-headcount">
           Headcount {agentsReport.headcount.total}
-          {agentsReport.headcount.anonymous > 0 && ` - ${agentsReport.headcount.anonymous} anonymous`}
+          {agentsReport.headcount.retired > 0 && ` - ${agentsReport.headcount.retired} retired`}
         </p>
       )}
       {agentsFailed ? (
@@ -1075,49 +1073,70 @@ const RosterTab = ({
       ) : agents.length === 0 ? (
         <p className="subtle">No agents on the roster yet. Coding-agent shifts mint them automatically.</p>
       ) : (
-        <ol className="board-list" data-testid="roster-list">
-          {agents.map((agent) => (
-            <li
-              key={agent.id}
-              className={[
-                agent.id === selectedAgentId ? "is-selected" : "",
-                agent.status === "anonymous" ? "is-anonymous" : "",
-              ].join(" ").trim() || undefined}
-            >
-              <button
-                type="button"
-                className="board-choice"
-                aria-pressed={agent.id === selectedAgentId}
-                onClick={() => onSelect(agent.id)}
+        <ol className="board-list roster-list" data-testid="roster-list">
+          {agents.map((agent) => {
+            const models = rowsByAgentId.get(agent.id)?.models ?? [];
+            return (
+              <li
+                key={agent.id}
+                className={agent.id === selectedAgentId ? "is-selected" : undefined}
               >
-                <span className="board-rank" aria-hidden="true" />
-                <span className="board-name">
-                  {agent.name}
-                  {agent.status === "retired" && <span className="you-tag"> retired</span>}
-                </span>
-                <span className="board-times">
-                  <span className="board-hours">
-                    {rowsByAgentId.get(agent.id)?.agentSeconds !== undefined
-                      ? formatHumanDuration(rowsByAgentId.get(agent.id)!.agentSeconds)
-                      : "-"}
-                  </span>
-                  <span className="board-agent">
-                    {agentRuntimeLabel(agent.source)} · {agent.owner.name}
-                  </span>
-                </span>
-              </button>
-              {agent.status === "anonymous" && (
-                <button
-                  type="button"
-                  className="ghost register-button"
-                  disabled={agentBusyId === agent.id}
-                  onClick={() => onRegister(agent)}
-                >
-                  {agentBusyId === agent.id ? "Registering…" : "Register"}
-                </button>
-              )}
-            </li>
-          ))}
+                {renamingId === agent.id ? (
+                  <form
+                    className="manage-rename"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      const trimmed = renameDraft.trim();
+                      if (trimmed === "") return;
+                      setRenamingId(undefined);
+                      onRename(agent, trimmed);
+                    }}
+                  >
+                    <label>
+                      <span className="visually-hidden">New name for {agent.name}</span>
+                      <input value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} maxLength={200} required />
+                    </label>
+                    <button type="submit" disabled={agentBusyId === agent.id}>Save</button>
+                    <button type="button" onClick={() => setRenamingId(undefined)}>Cancel</button>
+                  </form>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className="board-choice"
+                      aria-pressed={agent.id === selectedAgentId}
+                      onClick={() => onSelect(agent.id)}
+                    >
+                      <span className="board-rank" aria-hidden="true" />
+                      <span className="board-name">
+                        {agent.name}
+                        {agent.status === "retired" && <span className="you-tag"> retired</span>}
+                      </span>
+                      <span className="board-times">
+                        <span className="board-hours">
+                          {rowsByAgentId.get(agent.id)?.agentSeconds !== undefined
+                            ? formatHumanDuration(rowsByAgentId.get(agent.id)!.agentSeconds)
+                            : "-"}
+                        </span>
+                        <span className="board-agent">
+                          {agentRuntimeLabel(agent.source)} · {agent.owner.name}
+                          {models.length > 0 && ` · ${models.join(", ")}`}
+                        </span>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost roster-rename"
+                      disabled={agentBusyId === agent.id}
+                      onClick={() => { setRenamingId(agent.id); setRenameDraft(agent.name); }}
+                    >
+                      {agentBusyId === agent.id ? "Saving…" : "Rename"}
+                    </button>
+                  </>
+                )}
+              </li>
+            );
+          })}
         </ol>
       )}
 
@@ -1158,26 +1177,29 @@ const RosterTab = ({
               {paystub.shifts.length === 0 ? (
                 <p className="subtle">No shifts in this range.</p>
               ) : (
-                <ul className="stat-list" data-testid="paystub-shifts">
-                  {paystub.shifts.map((shift) => (
-                    <li key={shift.id} className="stat-row">
-                      <span className="stat-name">
-                        {new Date(shift.startedAt).toLocaleString()}
-                        {shift.model !== null && <span className="metric-hint"> · {shift.model}</span>}
-                        {shift.commits.map((commit) => (
-                          <span
-                            key={commit.id}
-                            className={`verify-badge is-${commit.verification}`}
-                            title={`${commit.subject}${commit.verifiedAt === null ? "" : ` · verified ${new Date(commit.verifiedAt).toLocaleString()}`}`}
-                          >
-                            {commit.verification}
-                          </span>
-                        ))}
-                      </span>
-                      <span className="stat-duration">{formatHumanDuration(shift.durationSeconds)}</span>
-                    </li>
-                  ))}
-                </ul>
+                <>
+                  <p className="subtle">Each shift below is one terminal session.</p>
+                  <ul className="stat-list" data-testid="paystub-shifts">
+                    {paystub.shifts.map((shift) => (
+                      <li key={shift.id} className="stat-row">
+                        <span className="stat-name">
+                          {new Date(shift.startedAt).toLocaleString()}
+                          {shift.model !== null && <span className="metric-hint"> · {shift.model}</span>}
+                          {shift.commits.map((commit) => (
+                            <span
+                              key={commit.id}
+                              className={`verify-badge is-${commit.verification}`}
+                              title={`${commit.subject}${commit.verifiedAt === null ? "" : ` · verified ${new Date(commit.verifiedAt).toLocaleString()}`}`}
+                            >
+                              {commit.verification}
+                            </span>
+                          ))}
+                        </span>
+                        <span className="stat-duration">{formatHumanDuration(shift.durationSeconds)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
               )}
               <ul className="stat-list" data-testid="paystub-trend">
                 {paystub.trend.map((bucket) => (

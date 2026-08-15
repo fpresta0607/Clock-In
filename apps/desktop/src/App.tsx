@@ -164,9 +164,10 @@ const MemberBreakdown = ({ stats, self }: { stats: MeStats; self: boolean }) => 
   );
 };
 
-/// Which models actually ran, how many sessions that was, how many overlapped
-/// at once, and how long a session typically lasted - all already in the
-/// agent_sessions table, now presented rather than folded into a note.
+/// Which runtimes actually ran, with the model each was driving, how many
+/// sessions that was, how many overlapped at once, and how long a session
+/// typically lasted - all already in the agent_sessions table, now presented
+/// rather than folded into a note.
 const AgentSessionsTable = ({ byAgent }: { byAgent: readonly MeStats["byAgent"][number][] }) => {
   if (byAgent.length === 0) return null;
   return (
@@ -175,7 +176,8 @@ const AgentSessionsTable = ({ byAgent }: { byAgent: readonly MeStats["byAgent"][
       <table>
         <thead>
           <tr>
-            <th>Agent</th>
+            <th>Runtime</th>
+            <th>Model</th>
             <th className="numeric">Sessions</th>
             <th className="numeric">Max at once</th>
             <th className="numeric">Total</th>
@@ -185,10 +187,8 @@ const AgentSessionsTable = ({ byAgent }: { byAgent: readonly MeStats["byAgent"][
         <tbody>
           {byAgent.map((split) => (
             <tr key={`${split.source}|${split.model ?? ""}`}>
-              <td>
-                {split.model ?? sourceLabel(split.source)}
-                {split.model !== null && <span className="metric-hint"> · {sourceLabel(split.source)}</span>}
-              </td>
+              <td>{sourceLabel(split.source)}</td>
+              <td>{split.model ?? "-"}</td>
               {/* Null means the deployed API predates the field: absence
                   shown as absence, never as a zero that never happened. */}
               <td className="numeric">{split.sessionCount ?? "-"}</td>
@@ -1571,7 +1571,9 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                         <span className="board-times">
                           <span className="board-hours">{formatHuman(row.agentSeconds)}</span>
                           <span className="board-agent">
-                            {sourceLabel(row.agent.source)} · {row.shiftCount} shift{row.shiftCount === 1 ? "" : "s"}
+                            {sourceLabel(row.agent.source)}
+                            {row.models.length > 0 && ` · ${row.models.join(", ")}`}
+                            {` · ${row.shiftCount} shift${row.shiftCount === 1 ? "" : "s"}`}
                             {row.heldRate === null ? " · pending" : ` · ${Math.round(row.heldRate * 100)}% held`}
                           </span>
                         </span>

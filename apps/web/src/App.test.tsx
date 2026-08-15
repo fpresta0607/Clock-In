@@ -71,6 +71,7 @@ const paystub = {
     commitsOrphaned: 0,
     heldRate: null,
   },
+  models: [{ model: "claude-fable-5", agentSeconds: 5_400, shiftCount: 2 }],
   shifts: [{
     id: "00000000-0000-4000-8000-0000000000s1",
     startedAt: "2026-08-06T10:00:00.000Z",
@@ -84,7 +85,7 @@ const paystub = {
 
 const agentsReportResponse = {
   filters: {},
-  headcount: { total: 1, anonymous: 1, registered: 0, retired: 0 },
+  headcount: { total: 1, active: 1, retired: 0 },
   rows: [{
     agent: rosterAgent,
     agentSeconds: 5_400,
@@ -95,6 +96,7 @@ const agentsReportResponse = {
     commitsReverted: 0,
     commitsOrphaned: 0,
     heldRate: null,
+    models: ["claude-fable-5"],
   }],
 };
 
@@ -718,7 +720,7 @@ describe("project management", () => {
 });
 
 describe("the roster tab", () => {
-  it("lists the roster under the Agents toggle, greyed while anonymous", async () => {
+  it("lists the roster under the Agents toggle with an inline Rename on every row", async () => {
     const person = await signIn(clientFor());
     await screen.findByRole("heading", { name: "SIQstack" });
 
@@ -726,30 +728,30 @@ describe("the roster tab", () => {
 
     const roster = await screen.findByTestId("roster-list");
     const row = within(roster).getByText("Claude Code @ General").closest("li");
-    expect(row).toHaveClass("is-anonymous");
-    expect(row).toHaveTextContent("Claude Code · Alex");
+    expect(row).toHaveTextContent("Claude Code · Alex · claude-fable-5");
     // The pay-run report's hours land on the matching roster row.
     await waitFor(() => expect(row).toHaveTextContent("1h 30m"));
-    expect(within(row as HTMLElement).getByRole("button", { name: "Register" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Rename" })).toBeInTheDocument();
+    expect(within(row as HTMLElement).queryByRole("button", { name: "Register" })).not.toBeInTheDocument();
   });
 
-  it("registers an anonymous agent with one click, restating name and owner", async () => {
-    const patchAgent = vi.fn().mockResolvedValue({ ...rosterAgent, status: "registered" });
+  it("renames an agent inline, and the API registers an anonymous one in the same write", async () => {
+    const patchAgent = vi.fn().mockResolvedValue({ ...rosterAgent, name: "Reviewer", status: "registered" });
     const person = await signIn(clientFor({ patchAgent }));
     await screen.findByRole("heading", { name: "SIQstack" });
     await person.click(screen.getByRole("button", { name: "Agents" }));
 
-    await person.click(await screen.findByRole("button", { name: "Register" }));
+    await person.click(await screen.findByRole("button", { name: "Rename" }));
+    const input = await screen.findByLabelText("New name for Claude Code @ General");
+    await person.clear(input);
+    await person.type(input, "Reviewer");
+    await person.click(screen.getByRole("button", { name: "Save" }));
 
-    await waitFor(() => expect(patchAgent).toHaveBeenCalledWith(rosterAgent.id, {
-      status: "registered",
-      name: "Claude Code @ General",
-      ownerUserId: "u2",
-    }));
-    // The registered row sheds its Register button and its grey.
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Register" })).not.toBeInTheDocument());
-    const row = screen.getByText("Claude Code @ General").closest("li");
-    expect(row).not.toHaveClass("is-anonymous");
+    // The rename goes alone - never a status - because the service marks an
+    // anonymous agent registered when a member names it.
+    await waitFor(() => expect(patchAgent).toHaveBeenCalledWith(rosterAgent.id, { name: "Reviewer" }));
+    const row = (await screen.findByText("Reviewer")).closest("li");
+    expect(row).toHaveTextContent("Claude Code · Alex · claude-fable-5");
   });
 
   it("opens an agent's paystub for the range on screen", async () => {
@@ -785,23 +787,22 @@ describe("the roster tab", () => {
     await userEvent.setup().click(screen.getByRole("button", { name: "Agents" }));
 
     await waitFor(() => expect(agentsReport).toHaveBeenCalled());
-    expect(await screen.findByTestId("roster-headcount")).toHaveTextContent("Headcount 1 - 1 anonymous");
+    expect(await screen.findByTestId("roster-headcount")).toHaveTextContent("Headcount 1");
     const row = screen.getByText("Claude Code @ General").closest("li");
     expect(row).toHaveTextContent("1h 30m");
   });
 
-  it("omits the anonymous count from the headcount once every agent is named", async () => {
+  it("names the retired share of the headcount once anyone is retired", async () => {
     const agentsReport = vi.fn().mockResolvedValue({
       ...agentsReportResponse,
-      headcount: { total: 1, anonymous: 0, registered: 1, retired: 0 },
+      headcount: { total: 1, active: 0, retired: 1 },
     });
     await signIn(clientFor({ agentsReport }));
     await screen.findByRole("heading", { name: "SIQstack" });
     await userEvent.setup().click(screen.getByRole("button", { name: "Agents" }));
 
     const headcount = await screen.findByTestId("roster-headcount");
-    expect(headcount).toHaveTextContent("Headcount 1");
-    expect(headcount).not.toHaveTextContent("anonymous");
+    expect(headcount).toHaveTextContent("Headcount 1 - 1 retired");
   });
 
   it("renders a verification badge per commit and a held share once some are decided", async () => {

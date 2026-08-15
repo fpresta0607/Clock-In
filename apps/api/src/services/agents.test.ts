@@ -134,6 +134,32 @@ describe("agent service", () => {
       .rejects.toMatchObject({ code: "not_found" });
   });
 
+  it("registers an anonymous agent in the same write as its first rename", async () => {
+    const agents = new MemoryAgents([agentRecord()]);
+    const { service } = createService(agents);
+
+    const renamed = await service.patch(member, ids.agent, { name: "Reviewer" });
+    expect(renamed).toMatchObject({ name: "Reviewer", status: "registered" });
+    expect(agents.patches[0]).toMatchObject({ name: "Reviewer", status: "registered", updatedAt: now });
+
+    // Renaming an already-registered agent sends no status at all.
+    await service.patch(member, ids.agent, { name: "Reviewer II" });
+    expect(agents.patches[1]).toMatchObject({ name: "Reviewer II" });
+    expect(agents.patches[1]).not.toHaveProperty("status");
+
+    // An explicit status always wins over the ceremony.
+    const retiring = new MemoryAgents([agentRecord()]);
+    const { service: retiringService } = createService(retiring);
+    await retiringService.patch(member, ids.agent, { name: "Reviewer", status: "retired" });
+    expect(retiring.patches[0]).toMatchObject({ name: "Reviewer", status: "retired" });
+
+    // An owner change alone is no naming ceremony.
+    const handing = new MemoryAgents([agentRecord()]);
+    const { service: handingService } = createService(handing);
+    await handingService.patch(member, ids.agent, { ownerUserId: ids.user });
+    expect(handing.patches[0]).not.toHaveProperty("status");
+  });
+
   it("rejects an owner change to a nonexistent user", async () => {
     const agents = new MemoryAgents([agentRecord()]);
     const { service } = createService(agents);
@@ -192,6 +218,7 @@ describe("agent service", () => {
       // Still running: its effective end is its last event, never "open".
       shift({
         id: "d3c7e513-b094-4d4c-ae55-21790ae019a4",
+        model: null,
         status: "running",
         startedAt: new Date("2026-08-06T12:00:00.000Z"),
         endedAt: null,
@@ -215,6 +242,13 @@ describe("agent service", () => {
     });
     const running = paystub.shifts.find((row) => row.id === "d3c7e513-b094-4d4c-ae55-21790ae019a4");
     expect(running).toMatchObject({ endedAt: null, durationSeconds: 1_800 });
+
+    // The model mix folds per-shift seconds under each named model, unnamed
+    // shifts under null, in first-seen order.
+    expect(paystub.models).toEqual([
+      { model: "claude-fable-5", agentSeconds: 3_600 + 1_800, shiftCount: 2 },
+      { model: null, agentSeconds: 1_800, shiftCount: 1 },
+    ]);
 
     // Six weekly buckets, oldest first, ending at the range's end.
     expect(paystub.trend).toHaveLength(6);
