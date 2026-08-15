@@ -208,7 +208,7 @@ const AgentSessionsTable = ({ byAgent }: { byAgent: MeStatsResponse["byAgent"] }
 };
 
 /// Two-line SVG chart - agents in the brand green, the person in gray. No
-/// chart library: a fixed viewBox and two polylines are all a day needs, and
+/// chart library: a fixed viewBox and two paths are all a day needs, and
 /// the server already buckets to the caller's local hours.
 const HourlyGraph = ({ buckets, personLabel = "You" }: { buckets: readonly HourlyBucket[]; personLabel?: string }) => {
   if (buckets.length === 0) return null;
