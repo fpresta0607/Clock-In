@@ -264,6 +264,52 @@ export interface ActivitySegmentRepository {
   insertBatch(segments: ActivitySegmentInsert[]): Promise<void>;
 }
 
+export type AgentStatus = "anonymous" | "registered" | "retired";
+
+/** One roster identity, with its owner and project already looked up for display. */
+export interface AgentRecord {
+  id: string;
+  organizationId: string;
+  name: string;
+  source: AgentSource;
+  status: AgentStatus;
+  owner: ReportLookupRecord;
+  project: ReportLookupRecord | null;
+  createdAt: Date;
+}
+
+export interface UpsertAgentForKey {
+  organizationId: string;
+  ownerUserId: string;
+  source: AgentSource;
+  projectId: string | null;
+  /**
+   * The runtime's display label. The insert path composes the row's default
+   * name from it and the project's name ("<label> @ <project|unassigned>");
+   * a replay never overwrites the name, owner, or status already stored.
+   */
+  name: string;
+  now: Date;
+}
+
+export interface AgentUpdatePatch {
+  name?: string;
+  status?: "registered" | "retired";
+  ownerUserId?: string;
+  updatedAt: Date;
+}
+
+export interface AgentRepository {
+  /** Mints or finds the identity for (org, source, project); replay yields the same id. */
+  upsertForKey(input: UpsertAgentForKey): Promise<{ id: string }>;
+  listForOrganization(subject: AuthenticatedSubject): Promise<AgentRecord[]>;
+  findById(subject: AuthenticatedSubject, agentId: string): Promise<AgentRecord | null>;
+  /** Applies the patch; null when the agent is not in the caller's organization. */
+  update(subject: AuthenticatedSubject, agentId: string, patch: AgentUpdatePatch): Promise<AgentRecord | null>;
+  /** Re-points the loser's shifts at the winner and retires the loser, in one transaction. */
+  merge(subject: AuthenticatedSubject, winnerId: string, loserId: string): Promise<void>;
+}
+
 export interface AgentSessionRecord {
   id: string;
   organizationId: string;
@@ -276,6 +322,8 @@ export interface AgentSessionRecord {
   cwd: string | null;
   /** The matched url-rule mapping id for browser spans; null for agent events. */
   ruleId: string | null;
+  /** The roster identity this shift belongs to; legacy rows stay null. */
+  agentId: string | null;
   status: "running" | "ended";
   startedAt: Date;
   endedAt: Date | null;
@@ -292,6 +340,7 @@ export interface UpsertStartedAgentSession {
   cwd: string | null;
   ruleId: string | null;
   projectId: string | null;
+  agentId: string | null;
   linkedSessionId: string | null;
   occurredAt: Date;
   receivedAt: Date;
@@ -306,6 +355,7 @@ export interface InsertEndedAgentSession {
   cwd: string | null;
   ruleId: string | null;
   projectId: string | null;
+  agentId: string | null;
   occurredAt: Date;
   receivedAt: Date;
 }

@@ -4,6 +4,7 @@ export { runMigrations } from "./migrate.js";
 export {
   activitySegmentKind,
   activitySegments,
+  agents,
   agentSessions,
   agentSessionStatus,
   organizationAdminClaims,

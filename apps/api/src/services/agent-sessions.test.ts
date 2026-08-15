@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import type {
+  AgentRecord,
+  AgentRepository,
   AgentSessionRecord,
   AgentSessionRepository,
   InsertEndedAgentSession,
@@ -9,6 +11,7 @@ import type {
   PathMappingRepository,
   SessionRecord,
   SessionRepository,
+  UpsertAgentForKey,
   UpsertStartedAgentSession,
 } from "../repositories.js";
 import { createAgentSessionReaper, createAgentSessionService, type AgentSessionEventInput } from "./agent-sessions.js";
@@ -43,6 +46,8 @@ class MemoryAgentSessions implements AgentSessionRepository {
     const existing = this.find({ organizationId: input.organizationId, userId: input.userId, role: "member" }, input.source, input.externalSessionId);
     if (existing !== undefined) {
       if (input.occurredAt > existing.lastEventAt) existing.lastEventAt = input.occurredAt;
+      // Mirrors coalesce(agent_id, $new): the first assignment wins.
+      existing.agentId ??= input.agentId;
       return existing;
     }
     const record: AgentSessionRecord = {
@@ -55,6 +60,7 @@ class MemoryAgentSessions implements AgentSessionRepository {
       projectId: input.projectId,
       cwd: input.cwd,
       ruleId: input.ruleId,
+      agentId: input.agentId,
       status: "running",
       startedAt: input.occurredAt,
       endedAt: null,
@@ -88,6 +94,7 @@ class MemoryAgentSessions implements AgentSessionRepository {
       projectId: input.projectId,
       cwd: input.cwd,
       ruleId: input.ruleId,
+      agentId: input.agentId,
       status: "ended",
       startedAt: input.occurredAt,
       endedAt: input.occurredAt,
@@ -131,6 +138,28 @@ class MemoryPathMappings implements PathMappingRepository {
   public async remove(): Promise<boolean> { throw new Error("not used"); }
 }
 
+/** Records every roster upsert and answers each (source, project) key with one stable id. */
+class MemoryAgents implements AgentRepository {
+  public readonly upserts: UpsertAgentForKey[] = [];
+  private readonly idsByKey = new Map<string, string>();
+
+  public async upsertForKey(input: UpsertAgentForKey): Promise<{ id: string }> {
+    this.upserts.push(input);
+    const key = `${input.source}|${input.projectId ?? ""}`;
+    let id = this.idsByKey.get(key);
+    if (id === undefined) {
+      id = crypto.randomUUID();
+      this.idsByKey.set(key, id);
+    }
+    return { id };
+  }
+
+  public async listForOrganization(): Promise<AgentRecord[]> { throw new Error("not used"); }
+  public async findById(): Promise<AgentRecord | null> { throw new Error("not used"); }
+  public async update(): Promise<AgentRecord | null> { throw new Error("not used"); }
+  public async merge(): Promise<void> { throw new Error("not used"); }
+}
+
 class MemoryTimers implements Pick<SessionRepository, "findRunning"> {
   public running: SessionRecord | null = null;
   public async findRunning(): Promise<SessionRecord | null> { return this.running; }
@@ -168,6 +197,7 @@ function createService(options: {
   mappings?: PathMappingRecord[];
   runningTimer?: SessionRecord | null;
   staleThresholdMs?: number;
+  agents?: AgentRepository;
 } = {}) {
   const agentSessions = new MemoryAgentSessions();
   const timers = new MemoryTimers();
@@ -178,6 +208,7 @@ function createService(options: {
     sessions: timers as SessionRepository,
     clock: () => now,
     ...(options.staleThresholdMs === undefined ? {} : { staleThresholdMs: options.staleThresholdMs }),
+    ...(options.agents === undefined ? {} : { agents: options.agents }),
   });
   return { agentSessions, service };
 }
@@ -320,6 +351,70 @@ describe("agent-session service", () => {
     await service.ingest(other, [event({ event: "ended" })]);
     expect(agentSessions.records[0]).toMatchObject({ userId: ids.user, status: "running" });
     expect(agentSessions.records[1]).toMatchObject({ userId: ids.otherUser, status: "ended" });
+  });
+});
+
+describe("roster minting", () => {
+  it("mints an identity for a started shift and stamps it on the row", async () => {
+    const agents = new MemoryAgents();
+    const { agentSessions, service } = createService({ mappings: [mapped], agents });
+
+    await service.ingest(subject, [event()]);
+
+    expect(agents.upserts).toEqual([{
+      organizationId: ids.organization,
+      ownerUserId: ids.user,
+      source: "claude_code",
+      projectId: ids.project,
+      name: "Claude Code",
+      now,
+    }]);
+    expect(agentSessions.records[0]!.agentId).not.toBeNull();
+  });
+
+  it("mints for an end-before-start row too", async () => {
+    const agents = new MemoryAgents();
+    const { agentSessions, service } = createService({ agents });
+
+    await service.ingest(subject, [event({ event: "ended" })]);
+
+    expect(agents.upserts).toHaveLength(1);
+    expect(agents.upserts[0]).toMatchObject({ source: "claude_code", projectId: null });
+    expect(agentSessions.records[0]!.agentId).not.toBeNull();
+  });
+
+  it("mints nothing for browser spans", async () => {
+    const agents = new MemoryAgents();
+    const { agentSessions, service } = createService({ agents });
+
+    await service.ingest(subject, [event({ source: "browser", cwd: null, ruleId: null })]);
+
+    expect(agents.upserts).toHaveLength(0);
+    expect(agentSessions.records[0]!.agentId).toBeNull();
+  });
+
+  it("memoizes one upsert per (source, project) per batch", async () => {
+    const agents = new MemoryAgents();
+    const { agentSessions, service } = createService({ agents });
+
+    await service.ingest(subject, [
+      event({ externalSessionId: "one" }),
+      event({ externalSessionId: "two" }),
+      event({ externalSessionId: "three", source: "codex" }),
+    ]);
+
+    expect(agents.upserts.map((upsert) => upsert.source)).toEqual(["claude_code", "codex"]);
+    expect(agentSessions.records[0]!.agentId).toBe(agentSessions.records[1]!.agentId);
+    expect(agentSessions.records[2]!.agentId).not.toBe(agentSessions.records[0]!.agentId);
+  });
+
+  it("stays safe when the agents dependency is missing", async () => {
+    const { agentSessions, service } = createService();
+
+    const result = await service.ingest(subject, [event()]);
+
+    expect(result.results).toEqual([{ externalSessionId: "session-1", accepted: true }]);
+    expect(agentSessions.records[0]!.agentId).toBeNull();
   });
 });
 

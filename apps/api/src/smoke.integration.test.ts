@@ -728,18 +728,21 @@ integration(integrationDescription, () => {
     expect(priorBoard.status).toBe(200);
     const priorBoardBody = await priorBoard.json();
     expect(priorBoardBody.totalDurationSeconds).toBe(3_600);
-    expect(priorBoardBody.entries).toEqual([expect.objectContaining({
+    // The board lists every workspace member zeros included, and an earlier
+    // test joined a teammate into this workspace, so assert this member's row
+    // rather than the whole list.
+    expect(priorBoardBody.entries).toContainEqual(expect.objectContaining({
       user: { id: user.id, name: user.name },
       durationSeconds: 3_600,
       attributedSeconds: 3_600,
       sessionCount: 1,
-    })]);
+    }));
 
     const dstBoard = await app.request(`/reports/leaderboard?${dstDay}`, { headers: authorized });
     expect(dstBoard.status).toBe(200);
     const dstBoardBody = await dstBoard.json();
     expect(dstBoardBody.totalDurationSeconds).toBe(0);
-    expect(dstBoardBody.entries).toEqual([]);
+    expect(dstBoardBody.entries.every((entry: { durationSeconds: number }) => entry.durationSeconds === 0)).toBe(true);
   }, 60_000);
 
   // Since f2cb540, idle is subtracted when a session is recorded, not

@@ -14,6 +14,7 @@ export { AppError } from "./errors.js";
 export {
   DrizzleAccountStore,
   DrizzleActivitySegmentRepository,
+  DrizzleAgentRepository,
   DrizzleAgentSessionRepository,
   DrizzlePathMappingRepository,
   DrizzleProjectRepository,
@@ -28,7 +29,7 @@ export { createProjectRoutes } from "./routes/projects.js";
 export { createReportRoutes } from "./routes/reports.js";
 export { createSessionRoutes } from "./routes/sessions.js";
 export { createActivityService } from "./services/activity.js";
-export { createAgentSessionReaper, createAgentSessionService } from "./services/agent-sessions.js";
+export { createAgentSessionReaper, createAgentSessionService, rosterEligibleSource } from "./services/agent-sessions.js";
 export { normalizePath, resolveProjectForCwd } from "./services/attribution.js";
 export { createPathMappingService } from "./services/path-mappings.js";
 export { listProjects } from "./services/projects.js";
@@ -38,8 +39,13 @@ export { PathMappingRepositoryError, SessionRepositoryError } from "./repositori
 export type {
   ActivitySegmentInsert,
   ActivitySegmentRepository,
+  AgentRecord,
+  AgentRepository,
   AgentSessionRecord,
   AgentSessionRepository,
+  AgentStatus,
+  AgentUpdatePatch,
+  UpsertAgentForKey,
   CreatePathMapping,
   CreateRunningSession,
   InsertEndedAgentSession,

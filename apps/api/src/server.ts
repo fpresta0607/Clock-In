@@ -5,6 +5,7 @@ import { createNeonAuthKeys } from "./auth.js";
 import {
   DrizzleAccountStore,
   DrizzleActivitySegmentRepository,
+  DrizzleAgentRepository,
   DrizzleAgentSessionRepository,
   DrizzlePathMappingRepository,
   DrizzleProjectRepository,
@@ -28,6 +29,7 @@ const server = serveApp(
     reportRepository: new DrizzleReportRepository(db),
     activitySegmentRepository: new DrizzleActivitySegmentRepository(db),
     agentSessionRepository: new DrizzleAgentSessionRepository(db),
+    agentRepository: new DrizzleAgentRepository(db),
     pathMappingRepository: new DrizzlePathMappingRepository(db),
     viewPreferencesRepository: new DrizzleViewPreferencesRepository(db),
   }),
