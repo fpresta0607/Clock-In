@@ -234,6 +234,20 @@ Uploads run every five minutes in batches of up to 500. A session older than the
 **seven-day** freshness bound is refused rather than backfilled, and per-row
 refusals never fail a batch.
 
+### Roster: agents as identities
+
+An agent's identity is durable across sessions, keyed by **(source, project)** per
+organization — the same Claude Code instance working the same project is one
+roster entry, not a new row per shift. Each `agent_sessions` row is that
+identity's shift. For a shift in a git repo, the desktop app captures the
+branch and the titles of the commits authored during it, once the shift ends.
+Verification happens later, locally, and read-only: once a day the app checks
+each captured commit against the repo already on disk — merged into the
+default branch, explicitly reverted, no longer reachable from any local ref
+(orphaned), or still undecided — without ever fetching or pulling. Nothing is
+pushed, fetched, or written to the repo at any point; verification only reads
+refs and history that are already there.
+
 ### The OS monitor, in detail
 
 One task wakes every **30 seconds** and asks Windows two read-only questions:
