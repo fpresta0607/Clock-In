@@ -191,8 +191,12 @@ both manual; `.strict()` request filters mean API deploys before/with web). Rust
 - **shift_commits dedup**: denormalized `user_id`, `agent_id` (NOT NULL), `client_id`. Uniques:
   `(org, user_id, client_id)` for replay idempotency; `(org, agent_id, repo_root, sha)` for the
   "same agent records once / different agents record each" rule.
-- **agents uniqueness with nullable project**: `unique(...).on(org, source, projectId).nullsNotDistinct()`
-  (PG >= 15).
+- **agents uniqueness with nullable project**: two partial unique indexes, both excluding retired
+  rows - `agents_organization_source_project_unique` over (org, source, projectId) and
+  `agents_organization_source_unassigned_unique` over (org, source) where projectId is null. The
+  unassigned half is its own index because drizzle `uniqueIndex` cannot express NULLS NOT DISTINCT,
+  and retiring has to release the key so the next shift mints a fresh identity instead of
+  resurrecting the retired one.
 - **Paystub period**: `fromAt`/`toExclusiveAt` instants (client-composed like every filter), no named
   period token; trend = 6 weekly buckets computed server-side.
 - **No new error codes** - validation_error / not_found / forbidden / conflict cover everything.
@@ -240,7 +244,9 @@ New table `agents` (declare above `agentSessions`, no cycle):
 `status` text `$type<"anonymous"|"registered"|"retired">()` default "anonymous" notNull;
 `...auditColumns` last. Constraints (house naming):
 - `unique("agents_organization_id_id_unique").on(org, id)` - composite-FK target
-- `unique("agents_organization_source_project_unique").on(org, source, projectId).nullsNotDistinct()`
+- `uniqueIndex("agents_organization_source_project_unique").on(org, source, projectId)` where
+  status <> retired, plus `uniqueIndex("agents_organization_source_unassigned_unique").on(org, source)`
+  where projectId is null and status <> retired (retiring releases the identity key - see Up-front)
 - `foreignKey` `agents_organization_owner_fk` -> users(org,id) cascade; `agents_organization_project_fk`
   -> projects(org,id) restrict
 - checks: `agents_status_valid` (in-list), `agents_source_valid` (same regex/length as
@@ -292,8 +298,9 @@ owner {id,name}, project {id,name}|null, createdAt} `.strict()`; `agentsListResp
 (+ refine non-empty); `agentMergeRequestSchema` {loserId} (path `:id` = winner);
 `agentPaystubFiltersSchema` {from?, to?, fromAt?, toExclusiveAt?}
 `.strict().superRefine(validateCalendarAndInstantBounds)`; `shiftCommitVerificationValues`
-["pending","merged","reverted","orphaned"]; `shiftCommitViewSchema` {id, repoRoot, branch|null,
-sha, subject, authoredAt, verification, verifiedAt|null}; `agentPaystubResponseSchema` {agent,
+["pending","merged","reverted","orphaned"]; `shiftCommitViewSchema` {id, repoRoot?: string,
+branch|null, sha, subject, authoredAt, verification, verifiedAt|null} - repoRoot optional, sent only
+to the agent's owner and workspace admins; `agentPaystubResponseSchema` {agent,
 filters, totals {agentSeconds, shiftCount, commitsRecorded/Pending/Merged/Reverted/Orphaned,
 heldRate: number 0..1 | null}, shifts [{id, startedAt, endedAt|null, model|null, durationSeconds,
 commits[]}], trend [{periodStartAt, agentSeconds, shiftCount, heldRate|null}]} - commit counts all
@@ -370,11 +377,14 @@ no-op). Reject rows whose verifiedAt presence disagrees with verification. New r
 - New `src/git_evidence.rs` (read-only git, never fetch/pull/write): `run_git` via
   `tokio::process::Command` + `#[cfg(windows)] CREATE_NO_WINDOW` (quota.rs:302-307 template) +
   `tokio::time::timeout(10s)`; `discover_repo(cwd)` (rev-parse --show-toplevel / --abbrev-ref
-  HEAD); `commits_in_window(root, started, ended)` - `git log HEAD --since=<start-24h>
-  --pretty=format:%H%x1f%aI%x1f%s`, author-date filtered in Rust (authoritative), subjects
-  truncated to 500; `default_ref` (origin/HEAD -> origin/main -> origin/master -> None);
-  `verify(root, sha, authoredAt)` - merged: `merge-base --is-ancestor sha default_ref`; reverted:
-  `git log default_ref --since=authoredAt --grep="This reverts commit <sha>"`; orphaned:
+  HEAD); `commits_in_window(root, start_head, started, ended)` - `git log start_head..HEAD
+  --pretty=format:%H%x1f%aI%x1f%s` bounded by the sha the hook records on the Started event, by
+  this machine's own git committer identity (`--committer=<user.email>`, skipped when the repo
+  resolves no identity), and by author date filtered in Rust (authoritative); subjects truncated
+  to 500; `default_ref` (origin/HEAD -> origin/main -> origin/master -> None);
+  `verify(root, sha, authoredAt)` - reverted: `git log default_ref --since=authoredAt --grep="This
+  reverts commit <sha>"`; merged: `merge-base --is-ancestor sha default_ref`, or `git cherry` shows
+  the patch already applied upstream, or a commit on the default ref names the sha; orphaned:
   `cat-file -e` fails or `for-each-ref --contains` empty; else pending.
 - New `src/shift_commits.rs`: `ShiftWindow` map keyed `source|external_session_id` in
   shift-windows.json (under `spool::with_lock`, browser.rs sidecar precedent; stale opens reaped
@@ -413,10 +423,11 @@ never per-tick.
   `.setup()` (:811-868): run at launch, then 24h sleep loop; re-resolve identity/paths each pass.
   State changes ride the next 5-minute upload pass.
 - Web paystub: verification badges + verifiedAt; held-share = merged / decided, null -> "pending".
-- `RecordingPanel.tsx`: KEPT (:49-53) add: "For AI coding shifts in a git repo: the branch name and
-  the titles of commits made during the shift, checked later on this machine, read-only." NEVER
-  (:55-63): amend "The titles of your windows, files, or documents." with "Commit titles are the
-  one exception, listed above." Update any test pinning these strings.
+- `RecordingPanel.tsx`: KEPT (:49-53) add: "For AI coding shifts in a git repo: the branch name,
+  and the title, commit id, and repository folder of each commit made during the shift, checked
+  later on this machine, read-only. The repository folder is shown only to you and your workspace's
+  admins." NEVER (:55-63): amend "The titles of your windows, files, or documents." with "Commit
+  titles are the one exception, listed above." Update any test pinning these strings.
 - README "How session tracking works": one paragraph on agents-as-identities, shift-end branch +
   commit-title capture, local read-only verification (AGENTS.md requires this section stay true).
 
