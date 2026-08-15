@@ -243,8 +243,8 @@ const HourlyGraph = ({ buckets, personLabel = "You" }: { buckets: readonly Hourl
         {xTicks.map(({ index, label }) => (
           <text key={index} x={x(index)} y={height - 6} fill="#a3b3c2" fontSize="9" textAnchor="middle">{label}</text>
         ))}
-        <polyline points={line("activeSeconds")} fill="none" stroke="#8b98a8" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-        <polyline points={line("agentSeconds")} fill="none" stroke="#00e59b" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+        <path d={line("activeSeconds")} fill="none" stroke="#8b98a8" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+        <path d={line("agentSeconds")} fill="none" stroke="#00e59b" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
       </svg>
       <ul className="legend">
         <li><span className="legend-line legend-agents" aria-hidden="true" />Agents</li>

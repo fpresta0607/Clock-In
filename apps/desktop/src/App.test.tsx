@@ -697,6 +697,32 @@ describe("the today panel", () => {
     expect(rows[2]).toHaveTextContent("15m");
   });
 
+  it("draws the hourly chart as real path geometry once the API sends buckets", async () => {
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(recording),
+      meStats: vi.fn().mockResolvedValue({
+        ...meStats,
+        hourly: [
+          { hourStart: "2026-08-15T09:00:00.000Z", activeSeconds: 600, agentSeconds: 300 },
+          { hourStart: "2026-08-15T10:00:00.000Z", activeSeconds: 1_800, agentSeconds: 900 },
+          { hourStart: "2026-08-15T11:00:00.000Z", activeSeconds: 300, agentSeconds: 0 },
+        ],
+      }),
+    })} />);
+
+    // The chart must emit <path d="M… L…"> elements, not polylines fed a
+    // path string: `points` cannot parse path commands, so a polyline would
+    // hold zero points and the graph would be an empty frame.
+    const graph = await screen.findByTestId("hourly-graph");
+    const lines = graph.querySelectorAll("path");
+    expect(lines).toHaveLength(2);
+    for (const line of lines) {
+      const d = line.getAttribute("d");
+      expect(d).toMatch(/^M\d/);
+      expect(d).toContain("L");
+    }
+  });
+
   it("keeps agent runtimes on their own rows instead of folding them together", async () => {
     render(<App bridge={bridgeFor({
       monitorStatus: vi.fn().mockResolvedValue(recording),
