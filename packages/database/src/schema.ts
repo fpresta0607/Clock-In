@@ -283,8 +283,8 @@ export const agents = pgTable(
     id: uuid("id").defaultRandom().primaryKey(),
     organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
     ownerUserId: uuid("owner_user_id").notNull(),
-    // Null means the agent works unassigned; nullsNotDistinct keeps that a
-    // single identity rather than one per sighting (PG >= 15).
+    // Null means the agent works unassigned; the unassigned half of the
+    // identity key below collapses those to a single identity per source.
     projectId: uuid("project_id"),
     source: text("source").notNull(),
     name: text("name").notNull(),

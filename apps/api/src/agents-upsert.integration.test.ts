@@ -15,9 +15,11 @@ const databaseUrl = process.env.TEST_DATABASE_URL || undefined;
 const integration = databaseUrl ? describe : describe.skip;
 
 // The roster identity key is (organization, source, project) with project
-// nullable. Only NULLS NOT DISTINCT (PG >= 15) makes two null-project
-// sightings one agent; a schema-test cannot exercise that, so this runs the
-// real upsert against a real PostgreSQL server.
+// nullable. A plain unique treats nulls as distinct, so the unassigned half
+// is its own partial index on (organization, source) where project_id is
+// null - that is what makes two null-project sightings one agent. A
+// schema-test cannot exercise that, so this runs the real upsert against a
+// real PostgreSQL server.
 integration("agents nulls-not-distinct identity upsert", () => {
   let disposable: DisposableTestDatabase | undefined;
   let database = undefined as unknown as DatabaseConnection;
