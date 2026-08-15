@@ -36,6 +36,7 @@ import {
   type AgentRecord,
   type AgentRepository,
   type AgentSessionRecord,
+  type AgentShiftRecord,
   type AgentSessionRepository,
   type AgentUpdatePatch,
   type UpsertAgentForKey,
@@ -1284,6 +1285,28 @@ export class DrizzleAgentRepository implements AgentRepository {
         .set({ status: "retired", updatedAt: sql`now()` })
         .where(and(eq(agents.organizationId, subject.organizationId), eq(agents.id, loserId)));
     });
+  }
+
+  public async listSessionsForAgent(subject: AuthenticatedSubject, agentId: string, query: ReportQuery): Promise<AgentShiftRecord[]> {
+    const effectiveEnd = sql`coalesce(${agentSessions.endedAt}, ${agentSessions.lastEventAt})`;
+    const rows = await this.db
+      .select({
+        id: agentSessions.id,
+        model: agentSessions.model,
+        status: agentSessions.status,
+        startedAt: agentSessions.startedAt,
+        endedAt: agentSessions.endedAt,
+        lastEventAt: agentSessions.lastEventAt,
+      })
+      .from(agentSessions)
+      .where(and(
+        eq(agentSessions.organizationId, subject.organizationId),
+        eq(agentSessions.agentId, agentId),
+        query.from === undefined ? undefined : gt(effectiveEnd, query.from.toISOString()),
+        query.toExclusive === undefined ? undefined : lt(agentSessions.startedAt, query.toExclusive),
+      ))
+      .orderBy(desc(agentSessions.startedAt), asc(agentSessions.id));
+    return rows;
   }
 }
 

@@ -6,6 +6,8 @@ import {
   formatHumanDuration,
   friendlyAppName,
   leverage,
+  type Agent,
+  type AgentPaystubResponse,
   type LeaderboardEntry,
   type MeStatsResponse,
   type Organization,
@@ -281,6 +283,15 @@ export const App = ({ client }: AppProps) => {
   const [projects, setProjects] = useState<readonly ProjectListItem[]>([]);
   const [entries, setEntries] = useState<readonly LeaderboardEntry[]>([]);
   const [boardSort, setBoardSort] = useState<BoardSort>("active");
+  /// People is the existing leaderboard; Agents is the roster of worker
+  /// identities, with a paystub in the detail region below.
+  const [boardTab, setBoardTab] = useState<"people" | "agents">("people");
+  const [agents, setAgents] = useState<readonly Agent[]>([]);
+  const [agentsFailed, setAgentsFailed] = useState(false);
+  const [agentBusyId, setAgentBusyId] = useState<string | undefined>();
+  const [selectedAgentId, setSelectedAgentId] = useState<string | undefined>();
+  const [paystub, setPaystub] = useState<AgentPaystubResponse | undefined>();
+  const [paystubFailed, setPaystubFailed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [dataError, setDataError] = useState<string | undefined>();
   const [boardFailed, setBoardFailed] = useState(false);
@@ -428,6 +439,55 @@ export const App = ({ client }: AppProps) => {
     };
   }, [client, signedIn, preferencesReady, range, viewedId, scopeParams, expireSession]);
 
+  // The roster loads when its tab opens; renames and registrations patch the
+  // row in place rather than refetching the list.
+  useEffect(() => {
+    if (!signedIn || !preferencesReady || boardTab !== "agents") return undefined;
+    let cancelled = false;
+    setAgentsFailed(false);
+    client.agents().then(
+      (result) => {
+        if (!cancelled) setAgents(result.agents);
+      },
+      (error: unknown) => {
+        if (cancelled) return;
+        if (error instanceof ClientError && error.kind === "auth") {
+          expireSession();
+          return;
+        }
+        setAgentsFailed(true);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [client, signedIn, preferencesReady, boardTab, expireSession]);
+
+  // The paystub: one agent's shifts, hours, and commit record over the range
+  // on screen. Same detail region the member breakdown uses.
+  useEffect(() => {
+    if (!signedIn || !preferencesReady || boardTab !== "agents" || selectedAgentId === undefined) return undefined;
+    let cancelled = false;
+    setPaystub(undefined);
+    setPaystubFailed(false);
+    client.agentPaystub(selectedAgentId, rangeQuery(range)).then(
+      (result) => {
+        if (!cancelled) setPaystub(result);
+      },
+      (error: unknown) => {
+        if (cancelled) return;
+        if (error instanceof ClientError && error.kind === "auth") {
+          expireSession();
+          return;
+        }
+        setPaystubFailed(true);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [client, signedIn, preferencesReady, boardTab, selectedAgentId, range, expireSession]);
+
   // Recent sessions load only while their tab is open, one page at a time.
   useEffect(() => {
     if (!signedIn || !preferencesReady || !sessionsOpen) return undefined;
@@ -516,6 +576,29 @@ export const App = ({ client }: AppProps) => {
       setJoinError(messageFor(error));
     } finally {
       setJoinBusy(false);
+    }
+  };
+
+  /// One-click registration: the prefilled name and current owner are the
+  /// confirmation - the PATCH restates them beside the status change.
+  const registerAgent = async (agent: Agent): Promise<void> => {
+    setAgentBusyId(agent.id);
+    try {
+      const updated = await client.patchAgent(agent.id, {
+        status: "registered",
+        name: agent.name,
+        ownerUserId: agent.owner.id,
+      });
+      setAgents((current) => current.map((row) => (row.id === updated.id ? updated : row)));
+      setDataError(undefined);
+    } catch (error: unknown) {
+      if (error instanceof ClientError && error.kind === "auth") {
+        expireSession();
+        return;
+      }
+      setDataError(messageFor(error));
+    } finally {
+      setAgentBusyId(undefined);
     }
   };
 
@@ -700,20 +783,52 @@ export const App = ({ client }: AppProps) => {
 
       <section className="card" aria-labelledby="board-title">
         <div className="card-head">
-          <h2 id="board-title">Leaderboard</h2>
-          <span className="board-tools">
-            <span className="total">{boardFailed ? "Not loaded" : `${formatHumanDuration(activeTotal)} total`}</span>
-            <label className="board-sort">
-              <span className="visually-hidden">Sort by</span>
-              <select value={boardSort} onChange={(event) => setBoardSort(event.target.value as BoardSort)}>
-                <option value="active">By active time</option>
-                <option value="agent">By agent time</option>
-                <option value="leverage">By leverage</option>
-              </select>
-            </label>
-          </span>
+          <h2 id="board-title" className="visually-hidden">Leaderboard</h2>
+          {/* People is the human board; Agents is the roster. One card, one
+              detail region, whichever workforce is on screen. */}
+          <div className="range-toggle" role="group" aria-label="People or agents">
+            <button
+              type="button"
+              className={boardTab === "people" ? "is-active" : undefined}
+              onClick={() => setBoardTab("people")}
+            >
+              People
+            </button>
+            <button
+              type="button"
+              className={boardTab === "agents" ? "is-active" : undefined}
+              onClick={() => setBoardTab("agents")}
+            >
+              Agents
+            </button>
+          </div>
+          {boardTab === "people" && (
+            <span className="board-tools">
+              <span className="total">{boardFailed ? "Not loaded" : `${formatHumanDuration(activeTotal)} total`}</span>
+              <label className="board-sort">
+                <span className="visually-hidden">Sort by</span>
+                <select value={boardSort} onChange={(event) => setBoardSort(event.target.value as BoardSort)}>
+                  <option value="active">By active time</option>
+                  <option value="agent">By agent time</option>
+                  <option value="leverage">By leverage</option>
+                </select>
+              </label>
+            </span>
+          )}
         </div>
-        {boardFailed ? (
+        {boardTab === "agents" ? (
+          <RosterTab
+            agents={agents}
+            agentsFailed={agentsFailed}
+            agentBusyId={agentBusyId}
+            selectedAgentId={selectedAgentId}
+            onSelect={setSelectedAgentId}
+            onRegister={(agent) => void registerAgent(agent)}
+            paystub={paystub}
+            paystubFailed={paystubFailed}
+            rangeLabel={rangeSentence[range]}
+          />
+        ) : boardFailed ? (
           <p className="subtle">Could not load hours for this range.</p>
         ) : loading && entries.length === 0 ? (
           <p className="subtle" role="status">Loading hours…</p>
@@ -756,7 +871,7 @@ export const App = ({ client }: AppProps) => {
           </>
         )}
 
-        {viewedId !== undefined && (
+        {boardTab === "people" && viewedId !== undefined && (
           <section className="member-stats" aria-labelledby="member-stats-title">
             <div className="member-stats-head">
               <h3 id="member-stats-title">
@@ -884,6 +999,156 @@ export const App = ({ client }: AppProps) => {
 
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
     </main>
+  );
+};
+
+type RosterTabProps = {
+  agents: readonly Agent[];
+  agentsFailed: boolean;
+  agentBusyId: string | undefined;
+  selectedAgentId: string | undefined;
+  onSelect: (agentId: string) => void;
+  onRegister: (agent: Agent) => void;
+  paystub: AgentPaystubResponse | undefined;
+  paystubFailed: boolean;
+  rangeLabel: string;
+};
+
+/// The roster in the board's own grammar, with an agent's paystub in the
+/// detail region below. Hours/shifts/commits columns stay "-" until the
+/// pay-run report feeds them.
+const RosterTab = ({
+  agents,
+  agentsFailed,
+  agentBusyId,
+  selectedAgentId,
+  onSelect,
+  onRegister,
+  paystub,
+  paystubFailed,
+  rangeLabel,
+}: RosterTabProps) => {
+  const selected = agents.find((agent) => agent.id === selectedAgentId);
+  return (
+    <>
+      {agentsFailed ? (
+        <p className="subtle">Could not load the roster.</p>
+      ) : agents.length === 0 ? (
+        <p className="subtle">No agents on the roster yet. Coding-agent shifts mint them automatically.</p>
+      ) : (
+        <ol className="board-list" data-testid="roster-list">
+          {agents.map((agent) => (
+            <li
+              key={agent.id}
+              className={[
+                agent.id === selectedAgentId ? "is-selected" : "",
+                agent.status === "anonymous" ? "is-anonymous" : "",
+              ].join(" ").trim() || undefined}
+            >
+              <button
+                type="button"
+                className="board-choice"
+                aria-pressed={agent.id === selectedAgentId}
+                onClick={() => onSelect(agent.id)}
+              >
+                <span className="board-rank" aria-hidden="true" />
+                <span className="board-name">
+                  {agent.name}
+                  {agent.status === "retired" && <span className="you-tag"> retired</span>}
+                </span>
+                <span className="board-times">
+                  <span className="board-hours">-</span>
+                  <span className="board-agent">
+                    {agentRuntimeLabel(agent.source)} · {agent.owner.name}
+                  </span>
+                </span>
+              </button>
+              {agent.status === "anonymous" && (
+                <button
+                  type="button"
+                  className="ghost register-button"
+                  disabled={agentBusyId === agent.id}
+                  onClick={() => onRegister(agent)}
+                >
+                  {agentBusyId === agent.id ? "Registering…" : "Register"}
+                </button>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+
+      {selected !== undefined && (
+        <section className="member-stats" aria-labelledby="paystub-title" data-testid="agent-paystub">
+          <div className="member-stats-head">
+            <h3 id="paystub-title">{selected.name} · {rangeLabel}</h3>
+          </div>
+          {paystubFailed ? (
+            <p className="subtle">Could not load this agent's paystub.</p>
+          ) : paystub === undefined ? (
+            <p className="subtle" role="status">Loading…</p>
+          ) : (
+            <>
+              <div className="breakdown">
+                <div className="metric-row is-headline">
+                  <span className="metric-name">Hours</span>
+                  <span className="metric-value">{formatHumanDuration(paystub.totals.agentSeconds)}</span>
+                </div>
+                <div className="metric-row">
+                  <span className="metric-name">Shifts</span>
+                  <span className="metric-value">{paystub.totals.shiftCount}</span>
+                </div>
+                <div className="metric-row">
+                  <span className="metric-name">Commits recorded</span>
+                  <span className="metric-value">{paystub.totals.commitsRecorded}</span>
+                </div>
+                <div className="metric-row">
+                  <span className="metric-name">Held rate</span>
+                  <span className="metric-value">
+                    {paystub.totals.heldRate === null ? "pending" : `${Math.round(paystub.totals.heldRate * 100)}%`}
+                  </span>
+                </div>
+              </div>
+              {paystub.shifts.length === 0 ? (
+                <p className="subtle">No shifts in this range.</p>
+              ) : (
+                <ul className="stat-list" data-testid="paystub-shifts">
+                  {paystub.shifts.map((shift) => (
+                    <li key={shift.id} className="stat-row">
+                      <span className="stat-name">
+                        {new Date(shift.startedAt).toLocaleString()}
+                        {shift.model !== null && <span className="metric-hint"> · {shift.model}</span>}
+                        {shift.commits.map((commit) => (
+                          <span
+                            key={commit.id}
+                            className={`verify-badge is-${commit.verification}`}
+                            title={`${commit.subject}${commit.verifiedAt === null ? "" : ` · verified ${new Date(commit.verifiedAt).toLocaleString()}`}`}
+                          >
+                            {commit.verification}
+                          </span>
+                        ))}
+                      </span>
+                      <span className="stat-duration">{formatHumanDuration(shift.durationSeconds)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <ul className="stat-list" data-testid="paystub-trend">
+                {paystub.trend.map((bucket) => (
+                  <li key={bucket.periodStartAt} className="stat-row">
+                    <span className="stat-name">Week of {new Date(bucket.periodStartAt).toLocaleDateString()}</span>
+                    <span className="stat-duration">
+                      {formatHumanDuration(bucket.agentSeconds)} · {bucket.shiftCount} shifts
+                      {bucket.heldRate !== null && ` · ${Math.round(bucket.heldRate * 100)}% held`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </section>
+      )}
+    </>
   );
 };
 

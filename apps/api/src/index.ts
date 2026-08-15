@@ -22,6 +22,7 @@ export {
   DrizzleSessionRepository,
 } from "./drizzle-repositories.js";
 export { createActivityRoutes } from "./routes/activity.js";
+export { createAgentRoutes } from "./routes/agents.js";
 export { createAgentSessionRoutes } from "./routes/agent-sessions.js";
 export { createMeStatsRoutes } from "./routes/me-stats.js";
 export { createPathMappingRoutes } from "./routes/path-mappings.js";
@@ -30,6 +31,8 @@ export { createReportRoutes } from "./routes/reports.js";
 export { createSessionRoutes } from "./routes/sessions.js";
 export { createActivityService } from "./services/activity.js";
 export { createAgentSessionReaper, createAgentSessionService, rosterEligibleSource } from "./services/agent-sessions.js";
+export { asAgentView, createAgentService } from "./services/agents.js";
+export type { AgentPatchInput, AgentService, AgentServiceDependencies } from "./services/agents.js";
 export { normalizePath, resolveProjectForCwd } from "./services/attribution.js";
 export { createPathMappingService } from "./services/path-mappings.js";
 export { listProjects } from "./services/projects.js";
@@ -43,6 +46,7 @@ export type {
   AgentRepository,
   AgentSessionRecord,
   AgentSessionRepository,
+  AgentShiftRecord,
   AgentStatus,
   AgentUpdatePatch,
   UpsertAgentForKey,

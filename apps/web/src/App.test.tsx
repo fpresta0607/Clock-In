@@ -48,6 +48,40 @@ const memberStats = {
   sites: [],
 };
 
+const rosterAgent = {
+  id: "00000000-0000-4000-8000-0000000000a1",
+  name: "Claude Code @ General",
+  source: "claude_code",
+  status: "anonymous" as const,
+  owner: { id: "u2", name: "Alex" },
+  project: { id: "p1", name: "General" },
+  createdAt: "2026-08-01T00:00:00.000Z",
+};
+
+const paystub = {
+  agent: rosterAgent,
+  filters: {},
+  totals: {
+    agentSeconds: 5_400,
+    shiftCount: 2,
+    commitsRecorded: 0,
+    commitsPending: 0,
+    commitsMerged: 0,
+    commitsReverted: 0,
+    commitsOrphaned: 0,
+    heldRate: null,
+  },
+  shifts: [{
+    id: "00000000-0000-4000-8000-0000000000s1",
+    startedAt: "2026-08-06T10:00:00.000Z",
+    endedAt: "2026-08-06T11:00:00.000Z",
+    model: "claude-fable-5",
+    durationSeconds: 3_600,
+    commits: [],
+  }],
+  trend: [{ periodStartAt: "2026-07-30T00:00:00.000Z", agentSeconds: 5_400, shiftCount: 2, heldRate: null }],
+};
+
 function clientFor(overrides: Partial<Client> = {}): Client {
   return {
     hasSession: false,
@@ -65,6 +99,10 @@ function clientFor(overrides: Partial<Client> = {}): Client {
     report: vi.fn().mockResolvedValue({ rows: [], totalDurationSeconds: 0, filters: {}, pagination: { page: 1, pageSize: 25, totalRows: 0, totalPages: 0 } }),
     joinOrganization: vi.fn().mockResolvedValue(undefined),
     restoreSession: vi.fn().mockResolvedValue(false),
+    agents: vi.fn().mockResolvedValue({ agents: [rosterAgent] }),
+    patchAgent: vi.fn().mockResolvedValue({ ...rosterAgent, status: "registered" }),
+    mergeAgents: vi.fn().mockResolvedValue(undefined),
+    agentPaystub: vi.fn().mockResolvedValue(paystub),
     ...overrides,
   } as unknown as Client;
 }
@@ -630,5 +668,67 @@ describe("project management", () => {
     expect(dialog).toHaveTextContent("5 agent sessions");
     expect(within(dialog).queryByLabelText(/type the project's name to confirm/i)).not.toBeInTheDocument();
     await waitFor(() => expect(within(dialog).getByRole("button", { name: "Delete Client" })).toBeEnabled());
+  });
+});
+
+describe("the roster tab", () => {
+  it("lists the roster under the Agents toggle, greyed while anonymous", async () => {
+    const person = await signIn(clientFor());
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+
+    const roster = await screen.findByTestId("roster-list");
+    const row = within(roster).getByText("Claude Code @ General").closest("li");
+    expect(row).toHaveClass("is-anonymous");
+    expect(row).toHaveTextContent("Claude Code · Alex");
+    // No pay-run data yet: the hours column is a dash, never a fake zero.
+    expect(within(row as HTMLElement).getByText("-")).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Register" })).toBeInTheDocument();
+  });
+
+  it("registers an anonymous agent with one click, restating name and owner", async () => {
+    const patchAgent = vi.fn().mockResolvedValue({ ...rosterAgent, status: "registered" });
+    const person = await signIn(clientFor({ patchAgent }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+
+    await person.click(await screen.findByRole("button", { name: "Register" }));
+
+    await waitFor(() => expect(patchAgent).toHaveBeenCalledWith(rosterAgent.id, {
+      status: "registered",
+      name: "Claude Code @ General",
+      ownerUserId: "u2",
+    }));
+    // The registered row sheds its Register button and its grey.
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Register" })).not.toBeInTheDocument());
+    const row = screen.getByText("Claude Code @ General").closest("li");
+    expect(row).not.toHaveClass("is-anonymous");
+  });
+
+  it("opens an agent's paystub for the range on screen", async () => {
+    const agentPaystub = vi.fn().mockResolvedValue(paystub);
+    const person = await signIn(clientFor({ agentPaystub }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+
+    await person.click(await screen.findByRole("button", { name: /Claude Code @ General/ }));
+
+    await waitFor(() => expect(agentPaystub).toHaveBeenCalled());
+    const [calledId, calledQuery] = agentPaystub.mock.calls.at(-1) as [string, string];
+    expect(calledId).toBe(rosterAgent.id);
+    // The default range is 30d, sent as instant bounds like every report.
+    const query = new URLSearchParams(calledQuery.replace(/^\?/, ""));
+    expect(query.get("fromAt")).not.toBeNull();
+    expect(query.get("toExclusiveAt")).not.toBeNull();
+
+    const detail = await screen.findByTestId("agent-paystub");
+    expect(detail).toHaveTextContent("Hours");
+    expect(detail).toHaveTextContent("1h 30m");
+    expect(detail).toHaveTextContent("Shifts");
+    expect(within(detail).getByTestId("paystub-shifts")).toHaveTextContent("claude-fable-5");
+    expect(within(detail).getByTestId("paystub-trend")).toHaveTextContent("2 shifts");
+    // Nothing decided yet reads as pending, not 0%.
+    expect(detail).toHaveTextContent("pending");
   });
 });
