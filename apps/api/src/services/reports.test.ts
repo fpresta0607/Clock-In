@@ -696,7 +696,7 @@ describe("me/stats", () => {
   it("carries the caller's own agent rows, scoped exactly like the org-wide pay-run report", async () => {
     const reports = new Reports();
     reports.agentIntervals = [
-      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: "claude-fable-5", projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
       // A teammate's shift under a different roster identity must never surface here.
       { user: { id: ids.otherUser, name: "Sam" }, source: "codex", model: null, projectId: ids.project, agentId: ids.otherAgent, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
     ];
@@ -720,6 +720,7 @@ describe("me/stats", () => {
       commitsReverted: 0,
       commitsOrphaned: 0,
       heldRate: 1,
+      models: ["claude-fable-5"],
     }]);
   });
 
@@ -749,6 +750,7 @@ describe("me/stats", () => {
       commitsReverted: 0,
       commitsOrphaned: 0,
       heldRate: 1,
+      models: [],
     }]);
     expect(shiftCommits.lastCountsQuery).toEqual({ userId: ids.user });
 
@@ -764,6 +766,7 @@ describe("me/stats", () => {
       commitsReverted: 0,
       commitsOrphaned: 0,
       heldRate: 1,
+      models: [],
     }]);
   });
 });
@@ -772,7 +775,7 @@ describe("agents report", () => {
   it("lists every roster agent with hours, shifts, and held share - zero-activity agents included", async () => {
     const reports = new Reports();
     reports.agentIntervals = [
-      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: "claude-fable-5", projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
     ];
     const roster = new Agents([
       agentRecord({ id: ids.session }),
@@ -800,6 +803,7 @@ describe("agents report", () => {
         commitsOrphaned: 0,
         // merged / decided (merged + reverted + orphaned); "orphaned" decides too.
         heldRate: 0.5,
+        models: ["claude-fable-5"],
       },
       {
         // A registered agent with nothing in range still gets a row: zeros and a null rate, never absence.
@@ -812,9 +816,10 @@ describe("agents report", () => {
         commitsReverted: 0,
         commitsOrphaned: 0,
         heldRate: null,
+        models: [],
       },
     ]);
-    expect(result.headcount).toEqual({ total: 2, anonymous: 1, registered: 1, retired: 0 });
+    expect(result.headcount).toEqual({ total: 2, active: 2, retired: 0 });
   });
 
   it("works with no commit repository configured, reaps stale sessions first, and rejects a scope outside the workspace", async () => {
@@ -833,6 +838,7 @@ describe("agents report", () => {
       commitsReverted: 0,
       commitsOrphaned: 0,
       heldRate: null,
+      models: [],
     }]);
     expect(reaper.subjects).toEqual([subject]);
 
@@ -871,6 +877,7 @@ describe("agents report", () => {
         commitsReverted: 0,
         commitsOrphaned: 0,
         heldRate: 1,
+        models: [],
       },
       {
         agent: { id: ids.otherAgent, name: "Codex @ Side", source: "codex", status: "anonymous", owner: { id: ids.user, name: "Alex" }, project: { id: ids.otherProject, name: "Side" }, createdAt: "2026-08-01T00:00:00.000Z" },
@@ -882,6 +889,7 @@ describe("agents report", () => {
         commitsReverted: 0,
         commitsOrphaned: 0,
         heldRate: null,
+        models: [],
       },
     ]);
     expect(shiftCommits.lastCountsQuery).toEqual({ projectId: ids.project });

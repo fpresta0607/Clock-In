@@ -668,6 +668,7 @@ describe("personal stats contracts", () => {
         commitsReverted: 0,
         commitsOrphaned: 0,
         heldRate: 1,
+        models: ["claude-fable-5"],
       },
     ],
   };
@@ -816,6 +817,7 @@ describe("roster agent contracts", () => {
         commitsOrphaned: 0,
         heldRate: 1,
       },
+      models: [{ model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1 }],
       shifts: [{
         id: ids.session,
         startedAt,
@@ -831,6 +833,7 @@ describe("roster agent contracts", () => {
     expect(() => agentPaystubResponseSchema.parse({
       ...paystub,
       totals: { ...paystub.totals, commitsRecorded: 0, commitsMerged: 0, heldRate: null },
+      models: [{ model: null, agentSeconds: 3_600, shiftCount: 1 }],
       shifts: [{ ...paystub.shifts[0], commits: [] }],
       trend: [{ periodStartAt: startedAt, agentSeconds: 0, shiftCount: 0, heldRate: null }],
     })).not.toThrow();
@@ -848,7 +851,7 @@ describe("roster agent contracts", () => {
     expect(() => agentsReportFiltersSchema.parse({ from: "2026-08-06", fromAt: startedAt, toExclusiveAt: stoppedAt })).toThrow();
   });
 
-  it("reports every roster agent with its held share and a headcount by status", () => {
+  it("reports every roster agent with its held share and an active/retired headcount", () => {
     const row = {
       agent,
       agentSeconds: 3_600,
@@ -859,9 +862,11 @@ describe("roster agent contracts", () => {
       commitsReverted: 0,
       commitsOrphaned: 0,
       heldRate: 1,
+      models: ["claude-fable-5"],
     };
     expect(() => agentsReportRowSchema.parse(row)).not.toThrow();
-    // A roster agent with no activity in range still gets a row: zeros and a null rate.
+    // A roster agent with no activity in range still gets a row: zeros, a null
+    // rate, and no models named.
     expect(() => agentsReportRowSchema.parse({
       ...row,
       agentSeconds: 0,
@@ -869,12 +874,14 @@ describe("roster agent contracts", () => {
       commitsRecorded: 0,
       commitsMerged: 0,
       heldRate: null,
+      models: [],
     })).not.toThrow();
     expect(() => agentsReportRowSchema.parse({ ...row, heldRate: 1.5 })).toThrow();
+    expect(() => agentsReportRowSchema.parse({ ...row, models: Array.from({ length: 21 }, (_, index) => `model-${index}`) })).toThrow();
 
     const report = {
       filters: {},
-      headcount: { total: 4, anonymous: 1, registered: 2, retired: 1 },
+      headcount: { total: 4, active: 3, retired: 1 },
       rows: [row],
     };
     expect(() => agentsReportResponseSchema.parse(report)).not.toThrow();

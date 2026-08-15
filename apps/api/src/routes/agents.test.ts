@@ -228,12 +228,12 @@ describe("agent routes", () => {
     });
   });
 
-  it("patches a rename and a registration, any member allowed", async () => {
+  it("patches a rename, any member allowed, and an anonymous agent registers in the same write", async () => {
     const { app } = createTestApp();
     const response = await app.request(`http://api.test/agents/${ids.agent}`, {
       method: "PATCH",
       headers: { authorization: memberHeader, "content-type": "application/json" },
-      body: JSON.stringify({ name: "Reviewer", status: "registered" }),
+      body: JSON.stringify({ name: "Reviewer" }),
     });
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ name: "Reviewer", status: "registered" });

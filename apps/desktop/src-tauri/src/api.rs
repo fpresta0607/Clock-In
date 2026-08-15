@@ -219,14 +219,17 @@ pub struct AgentsReportRow {
     /// merged / decided; null while nothing has been decided yet.
     #[serde(default)]
     pub held_rate: Option<f64>,
+    /// Distinct models this agent's shifts named in range; empty when none did.
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentsReportHeadcount {
     pub total: u32,
-    pub anonymous: u32,
-    pub registered: u32,
+    /// Everyone still on the clock: anonymous and registered alike.
+    pub active: u32,
     pub retired: u32,
 }
 

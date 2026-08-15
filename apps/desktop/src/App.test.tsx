@@ -106,7 +106,7 @@ const mapping = {
 };
 
 const agentsReport = {
-  headcount: { total: 1, anonymous: 1, registered: 0, retired: 0 },
+  headcount: { total: 1, active: 1, retired: 0 },
   rows: [{
     agent: {
       id: "00000000-0000-4000-8000-000000000500",
@@ -124,6 +124,7 @@ const agentsReport = {
     commitsReverted: 0,
     commitsOrphaned: 0,
     heldRate: null,
+    models: ["claude-fable-5"],
   }],
 };
 
@@ -484,8 +485,9 @@ describe("today", () => {
     const sessions = await within(panel).findByTestId("agent-sessions");
     expect(sessions).toHaveTextContent("claude-fable-5");
     expect(sessions).toHaveTextContent("Codex");
-    // The app row still folds the CLI into one friendly "Claude Code" row.
-    expect(within(panel).getByText("Claude Code")).toBeInTheDocument();
+    // The app row still folds the CLI into one friendly "Claude Code" row,
+    // and the sessions table names the same runtime in its Runtime column.
+    expect(within(panel).getAllByText("Claude Code").length).toBeGreaterThan(0);
   });
 
   it("shows absence as a dash when the API predates the session details", async () => {
@@ -502,9 +504,9 @@ describe("today", () => {
     const panel = await openAllStats(person);
     const sessions = await within(panel).findByTestId("agent-sessions");
     const cells = [...sessions.querySelectorAll("tbody td")].map((cell) => cell.textContent);
-    // Sessions, max at once and median are dashes, never fake zeros; the
-    // duration the API did send still renders.
-    expect(cells).toEqual(["Claude Code", "-", "-", "1h 00m", "-"]);
+    // Runtime and model lead; sessions, max at once and median are dashes,
+    // never fake zeros; the duration the API did send still renders.
+    expect(cells).toEqual(["Claude Code", "-", "-", "-", "1h 00m", "-"]);
   });
 });
 
@@ -1140,7 +1142,7 @@ describe("the agents tab", () => {
     expect(within(roster).getByText(/1h 30m/)).toBeInTheDocument();
     const row = within(roster).getByText("Claude Code @ Field work").closest("li");
     expect(row).toHaveClass("is-anonymous");
-    expect(row).toHaveTextContent("Claude Code · 2 shifts");
+    expect(row).toHaveTextContent("Claude Code · claude-fable-5 · 2 shifts");
     // The human board and its breakdown step aside while Agents is open.
     expect(within(panel).queryByTestId("board-list")).not.toBeInTheDocument();
     expect(within(panel).queryByTestId("member-stats")).not.toBeInTheDocument();
@@ -1154,7 +1156,7 @@ describe("the agents tab", () => {
   it("reports every roster agent, zero-activity ones included, with no register control", async () => {
     const bridge = bridgeFor({
       agentsReport: vi.fn().mockResolvedValue({
-        headcount: { total: 2, anonymous: 0, registered: 1, retired: 1 },
+        headcount: { total: 2, active: 1, retired: 1 },
         rows: [
           {
             agent: {
@@ -1173,6 +1175,7 @@ describe("the agents tab", () => {
             commitsReverted: 0,
             commitsOrphaned: 0,
             heldRate: null,
+            models: [],
           },
           {
             agent: {
@@ -1191,6 +1194,7 @@ describe("the agents tab", () => {
             commitsReverted: 1,
             commitsOrphaned: 0,
             heldRate: 0.5,
+            models: ["claude-fable-5"],
           },
         ],
       }),

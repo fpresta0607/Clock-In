@@ -207,8 +207,8 @@ describe("report routes", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
-      headcount: { total: 1, anonymous: 1, registered: 0, retired: 0 },
-      rows: [{ agent: { id: agentRecord.id, name: "Claude Code @ Timer" }, agentSeconds: 3_600, shiftCount: 1, heldRate: null }],
+      headcount: { total: 1, active: 1, retired: 0 },
+      rows: [{ agent: { id: agentRecord.id, name: "Claude Code @ Timer" }, agentSeconds: 3_600, shiftCount: 1, heldRate: null, models: [] }],
     });
   });
 

@@ -12,6 +12,7 @@ import type {
   AgentRecord,
   AgentRepository,
   AgentShiftRecord,
+  AgentUpdatePatch,
   ReportQuery,
   ReportRepository,
   ShiftCommitRecord,
@@ -137,13 +138,17 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
       if (input.ownerUserId !== undefined && subject.role !== "admin" && existing.owner.id !== subject.userId) {
         throw new AppError("forbidden", "Only a workspace administrator or the current owner can reassign an agent.");
       }
+      // A member naming an anonymous agent is the registration ceremony: the
+      // rename and the status land in one write. An explicit status always wins.
+      const autoRegister = input.name !== undefined && input.status === undefined && existing.status === "anonymous";
+      const status = input.status ?? (autoRegister ? "registered" : existing.status);
       // The request schema validates fields in isolation; the merged record is
       // re-validated whole, the same rule the path-mapping patch follows.
       const merged = agentSchema.safeParse({
         id: existing.id,
         name: input.name ?? existing.name,
         source: existing.source,
-        status: input.status ?? existing.status,
+        status,
         owner: { id: input.ownerUserId ?? existing.owner.id, name: existing.owner.name },
         project: existing.project,
         createdAt: existing.createdAt.toISOString(),
@@ -153,7 +158,12 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
         const owner = await dependencies.reports.findUserForOrganization(subject, input.ownerUserId);
         if (owner === null) throw new AppError("not_found", "User not found.");
       }
-      const updated = await dependencies.agents.update(subject, agentId, { ...input, updatedAt: clock() });
+      const patch: AgentUpdatePatch = {
+        ...input,
+        ...(autoRegister ? { status: "registered" as const } : {}),
+        updatedAt: clock(),
+      };
+      const updated = await dependencies.agents.update(subject, agentId, patch);
       if (updated === null) throw new AppError("not_found", "Agent not found.");
       return updated;
     },
@@ -197,6 +207,16 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
         commits: (commitsBySession.get(shift.id) ?? []).map((commit) => asCommitView(commit, showRepoRoot)),
       }));
 
+      // The model mix: per-shift seconds (already rounded once per shift)
+      // summed under each distinct model, unnamed shifts under null.
+      const modelMix = new Map<string | null, { model: string | null; agentSeconds: number; shiftCount: number }>();
+      for (const shift of shiftViews) {
+        const entry = modelMix.get(shift.model) ?? { model: shift.model, agentSeconds: 0, shiftCount: 0 };
+        entry.agentSeconds += shift.durationSeconds;
+        entry.shiftCount += 1;
+        modelMix.set(shift.model, entry);
+      }
+
       // Six weekly buckets ending at the range's end (or now, unbounded),
       // oldest first, read from their own window rather than the filter's.
       const anchor = query.toExclusive?.getTime() ?? clock().getTime();
@@ -239,6 +259,7 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
           commitsOrphaned: commits.filter((commit) => commit.verification === "orphaned").length,
           heldRate: heldRateOf(commits),
         },
+        models: [...modelMix.values()],
         shifts: shiftViews,
         trend,
       };

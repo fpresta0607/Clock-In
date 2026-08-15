@@ -83,11 +83,13 @@ a.primary { display: inline-block; text-decoration: none; }
 .board-times { display: grid; justify-items: end; gap: 1px; }
 .board-agent { color: var(--text-secondary); font-size: .74rem; font-variant-numeric: tabular-nums; }
 
-/* The roster tab: anonymous rows sit greyed beside their one-click Register
-   until a member claims them; registered rows read at full weight. */
-.board-list li.is-anonymous { display: flex; align-items: center; gap: 8px; }
-.board-list li.is-anonymous .board-choice { flex: 1; min-width: 0; opacity: .55; }
-.register-button { flex: none; }
+/* The roster tab: every row carries an inline Rename beside the board choice;
+   naming an anonymous agent is what registers it, so there is no grey state. */
+.roster-list li { display: flex; align-items: center; gap: 8px; }
+.roster-list li .board-choice { flex: 1; min-width: 0; }
+.roster-rename { flex: none; }
+.manage-rename { display: flex; flex: 1; gap: 8px; align-items: center; }
+.manage-rename input { flex: 1; min-width: 0; }
 
 /* Commit verification badges on the paystub. */
 .verify-badge { margin-left: 8px; border-radius: 999px; padding: 1px 8px; font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; }

@@ -218,7 +218,7 @@ describe("defaultBridge", () => {
 
   it("decodes the pay-run report, with zero-activity agents and a null held rate", async () => {
     const report = {
-      headcount: { total: 1, anonymous: 1, registered: 0, retired: 0 },
+      headcount: { total: 1, active: 1, retired: 0 },
       rows: [{
         agent: {
           id: ids.project,
@@ -236,6 +236,7 @@ describe("defaultBridge", () => {
         commitsReverted: 0,
         commitsOrphaned: 0,
         heldRate: null,
+        models: ["claude-fable-5"],
       }],
     };
     invoke.mockResolvedValueOnce(report);
@@ -244,6 +245,15 @@ describe("defaultBridge", () => {
     const toExclusiveAt = "2026-08-07T05:00:00.000Z";
     await expect(defaultBridge.agentsReport(fromAt, toExclusiveAt)).resolves.toEqual(report);
     expect(invoke).toHaveBeenLastCalledWith("agents_report", { fromAt, toExclusiveAt, scope: undefined });
+
+    // An API from before the models field shipped decodes it as empty.
+    invoke.mockResolvedValueOnce({
+      headcount: report.headcount,
+      rows: report.rows.map(({ models: _models, ...row }) => row),
+    });
+    await expect(defaultBridge.agentsReport(fromAt, toExclusiveAt)).resolves.toMatchObject({
+      rows: [{ models: [] }],
+    });
   });
 
   it("decodes an agent with a null project and a decided held rate, and rejects an out-of-range one", async () => {
@@ -265,17 +275,17 @@ describe("defaultBridge", () => {
       commitsOrphaned: 0,
       heldRate: 0.5,
     };
-    invoke.mockResolvedValueOnce({ headcount: { total: 1, anonymous: 0, registered: 1, retired: 0 }, rows: [row] });
+    invoke.mockResolvedValueOnce({ headcount: { total: 1, active: 1, retired: 0 }, rows: [row] });
     await expect(defaultBridge.agentsReport()).resolves.toMatchObject({ rows: [row] });
 
     invoke.mockResolvedValueOnce({
-      headcount: { total: 1, anonymous: 0, registered: 1, retired: 0 },
+      headcount: { total: 1, active: 1, retired: 0 },
       rows: [{ ...row, heldRate: 1.5 }],
     });
     await expect(defaultBridge.agentsReport()).rejects.toMatchObject({ kind: "unknown" });
 
     invoke.mockResolvedValueOnce({
-      headcount: { total: 1, anonymous: 0, registered: 1, retired: 0 },
+      headcount: { total: 1, active: 1, retired: 0 },
       rows: [{ ...row, agent: { ...row.agent, status: "fired" } }],
     });
     await expect(defaultBridge.agentsReport()).rejects.toMatchObject({ kind: "unknown" });

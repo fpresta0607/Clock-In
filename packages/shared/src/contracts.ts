@@ -583,6 +583,14 @@ export const agentPaystubResponseSchema = z
         heldRate: heldRateSchema,
       })
       .strict(),
+    /** The model mix in range: one entry per distinct model the shifts named, unnamed shifts under null. */
+    models: z.array(z
+      .object({
+        model: z.string().min(1).max(200).nullable(),
+        agentSeconds: z.number().int().nonnegative().safe(),
+        shiftCount: z.number().int().nonnegative().safe(),
+      })
+      .strict()),
     shifts: z.array(z
       .object({
         id: idSchema,
@@ -634,6 +642,8 @@ export const agentsReportRowSchema = z
     commitsOrphaned: z.number().int().nonnegative().safe(),
     /** merged / decided; null while nothing has been decided. */
     heldRate: heldRateSchema,
+    /** Distinct models this agent's shifts named in range, capped; empty when none named one. */
+    models: z.array(z.string().min(1).max(200)).max(20),
   })
   .strict();
 
@@ -643,8 +653,8 @@ export const agentsReportResponseSchema = z
     headcount: z
       .object({
         total: z.number().int().nonnegative().safe(),
-        anonymous: z.number().int().nonnegative().safe(),
-        registered: z.number().int().nonnegative().safe(),
+        /** Everyone still on the clock: anonymous and registered alike. */
+        active: z.number().int().nonnegative().safe(),
         retired: z.number().int().nonnegative().safe(),
       })
       .strict(),

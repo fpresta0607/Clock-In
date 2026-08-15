@@ -282,10 +282,12 @@ export type AgentsReportRow = {
   commitsOrphaned: number;
   /// merged / decided; null while nothing has been decided yet.
   heldRate: number | null;
+  /// Distinct models this agent's shifts named in range; empty when none did.
+  models: readonly string[];
 };
 
 export type AgentsReport = {
-  headcount: { total: number; anonymous: number; registered: number; retired: number };
+  headcount: { total: number; active: number; retired: number };
   rows: readonly AgentsReportRow[];
 };
 
@@ -415,6 +417,13 @@ const decodeProject = (value: unknown): TimerProject => {
 };
 
 const uuidOrNull = (value: unknown): string | null => (value === null || value === undefined ? null : uuid(value));
+
+/// A field an older API may not send yet decodes to the empty list, not an error.
+const stringArrayOrEmpty = (value: unknown): readonly string[] => {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) invalidResponse();
+  return (value as unknown[]).map(string);
+};
 
 export const decodeAccountSnapshot = (value: unknown): AccountSnapshot => {
   const candidate = record(value);
@@ -776,6 +785,8 @@ const decodeAgentsReportRow = (value: unknown): AgentsReportRow => {
     commitsReverted: nonnegativeInteger(candidate.commitsReverted),
     commitsOrphaned: nonnegativeInteger(candidate.commitsOrphaned),
     heldRate: unitRateOrNull(candidate.heldRate),
+    // An API from before the field shipped reads as no models named, never an error.
+    models: stringArrayOrEmpty(candidate.models),
   };
 };
 
@@ -787,8 +798,7 @@ export const decodeAgentsReport = (value: unknown): AgentsReport => {
   return {
     headcount: {
       total: nonnegativeInteger(headcount.total),
-      anonymous: nonnegativeInteger(headcount.anonymous),
-      registered: nonnegativeInteger(headcount.registered),
+      active: nonnegativeInteger(headcount.active),
       retired: nonnegativeInteger(headcount.retired),
     },
     rows: (rows as unknown[]).map(decodeAgentsReportRow),
