@@ -463,6 +463,25 @@ describe("today", () => {
     // The app row still folds the CLI into one friendly "Claude Code" row.
     expect(within(panel).getByText("Claude Code")).toBeInTheDocument();
   });
+
+  it("shows absence as a dash when the API predates the session details", async () => {
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor({
+      meStats: vi.fn().mockResolvedValue({
+        ...meStats,
+        byAgent: [
+          { source: "claude_code", model: null, durationSeconds: 3_600, sessionCount: null, maxConcurrent: null, medianSeconds: null },
+        ],
+      }),
+    })} />);
+
+    const panel = await openAllStats(person);
+    const sessions = await within(panel).findByTestId("agent-sessions");
+    const cells = [...sessions.querySelectorAll("tbody td")].map((cell) => cell.textContent);
+    // Sessions, max at once and median are dashes, never fake zeros; the
+    // duration the API did send still renders.
+    expect(cells).toEqual(["Claude Code", "-", "-", "1h 00m", "-"]);
+  });
 });
 
 describe("settings", () => {
@@ -827,8 +846,8 @@ describe("the today panel", () => {
   });
 });
 
-describe("the shared scope", () => {
-  it("lands where the dashboard was, and writes a change back for it", async () => {
+describe("the all-stats overlay scope", () => {
+  it("offers no project scope select and fetches every project", async () => {
     const bridge = bridgeFor({
       preferencesGet: vi.fn().mockResolvedValue({ scope: otherProject.id, range: "30d" }),
     });
@@ -836,37 +855,15 @@ describe("the shared scope", () => {
     render(<App bridge={bridge} />);
 
     const panel = await openAllStats(person);
-    // Seeded from the shared row: the select lands on the dashboard's project.
-    const scope = await within(panel).findByLabelText("Project scope");
-    await waitFor(() => expect(scope).toHaveValue(otherProject.id));
-    // A scoped view fetches scoped stats rather than reusing the live day.
-    await waitFor(() => expect(bridge.meStats).toHaveBeenLastCalledWith(
-      expect.any(String),
-      expect.any(String),
-      undefined,
-      otherProject.id,
-    ));
-
-    await person.selectOptions(scope, "all");
-    await waitFor(() => expect(bridge.preferencesSet).toHaveBeenCalledWith({ scope: "all" }));
-  });
-
-  it("reads a stored unassigned scope as everything", async () => {
-    const bridge = bridgeFor({
-      preferencesGet: vi.fn().mockResolvedValue({ scope: "unassigned", range: "30d" }),
-    });
-    const person = userEvent.setup();
-    render(<App bridge={bridge} />);
-
-    const panel = await openAllStats(person);
-    const scope = await within(panel).findByLabelText("Project scope");
-    await waitFor(() => expect(scope).toHaveValue("all"));
-    // The board fetches unscoped data rather than passing "unassigned" through.
+    // The main screen's filing bar already answers "which project"; the
+    // overlay reads everything and never touches the shared preference row.
+    expect(within(panel).queryByLabelText("Project scope")).not.toBeInTheDocument();
     await waitFor(() => expect(bridge.orgOverview).toHaveBeenLastCalledWith(
       expect.any(String),
       expect.any(String),
-      undefined,
     ));
+    expect(bridge.preferencesGet).not.toHaveBeenCalled();
+    expect(bridge.preferencesSet).not.toHaveBeenCalled();
   });
 });
 
@@ -906,7 +903,6 @@ describe("the team board", () => {
       expect.any(String),
       expect.any(String),
       "b1c7e513-b094-4d4c-ae55-21790ae019a4",
-      undefined,
     ));
     expect(await within(stats).findByText("Blender")).toBeInTheDocument();
   });
@@ -983,6 +979,38 @@ describe("the team board", () => {
     const stats = within(panel).getByTestId("member-stats");
     expect(within(stats).getByRole("alert")).toHaveTextContent("The stats service is unavailable.");
     expect(within(stats).queryByText("Loading…")).not.toBeInTheDocument();
+  });
+
+  it("rides out fewer than three failed refreshes on last-good data", async () => {
+    vi.useFakeTimers();
+    const failure = { kind: "transient", message: "The stats service is unavailable." };
+    const meStatsMock = vi.fn()
+      .mockResolvedValueOnce(meStats)
+      .mockRejectedValueOnce(failure)
+      .mockRejectedValueOnce(failure)
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValue(meStats);
+    render(<App bridge={bridgeFor({ meStats: meStatsMock })} />);
+
+    // The first read lands; the day is on screen.
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByTestId("session-app-list")).toBeInTheDocument();
+
+    // Two failed background refreshes keep the numbers and stay quiet.
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(meStatsMock.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByTestId("session-app-list")).toBeInTheDocument();
+
+    // The third consecutive failure earns the banner - beside the data.
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(screen.getByRole("alert")).toHaveTextContent("The stats service is unavailable.");
+    expect(screen.getByTestId("session-app-list")).toBeInTheDocument();
+
+    // The next success clears it and resets the count.
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("joins another workspace by invite code from settings", async () => {
