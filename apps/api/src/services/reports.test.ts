@@ -102,7 +102,11 @@ class Reports implements ReportRepository {
     return this.sessionIntervals.filter((row) => query.userId === undefined || row.user.id === query.userId);
   }
   public async readAgentIntervals(_subject: AuthenticatedSubject, query: ReportQuery) {
-    return this.agentIntervals.filter((row) => query.userId === undefined || row.user.id === query.userId);
+    return this.agentIntervals.filter((row) =>
+      (query.userId === undefined || row.user.id === query.userId)
+      && (query.projectId === undefined || row.projectId === query.projectId)
+      && (query.unassignedOnly !== true || row.projectId === null)
+    );
   }
   public async findProjectForOrganization(_subject: AuthenticatedSubject, projectId: string) {
     return this.accessible.has(projectId) ? { id: projectId, name: "Timer" } : null;
@@ -162,9 +166,17 @@ class Agents implements AgentRepository {
 
 const agents = new Agents();
 
+type CommitSeed = {
+  userId: string;
+  agentId: string;
+  projectId: string | null;
+  verification: "pending" | "merged" | "reverted" | "orphaned";
+  authoredAt: Date;
+};
+
 class ShiftCommits implements ShiftCommitRepository {
   public lastCountsQuery: ReportQuery | null = null;
-  public constructor(public counts: ShiftCommitCountsRecord[] = []) {}
+  public constructor(public commits: CommitSeed[] = []) {}
   public async findByClientId(): ReturnType<ShiftCommitRepository["findByClientId"]> {
     throw new Error("not used");
   }
@@ -176,7 +188,29 @@ class ShiftCommits implements ShiftCommitRepository {
   }
   public async countsByAgent(_subject: AuthenticatedSubject, query: ReportQuery): Promise<ShiftCommitCountsRecord[]> {
     this.lastCountsQuery = query;
-    return this.counts;
+    const byAgent = new Map<string, ShiftCommitCountsRecord>();
+    for (const commit of this.commits) {
+      if (query.userId !== undefined && commit.userId !== query.userId) continue;
+      if (query.projectId !== undefined && commit.projectId !== query.projectId) continue;
+      if (query.unassignedOnly === true && commit.projectId !== null) continue;
+      if (query.from !== undefined && commit.authoredAt < query.from) continue;
+      if (query.toExclusive !== undefined && commit.authoredAt >= query.toExclusive) continue;
+      const record = byAgent.get(commit.agentId) ?? {
+        agentId: commit.agentId,
+        recorded: 0,
+        pending: 0,
+        merged: 0,
+        reverted: 0,
+        orphaned: 0,
+      };
+      record.recorded += 1;
+      if (commit.verification === "pending") record.pending += 1;
+      else if (commit.verification === "merged") record.merged += 1;
+      else if (commit.verification === "reverted") record.reverted += 1;
+      else record.orphaned += 1;
+      byAgent.set(commit.agentId, record);
+    }
+    return [...byAgent.values()];
   }
   public async listForAgent(): ReturnType<ShiftCommitRepository["listForAgent"]> {
     throw new Error("not used");
@@ -667,7 +701,11 @@ describe("me/stats", () => {
       { user: { id: ids.otherUser, name: "Sam" }, source: "codex", model: null, projectId: ids.project, agentId: ids.otherAgent, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
     ];
     const roster = new Agents([agentRecord({ id: ids.session }), agentRecord({ id: ids.otherAgent, source: "codex" })]);
-    const shiftCommits = new ShiftCommits([{ agentId: ids.session, recorded: 2, pending: 0, merged: 2, reverted: 0, orphaned: 0 }]);
+    const authoredAt = new Date("2026-08-06T14:30:00.000Z");
+    const shiftCommits = new ShiftCommits([
+      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "merged", authoredAt },
+      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "merged", authoredAt },
+    ]);
     const service = createReportService({ reports, reaper: silentReaper, agents: roster, shiftCommits });
 
     const result = await service.meStats(subject, {});
@@ -676,6 +714,50 @@ describe("me/stats", () => {
       agent: { id: ids.session, name: "Claude Code @ Timer", source: "claude_code", status: "anonymous", project: { id: ids.project, name: "Timer" }, createdAt: "2026-08-01T00:00:00.000Z" },
       agentSeconds: 3_600,
       shiftCount: 1,
+      commitsRecorded: 2,
+      commitsPending: 0,
+      commitsMerged: 2,
+      commitsReverted: 0,
+      commitsOrphaned: 0,
+      heldRate: 1,
+    }]);
+  });
+
+  it("scopes a shared agent's commit tallies to the caller in meStats while the org report shows every member", async () => {
+    const reports = new Reports();
+    reports.agentIntervals = [
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+      { user: { id: ids.otherUser, name: "Sam" }, source: "claude_code", model: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+    ];
+    const roster = new Agents([agentRecord({ id: ids.session })]);
+    const authoredAt = new Date("2026-08-06T14:30:00.000Z");
+    const shiftCommits = new ShiftCommits([
+      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "merged", authoredAt },
+      { userId: ids.otherUser, agentId: ids.session, projectId: ids.project, verification: "merged", authoredAt },
+    ]);
+    const service = createReportService({ reports, reaper: silentReaper, agents: roster, shiftCommits });
+
+    const own = await service.meStats(subject, {});
+
+    expect(own.agents).toEqual([{
+      agent: { id: ids.session, name: "Claude Code @ Timer", source: "claude_code", status: "anonymous", project: { id: ids.project, name: "Timer" }, createdAt: "2026-08-01T00:00:00.000Z" },
+      agentSeconds: 3_600,
+      shiftCount: 1,
+      commitsRecorded: 1,
+      commitsPending: 0,
+      commitsMerged: 1,
+      commitsReverted: 0,
+      commitsOrphaned: 0,
+      heldRate: 1,
+    }]);
+    expect(shiftCommits.lastCountsQuery).toEqual({ userId: ids.user });
+
+    const org = await service.agentsReport(subject, {});
+
+    expect(org.rows).toEqual([{
+      agent: { id: ids.session, name: "Claude Code @ Timer", source: "claude_code", status: "anonymous", owner: { id: ids.user, name: "Alex" }, project: { id: ids.project, name: "Timer" }, createdAt: "2026-08-01T00:00:00.000Z" },
+      agentSeconds: 7_200,
+      shiftCount: 2,
       commitsRecorded: 2,
       commitsPending: 0,
       commitsMerged: 2,
@@ -696,7 +778,12 @@ describe("agents report", () => {
       agentRecord({ id: ids.session }),
       agentRecord({ id: ids.otherAgent, name: "Codex @ Side", source: "codex", status: "registered" }),
     ]);
-    const shiftCommits = new ShiftCommits([{ agentId: ids.session, recorded: 3, pending: 1, merged: 1, reverted: 1, orphaned: 0 }]);
+    const authoredAt = new Date("2026-08-06T14:30:00.000Z");
+    const shiftCommits = new ShiftCommits([
+      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "pending", authoredAt },
+      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "merged", authoredAt },
+      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "reverted", authoredAt },
+    ]);
     const service = createReportService({ reports, reaper: silentReaper, agents: roster, shiftCommits });
 
     const result = await service.agentsReport(subject, {});
@@ -752,5 +839,51 @@ describe("agents report", () => {
     const outsideScopeService = createReportService({ reports: new Reports([], new Set()), reaper: silentReaper, agents });
     await expect(outsideScopeService.agentsReport(subject, { scope: ids.otherProject }))
       .rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("narrows commit tallies to the same project scope as the hours", async () => {
+    const reports = new Reports();
+    reports.agentIntervals = [
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+      { user: { id: ids.user, name: "Alex" }, source: "codex", model: null, projectId: ids.otherProject, agentId: ids.otherAgent, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+    ];
+    const roster = new Agents([
+      agentRecord({ id: ids.session }),
+      agentRecord({ id: ids.otherAgent, name: "Codex @ Side", source: "codex", project: { id: ids.otherProject, name: "Side" } }),
+    ]);
+    const authoredAt = new Date("2026-08-06T14:30:00.000Z");
+    const shiftCommits = new ShiftCommits([
+      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "merged", authoredAt },
+      { userId: ids.user, agentId: ids.otherAgent, projectId: ids.otherProject, verification: "merged", authoredAt },
+    ]);
+    const service = createReportService({ reports, reaper: silentReaper, agents: roster, shiftCommits });
+
+    const result = await service.agentsReport(subject, { scope: ids.project });
+
+    expect(result.rows).toEqual([
+      {
+        agent: { id: ids.session, name: "Claude Code @ Timer", source: "claude_code", status: "anonymous", owner: { id: ids.user, name: "Alex" }, project: { id: ids.project, name: "Timer" }, createdAt: "2026-08-01T00:00:00.000Z" },
+        agentSeconds: 3_600,
+        shiftCount: 1,
+        commitsRecorded: 1,
+        commitsPending: 0,
+        commitsMerged: 1,
+        commitsReverted: 0,
+        commitsOrphaned: 0,
+        heldRate: 1,
+      },
+      {
+        agent: { id: ids.otherAgent, name: "Codex @ Side", source: "codex", status: "anonymous", owner: { id: ids.user, name: "Alex" }, project: { id: ids.otherProject, name: "Side" }, createdAt: "2026-08-01T00:00:00.000Z" },
+        agentSeconds: 0,
+        shiftCount: 0,
+        commitsRecorded: 0,
+        commitsPending: 0,
+        commitsMerged: 0,
+        commitsReverted: 0,
+        commitsOrphaned: 0,
+        heldRate: null,
+      },
+    ]);
+    expect(shiftCommits.lastCountsQuery).toEqual({ projectId: ids.project });
   });
 });

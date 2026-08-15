@@ -1301,6 +1301,20 @@ export class DrizzleAgentRepository implements AgentRepository {
         .set({ agentId: winnerId, updatedAt: sql`now()` })
         .where(and(eq(agentSessions.organizationId, subject.organizationId), eq(agentSessions.agentId, loserId)));
       await tx
+        .update(shiftCommits)
+        .set({ agentId: winnerId, updatedAt: sql`now()` })
+        .where(and(
+          eq(shiftCommits.organizationId, subject.organizationId),
+          eq(shiftCommits.agentId, loserId),
+          sql`not exists (
+            select 1 from shift_commits as winner_commits
+            where winner_commits.organization_id = ${shiftCommits.organizationId}
+              and winner_commits.agent_id = ${winnerId}
+              and winner_commits.repo_root = ${shiftCommits.repoRoot}
+              and winner_commits.sha = ${shiftCommits.sha}
+          )`,
+        ));
+      await tx
         .update(agents)
         .set({ status: "retired", updatedAt: sql`now()` })
         .where(and(eq(agents.organizationId, subject.organizationId), eq(agents.id, loserId)));
@@ -1406,7 +1420,14 @@ export class DrizzleShiftCommitRepository implements ShiftCommitRepository {
   }
 
   public async countsByAgent(subject: AuthenticatedSubject, query: ReportQuery): Promise<ShiftCommitCountsRecord[]> {
-    const rows = await this.db
+    const projectScoped = query.projectId !== undefined || query.unassignedOnly === true;
+    const conditions = [
+      eq(shiftCommits.organizationId, subject.organizationId),
+      query.from === undefined ? undefined : gte(shiftCommits.authoredAt, query.from),
+      query.toExclusive === undefined ? undefined : lt(shiftCommits.authoredAt, query.toExclusive),
+      query.userId === undefined ? undefined : eq(shiftCommits.userId, query.userId),
+    ];
+    const base = this.db
       .select({
         agentId: shiftCommits.agentId,
         recorded: count(),
@@ -1415,13 +1436,21 @@ export class DrizzleShiftCommitRepository implements ShiftCommitRepository {
         reverted: count(sql`case when ${shiftCommits.verification} = 'reverted' then 1 end`),
         orphaned: count(sql`case when ${shiftCommits.verification} = 'orphaned' then 1 end`),
       })
-      .from(shiftCommits)
-      .where(and(
-        eq(shiftCommits.organizationId, subject.organizationId),
-        query.from === undefined ? undefined : gte(shiftCommits.authoredAt, query.from),
-        query.toExclusive === undefined ? undefined : lt(shiftCommits.authoredAt, query.toExclusive),
-      ))
-      .groupBy(shiftCommits.agentId);
+      .from(shiftCommits);
+    const rows = await (projectScoped
+      ? base
+        .innerJoin(agentSessions, and(
+          eq(agentSessions.organizationId, shiftCommits.organizationId),
+          eq(agentSessions.id, shiftCommits.agentSessionId),
+        ))
+        .where(and(
+          ...conditions,
+          query.projectId === undefined ? isNull(agentSessions.projectId) : eq(agentSessions.projectId, query.projectId),
+        ))
+        .groupBy(shiftCommits.agentId)
+      : base
+        .where(and(...conditions))
+        .groupBy(shiftCommits.agentId));
     return rows;
   }
 
