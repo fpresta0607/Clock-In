@@ -639,6 +639,11 @@ pub struct SpoolEvent {
     pub occurred_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// `HEAD` when a `Started` event was written, recorded by the hook so the
+    /// uploader can bound the shift to its own commits. Only `Started` carries
+    /// it; every other event kind leaves it absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_head: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -692,6 +697,7 @@ impl HookInput {
             event: self.event,
             occurred_at: self.occurred_at,
             cwd: Some(self.cwd),
+            start_head: None,
             model: non_empty(self.model.as_deref()),
             rule_id: None,
         }
@@ -821,6 +827,7 @@ fn translate_claude(
         event,
         occurred_at: now_iso8601(),
         cwd: Some(input.cwd),
+        start_head: None,
         model: non_empty(input.model.as_deref()),
         rule_id: None,
     }))
@@ -884,6 +891,7 @@ fn translate_native(value: &serde_json::Value, context: &ArgvContext) -> HookStd
         event: context.event,
         occurred_at: now_iso8601(),
         cwd: Some(cwd.to_string()),
+        start_head: None,
         model: non_empty(model),
         rule_id: None,
     })
@@ -1870,6 +1878,7 @@ mod tests {
             event: AgentEventKind::Started,
             occurred_at: "2026-08-07T12:00:00Z".to_string(),
             cwd: Some("C:/dev/Clock-In".to_string()),
+            start_head: None,
             model: None,
             rule_id: None,
         }
@@ -2232,6 +2241,7 @@ mod tests {
             event: AgentEventKind::Started,
             occurred_at: "2026-08-09T12:00:00Z".to_string(),
             cwd: None,
+            start_head: None,
             model: None,
             rule_id: Some("r1".to_string()),
         };

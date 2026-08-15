@@ -366,3 +366,108 @@ fn a_cursor_payload_without_a_session_id_exits_zero_and_writes_nothing() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn init_repo_with_one_commit(dir: &Path) -> String {
+    std::fs::create_dir_all(dir).expect("repo dir creates");
+    for args in [
+        &["init", "--quiet", "--initial-branch=main"][..],
+        &["config", "user.email", "shift@example.test"][..],
+        &["config", "user.name", "Shift Test"][..],
+        &["config", "commit.gpgsign", "false"][..],
+    ] {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git setup failed in {dir:?}");
+    }
+    std::fs::write(dir.join("a.txt"), "base").expect("scratch file writes");
+    for args in [&["add", "-A"][..], &["commit", "--quiet", "-m", "base"][..]] {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git commit failed in {dir:?}");
+    }
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .expect("git rev-parse runs");
+    String::from_utf8(output.stdout)
+        .expect("utf8 sha")
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn a_started_event_over_a_git_repo_records_the_head_at_shift_start() {
+    let dir = temp_dir("started-head-repo");
+    let repo = dir.join("repo");
+    let head = init_repo_with_one_commit(&repo);
+    let spool = active_agent_spool(&dir);
+
+    let output = run_hook(
+        &dir,
+        &[
+            "--source",
+            "pi",
+            "--event",
+            "session-start",
+            "--session-id",
+            "s1",
+            "--cwd",
+            repo.to_str().expect("utf8 path"),
+        ],
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let content = std::fs::read_to_string(&spool).expect("spool reads");
+    let value: serde_json::Value =
+        serde_json::from_str(content.lines().next().expect("one line")).expect("line parses");
+    assert_eq!(value["startHead"], head);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_started_event_over_a_non_repo_cwd_records_no_head() {
+    let dir = temp_dir("started-head-non-repo");
+    let not_a_repo = dir.join("not-a-repo");
+    std::fs::create_dir_all(&not_a_repo).expect("dir creates");
+    let spool = active_agent_spool(&dir);
+
+    let output = run_hook(
+        &dir,
+        &[
+            "--source",
+            "pi",
+            "--event",
+            "session-start",
+            "--session-id",
+            "s1",
+            "--cwd",
+            not_a_repo.to_str().expect("utf8 path"),
+        ],
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let content = std::fs::read_to_string(&spool).expect("spool reads");
+    let value: serde_json::Value =
+        serde_json::from_str(content.lines().next().expect("one line")).expect("line parses");
+    assert!(value.get("startHead").is_none());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

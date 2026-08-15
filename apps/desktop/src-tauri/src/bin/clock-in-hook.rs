@@ -13,9 +13,11 @@
 //! one-line message the CLI surfaces, and never writes a partial line.
 
 use std::io::Read;
+use std::path::Path;
 use std::process::ExitCode;
 
-use clock_in_desktop_lib::spool::{self, ArgvContext, HookInput, HookStdin};
+use clock_in_desktop_lib::git_evidence;
+use clock_in_desktop_lib::spool::{self, AgentEventKind, ArgvContext, HookInput, HookStdin};
 
 fn main() -> ExitCode {
     match run() {
@@ -29,7 +31,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let event = match input_from_args(&args)? {
+    let mut event = match input_from_args(&args)? {
         ArgvInput::Event(input) => input.into_event(),
         ArgvInput::Stdin(context) => match input_from_stdin(context)? {
             HookStdin::Event(event) => event,
@@ -38,6 +40,12 @@ fn run() -> Result<(), String> {
             HookStdin::Ignored => return Ok(()),
         },
     };
+    if event.event == AgentEventKind::Started {
+        event.start_head = event
+            .cwd
+            .as_deref()
+            .and_then(|cwd| git_evidence::head_sha(Path::new(cwd)));
+    }
     let path = spool::agent_spool_path();
     spool::append(&path, &event).map_err(|error| format!("could not write the spool: {error}"))
 }

@@ -13,6 +13,9 @@ use std::time::Duration;
 use tokio::process::Command;
 
 #[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// git can hang on a slow filesystem or a huge pack; a shift's capture must
@@ -63,10 +66,30 @@ pub async fn discover_repo(cwd: &Path) -> Option<RepoLocation> {
     Some(RepoLocation { root, branch })
 }
 
-/// The commit `HEAD` pointed at when a shift opened. Recorded then so the
-/// shift's capture can be bounded to what appeared afterward.
-pub async fn head_sha(cwd: &Path) -> Option<String> {
-    run_git(cwd, &["rev-parse", "HEAD"]).await
+/// The commit `HEAD` pointed at when a shift opened. Recorded by the hook at
+/// the moment the `Started` line is written, so the shift's capture can be
+/// bounded to what appeared afterward instead of reading HEAD minutes later.
+///
+/// Synchronous (`std::process::Command`) on purpose: the hook is a synchronous
+/// binary, and `git rev-parse HEAD` takes no locks and reads two files, so it
+/// cannot slow down or block the agent CLI that invoked the hook.
+pub fn head_sha(cwd: &Path) -> Option<String> {
+    let mut command = std::process::Command::new("git");
+    command
+        .args(["rev-parse", "HEAD"])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|text| text.trim().to_string())
 }
 
 /// One commit authored during a shift, ready to become a `shift_commits` row.
@@ -331,8 +354,8 @@ mod tests {
         run(dir, &["init", "--quiet", "--bare", "--initial-branch=main"]).await;
     }
 
-    async fn head(dir: &Path) -> String {
-        head_sha(dir).await.expect("HEAD resolves")
+    fn head(dir: &Path) -> String {
+        head_sha(dir).expect("HEAD resolves")
     }
 
     /// Pushes `main` to `origin` and immediately fetches it back, so `work`'s
@@ -375,7 +398,7 @@ mod tests {
         let dir = temp_dir("window");
         init_repo(&dir).await;
         commit_at(&dir, "a.txt", "before the window", 1_700_000_000).await;
-        let start_head = head(&dir).await;
+        let start_head = head(&dir);
         commit_at(&dir, "b.txt", "inside the window", 1_700_001_000).await;
         commit_at(&dir, "c.txt", "after the window", 1_700_002_000).await;
 
@@ -395,7 +418,7 @@ mod tests {
         let dir = temp_dir("start-head");
         init_repo(&dir).await;
         commit_at(&dir, "a.txt", "already in history", 1_700_001_000).await;
-        let start_head = head(&dir).await;
+        let start_head = head(&dir);
         commit_at(&dir, "b.txt", "the shift's own commit", 1_700_001_100).await;
 
         let commits = commits_in_window(&dir, &start_head, 1_700_000_500, 1_700_001_500).await;
@@ -446,7 +469,7 @@ mod tests {
         run(&mate, &["fetch", "origin"]).await;
         run(&mate, &["reset", "--hard", "origin/main"]).await;
 
-        let start_head = head(&work).await;
+        let start_head = head(&work);
         commit_at(&mate, "mate-1.txt", "teammate change 1", 1_700_001_100).await;
         commit_at(&mate, "mate-2.txt", "teammate change 2", 1_700_001_200).await;
         run(&mate, &["push", "origin", "main"]).await;
@@ -541,7 +564,7 @@ mod tests {
     async fn verify_reports_merged_once_the_default_ref_carries_the_commit() {
         let (root, work) = origin_and_work_with_a_base_commit("merged").await;
         commit_at(&work, "shift.txt", "the shift commit", 1_700_001_000).await;
-        let sha = head(&work).await;
+        let sha = head(&work);
         push_and_fetch(&work).await;
 
         let outcome = verify(&work, &sha, &crate::monitor::iso8601(1_700_001_000)).await;
@@ -559,7 +582,7 @@ mod tests {
         let (root, work) = origin_and_work_with_a_base_commit("squash-merged").await;
         run(&work, &["checkout", "--quiet", "-b", "feature"]).await;
         commit_at(&work, "shift.txt", "the shift commit", 1_700_001_000).await;
-        let sha = head(&work).await;
+        let sha = head(&work);
         run(&work, &["checkout", "--quiet", "main"]).await;
         run(&work, &["merge", "--squash", "feature"]).await;
         commit_with_message(&work, "squashed feature (#7)", 1_700_001_500).await;
@@ -579,7 +602,7 @@ mod tests {
         let (root, work) = origin_and_work_with_a_base_commit("rebase-merged").await;
         run(&work, &["checkout", "--quiet", "-b", "feature"]).await;
         commit_at(&work, "shift.txt", "the shift commit", 1_700_001_000).await;
-        let sha = head(&work).await;
+        let sha = head(&work);
         run(&work, &["checkout", "--quiet", "main"]).await;
         commit_at(&work, "other.txt", "unrelated main work", 1_700_001_200).await;
         run(&work, &["checkout", "--quiet", "feature"]).await;
@@ -602,7 +625,7 @@ mod tests {
         let (root, work) = origin_and_work_with_a_base_commit("abandoned").await;
         run(&work, &["checkout", "--quiet", "-b", "abandoned"]).await;
         commit_at(&work, "abandoned.txt", "work nobody kept", 1_700_001_000).await;
-        let sha = head(&work).await;
+        let sha = head(&work);
         run(&work, &["checkout", "--quiet", "main"]).await;
         run(&work, &["branch", "-D", "abandoned"]).await;
 
@@ -620,7 +643,7 @@ mod tests {
         let (root, work) = origin_and_work_with_a_base_commit("referenced").await;
         run(&work, &["checkout", "--quiet", "-b", "feature"]).await;
         commit_at(&work, "shift.txt", "the shift commit", 1_700_001_000).await;
-        let sha = head(&work).await;
+        let sha = head(&work);
         run(&work, &["checkout", "--quiet", "main"]).await;
         // A different tree change, so only the message reference can decide it.
         std::fs::write(work.join("landed.txt"), "landed").expect("scratch file writes");
@@ -644,7 +667,7 @@ mod tests {
     async fn verify_reports_reverted_even_though_the_original_stays_an_ancestor() {
         let (root, work) = origin_and_work_with_a_base_commit("reverted").await;
         commit_at(&work, "shift.txt", "the shift commit", 1_700_001_000).await;
-        let sha = head(&work).await;
+        let sha = head(&work);
         push_and_fetch(&work).await;
 
         let revert_date = crate::monitor::iso8601(1_700_002_000);
@@ -689,7 +712,7 @@ mod tests {
         let dir = temp_dir("no-remote-pending");
         init_repo(&dir).await;
         commit_at(&dir, "a.txt", "local only", 1_700_000_000).await;
-        let sha = head(&dir).await;
+        let sha = head(&dir);
 
         let outcome = verify(&dir, &sha, &crate::monitor::iso8601(1_700_000_000)).await;
 
