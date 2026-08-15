@@ -210,7 +210,8 @@ describe("defaultBridge", () => {
 
     await expect(defaultBridge.meStats(undefined, undefined)).resolves.toMatchObject({
       hourly: [],
-      byAgent: [{ source: "claude_code", model: null, durationSeconds: 0, sessionCount: 0, maxConcurrent: 0, medianSeconds: 0 }],
+      // Absent fields decode to null - absence shown as absence, not zero.
+      byAgent: [{ source: "claude_code", model: null, durationSeconds: 0, sessionCount: null, maxConcurrent: null, medianSeconds: null }],
     });
   });
 });

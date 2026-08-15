@@ -516,9 +516,6 @@ select:disabled { opacity: .55; }
 .manage-rename input { flex: 1; min-width: 0; }
 .manage-delete { display: grid; gap: 9px; }
 
-/* The overlay's shared project scope, kept as slim as the range toggle. */
-.board-scope select { min-height: 30px; padding: 3px 8px; font-size: .74rem; }
-
 /* The human/agent metric breakdown: labeled rows, not one cramped sentence. */
 .breakdown { display: grid; gap: 0; }
 .group-label { margin: 14px 0 5px; color: var(--text-secondary); font-size: .72rem; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }

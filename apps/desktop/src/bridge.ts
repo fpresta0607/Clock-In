@@ -218,9 +218,11 @@ export type MeStatsAgentSplit = {
   source: string;
   model: string | null;
   durationSeconds: number;
-  sessionCount: number;
-  maxConcurrent: number;
-  medianSeconds: number;
+  /// Null when the API predates these fields: absence shown as absence,
+  /// never as a zero the server can't legitimately send.
+  sessionCount: number | null;
+  maxConcurrent: number | null;
+  medianSeconds: number | null;
 };
 
 export type MeStatsHourlyBucket = {
@@ -349,8 +351,8 @@ const nonnegativeInteger = (value: unknown): number => {
   return value as number;
 };
 
-const optionalNonnegativeInteger = (value: unknown): number => {
-  if (value === undefined || value === null) return 0;
+const nonnegativeIntegerOrNull = (value: unknown): number | null => {
+  if (value === undefined || value === null) return null;
   return nonnegativeInteger(value);
 };
 
@@ -662,9 +664,9 @@ const decodeAgentSplit = (value: unknown): MeStatsAgentSplit => {
     source: string(candidate.source),
     model: stringOrNull(candidate.model ?? null),
     durationSeconds: nonnegativeInteger(candidate.durationSeconds),
-    sessionCount: optionalNonnegativeInteger(candidate.sessionCount),
-    maxConcurrent: optionalNonnegativeInteger(candidate.maxConcurrent),
-    medianSeconds: optionalNonnegativeInteger(candidate.medianSeconds),
+    sessionCount: nonnegativeIntegerOrNull(candidate.sessionCount),
+    maxConcurrent: nonnegativeIntegerOrNull(candidate.maxConcurrent),
+    medianSeconds: nonnegativeIntegerOrNull(candidate.medianSeconds),
   };
 };
 

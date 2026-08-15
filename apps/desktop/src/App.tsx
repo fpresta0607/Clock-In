@@ -188,10 +188,12 @@ const AgentSessionsTable = ({ byAgent }: { byAgent: readonly MeStats["byAgent"][
                 {split.model ?? sourceLabel(split.source)}
                 {split.model !== null && <span className="metric-hint"> · {sourceLabel(split.source)}</span>}
               </td>
-              <td className="numeric">{split.sessionCount}</td>
-              <td className="numeric">{split.maxConcurrent}</td>
+              {/* Null means the deployed API predates the field: absence
+                  shown as absence, never as a zero that never happened. */}
+              <td className="numeric">{split.sessionCount ?? "-"}</td>
+              <td className="numeric">{split.maxConcurrent ?? "-"}</td>
               <td className="numeric">{formatHuman(split.durationSeconds)}</td>
-              <td className="numeric">{formatHuman(split.medianSeconds)}</td>
+              <td className="numeric">{split.medianSeconds === null ? "-" : formatHuman(split.medianSeconds)}</td>
             </tr>
           ))}
         </tbody>
@@ -409,9 +411,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   /// someone's week there never rewrites the day the main screen is showing.
   const [boardRange, setBoardRange] = useState<StatsRange>("today");
   const [boardMember, setBoardMember] = useState<{ id: string; name: string } | undefined>();
-  /// The project scope shared with the web dashboard: opening All stats lands
-  /// where the dashboard last was, and changing it here moves the dashboard.
-  const [boardScope, setBoardScope] = useState("all");
   const [boardStats, setBoardStats] = useState<MeStats | undefined>();
   const [boardStatsError, setBoardStatsError] = useState<string | undefined>();
   const [settings, setSettings] = useState<MonitorSettings | undefined>();
@@ -438,6 +437,12 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const latestBridge = useRef(bridge);
   const mounted = useRef(true);
   const bridgeGeneration = useRef(0);
+  /// Consecutive-failure counters for the background polls: one failed
+  /// request keeps the last-good reading; the banner waits for three in a
+  /// row, unless there is no data to keep showing at all.
+  const statsFailures = useRef(0);
+  const overviewFailures = useRef(0);
+  const boardStatsFailures = useRef(0);
 
   if (latestBridge.current !== bridge) bridgeGeneration.current += 1;
   latestBridge.current = bridge;
@@ -456,9 +461,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setStats(undefined);
     setStatsError(undefined);
     setBoardMember(undefined);
-    setBoardScope("all");
     setBoardStats(undefined);
     setBoardStatsError(undefined);
+    statsFailures.current = 0;
+    overviewFailures.current = 0;
+    boardStatsFailures.current = 0;
     setSettings(undefined);
     setSettingsError(undefined);
     setHookSnippets({});
@@ -527,6 +534,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     void service.orgOverview().then(
       (result) => {
         if (active && isCurrent(service, generation)) {
+          overviewFailures.current = 0;
           setOverview(result);
           setOverviewError(undefined);
         }
@@ -536,10 +544,15 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         const problem = bridgeError(error);
         // An expired session is handled by whatever the user does next; the
         // board going stale is not worth a sign-in bounce.
-        if (problem.kind !== "auth") setOverviewError(problem.message);
+        if (problem.kind === "auth") return;
+        overviewFailures.current += 1;
+        if (overviewFailures.current >= 3 || overview === undefined) setOverviewError(problem.message);
       },
     );
     return () => { active = false; };
+    // `overview` is read only to tell "nothing to show" from "stale";
+    // re-running on its change would refetch after every success.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bridge, signedIn?.user.id]);
 
   useEffect(() => {
@@ -554,6 +567,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     void service.meStats(bounds?.fromAt, bounds?.toExclusiveAt).then(
       (result) => {
         if (active && isCurrent(service, generation)) {
+          statsFailures.current = 0;
           setStats(result);
           setStatsError(undefined);
         }
@@ -561,30 +575,16 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       (error: unknown) => {
         if (!active || !isCurrent(service, generation)) return;
         const problem = bridgeError(error);
-        if (problem.kind !== "auth") setStatsError(problem.message);
+        if (problem.kind === "auth") return;
+        statsFailures.current += 1;
+        if (statsFailures.current >= 3 || stats === undefined) setStatsError(problem.message);
       },
     );
     return () => { active = false; };
-  }, [bridge, signedIn?.user.id, statsTick]);
-
-  // Each open of the overlay starts from the scope the shared row holds, so
-  // this surface lands wherever the dashboard (or this app, last time) was.
-  useEffect(() => {
-    if (signedIn === undefined || !allStatsOpen) return undefined;
-    let active = true;
-    const service = bridge;
-    const generation = bridgeGeneration.current;
-    void service.preferencesGet().then(
-      (preferences) => {
-        if (active && isCurrent(service, generation)) setBoardScope(preferences.scope === "unassigned" ? "all" : preferences.scope);
-      },
-      // A missing preference row is the default view, not a problem.
-      () => undefined,
-    );
-    return () => { active = false; };
-    // Seeding re-runs only when the overlay opens, not when the scope moves.
+    // `stats` is read only to tell "nothing to show" from "stale"; re-running
+    // on its change would refetch after every success.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bridge, allStatsOpen, signedIn?.user.id]);
+  }, [bridge, signedIn?.user.id, statsTick]);
 
   // The All stats overlay reads on its own account: whichever member is being
   // looked at, over whichever range that overlay is set to. Only while it is
@@ -597,15 +597,17 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const lastBoardKey = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (signedIn === undefined || !allStatsOpen) return undefined;
-    const boardKey = `${boardRange}|${boardScope}|${boardMember?.id ?? ""}`;
-    if (lastBoardKey.current !== boardKey) {
+    const boardKey = `${boardRange}|${boardMember?.id ?? ""}`;
+    // Blanked means who or what changed: there is no last-good reading to
+    // keep, so a failure surfaces immediately rather than after three.
+    const blanked = lastBoardKey.current !== boardKey;
+    if (blanked) {
       lastBoardKey.current = boardKey;
+      boardStatsFailures.current = 0;
       setBoardStats(undefined);
       setBoardStatsError(undefined);
     }
-    // The live-day shortcut reuses the main screen's reading, which is
-    // unscoped - so it only stands while the overlay is unscoped too.
-    if ((boardMember === undefined || boardMember.id === signedIn.user.id) && boardRange === "today" && boardScope === "all") return undefined;
+    if ((boardMember === undefined || boardMember.id === signedIn.user.id) && boardRange === "today") return undefined;
     let active = true;
     const service = bridge;
     const generation = bridgeGeneration.current;
@@ -614,10 +616,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       bounds?.fromAt,
       bounds?.toExclusiveAt,
       boardMember?.id,
-      boardScope === "all" ? undefined : boardScope,
     ).then(
       (result) => {
         if (active && isCurrent(service, generation)) {
+          boardStatsFailures.current = 0;
           setBoardStats(result);
           setBoardStatsError(undefined);
         }
@@ -625,11 +627,16 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       (error: unknown) => {
         if (!active || !isCurrent(service, generation)) return;
         const problem = bridgeError(error);
-        if (problem.kind !== "auth") setBoardStatsError(problem.message);
+        if (problem.kind === "auth") return;
+        boardStatsFailures.current += 1;
+        if (boardStatsFailures.current >= 3 || blanked || boardStats === undefined) setBoardStatsError(problem.message);
       },
     );
     return () => { active = false; };
-  }, [bridge, allStatsOpen, boardRange, boardScope, boardMember?.id, signedIn?.user.id, statsTick]);
+    // `boardStats` is read only to tell "nothing to show" from "stale";
+    // re-running on its change would refetch after every success.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bridge, allStatsOpen, boardRange, boardMember?.id, signedIn?.user.id, statsTick]);
 
   // The board itself follows the overlay's range too: hours beside a name and
   // the breakdown under it must answer for the same days. All time sends no
@@ -643,10 +650,10 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     void service.orgOverview(
       bounds?.fromAt,
       bounds?.toExclusiveAt,
-      boardScope === "all" ? undefined : boardScope,
     ).then(
       (result) => {
         if (active && isCurrent(service, generation)) {
+          overviewFailures.current = 0;
           setOverview(result);
           setOverviewError(undefined);
         }
@@ -654,11 +661,16 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       (error: unknown) => {
         if (!active || !isCurrent(service, generation)) return;
         const problem = bridgeError(error);
-        if (problem.kind !== "auth") setOverviewError(problem.message);
+        if (problem.kind === "auth") return;
+        overviewFailures.current += 1;
+        if (overviewFailures.current >= 3 || overview === undefined) setOverviewError(problem.message);
       },
     );
     return () => { active = false; };
-  }, [bridge, allStatsOpen, boardRange, boardScope, signedIn?.user.id, statsTick]);
+    // `overview` is read only to tell "nothing to show" from "stale";
+    // re-running on its change would refetch after every success.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bridge, allStatsOpen, boardRange, signedIn?.user.id, statsTick]);
 
   // Agent plan quota, read from this machine. Advisory and never on the
   // critical path: a failure leaves the dials unknown rather than saying so.
@@ -1234,20 +1246,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   // Your own "today" in the overlay is the very day the clock above is
   // counting, live stretch and all: it reuses those rows rather than
   // re-deriving them, because two numbers for one day is the whole confusion.
-  const showingLiveDay = viewingSelf && boardRange === "today" && boardScope === "all";
-  // A scope naming a project this account no longer sees renders as "all"
-  // rather than a select stuck on an invisible value.
-  // The unassigned scope is retired from the picker; a stored one reads as
-  // everything rather than as a select stuck on an invisible value.
-  const scopeValue = boardScope === "all" || ready.projects.some((item) => item.id === boardScope)
-    ? boardScope
-    : "all";
-  const changeBoardScope = (scope: string): void => {
-    setBoardScope(scope);
-    // Written through so the dashboard lands here too; a failed write only
-    // costs the sync, never the view.
-    void bridge.preferencesSet({ scope }).catch(() => undefined);
-  };
+  const showingLiveDay = viewingSelf && boardRange === "today";
   const boardLoading = showingLiveDay ? stats === undefined : boardStats === undefined;
   const boardError = showingLiveDay ? statsError : boardStatsError;
   const boardTotalSeconds = showingLiveDay ? todayTotalSeconds : boardStats?.totalDurationSeconds ?? 0;
@@ -1478,15 +1477,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         >
           <div className="panel-head">
             <h2 id="today-title">{overview?.organization.name ?? "All stats"}</h2>
-            {/* The scope shared with the web dashboard: change it here and
-                the dashboard opens on the same project, and vice versa. */}
-            <label className="board-scope">
-              <span className="visually-hidden">Project scope</span>
-              <select value={scopeValue} onChange={(event) => changeBoardScope(event.target.value)}>
-                <option value="all">All projects</option>
-                {ready.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-              </select>
-            </label>
             <div className="range-toggle" role="group" aria-label="Date range">
               {(["today", "week", "all"] as const).map((range) => (
                 <button
