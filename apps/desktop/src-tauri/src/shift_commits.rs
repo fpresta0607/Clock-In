@@ -30,6 +30,12 @@ const STALE_WINDOW_SECS: u64 = 7 * 24 * 60 * 60;
 /// no longer change or need re-upload.
 const REGISTRY_RETENTION_SECS: u64 = 90 * 24 * 60 * 60;
 
+/// A permanently rejected entry is never re-uploaded and never re-verified,
+/// so it only has to outlive the diagnosis of whatever rejected it. Without
+/// its own window it is pending and unsynced by construction, which every
+/// other rule reads as "keep forever".
+const REJECTED_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
+
 fn window_key(source: &AgentSource, external_session_id: &str) -> String {
     format!("{}|{external_session_id}", source.as_str())
 }
@@ -39,6 +45,11 @@ struct ShiftWindow {
     started_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cwd: Option<String>,
+    /// What `HEAD` pointed at when the shift opened; the capture range starts
+    /// there. Absent on windows opened before this was recorded, and on a cwd
+    /// that is not a repo - both record nothing rather than guessing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    start_head: Option<String>,
     #[serde(default)]
     captured: bool,
 }
@@ -110,9 +121,16 @@ fn reap_stale_windows(windows: &mut HashMap<String, ShiftWindow>, now: u64) {
 }
 
 /// Drops registry rows that can no longer change or need re-upload: decided
-/// and already synced, and old enough that nobody is still looking at them.
+/// and already synced, or permanently rejected, once they are old enough that
+/// nobody is still looking at them.
 fn prune_decided_and_synced(registry: &mut Vec<CommitEntry>, now: u64) {
     registry.retain(|entry| {
+        if entry.rejected {
+            let Some(authored_at) = parse_iso8601(&entry.authored_at) else {
+                return true;
+            };
+            return now.saturating_sub(authored_at) < REJECTED_RETENTION_SECS;
+        }
         if entry.verification == "pending" || !entry.synced {
             return true;
         }
@@ -128,6 +146,7 @@ struct PendingCapture {
     source: AgentSource,
     external_session_id: String,
     cwd: String,
+    start_head: String,
     started_at: u64,
     ended_at: u64,
 }
@@ -163,6 +182,25 @@ pub async fn capture_from_spool(
     }
 
     let now = unix_now();
+
+    // Resolving each opening shift's `HEAD` before the lock: it is the range
+    // the capture is bounded to, and it has to be read while the shift is
+    // opening rather than reconstructed from author dates when it closes.
+    let mut start_heads: HashMap<String, Option<String>> = HashMap::new();
+    for event in &pending.events {
+        if !matches!(event.event, AgentEventKind::Started) {
+            continue;
+        }
+        let Some(cwd) = event.cwd.clone() else {
+            continue;
+        };
+        if start_heads.contains_key(&cwd) {
+            continue;
+        }
+        let head = git_evidence::head_sha(Path::new(&cwd)).await;
+        start_heads.insert(cwd, head);
+    }
+
     let mut to_capture: Vec<PendingCapture> = Vec::new();
     let opened = spool::with_lock(shift_commits_path, || {
         let mut windows = read_windows(shift_windows_path);
@@ -173,9 +211,16 @@ pub async fn capture_from_spool(
             match event.event {
                 AgentEventKind::Started => {
                     if let Some(started_at) = parse_iso8601(&event.occurred_at) {
+                        let start_head = event
+                            .cwd
+                            .as_ref()
+                            .and_then(|cwd| start_heads.get(cwd))
+                            .cloned()
+                            .flatten();
                         windows.entry(key).or_insert_with(|| ShiftWindow {
                             started_at,
                             cwd: event.cwd.clone(),
+                            start_head,
                             captured: false,
                         });
                     }
@@ -184,19 +229,27 @@ pub async fn capture_from_spool(
                     let Some(ended_at) = parse_iso8601(&event.occurred_at) else {
                         continue;
                     };
-                    if let Some(window) = windows.get(&key) {
-                        if !window.captured {
-                            if let Some(cwd) = window.cwd.clone() {
-                                to_capture.push(PendingCapture {
-                                    key: key.clone(),
-                                    source: event.source.clone(),
-                                    external_session_id: event.external_session_id.clone(),
-                                    cwd,
-                                    started_at: window.started_at,
-                                    ended_at,
-                                });
-                            }
-                        }
+                    let Some(window) = windows.get_mut(&key) else {
+                        continue;
+                    };
+                    if window.captured {
+                        continue;
+                    }
+                    match (window.cwd.clone(), window.start_head.clone()) {
+                        (Some(cwd), Some(start_head)) => to_capture.push(PendingCapture {
+                            key: key.clone(),
+                            source: event.source.clone(),
+                            external_session_id: event.external_session_id.clone(),
+                            cwd,
+                            start_head,
+                            started_at: window.started_at,
+                            ended_at,
+                        }),
+                        // No working directory, or a shift that opened before
+                        // its starting commit was recorded: there is nothing
+                        // to look at, so the window closes captured instead of
+                        // being re-examined every pass until it goes stale.
+                        _ => window.captured = true,
                     }
                 }
                 AgentEventKind::Heartbeat => {}
@@ -218,6 +271,7 @@ pub async fn capture_from_spool(
             Some(location) => {
                 let commits = git_evidence::commits_in_window(
                     &location.root,
+                    &capture.start_head,
                     capture.started_at,
                     capture.ended_at,
                 )
@@ -439,15 +493,17 @@ mod tests {
         assert!(status.success(), "git {args:?} failed in {dir:?}");
     }
 
-    async fn init_repo_with_commit(dir: &Path, unix_time: u64) {
+    async fn init_repo(dir: &Path) {
         git(dir, &["init", "--quiet"]).await;
         git(dir, &["config", "user.email", "shift@example.test"]).await;
         git(dir, &["config", "user.name", "Shift Test"]).await;
         git(dir, &["config", "commit.gpgsign", "false"]).await;
-        std::fs::write(dir.join("a.txt"), "hello").expect("scratch file writes");
+    }
+
+    async fn commit_in_repo(dir: &Path, message: &str, unix_time: u64) {
         let date = iso8601(unix_time);
         let status = tokio::process::Command::new("git")
-            .args(["commit", "--quiet", "--allow-empty", "-a", "-m", "did work"])
+            .args(["commit", "--quiet", "--allow-empty", "-m", message])
             .current_dir(dir)
             .env("GIT_AUTHOR_DATE", &date)
             .env("GIT_COMMITTER_DATE", &date)
@@ -506,7 +562,11 @@ mod tests {
         let dir = temp_dir("capture");
         let repo = dir.join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir creates");
-        init_repo_with_commit(&repo, 1_700_000_500).await;
+        init_repo(&repo).await;
+        // A live shift, not a historical one: a window older than the stale
+        // bound is reaped rather than closed.
+        let started_at = unix_now() - 600;
+        commit_in_repo(&repo, "work from before the shift", started_at - 60).await;
 
         let agent_path = dir.join("agent-spool.jsonl");
         let windows_path = dir.join("shift-windows.json");
@@ -514,19 +574,33 @@ mod tests {
         let cwd = repo.to_string_lossy().into_owned();
         spool::append(
             &agent_path,
-            &event(AgentEventKind::Started, &iso8601(1_700_000_000), Some(&cwd)),
+            &event(AgentEventKind::Started, &iso8601(started_at), Some(&cwd)),
         )
         .expect("append succeeds");
+
+        // The shift opens in one pass and closes in a later one, which is what
+        // gives the window a starting commit to bound the capture with.
+        capture_from_spool(&agent_path, &windows_path, &commits_path).await;
+        commit_in_repo(&repo, "did work", started_at + 60).await;
         spool::append(
             &agent_path,
-            &event(AgentEventKind::Ended, &iso8601(1_700_001_000), Some(&cwd)),
+            &event(
+                AgentEventKind::Ended,
+                &iso8601(started_at + 300),
+                Some(&cwd),
+            ),
         )
         .expect("append succeeds");
 
         capture_from_spool(&agent_path, &windows_path, &commits_path).await;
         let first_pass = read_registry(&commits_path);
-        assert_eq!(first_pass.len(), 1);
-        assert_eq!(first_pass[0].subject, "did work");
+        assert_eq!(
+            first_pass
+                .iter()
+                .map(|entry| entry.subject.as_str())
+                .collect::<Vec<_>>(),
+            ["did work"],
+        );
 
         // The uploader has not truncated the spool yet, so a second pass
         // (retry, restart) replays the identical lines.
@@ -534,6 +608,39 @@ mod tests {
         let second_pass = read_registry(&commits_path);
         assert_eq!(second_pass, first_pass);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A shift that opened before its starting commit was ever recorded has
+    /// nothing to bound a capture with, so it closes rather than being
+    /// re-examined on every pass until it goes stale seven days later.
+    #[tokio::test]
+    async fn a_shift_with_no_starting_commit_closes_without_capturing() {
+        let dir = temp_dir("no-start-head");
+        let agent_path = dir.join("agent-spool.jsonl");
+        let windows_path = dir.join("shift-windows.json");
+        let commits_path = dir.join("shift-commits.json");
+        spool::append(
+            &agent_path,
+            &event(AgentEventKind::Started, &iso8601(1_700_000_000), None),
+        )
+        .expect("append succeeds");
+        spool::append(
+            &agent_path,
+            &event(AgentEventKind::Ended, &iso8601(1_700_001_000), None),
+        )
+        .expect("append succeeds");
+
+        capture_from_spool(&agent_path, &windows_path, &commits_path).await;
+
+        assert!(read_registry(&commits_path).is_empty());
+        assert!(
+            read_windows(&windows_path)
+                .values()
+                .next()
+                .expect("the window exists")
+                .captured
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -685,6 +792,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A rejected entry is pending and unsynced by construction, so without a
+    /// window of its own every other retention rule reads it as "keep
+    /// forever" and the registry grows without a ceiling.
+    #[test]
+    fn a_rejected_entry_is_pruned_once_its_retention_window_passes() {
+        let now = 1_800_000_000;
+        let mut fresh = pending_entry("fresh", "C:/repo".to_string(), "a".repeat(40));
+        fresh.rejected = true;
+        fresh.authored_at = iso8601(now - 60);
+        let mut stale = pending_entry("stale", "C:/repo".to_string(), "b".repeat(40));
+        stale.rejected = true;
+        stale.authored_at = iso8601(now - REJECTED_RETENTION_SECS - 60);
+        let mut registry = vec![
+            fresh,
+            stale,
+            pending_entry("pending", "C:/repo".to_string(), "c".repeat(40)),
+        ];
+
+        prune_decided_and_synced(&mut registry, now);
+
+        assert_eq!(
+            registry
+                .iter()
+                .map(|entry| entry.client_id.as_str())
+                .collect::<Vec<_>>(),
+            ["fresh", "pending"],
+        );
+    }
+
     fn pending_entry(client_id: &str, repo_root: String, sha: String) -> CommitEntry {
         CommitEntry {
             client_id: client_id.to_string(),
@@ -724,7 +860,8 @@ mod tests {
         let dir = temp_dir("flip-once");
         let repo = dir.join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir creates");
-        init_repo_with_commit(&repo, 1_700_000_000).await;
+        init_repo(&repo).await;
+        commit_in_repo(&repo, "did work", 1_700_000_000).await;
 
         let commits_path = dir.join("shift-commits.json");
         let entry = pending_entry("c1", repo.to_string_lossy().into_owned(), "f".repeat(40));
