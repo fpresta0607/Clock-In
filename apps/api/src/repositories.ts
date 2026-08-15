@@ -273,7 +273,7 @@ export interface AgentSessionRecord {
   model: string | null;
   externalSessionId: string;
   projectId: string | null;
-  cwd: string;
+  cwd: string | null;
   /** The matched url-rule mapping id for browser spans; null for agent events. */
   ruleId: string | null;
   status: "running" | "ended";
@@ -289,7 +289,7 @@ export interface UpsertStartedAgentSession {
   source: AgentSource;
   model: string | null;
   externalSessionId: string;
-  cwd: string;
+  cwd: string | null;
   ruleId: string | null;
   projectId: string | null;
   linkedSessionId: string | null;
@@ -303,7 +303,7 @@ export interface InsertEndedAgentSession {
   source: AgentSource;
   model: string | null;
   externalSessionId: string;
-  cwd: string;
+  cwd: string | null;
   ruleId: string | null;
   projectId: string | null;
   occurredAt: Date;

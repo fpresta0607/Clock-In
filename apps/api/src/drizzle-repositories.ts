@@ -1048,7 +1048,7 @@ function asAgentSessionRecord(row: typeof agentSessions.$inferSelect): AgentSess
     model: row.model,
     externalSessionId: row.externalSessionId,
     projectId: row.projectId,
-    cwd: row.cwd ?? "",
+    cwd: row.cwd,
     ruleId: row.ruleId,
     status: row.status,
     startedAt: row.startedAt,

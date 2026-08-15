@@ -23,7 +23,7 @@ export interface AgentSessionEventInput {
   externalSessionId: string;
   event: "started" | "ended" | "heartbeat";
   occurredAt: Date;
-  cwd: string;
+  cwd: string | null;
   /** The matched url-rule mapping id for browser spans; null for agent events. */
   ruleId: string | null;
 }
@@ -87,7 +87,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
       const resolveProject = (event: AgentSessionEventInput, mappings: PathMappingCandidate[]): string | null =>
         event.source === "browser"
           ? (event.ruleId === null ? null : resolveProjectForRule(event.ruleId, mappings))
-          : resolveProjectForCwd(event.cwd, mappings);
+          : resolveProjectForCwd(event.cwd ?? "", mappings);
       for (const event of events) {
         const occurredAt = event.occurredAt.getTime();
         if (!Number.isFinite(occurredAt)) {

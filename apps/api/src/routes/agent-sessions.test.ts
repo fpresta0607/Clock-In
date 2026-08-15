@@ -295,7 +295,7 @@ describe("agent-session routes", () => {
       source: "browser",
       ruleId: "01c7e513-b094-4d4c-ae55-21790ae019a4",
       projectId: ids.project,
-      cwd: "",
+      cwd: null,
     });
 
     // A browser span for a deleted rule resolves to no project, not a guess.
