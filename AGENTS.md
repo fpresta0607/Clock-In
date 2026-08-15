@@ -93,6 +93,13 @@ timer once said RECORDING above a card reading "Turn on recording in settings".
   the uploader could see, and every agent event vanished silently. The browser host
   and the app share the same rule for `spool::browser_dir()`, so the two cannot
   drift apart the same way.
+- The desktop force-installs the browser extension via the HKCU
+  `ExtensionInstallForcelist` policy (`browser::sync_extension_policies`), but only
+  when the store ids are compiled in (`CLOCK_IN_CHROME_EXTENSION_ID` /
+  `CLOCK_IN_EDGE_EXTENSION_ID` repo vars), so nothing happens until the extension is
+  published and the vars are set. `MonitorSettings.browser_auto_install` (default on)
+  is the opt-out: removing the policy entry is what uninstalls the extension. Firefox
+  has no force-install path until an AMO listing exists and keeps the manual flow.
 - The site's **Download for Windows** button is a hard-coded
   `releases/download/unsigned-latest/<fixed asset name>` URL, kept true by the `publish`
   job in `unsigned-test-installers.yml`. That job runs on `workflow_dispatch` only, so a

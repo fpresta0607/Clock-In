@@ -125,6 +125,7 @@ describe("defaultBridge", () => {
       enabled: true,
       awayThresholdMinutes: 10,
       agentOverrideEnabled: true,
+      browserAutoInstall: true,
       deviceId: "00000000-0000-4000-8000-000000000300",
     };
     invoke.mockResolvedValueOnce(settings);

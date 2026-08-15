@@ -184,6 +184,7 @@ export type MonitorSettings = {
   enabled: boolean;
   awayThresholdMinutes: number;
   agentOverrideEnabled: boolean;
+  browserAutoInstall: boolean;
   deviceId: string;
 };
 
@@ -669,6 +670,7 @@ export const decodeMonitorSettings = (value: unknown): MonitorSettings => {
     enabled: boolean(candidate.enabled),
     awayThresholdMinutes: nonnegativeInteger(candidate.awayThresholdMinutes),
     agentOverrideEnabled: boolean(candidate.agentOverrideEnabled),
+    browserAutoInstall: boolean(candidate.browserAutoInstall),
     deviceId: string(candidate.deviceId),
   };
 };

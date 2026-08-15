@@ -37,6 +37,7 @@ const settings = {
   enabled: true,
   awayThresholdMinutes: 10,
   agentOverrideEnabled: true,
+  browserAutoInstall: true,
   deviceId: "00000000-0000-4000-8000-000000000300",
 };
 
@@ -521,6 +522,9 @@ describe("settings", () => {
 
     await person.click(within(dialog).getByLabelText("Keep recording while an AI tool is working"));
     await waitFor(() => expect(bridge.settingsUpdate).toHaveBeenCalledWith({ agentOverrideEnabled: false }));
+
+    await person.click(within(dialog).getByLabelText("Add the Clock-In extension to my browsers automatically"));
+    await waitFor(() => expect(bridge.settingsUpdate).toHaveBeenCalledWith({ browserAutoInstall: false }));
 
     const quiet = within(dialog).getByLabelText("End a stretch after this many quiet minutes");
     await person.clear(quiet);
