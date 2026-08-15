@@ -258,6 +258,36 @@ export type MeStatsProject = {
   sessionCount: number;
 };
 
+/// A roster agent's standing: everything starts anonymous, a member naming
+/// it registers it, and retired is where merge losers and decommissioned
+/// workers go.
+export type AgentRosterStatus = "anonymous" | "registered" | "retired";
+
+export type AgentsReportRow = {
+  agent: {
+    id: string;
+    name: string;
+    source: string;
+    status: AgentRosterStatus;
+    owner: { id: string; name: string };
+    project: { id: string; name: string } | null;
+  };
+  agentSeconds: number;
+  shiftCount: number;
+  commitsRecorded: number;
+  commitsPending: number;
+  commitsMerged: number;
+  commitsReverted: number;
+  commitsOrphaned: number;
+  /// merged / decided; null while nothing has been decided yet.
+  heldRate: number | null;
+};
+
+export type AgentsReport = {
+  headcount: { total: number; anonymous: number; registered: number; retired: number };
+  rows: readonly AgentsReportRow[];
+};
+
 export type ProjectCreateInput = {
   name: string;
 };
@@ -292,6 +322,9 @@ export interface TimerBridge {
   /// `userId` names a teammate, which is how the leaderboard opens one
   /// member's breakdown; absent means the caller.
   meStats(fromAt?: string, toExclusiveAt?: string, userId?: string, scope?: string): Promise<MeStats>;
+  /// The pay-run report: every roster agent's hours, shifts, and held share
+  /// for a range. Both bounds absent asks for all time.
+  agentsReport(fromAt?: string, toExclusiveAt?: string, scope?: string): Promise<AgentsReport>;
   projectCreate(input: ProjectCreateInput): Promise<TimerProject>;
   projectUpdate(id: string, input: { name?: string; isArchived?: boolean }): Promise<TimerProject>;
   projectUsage(id: string): Promise<ProjectUsage>;
@@ -354,6 +387,19 @@ const nonnegativeInteger = (value: unknown): number => {
 const nonnegativeIntegerOrNull = (value: unknown): number | null => {
   if (value === undefined || value === null) return null;
   return nonnegativeInteger(value);
+};
+
+/// A merged/decided ratio in [0, 1], or null while nothing has been decided.
+const unitRateOrNull = (value: unknown): number | null => {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) invalidResponse();
+  return value as number;
+};
+
+const agentRosterStatus = (value: unknown): AgentRosterStatus => {
+  const result = string(value);
+  if (result !== "anonymous" && result !== "registered" && result !== "retired") invalidResponse();
+  return result as AgentRosterStatus;
 };
 
 const decodeUser = (value: unknown): TimerUser => {
@@ -706,6 +752,47 @@ export const decodeMeStats = (value: unknown): MeStats => {
   };
 };
 
+const decodeAgentsReportRow = (value: unknown): AgentsReportRow => {
+  const candidate = record(value);
+  const agent = record(candidate.agent);
+  const owner = record(agent.owner);
+  const project = agent.project === null || agent.project === undefined ? null : record(agent.project);
+  return {
+    agent: {
+      id: uuid(agent.id),
+      name: string(agent.name),
+      source: string(agent.source),
+      status: agentRosterStatus(agent.status),
+      owner: { id: uuid(owner.id), name: string(owner.name) },
+      project: project === null ? null : { id: uuid(project.id), name: string(project.name) },
+    },
+    agentSeconds: nonnegativeInteger(candidate.agentSeconds),
+    shiftCount: nonnegativeInteger(candidate.shiftCount),
+    commitsRecorded: nonnegativeInteger(candidate.commitsRecorded),
+    commitsPending: nonnegativeInteger(candidate.commitsPending),
+    commitsMerged: nonnegativeInteger(candidate.commitsMerged),
+    commitsReverted: nonnegativeInteger(candidate.commitsReverted),
+    commitsOrphaned: nonnegativeInteger(candidate.commitsOrphaned),
+    heldRate: unitRateOrNull(candidate.heldRate),
+  };
+};
+
+export const decodeAgentsReport = (value: unknown): AgentsReport => {
+  const candidate = record(value);
+  const headcount = record(candidate.headcount);
+  const rows = candidate.rows;
+  if (!Array.isArray(rows)) invalidResponse();
+  return {
+    headcount: {
+      total: nonnegativeInteger(headcount.total),
+      anonymous: nonnegativeInteger(headcount.anonymous),
+      registered: nonnegativeInteger(headcount.registered),
+      retired: nonnegativeInteger(headcount.retired),
+    },
+    rows: (rows as unknown[]).map(decodeAgentsReportRow),
+  };
+};
+
 export const decodeViewPreferences = (value: unknown): ViewPreferences => {
   const candidate = record(value);
   return { scope: string(candidate.scope), range: string(candidate.range) };
@@ -754,6 +841,7 @@ export const defaultBridge: TimerBridge = {
   settingsGet: () => invokeDecoded("settings_get", decodeMonitorSettings),
   settingsUpdate: (input) => invokeDecoded("settings_update", decodeMonitorSettings, { input }),
   meStats: (fromAt, toExclusiveAt, userId, scope) => invokeDecoded("me_stats", decodeMeStats, { fromAt, toExclusiveAt, userId, scope }),
+  agentsReport: (fromAt, toExclusiveAt, scope) => invokeDecoded("agents_report", decodeAgentsReport, { fromAt, toExclusiveAt, scope }),
   projectCreate: (input) => invokeDecoded("project_create", decodeProject, { input }),
   projectUpdate: (id, input) => invokeDecoded("project_update", decodeProject, { id, input }),
   projectUsage: (id) => invokeDecoded("project_usage", decodeProjectUsage, { id }),

@@ -6,6 +6,7 @@ import { sourceLabel } from "./agent-sources.js";
 import {
   bridgeError,
   defaultBridge,
+  type AgentsReport,
   type BrowserHealth,
   type MeStats,
   type MeStatsApp,
@@ -413,6 +414,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [boardMember, setBoardMember] = useState<{ id: string; name: string } | undefined>();
   const [boardStats, setBoardStats] = useState<MeStats | undefined>();
   const [boardStatsError, setBoardStatsError] = useState<string | undefined>();
+  /// Humans is the existing board + breakdown; Agents is the read-only roster,
+  /// fed by the pay-run report over the overlay's own range.
+  const [overlayTab, setOverlayTab] = useState<"humans" | "agents">("humans");
+  const [agentsReport, setAgentsReport] = useState<AgentsReport | undefined>();
+  const [agentsReportError, setAgentsReportError] = useState<string | undefined>();
   const [settings, setSettings] = useState<MonitorSettings | undefined>();
   const [settingsError, setSettingsError] = useState<string | undefined>();
   const [quietDraft, setQuietDraft] = useState("");
@@ -443,6 +449,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const statsFailures = useRef(0);
   const overviewFailures = useRef(0);
   const boardStatsFailures = useRef(0);
+  const agentsReportFailures = useRef(0);
 
   if (latestBridge.current !== bridge) bridgeGeneration.current += 1;
   latestBridge.current = bridge;
@@ -463,9 +470,12 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     setBoardMember(undefined);
     setBoardStats(undefined);
     setBoardStatsError(undefined);
+    setAgentsReport(undefined);
+    setAgentsReportError(undefined);
     statsFailures.current = 0;
     overviewFailures.current = 0;
     boardStatsFailures.current = 0;
+    agentsReportFailures.current = 0;
     setSettings(undefined);
     setSettingsError(undefined);
     setHookSnippets({});
@@ -671,6 +681,39 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     // re-running on its change would refetch after every success.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bridge, allStatsOpen, boardRange, signedIn?.user.id, statsTick]);
+
+  // The Agents tab's roster, over the overlay's own range; loads only while
+  // that tab is open, since nobody is served by fetching it in the background.
+  useEffect(() => {
+    if (signedIn === undefined || !allStatsOpen || overlayTab !== "agents") return undefined;
+    let active = true;
+    const service = bridge;
+    const generation = bridgeGeneration.current;
+    const bounds = rangeBounds(boardRange);
+    void service.agentsReport(
+      bounds?.fromAt,
+      bounds?.toExclusiveAt,
+    ).then(
+      (result) => {
+        if (active && isCurrent(service, generation)) {
+          agentsReportFailures.current = 0;
+          setAgentsReport(result);
+          setAgentsReportError(undefined);
+        }
+      },
+      (error: unknown) => {
+        if (!active || !isCurrent(service, generation)) return;
+        const problem = bridgeError(error);
+        if (problem.kind === "auth") return;
+        agentsReportFailures.current += 1;
+        if (agentsReportFailures.current >= 3 || agentsReport === undefined) setAgentsReportError(problem.message);
+      },
+    );
+    return () => { active = false; };
+    // `agentsReport` is read only to tell "nothing to show" from "stale";
+    // re-running on its change would refetch after every success.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bridge, allStatsOpen, overlayTab, boardRange, signedIn?.user.id, statsTick]);
 
   // Agent plan quota, read from this machine. Advisory and never on the
   // critical path: a failure leaves the dials unknown rather than saying so.
@@ -1476,7 +1519,23 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
           onClick={(event) => event.stopPropagation()}
         >
           <div className="panel-head">
-            <h2 id="today-title">{overview?.organization.name ?? "All stats"}</h2>
+            <h2 id="today-title" className="visually-hidden">All stats</h2>
+            <div className="range-toggle" role="group" aria-label="Humans or agents">
+              <button
+                type="button"
+                className={overlayTab === "humans" ? "is-active" : undefined}
+                onClick={() => setOverlayTab("humans")}
+              >
+                Humans
+              </button>
+              <button
+                type="button"
+                className={overlayTab === "agents" ? "is-active" : undefined}
+                onClick={() => setOverlayTab("agents")}
+              >
+                Agents
+              </button>
+            </div>
             <div className="range-toggle" role="group" aria-label="Date range">
               {(["today", "week", "all"] as const).map((range) => (
                 <button
@@ -1492,45 +1551,77 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             <button className="outline-button modal-close" type="button" aria-label="Close all stats" onClick={() => setAllStatsOpen(false)}>✕</button>
           </div>
 
-          {/* The board is the selector, not just a scoreboard: whoever is
-              picked here is whose breakdown the panel underneath shows. It
-              opens on you, and every member's is open to the whole team. */}
-          {overview && (
+          {overlayTab === "agents" ? (
             <>
-              {overviewError && <p className="form-error" role="alert">{overviewError}</p>}
-              {overview.entries.length === 0 ? (
-                <p className="subtle">No recorded time yet.</p>
+              {agentsReportError && <p className="form-error" role="alert">{agentsReportError}</p>}
+              {agentsReport === undefined ? (
+                !agentsReportError && <p className="subtle">Loading…</p>
+              ) : agentsReport.rows.length === 0 ? (
+                <p className="subtle">No agents on the roster yet. Coding-agent shifts mint them automatically.</p>
               ) : (
-                <ol className="board-list" data-testid="board-list">
-                  {overview.entries.map((entry) => (
-                    <li key={entry.user.id} className={entry.user.id === viewedMember.id ? "is-selected" : undefined}>
-                      <button
-                        type="button"
-                        className="board-choice"
-                        aria-pressed={entry.user.id === viewedMember.id}
-                        onClick={() => setBoardMember({ id: entry.user.id, name: entry.user.name })}
-                      >
-                        <span className="board-rank">{entry.rank}</span>
+                <ol className="board-list" data-testid="agent-roster-list">
+                  {agentsReport.rows.map((row) => (
+                    <li key={row.agent.id} className={row.agent.status === "anonymous" ? "is-anonymous" : undefined}>
+                      <div className="board-choice">
+                        <span className="board-rank" aria-hidden="true" />
                         <span className="board-name">
-                          {entry.user.name}
-                          {entry.user.id === ready.user.id && <span className="you-tag"> you</span>}
+                          {row.agent.name}
+                          {row.agent.status === "retired" && <span className="you-tag"> retired</span>}
                         </span>
                         <span className="board-times">
-                          <span className="board-hours">{formatHuman(entry.activeSeconds)}</span>
+                          <span className="board-hours">{formatHuman(row.agentSeconds)}</span>
                           <span className="board-agent">
-                            Agent {formatHuman(entry.agentSeconds)}
-                            {leverage(entry) !== null && ` · ${leverage(entry)}×`}
+                            {sourceLabel(row.agent.source)} · {row.shiftCount} shift{row.shiftCount === 1 ? "" : "s"}
+                            {row.heldRate !== null && ` · ${Math.round(row.heldRate * 100)}% held`}
                           </span>
                         </span>
-                      </button>
+                      </div>
                     </li>
                   ))}
                 </ol>
               )}
             </>
-          )}
+          ) : (
+            <>
+              {/* The board is the selector, not just a scoreboard: whoever is
+                  picked here is whose breakdown the panel underneath shows. It
+                  opens on you, and every member's is open to the whole team. */}
+              {overview && (
+                <>
+                  {overviewError && <p className="form-error" role="alert">{overviewError}</p>}
+                  {overview.entries.length === 0 ? (
+                    <p className="subtle">No recorded time yet.</p>
+                  ) : (
+                    <ol className="board-list" data-testid="board-list">
+                      {overview.entries.map((entry) => (
+                        <li key={entry.user.id} className={entry.user.id === viewedMember.id ? "is-selected" : undefined}>
+                          <button
+                            type="button"
+                            className="board-choice"
+                            aria-pressed={entry.user.id === viewedMember.id}
+                            onClick={() => setBoardMember({ id: entry.user.id, name: entry.user.name })}
+                          >
+                            <span className="board-rank">{entry.rank}</span>
+                            <span className="board-name">
+                              {entry.user.name}
+                              {entry.user.id === ready.user.id && <span className="you-tag"> you</span>}
+                            </span>
+                            <span className="board-times">
+                              <span className="board-hours">{formatHuman(entry.activeSeconds)}</span>
+                              <span className="board-agent">
+                                Agent {formatHuman(entry.agentSeconds)}
+                                {leverage(entry) !== null && ` · ${leverage(entry)}×`}
+                              </span>
+                            </span>
+                          </button>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </>
+              )}
 
-          <section className="member-stats" aria-labelledby="member-stats-title" data-testid="member-stats">
+              <section className="member-stats" aria-labelledby="member-stats-title" data-testid="member-stats">
             <div className="member-stats-head">
               <h3 id="member-stats-title">{viewedMember.name} · {RANGE_LABEL[boardRange]}</h3>
               {!viewingSelf && (
@@ -1589,6 +1680,8 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
               </>
             )}
           </section>
+            </>
+          )}
         </section>
         </div>
       )}

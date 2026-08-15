@@ -35,8 +35,8 @@ use tauri::{
 use tokio::sync::Mutex;
 
 use api::{
-    ApiClient, ApiResult, BridgeError, ErrorKind, LeaderboardEntry, MeStats, Organization,
-    ProjectUsage, TimerProject, TimerUser, ViewPreferences,
+    AgentsReport, ApiClient, ApiResult, BridgeError, ErrorKind, LeaderboardEntry, MeStats,
+    Organization, ProjectUsage, TimerProject, TimerUser, ViewPreferences,
 };
 use monitor::{MonitorSettings, MonitorStatus, SettingsPatch};
 use recovery::RecoveryState;
@@ -520,6 +520,27 @@ async fn me_stats(
         .await
 }
 
+/// The pay-run report: every roster agent's hours, shifts, and held share for
+/// a range. Bounds arrive together or not at all; both absent asks for all time.
+#[tauri::command]
+async fn agents_report(
+    state: State<'_, AppState>,
+    from_at: Option<String>,
+    to_exclusive_at: Option<String>,
+    scope: Option<String>,
+) -> ApiResult<AgentsReport> {
+    let access_token = state.access_token().await?;
+    state
+        .client
+        .agents_report(
+            &access_token,
+            from_at.as_deref(),
+            to_exclusive_at.as_deref(),
+            scope.as_deref(),
+        )
+        .await
+}
+
 /// How much of each coding agent's plan is left, read from what those CLIs
 /// already store on this machine. Answers from cache immediately; a stale
 /// reading refreshes on a background thread rather than holding the UI.
@@ -908,6 +929,7 @@ pub fn run() {
             settings_get,
             settings_update,
             me_stats,
+            agents_report,
             app_icons,
             project_create,
             project_update,

@@ -352,6 +352,7 @@ select:disabled { opacity: .55; }
 }
 .board-choice:hover { background: rgba(163, 179, 194, 0.1); }
 .board-list li.is-selected .board-choice { background: rgba(0, 229, 155, .1); }
+.board-list li.is-anonymous .board-choice { opacity: .55; }
 .board-rank { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .board-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .you-tag { color: var(--text-secondary); font-size: .74rem; text-transform: uppercase; letter-spacing: .08em; }
