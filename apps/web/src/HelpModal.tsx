@@ -10,12 +10,13 @@ const KEPT = [
   "Whether you were using your computer, away from it, or had the screen locked.",
   "The name of the app in front of you, like “chrome” or “code”. The name only.",
   "When an AI coding tool starts and finishes, and which folder it worked in.",
+  "For AI coding shifts in a git repo: the branch name and the titles of commits made during the shift, checked later on this machine, read-only.",
 ];
 
 const NEVER = [
   "What you type. Not one keystroke.",
   "Pictures of your screen.",
-  "The titles of your windows, files, or documents.",
+  "The titles of your windows, files, or documents. Commit titles are the one exception, listed above.",
   "Web addresses, or the pages you visit.",
   "Anything inside your files, messages, or email.",
   "Anything you type into a form, chat, or document.",

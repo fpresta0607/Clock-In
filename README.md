@@ -190,16 +190,16 @@ reads differently from one that something did. `GET /reports`,
 `/reports/leaderboard`, `/me/stats`, and the CSV export all carry both figures;
 the `attribution = 'default'` bucket is the unattributed one.
 
-### The project scope both surfaces share
+### The project scope
 
-The dashboard's project scope — **All Projects** or one project — filters
+The web dashboard's project scope — **All Projects** or one project — filters
 the leaderboard, member stats, the session list, and the CSV export at the query layer. The
-**Unassigned** scope is retired from both pickers, so a stored one reads as **All Projects**.
-The scope and the time range are stored per member in `user_view_preferences` and read/written
-through `GET/PUT /me/preferences`; the web control bar and the desktop All stats overlay both
-seed from and write through it, so opening one surface lands on the other's scope. Only the
-scope syncs: each surface keeps its own ranges, because the desktop's calendar "this week"
-and the web's rolling "7d" are different questions.
+**Unassigned** scope is retired from the picker, so a stored one reads as **All Projects**.
+The scope and the time range live per member in `user_view_preferences`, read and written
+through `GET/PUT /me/preferences` by the web dashboard alone; the desktop All stats overlay
+is always unscoped, and the main screen's per-project stat list carries the project detail a
+picker once did. Each surface keeps its own time range, because the desktop's calendar "this
+week" and the web's rolling "7d" are different questions.
 
 **Legacy rows are untouched.** Every session recorded by the old manual timer
 keeps its data and is marked `manual`. The `POST /sessions`, `/sessions/:id/stop`,
@@ -298,9 +298,10 @@ Not by policy, but because the code never reads it:
 
 What *is* collected: coarse activity segments with timestamps, the foreground process name, agent
 session boundaries with their working directory, browser spans naming which URL rule matched and
-for how long, and the start and end of each session the monitor observed. A working directory can
-contain a user name, so it is shown only to the owning user and org admins, and is redacted from
-logs.
+for how long, the start and end of each session the monitor observed, and — for an AI coding shift
+in a git repo — the branch name and the commit titles captured once the shift ends (see *Roster:
+agents as identities*). A working directory can contain a user name, so it is shown only to the
+owning user and org admins, and is redacted from logs.
 
 ## Repository layout
 
@@ -401,9 +402,14 @@ organization are derived from verified claims, never from the request body.
 | `POST` | `/activity/segments` | batch upload of activity segments |
 | `POST` | `/agent-sessions` | batch upload of agent lifecycle events |
 | `GET` `POST` `PATCH` `DELETE` | `/path-mappings`, `/path-mappings/:id` | map a path prefix to a project |
-| `GET` | `/reports`, `/reports/leaderboard`, `/reports/export.csv` | organization reporting |
-| `GET` | `/me/stats` | the caller's totals per project and per app; an optional `?userId=` opens a teammate's |
-| `GET` `PUT` | `/me/preferences` | the dashboard scope+range view state shared with the desktop app |
+| `GET` | `/reports`, `/reports/leaderboard`, `/reports/agents`, `/reports/export.csv` | organization reporting |
+| `GET` | `/me/stats` | the caller's totals per project, per app, and per agent; an optional `?userId=` opens a teammate's |
+| `GET` `PUT` | `/me/preferences` | the web dashboard's scope+range view state |
+| `GET` | `/agents` | the org's roster of agent identities |
+| `PATCH` | `/agents/:id` | rename, register, retire, or re-own an agent |
+| `POST` | `/agents/:id/merge` | merge one agent into another; admin-only |
+| `GET` | `/agents/:id/paystub` | one agent's shifts and captured commits |
+| `POST` | `/shift-commits` | batch upload of commits captured during a shift |
 
 **Invariants the server enforces**, not the client: a session must end after it starts and
 not in the future; it must start inside the 7-day freshness window; its idle seconds cannot
