@@ -179,6 +179,64 @@ struct LeaderboardResponse {
     entries: Vec<LeaderboardEntry>,
 }
 
+/// A roster agent's standing: everything starts anonymous, a member naming
+/// it registers it, and retired is where merge losers and decommissioned
+/// workers go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
+    Anonymous,
+    Registered,
+    Retired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentsReportAgent {
+    pub id: String,
+    pub name: String,
+    pub source: AgentSource,
+    pub status: AgentStatus,
+    pub owner: LeaderboardMember,
+    #[serde(default)]
+    pub project: Option<MeStatsProjectRef>,
+}
+
+/// One roster agent's row in the pay-run report: hours, shifts, and how its
+/// commits held up. Agents with no activity in range still get a row, at
+/// zero and a null held rate rather than absence.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentsReportRow {
+    pub agent: AgentsReportAgent,
+    pub agent_seconds: u64,
+    pub shift_count: u32,
+    pub commits_recorded: u32,
+    pub commits_pending: u32,
+    pub commits_merged: u32,
+    pub commits_reverted: u32,
+    pub commits_orphaned: u32,
+    /// merged / decided; null while nothing has been decided yet.
+    #[serde(default)]
+    pub held_rate: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentsReportHeadcount {
+    pub total: u32,
+    pub anonymous: u32,
+    pub registered: u32,
+    pub retired: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentsReport {
+    pub headcount: AgentsReportHeadcount,
+    pub rows: Vec<AgentsReportRow>,
+}
+
 #[derive(Deserialize)]
 struct ProjectListResponse {
     projects: Vec<ProjectListItem>,
@@ -640,6 +698,29 @@ impl ApiClient {
             .get_json(access_token, &format!("/reports/leaderboard{query}"))
             .await?;
         Ok(body.entries)
+    }
+
+    /// The pay-run report: every roster agent's hours, shifts, and held share
+    /// for a range. Bounds arrive together or not at all; none means all time.
+    pub async fn agents_report(
+        &self,
+        access_token: &str,
+        from_at: Option<&str>,
+        to_exclusive_at: Option<&str>,
+        scope: Option<&str>,
+    ) -> ApiResult<AgentsReport> {
+        let mut query = match (from_at, to_exclusive_at) {
+            (Some(from_at), Some(to_exclusive_at)) => {
+                format!("?fromAt={from_at}&toExclusiveAt={to_exclusive_at}")
+            }
+            _ => String::new(),
+        };
+        if let Some(scope) = scope.filter(|scope| *scope != "all") {
+            query.push(if query.is_empty() { '?' } else { '&' });
+            query.push_str(&format!("scope={scope}"));
+        }
+        self.get_json(access_token, &format!("/reports/agents{query}"))
+            .await
     }
 
     pub async fn me(&self, access_token: &str) -> ApiResult<TimerUser> {

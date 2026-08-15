@@ -104,6 +104,28 @@ const mapping = {
   projectId: project.id,
 };
 
+const agentsReport = {
+  headcount: { total: 1, anonymous: 1, registered: 0, retired: 0 },
+  rows: [{
+    agent: {
+      id: "00000000-0000-4000-8000-000000000500",
+      name: "Claude Code @ Field work",
+      source: "claude_code",
+      status: "anonymous" as const,
+      owner: { id: user.id, name: user.name },
+      project: { id: project.id, name: project.name },
+    },
+    agentSeconds: 5_400,
+    shiftCount: 2,
+    commitsRecorded: 0,
+    commitsPending: 0,
+    commitsMerged: 0,
+    commitsReverted: 0,
+    commitsOrphaned: 0,
+    heldRate: null,
+  }],
+};
+
 const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   bootstrap: vi.fn().mockResolvedValue(account),
   login: vi.fn().mockResolvedValue(account),
@@ -134,6 +156,7 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   settingsGet: vi.fn().mockResolvedValue(settings),
   settingsUpdate: vi.fn().mockResolvedValue(settings),
   meStats: vi.fn().mockResolvedValue(meStats),
+  agentsReport: vi.fn().mockResolvedValue(agentsReport),
   projectCreate: vi.fn().mockResolvedValue(newProject),
   projectUpdate: vi.fn().mockResolvedValue(project),
   projectUsage: vi.fn().mockResolvedValue({ sessionCount: 0, durationSeconds: 0, agentSessionCount: 0 }),
@@ -1065,6 +1088,98 @@ describe("the team board", () => {
 
     expect(await screen.findByRole("radio", { name: "Joined project" })).toBeInTheDocument();
     expect(screen.queryByRole("radio", { name: "Field work" })).not.toBeInTheDocument();
+  });
+});
+
+describe("the agents tab", () => {
+  it("switches from the human board to a read-only agent roster and back", async () => {
+    const bridge = bridgeFor();
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const panel = await openAllStats(person);
+    // Humans is the default: the board and the member breakdown are on screen.
+    expect(within(panel).getByTestId("board-list")).toBeInTheDocument();
+    expect(within(panel).getByTestId("member-stats")).toBeInTheDocument();
+    expect(within(panel).queryByTestId("agent-roster-list")).not.toBeInTheDocument();
+
+    await person.click(within(panel).getByRole("button", { name: "Agents" }));
+
+    const roster = await within(panel).findByTestId("agent-roster-list");
+    expect(within(roster).getByText("Claude Code @ Field work")).toBeInTheDocument();
+    expect(within(roster).getByText(/1h 30m/)).toBeInTheDocument();
+    const row = within(roster).getByText("Claude Code @ Field work").closest("li");
+    expect(row).toHaveClass("is-anonymous");
+    expect(row).toHaveTextContent("Claude Code · 2 shifts");
+    // The human board and its breakdown step aside while Agents is open.
+    expect(within(panel).queryByTestId("board-list")).not.toBeInTheDocument();
+    expect(within(panel).queryByTestId("member-stats")).not.toBeInTheDocument();
+    await waitFor(() => expect(bridge.agentsReport).toHaveBeenCalled());
+
+    await person.click(within(panel).getByRole("button", { name: "Humans" }));
+    expect(within(panel).getByTestId("board-list")).toBeInTheDocument();
+    expect(within(panel).queryByTestId("agent-roster-list")).not.toBeInTheDocument();
+  });
+
+  it("reports every roster agent, zero-activity ones included, with no register control", async () => {
+    const bridge = bridgeFor({
+      agentsReport: vi.fn().mockResolvedValue({
+        headcount: { total: 2, anonymous: 0, registered: 1, retired: 1 },
+        rows: [
+          {
+            agent: {
+              id: "00000000-0000-4000-8000-000000000501",
+              name: "Codex @ Field work",
+              source: "codex",
+              status: "registered" as const,
+              owner: { id: user.id, name: user.name },
+              project: { id: project.id, name: project.name },
+            },
+            agentSeconds: 0,
+            shiftCount: 0,
+            commitsRecorded: 0,
+            commitsPending: 0,
+            commitsMerged: 0,
+            commitsReverted: 0,
+            commitsOrphaned: 0,
+            heldRate: null,
+          },
+          {
+            agent: {
+              id: "00000000-0000-4000-8000-000000000502",
+              name: "Claude Code @ Field work",
+              source: "claude_code",
+              status: "retired" as const,
+              owner: { id: user.id, name: user.name },
+              project: null,
+            },
+            agentSeconds: 3_600,
+            shiftCount: 1,
+            commitsRecorded: 2,
+            commitsPending: 0,
+            commitsMerged: 1,
+            commitsReverted: 1,
+            commitsOrphaned: 0,
+            heldRate: 0.5,
+          },
+        ],
+      }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const panel = await openAllStats(person);
+    await person.click(within(panel).getByRole("button", { name: "Agents" }));
+
+    const roster = await within(panel).findByTestId("agent-roster-list");
+    expect(within(roster).queryByRole("button", { name: "Register" })).not.toBeInTheDocument();
+    const zeroRow = within(roster).getByText("Codex @ Field work").closest("li");
+    expect(zeroRow).not.toHaveClass("is-anonymous");
+    expect(zeroRow).toHaveTextContent("0s");
+    expect(zeroRow).toHaveTextContent("0 shifts");
+    const retiredRow = within(roster).getByText("Claude Code @ Field work").closest("li");
+    expect(retiredRow).toHaveTextContent("retired");
+    expect(retiredRow).toHaveTextContent("50% held");
   });
 });
 
