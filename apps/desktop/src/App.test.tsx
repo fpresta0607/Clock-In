@@ -1177,6 +1177,7 @@ describe("the agents tab", () => {
     expect(zeroRow).not.toHaveClass("is-anonymous");
     expect(zeroRow).toHaveTextContent("0s");
     expect(zeroRow).toHaveTextContent("0 shifts");
+    expect(zeroRow).toHaveTextContent("pending");
     const retiredRow = within(roster).getByText("Claude Code @ Field work").closest("li");
     expect(retiredRow).toHaveTextContent("retired");
     expect(retiredRow).toHaveTextContent("50% held");

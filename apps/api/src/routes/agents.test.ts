@@ -123,6 +123,16 @@ const emptyPathMappings = {
 
 const idleSessions = { findRunning: async () => null } as unknown as SessionRepository;
 
+const orgMembers = {
+  [ids.admin]: { id: ids.admin, name: "Alex" },
+  [ids.member]: { id: ids.member, name: "Blair" },
+};
+
+const membershipReports = {
+  findUserForOrganization: async (_subject: { organizationId: string }, userId: string) =>
+    orgMembers[userId as keyof typeof orgMembers] ?? null,
+} as unknown as import("../repositories.js").ReportRepository;
+
 const emptyProjects = {
   listForMember: async () => [],
   findForMember: async () => null,
@@ -137,6 +147,7 @@ function createTestApp(agents = new MemoryAgents([agentRecord()])) {
     clock: () => new Date("2026-08-06T14:00:00.000Z"),
     agentSessionRepository: reaperOnlySessions,
     agentRepository: agents,
+    reportRepository: membershipReports,
     pathMappingRepository: emptyPathMappings,
     sessionRepository: idleSessions,
     projectRepository: emptyProjects,

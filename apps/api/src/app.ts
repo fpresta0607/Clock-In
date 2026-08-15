@@ -333,9 +333,13 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
     if (dependencies.agentSessionRepository === undefined) {
       throw new Error("An agent session repository is required for agent routes.");
     }
+    if (dependencies.reportRepository === undefined) {
+      throw new Error("A report repository is required for agent routes.");
+    }
     const agentService = createAgentService({
       agents: dependencies.agentRepository,
       reaper: createAgentSessionReaper({ agentSessions: dependencies.agentSessionRepository, clock }),
+      reports: dependencies.reportRepository,
       ...(dependencies.shiftCommitRepository === undefined ? {} : { shiftCommits: dependencies.shiftCommitRepository }),
       clock,
     });

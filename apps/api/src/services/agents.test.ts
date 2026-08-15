@@ -8,6 +8,7 @@ import type {
   AgentShiftRecord,
   AgentUpdatePatch,
   ReportQuery,
+  ReportRepository,
   UpsertAgentForKey,
 } from "../repositories.js";
 import { createAgentService } from "./agents.js";
@@ -99,9 +100,15 @@ function shift(overrides: Partial<AgentShiftRecord> = {}): AgentShiftRecord {
   };
 }
 
-function createService(agents: MemoryAgents) {
+function createService(agents: MemoryAgents, members: ReadonlyMap<string, string> = new Map([[ids.user, "Alex"]])) {
   const reapStale = vi.fn().mockResolvedValue(0);
-  const service = createAgentService({ agents, reaper: { reapStale }, clock: () => now });
+  const reports = {
+    async findUserForOrganization(_subject: AuthenticatedSubject, userId: string) {
+      const name = members.get(userId);
+      return name === undefined ? null : { id: userId, name };
+    },
+  } as ReportRepository;
+  const service = createAgentService({ agents, reaper: { reapStale }, reports, clock: () => now });
   return { service, reapStale };
 }
 
@@ -124,6 +131,34 @@ describe("agent service", () => {
       .rejects.toMatchObject({ code: "validation_error" });
     await expect(service.patch(member, ids.otherAgent, { name: "Ghost" }))
       .rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("rejects an owner change to a nonexistent user", async () => {
+    const agents = new MemoryAgents([agentRecord()]);
+    const { service } = createService(agents);
+
+    await expect(service.patch(member, ids.agent, { ownerUserId: "99999999-9999-4999-8999-999999999999" }))
+      .rejects.toMatchObject({ code: "not_found" });
+    expect(agents.patches).toHaveLength(0);
+  });
+
+  it("rejects an owner change to a user outside the organization", async () => {
+    const agents = new MemoryAgents([agentRecord()]);
+    const { service } = createService(agents, new Map([[ids.user, "Alex"]]));
+
+    await expect(service.patch(member, ids.agent, { ownerUserId: "88888888-8888-4888-8888-888888888888" }))
+      .rejects.toMatchObject({ code: "not_found" });
+    expect(agents.patches).toHaveLength(0);
+  });
+
+  it("reassigns an owner who is a member of the organization", async () => {
+    const otherUser = "f1c7e513-b094-4d4c-ae55-21790ae019a4";
+    const agents = new MemoryAgents([agentRecord()]);
+    const { service } = createService(agents, new Map([[ids.user, "Alex"], [otherUser, "Blair"]]));
+
+    const updated = await service.patch(member, ids.agent, { ownerUserId: otherUser });
+    expect(updated.owner.id).toBe(otherUser);
+    expect(agents.patches[0]).toMatchObject({ ownerUserId: otherUser });
   });
 
   it("gates merging on the admin role before anything else", async () => {

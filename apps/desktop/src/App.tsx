@@ -1572,7 +1572,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                           <span className="board-hours">{formatHuman(row.agentSeconds)}</span>
                           <span className="board-agent">
                             {sourceLabel(row.agent.source)} · {row.shiftCount} shift{row.shiftCount === 1 ? "" : "s"}
-                            {row.heldRate !== null && ` · ${Math.round(row.heldRate * 100)}% held`}
+                            {row.heldRate === null ? " · pending" : ` · ${Math.round(row.heldRate * 100)}% held`}
                           </span>
                         </span>
                       </div>

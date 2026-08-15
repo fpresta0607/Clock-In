@@ -152,6 +152,10 @@ const emptyPathMappings: PathMappingRepository = {
 
 const idleSessions = { findRunning: async () => null } as unknown as SessionRepository;
 
+const emptyReports = {
+  findUserForOrganization: async () => null,
+} as unknown as import("../repositories.js").ReportRepository;
+
 const emptyProjects = {
   listForMember: async () => [],
   findForMember: async () => null,
@@ -166,6 +170,7 @@ function createTestApp(shiftCommits = new MemoryShiftCommits(), sessions = new M
     clock: () => new Date("2026-08-06T14:00:00.000Z"),
     agentSessionRepository: sessions,
     agentRepository: inertAgents,
+    reportRepository: emptyReports,
     shiftCommitRepository: shiftCommits,
     pathMappingRepository: emptyPathMappings,
     sessionRepository: idleSessions,
