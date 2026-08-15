@@ -12,6 +12,29 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    # Every SQL-exercising suite gates itself on TEST_DATABASE_URL, so without
+    # a server here the migration chain, the tenant foreign keys, the identity
+    # upsert and the merge collision guard are all untested. Each suite builds
+    # its own disposable database on this one and drops it again.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          # A disposable CI database bound to localhost only; trust auth means
+          # no password is ever written into this workflow.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # The disposable-database helper refuses a URL that does not carry this
+      # capability, so a test run can never reach a real database by accident.
+      CLOCK_IN_DISPOSABLE_TEST_CAPABILITY: ci-disposable-postgres
+      TEST_DATABASE_URL: postgres://postgres@localhost:5432/postgres?clock_in_disposable_test_capability=ci-disposable-postgres
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
