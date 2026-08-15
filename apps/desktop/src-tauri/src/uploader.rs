@@ -188,7 +188,15 @@ async fn upload_agent_spool(client: &ApiClient, token: &str, path: &Path) -> boo
         return true;
     }
 
-    for chunk in pending.events.chunks(UPLOAD_BATCH_SIZE) {
+    // `startHead` is a spool-local field the shift-capture sidecar reads; the
+    // server's agent-session contract has no such field, so it never leaves
+    // the machine.
+    let mut events = pending.events;
+    for event in &mut events {
+        event.start_head = None;
+    }
+
+    for chunk in events.chunks(UPLOAD_BATCH_SIZE) {
         match client.upload_agent_events(token, chunk).await {
             Ok(results) => {
                 let rejected = results.iter().filter(|result| !result.accepted).count();
@@ -915,9 +923,62 @@ mod tests {
             event: kind,
             occurred_at: occurred_at.to_string(),
             cwd: Some(cwd.to_string()),
+            start_head: None,
             model: None,
             rule_id: None,
         }
+    }
+
+    /// `startHead` is a spool-local field the shift-capture sidecar reads; the
+    /// server's agent-session contract has no such field, so the uploaded
+    /// event must not carry it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_uploaded_agent_event_drops_the_spool_local_start_head() {
+        let dir = temp_dir("agent-start-head");
+        let path = dir.join("agent-spool.jsonl");
+        let event = SpoolEvent {
+            source: source("claude_code"),
+            external_session_id: "session-1".to_string(),
+            event: AgentEventKind::Started,
+            occurred_at: "2026-08-12T13:36:06Z".to_string(),
+            cwd: Some("C:/dev/Clock-In".to_string()),
+            start_head: Some("a".repeat(40)),
+            model: None,
+            rule_id: None,
+        };
+        let mut line = serde_json::to_vec(&event).expect("the event encodes");
+        line.push(b'\n');
+        spool::append_line(&path, &line, spool::MAX_SPOOL_BYTES).expect("the spool accepts a line");
+
+        let (port, server) = stub_server(
+            200,
+            r#"{"results":[{"externalSessionId":"session-1","accepted":true}]}"#,
+        )
+        .await;
+        assert!(
+            upload_agent_spool(&stub_client(port), "token", &path).await,
+            "an accepted batch reports success"
+        );
+
+        let request = server.await.expect("the stub finishes");
+        assert!(
+            request.starts_with("POST /agent-sessions "),
+            "the batch goes to the agent-sessions endpoint: {request}"
+        );
+        assert!(
+            request.contains("\"externalSessionId\":\"session-1\"")
+                && request.contains("\"cwd\":\"C:/dev/Clock-In\""),
+            "the wire payload carries the contract's field names: {request}"
+        );
+        assert!(
+            !request.contains("startHead"),
+            "startHead is a spool-local field and must not reach the server: {request}"
+        );
+
+        let (pending, _) = spool::read_pending_lines::<SpoolEvent>(&path).expect("the spool reads");
+        assert!(pending.is_empty(), "an accepted batch leaves the spool");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

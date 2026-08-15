@@ -198,6 +198,7 @@ fn span_reply(dir: &Path, message: &Value) -> Option<Value> {
             event: kind,
             occurred_at: occurred_at.to_string(),
             cwd: None,
+            start_head: None,
             model: None,
             rule_id: Some(rule_id.to_string()),
         };

@@ -91,8 +91,10 @@ timer once said RECORDING above a card reading "Turn on recording in settings".
 - A repo root is a working directory, so the paystub sends `shiftCommitViewSchema.repoRoot`
   only to the agent's owner and workspace admins and omits it for everyone else
   (`services/agents.ts`). The disclosure sentence naming what leaves the machine is
-  duplicated word for word in `apps/web/src/HelpModal.tsx`, `apps/desktop/src/RecordingPanel.tsx`
-  and README's "What is never collected"; change what is sent and all three change with it.
+  stated in `apps/web/src/HelpModal.tsx`, `apps/desktop/src/RecordingPanel.tsx`
+  and README's "What is never collected"; the three word it differently, but they must
+  all describe the same thing that actually leaves the machine, so change what is sent
+  and all three change with it.
 - The migration folder is not a description of production. Production's
   `drizzle.__drizzle_migrations` holds entries whose hashes match no file on `main`,
   because phase 3 applied migrations that were later rewritten here. Drizzle selects

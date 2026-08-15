@@ -183,24 +183,6 @@ pub async fn capture_from_spool(
 
     let now = unix_now();
 
-    // Resolving each opening shift's `HEAD` before the lock: it is the range
-    // the capture is bounded to, and it has to be read while the shift is
-    // opening rather than reconstructed from author dates when it closes.
-    let mut start_heads: HashMap<String, Option<String>> = HashMap::new();
-    for event in &pending.events {
-        if !matches!(event.event, AgentEventKind::Started) {
-            continue;
-        }
-        let Some(cwd) = event.cwd.clone() else {
-            continue;
-        };
-        if start_heads.contains_key(&cwd) {
-            continue;
-        }
-        let head = git_evidence::head_sha(Path::new(&cwd)).await;
-        start_heads.insert(cwd, head);
-    }
-
     let mut to_capture: Vec<PendingCapture> = Vec::new();
     let opened = spool::with_lock(shift_commits_path, || {
         let mut windows = read_windows(shift_windows_path);
@@ -211,16 +193,10 @@ pub async fn capture_from_spool(
             match event.event {
                 AgentEventKind::Started => {
                     if let Some(started_at) = parse_iso8601(&event.occurred_at) {
-                        let start_head = event
-                            .cwd
-                            .as_ref()
-                            .and_then(|cwd| start_heads.get(cwd))
-                            .cloned()
-                            .flatten();
                         windows.entry(key).or_insert_with(|| ShiftWindow {
                             started_at,
                             cwd: event.cwd.clone(),
-                            start_head,
+                            start_head: event.start_head.clone(),
                             captured: false,
                         });
                     }
@@ -475,6 +451,20 @@ mod tests {
             event: kind,
             occurred_at: occurred_at.to_string(),
             cwd: cwd.map(str::to_string),
+            start_head: None,
+            model: None,
+            rule_id: None,
+        }
+    }
+
+    fn started_event(occurred_at: &str, cwd: &str, start_head: Option<&str>) -> SpoolEvent {
+        SpoolEvent {
+            source: source(),
+            external_session_id: "session-1".to_string(),
+            event: AgentEventKind::Started,
+            occurred_at: occurred_at.to_string(),
+            cwd: Some(cwd.to_string()),
+            start_head: start_head.map(str::to_string),
             model: None,
             rule_id: None,
         }
@@ -572,15 +562,16 @@ mod tests {
         let windows_path = dir.join("shift-windows.json");
         let commits_path = dir.join("shift-commits.json");
         let cwd = repo.to_string_lossy().into_owned();
+
+        // The hook records HEAD when it writes the Started line, so a shift
+        // that opens and closes inside one upload interval is still bounded to
+        // the HEAD that existed before the shift's own commit landed.
+        let start_head = crate::git_evidence::head_sha(&repo).expect("the repo has a HEAD");
         spool::append(
             &agent_path,
-            &event(AgentEventKind::Started, &iso8601(started_at), Some(&cwd)),
+            &started_event(&iso8601(started_at), &cwd, Some(&start_head)),
         )
         .expect("append succeeds");
-
-        // The shift opens in one pass and closes in a later one, which is what
-        // gives the window a starting commit to bound the capture with.
-        capture_from_spool(&agent_path, &windows_path, &commits_path).await;
         commit_in_repo(&repo, "did work", started_at + 60).await;
         spool::append(
             &agent_path,
@@ -592,6 +583,8 @@ mod tests {
         )
         .expect("append succeeds");
 
+        // Started and Ended drain in the same pass — the sub-5-minute shift
+        // that used to lose its commit because HEAD was read after it landed.
         capture_from_spool(&agent_path, &windows_path, &commits_path).await;
         let first_pass = read_registry(&commits_path);
         assert_eq!(
