@@ -1,4 +1,4 @@
-import { agentPaystubFiltersSchema, leaderboardFiltersSchema, meStatsFiltersSchema } from "@clock-in/shared";
+import { agentPaystubFiltersSchema, agentsReportFiltersSchema, leaderboardFiltersSchema, meStatsFiltersSchema } from "@clock-in/shared";
 import { describe, expect, it } from "vitest";
 
 import { rangeQuery } from "./App.js";
@@ -64,6 +64,22 @@ describe("web and API report contract", () => {
   it("sends no paystub bounds at all for all time", () => {
     expect(rangeQuery("all")).toBe("");
     expect(() => agentPaystubFiltersSchema.parse({})).not.toThrow();
+  });
+
+  it.each(boundedRanges)("accepts the pay-run report query the roster tab sends for %s", (range) => {
+    const parameters = parametersOf(rangeQuery(range));
+
+    const filters = agentsReportFiltersSchema.parse(parameters);
+
+    expect(filters.fromAt).toBe(parameters.fromAt);
+    expect(filters.toExclusiveAt).toBe(parameters.toExclusiveAt);
+  });
+
+  it("sends no pay-run report bounds at all for all time, and carries a project scope", () => {
+    expect(rangeQuery("all")).toBe("");
+    expect(() => agentsReportFiltersSchema.parse({})).not.toThrow();
+    const parameters = parametersOf(`${rangeQuery("today")}&scope=${memberId}`);
+    expect(() => agentsReportFiltersSchema.parse(parameters)).not.toThrow();
   });
 
   it("sends instant bounds rather than calendar dates, which the API refuses to mix", () => {

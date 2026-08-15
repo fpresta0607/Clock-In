@@ -12,6 +12,7 @@ import { createApp } from "./app.js";
 import {
   DrizzleAccountStore,
   DrizzleActivitySegmentRepository,
+  DrizzleAgentRepository,
   DrizzleAgentSessionRepository,
   DrizzlePathMappingRepository,
   DrizzleProjectRepository,
@@ -60,6 +61,7 @@ integration("leaderboard agent-interval range binding", () => {
       projectRepository: new DrizzleProjectRepository(database.db),
       sessionRepository: new DrizzleSessionRepository(database.db),
       reportRepository: new DrizzleReportRepository(database.db),
+      agentRepository: new DrizzleAgentRepository(database.db),
       agentSessionRepository: new DrizzleAgentSessionRepository(database.db),
       pathMappingRepository: new DrizzlePathMappingRepository(database.db),
       activitySegmentRepository: new DrizzleActivitySegmentRepository(database.db),

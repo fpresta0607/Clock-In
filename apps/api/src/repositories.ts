@@ -221,6 +221,8 @@ export interface AgentIntervalRecord {
   source: string;
   model: string | null;
   projectId: string | null;
+  /** Null for legacy sessions recorded before roster minting shipped. */
+  agentId: string | null;
   startedAt: Date;
   endedAt: Date;
 }

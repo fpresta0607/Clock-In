@@ -6,6 +6,7 @@ import { createApp } from "../app.js";
 import type { AuthenticatedSubject } from "../auth.js";
 import { parseEnv } from "../env.js";
 import type {
+  AgentRepository,
   AgentSessionRepository,
   AppTotalRecord,
   PathMappingRepository,
@@ -320,6 +321,11 @@ class PathMappings implements Partial<PathMappingRepository> {
   public async listForSubject() { return []; }
 }
 
+/** The pay-run report's roster; empty since these tests never seed a roster agent. */
+class Agents implements Partial<AgentRepository> {
+  public async listForOrganization() { return []; }
+}
+
 function session(overrides: Partial<StoredSession> = {}): StoredSession {
   return {
     id: crypto.randomUUID(),
@@ -347,6 +353,7 @@ function createTestApp(reports = new MemoryReports(), agentSessions = new ReapRe
     projectRepository: new Projects() as ProjectRepository,
     sessionRepository: new Timers() as SessionRepository,
     pathMappingRepository: new PathMappings() as PathMappingRepository,
+    agentRepository: new Agents() as AgentRepository,
   });
 }
 
@@ -356,6 +363,7 @@ const noMeasurement = {
   concurrency: { t0Seconds: 0, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
   byAgent: [] as never[],
   hourly: [] as never[],
+  agents: [] as never[],
 };
 
 describe("me/stats routes", () => {

@@ -6,11 +6,14 @@ import {
   summedSeconds,
   unionSeconds,
   type AgentSplit,
+  type AgentsReportFilters,
+  type AgentsReportResponse,
   type Concurrency,
   type HourlyBucket,
   type Interval,
   type LeaderboardFilters,
   type LeaderboardResponse,
+  type MeStatsAgent,
   type MeStatsFilters,
   type MeStatsResponse,
   type ReportFilters,
@@ -22,6 +25,8 @@ import type { AuthenticatedSubject } from "../auth.js";
 import { AppError } from "../errors.js";
 import type {
   AgentIntervalRecord,
+  AgentRecord,
+  AgentRepository,
   AppTotalRecord,
   LeaderboardRowRecord,
   PresenceIntervalRecord,
@@ -31,6 +36,8 @@ import type {
   ReportRowRecord,
   ReportSummaryRecord,
   SessionIntervalRecord,
+  ShiftCommitCountsRecord,
+  ShiftCommitRepository,
   SiteTotalRecord,
 } from "../repositories.js";
 import type { AgentSessionReaper } from "./agent-sessions.js";
@@ -40,6 +47,7 @@ export interface ReportService {
   export(subject: AuthenticatedSubject, filters: ReportFilters): Promise<ReportExport>;
   leaderboard(subject: AuthenticatedSubject, filters: LeaderboardFilters): Promise<LeaderboardResponse>;
   meStats(subject: AuthenticatedSubject, filters: MeStatsFilters): Promise<MeStatsResponse>;
+  agentsReport(subject: AuthenticatedSubject, filters: AgentsReportFilters): Promise<AgentsReportResponse>;
 }
 
 export interface ReportExport {
@@ -51,6 +59,10 @@ export interface ReportServiceDependencies {
   reports: ReportRepository;
   /** Stale running agent sessions close at lastEventAt before report aggregation. */
   reaper: AgentSessionReaper;
+  /** The roster behind the pay-run report and /me/stats's own-agent rows. */
+  agents: AgentRepository;
+  /** Without it, every agent row's commit counts stay at zero and heldRate null. */
+  shiftCommits?: ShiftCommitRepository;
 }
 
 const millisecondsPerDay = 24 * 60 * 60 * 1_000;
@@ -406,6 +418,75 @@ function asSiteTotal(record: SiteTotalRecord): MeStatsResponse["sites"][number] 
   };
 }
 
+function asAgentReportView(record: AgentRecord): AgentsReportResponse["rows"][number]["agent"] {
+  return {
+    id: record.id,
+    name: record.name,
+    source: record.source,
+    status: record.status,
+    owner: record.owner,
+    project: record.project,
+    createdAt: record.createdAt.toISOString(),
+  };
+}
+
+function asMeStatsAgentView(record: AgentRecord): MeStatsAgent["agent"] {
+  return {
+    id: record.id,
+    name: record.name,
+    source: record.source,
+    status: record.status,
+    project: record.project,
+    createdAt: record.createdAt.toISOString(),
+  };
+}
+
+/** Hours and shift count from an agent's intervals overlapping the range (reports rounding rule: group, then round once). */
+function agentHours(intervals: readonly Interval[], range: Partial<Interval>): { agentSeconds: number; shiftCount: number } {
+  const clipped = clippedIntervals(intervals, range);
+  return {
+    agentSeconds: Math.round(clipped.reduce((sum, interval) => sum + (interval.end - interval.start), 0) / 1_000),
+    shiftCount: clipped.length,
+  };
+}
+
+/** merged / (merged + reverted + orphaned) - the decided commits; null while nothing has been decided. */
+function agentCommitCounts(counts: ShiftCommitCountsRecord | undefined): {
+  commitsRecorded: number;
+  commitsPending: number;
+  commitsMerged: number;
+  commitsReverted: number;
+  commitsOrphaned: number;
+  heldRate: number | null;
+} {
+  const recorded = counts === undefined ? 0 : safeInteger(counts.recorded, "agent commit recorded count");
+  const pending = counts === undefined ? 0 : safeInteger(counts.pending, "agent commit pending count");
+  const merged = counts === undefined ? 0 : safeInteger(counts.merged, "agent commit merged count");
+  const reverted = counts === undefined ? 0 : safeInteger(counts.reverted, "agent commit reverted count");
+  const orphaned = counts === undefined ? 0 : safeInteger(counts.orphaned, "agent commit orphaned count");
+  const decided = merged + reverted + orphaned;
+  return {
+    commitsRecorded: recorded,
+    commitsPending: pending,
+    commitsMerged: merged,
+    commitsReverted: reverted,
+    commitsOrphaned: orphaned,
+    heldRate: decided === 0 ? null : merged / decided,
+  };
+}
+
+/** Roster agents' intervals grouped by agentId; legacy sessions with no roster identity carry no row to group into. */
+function intervalsByAgentId(intervals: readonly AgentIntervalRecord[]): Map<string, Interval[]> {
+  const grouped = new Map<string, Interval[]>();
+  for (const row of intervals) {
+    if (row.agentId === null) continue;
+    const existing = grouped.get(row.agentId) ?? [];
+    existing.push(asInterval(row.startedAt, row.endedAt));
+    grouped.set(row.agentId, existing);
+  }
+  return grouped;
+}
+
 export function createReportService(dependencies: ReportServiceDependencies): ReportService {
   return {
     async list(subject: AuthenticatedSubject, filters: ReportFilters): Promise<ReportResponse> {
@@ -525,6 +606,24 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       const hourly = member === undefined
         ? []
         : hourlySeries(workingIntervals(member, query), member.agents.map((agent) => agent.interval), queryRange(query));
+
+      const range = queryRange(query);
+      const grouped = intervalsByAgentId(agentIntervals);
+      const roster = await dependencies.agents.listForOrganization(subject);
+      const rosterById = new Map(roster.map((agent) => [agent.id, agent]));
+      const commitCounts = dependencies.shiftCommits === undefined ? [] : await dependencies.shiftCommits.countsByAgent(subject, query);
+      const countsById = new Map(commitCounts.map((row) => [row.agentId, row]));
+      // Own agent rows are exactly the roster identities this member's shifts
+      // ran under in range - the same boundary the interval read already scoped to.
+      const agents: MeStatsAgent[] = [...grouped.keys()]
+        .map((agentId) => rosterById.get(agentId))
+        .filter((agent): agent is AgentRecord => agent !== undefined)
+        .map((agent) => ({
+          agent: asMeStatsAgentView(agent),
+          ...agentHours(grouped.get(agent.id) ?? [], range),
+          ...agentCommitCounts(countsById.get(agent.id)),
+        }));
+
       return {
         filters,
         totalDurationSeconds: projects.reduce((total, project) => total + project.durationSeconds, 0),
@@ -535,6 +634,38 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
         projects,
         apps,
         sites,
+        agents,
+      };
+    },
+
+    async agentsReport(subject: AuthenticatedSubject, filters: AgentsReportFilters): Promise<AgentsReportResponse> {
+      const query: ReportQuery = { ...normalizedQuery(filters), ...scopeQuery(filters.scope) };
+      await authorizeFilters(dependencies.reports, subject, query);
+      await dependencies.reaper.reapStale(subject);
+      const [roster, agentIntervals, commitCounts] = await Promise.all([
+        dependencies.agents.listForOrganization(subject),
+        dependencies.reports.readAgentIntervals(subject, query),
+        dependencies.shiftCommits === undefined ? Promise.resolve([]) : dependencies.shiftCommits.countsByAgent(subject, query),
+      ]);
+      const range = queryRange(query);
+      const grouped = intervalsByAgentId(agentIntervals);
+      const countsById = new Map(commitCounts.map((row) => [row.agentId, row]));
+      // Every roster agent gets a row, activity or not: the roster - not the
+      // interval data - decides which agents exist.
+      const rows = roster.map((agent) => ({
+        agent: asAgentReportView(agent),
+        ...agentHours(grouped.get(agent.id) ?? [], range),
+        ...agentCommitCounts(countsById.get(agent.id)),
+      }));
+      return {
+        filters,
+        headcount: {
+          total: roster.length,
+          anonymous: roster.filter((agent) => agent.status === "anonymous").length,
+          registered: roster.filter((agent) => agent.status === "registered").length,
+          retired: roster.filter((agent) => agent.status === "retired").length,
+        },
+        rows,
       };
     },
   };

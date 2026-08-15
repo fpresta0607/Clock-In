@@ -599,6 +599,53 @@ export const agentPaystubResponseSchema = z
   })
   .strict();
 
+export const agentsReportFiltersSchema = z
+  .object({
+    from: dateSchema.optional(),
+    to: dateSchema.optional(),
+    fromAt: timestampSchema.optional(),
+    toExclusiveAt: timestampSchema.optional(),
+    /** Absent means all projects. */
+    scope: projectScopeSchema.optional(),
+  })
+  .strict()
+  .superRefine(validateCalendarAndInstantBounds);
+
+/**
+ * One agent's row in the org-wide pay-run report: hours, shifts, and how its
+ * commits held up. Agents with zero activity in range still appear, since the
+ * roster - not the interval data - decides which rows exist.
+ */
+export const agentsReportRowSchema = z
+  .object({
+    agent: agentSchema,
+    agentSeconds: z.number().int().nonnegative().safe(),
+    shiftCount: z.number().int().nonnegative().safe(),
+    commitsRecorded: z.number().int().nonnegative().safe(),
+    commitsPending: z.number().int().nonnegative().safe(),
+    commitsMerged: z.number().int().nonnegative().safe(),
+    commitsReverted: z.number().int().nonnegative().safe(),
+    commitsOrphaned: z.number().int().nonnegative().safe(),
+    /** merged / decided; null while nothing has been decided. */
+    heldRate: heldRateSchema,
+  })
+  .strict();
+
+export const agentsReportResponseSchema = z
+  .object({
+    filters: agentsReportFiltersSchema,
+    headcount: z
+      .object({
+        total: z.number().int().nonnegative().safe(),
+        anonymous: z.number().int().nonnegative().safe(),
+        registered: z.number().int().nonnegative().safe(),
+        retired: z.number().int().nonnegative().safe(),
+      })
+      .strict(),
+    rows: z.array(agentsReportRowSchema),
+  })
+  .strict();
+
 /**
  * One commit captured during an agent's shift, uploaded by the desktop app.
  * `clientId` makes replays idempotent, exactly as it does for activity
@@ -756,6 +803,11 @@ export const meStatsSiteSchema = z
   })
   .strict();
 
+/** An `agentsReportRowSchema` row scoped to one caller; `owner` is redundant here, so it drops. */
+export const meStatsAgentSchema = agentsReportRowSchema.extend({
+  agent: agentSchema.omit({ owner: true }),
+});
+
 export const meStatsResponseSchema = z
   .object({
     filters: meStatsFiltersSchema,
@@ -775,6 +827,8 @@ export const meStatsResponseSchema = z
     apps: z.array(meStatsAppSchema),
     /** Per-URL-rule browser focus totals, heaviest first; the producer sorts, the schema only validates. */
     sites: z.array(meStatsSiteSchema),
+    /** This caller's own agent rows, same shape as the org-wide pay-run report. */
+    agents: z.array(meStatsAgentSchema),
   })
   .strict();
 
@@ -821,6 +875,10 @@ export type AgentPatchRequest = z.infer<typeof agentPatchRequestSchema>;
 export type AgentMergeRequest = z.infer<typeof agentMergeRequestSchema>;
 export type AgentPaystubFilters = z.infer<typeof agentPaystubFiltersSchema>;
 export type AgentPaystubResponse = z.infer<typeof agentPaystubResponseSchema>;
+export type AgentsReportFilters = z.infer<typeof agentsReportFiltersSchema>;
+export type AgentsReportRow = z.infer<typeof agentsReportRowSchema>;
+export type AgentsReportResponse = z.infer<typeof agentsReportResponseSchema>;
+export type MeStatsAgent = z.infer<typeof meStatsAgentSchema>;
 export type ShiftCommitVerification = z.infer<typeof shiftCommitVerificationSchema>;
 export type ShiftCommitView = z.infer<typeof shiftCommitViewSchema>;
 export type ShiftCommitUpload = z.infer<typeof shiftCommitUploadSchema>;

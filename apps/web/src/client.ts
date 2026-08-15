@@ -3,6 +3,7 @@ import type {
   AgentPatchRequest,
   AgentPaystubResponse,
   AgentsListResponse,
+  AgentsReportResponse,
   LeaderboardResponse,
   MeResponse,
   MeStatsResponse,
@@ -275,6 +276,9 @@ export function createClient(config: ClientConfig) {
       });
     },
     agentPaystub: (id: string, query = "") => json<AgentPaystubResponse>(`/agents/${id}/paystub${query}`),
+
+    /** The pay-run report: every roster agent's hours, shifts, and held share. */
+    agentsReport: (query = "") => json<AgentsReportResponse>(`/reports/agents${query}`),
 
     leaderboard: (query = "") => json<LeaderboardResponse>(`/reports/leaderboard${query}`),
     report: (query = "") => json<ReportResponse>(`/reports${query}`),

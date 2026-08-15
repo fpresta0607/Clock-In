@@ -779,6 +779,7 @@ export class DrizzleReportRepository implements ReportRepository {
         source: agentSessions.source,
         model: agentSessions.model,
         projectId: agentSessions.projectId,
+        agentId: agentSessions.agentId,
         startedAt: agentSessions.startedAt,
         endedAt: intervalEnd,
       })
@@ -805,6 +806,7 @@ export class DrizzleReportRepository implements ReportRepository {
       source: row.source,
       model: row.model,
       projectId: row.projectId,
+      agentId: row.agentId,
       startedAt: row.startedAt,
       endedAt: row.endedAt instanceof Date ? row.endedAt : new Date(row.endedAt as unknown as string),
     }));

@@ -7,6 +7,9 @@ import {
   agentPatchRequestSchema,
   agentPaystubFiltersSchema,
   agentPaystubResponseSchema,
+  agentsReportFiltersSchema,
+  agentsReportResponseSchema,
+  agentsReportRowSchema,
   agentSchema,
   agentsListResponseSchema,
   agentStatusValues,
@@ -654,11 +657,24 @@ describe("personal stats contracts", () => {
         durationSeconds: 300,
       },
     ],
+    agents: [
+      {
+        agent: { id: ids.session, name: "Claude Code @ Website redesign", source: "claude_code", status: "anonymous", project: { id: ids.project, name: "Website redesign" }, createdAt: startedAt },
+        agentSeconds: 3_600,
+        shiftCount: 1,
+        commitsRecorded: 1,
+        commitsPending: 0,
+        commitsMerged: 1,
+        commitsReverted: 0,
+        commitsOrphaned: 0,
+        heldRate: 1,
+      },
+    ],
   };
 
   it("accepts a per-project attributed/unattributed split with a per-app breakdown", () => {
     expect(meStatsResponseSchema.parse(stats)).toEqual(stats);
-    expect(meStatsResponseSchema.parse({ ...stats, filters: {}, projects: [], apps: [], sites: [] })).toEqual({ ...stats, filters: {}, projects: [], apps: [], sites: [] });
+    expect(meStatsResponseSchema.parse({ ...stats, filters: {}, projects: [], apps: [], sites: [], agents: [] })).toEqual({ ...stats, filters: {}, projects: [], apps: [], sites: [], agents: [] });
     expect(meStatsResponseSchema.parse({
       ...stats,
       filters: { fromAt: "2026-08-06T05:00:00.000Z", toExclusiveAt: "2026-08-07T05:00:00.000Z" },
@@ -708,6 +724,16 @@ describe("personal stats contracts", () => {
     expect(() => meStatsResponseSchema.parse({
       ...stats,
       sites: [{ mapping: { id: ids.user, pattern: "x".repeat(501), projectId: null }, durationSeconds: 60 }],
+    })).toThrow();
+    expect(() => meStatsResponseSchema.parse({ ...stats, agents: undefined })).toThrow();
+    // The caller's own agent rows never carry an owner - it is redundant here.
+    expect(() => meStatsResponseSchema.parse({
+      ...stats,
+      agents: [{ ...stats.agents[0], agent: { ...stats.agents[0]!.agent, owner: { id: ids.user, name: "Alex Morgan" } } }],
+    })).toThrow();
+    expect(() => meStatsResponseSchema.parse({
+      ...stats,
+      agents: [{ ...stats.agents[0], heldRate: 1.5 }],
     })).toThrow();
   });
 });
@@ -812,6 +838,49 @@ describe("roster agent contracts", () => {
       ...paystub,
       totals: { ...paystub.totals, heldRate: 1.5 },
     })).toThrow();
+  });
+
+  it("takes report bounds with a project scope, like the leaderboard", () => {
+    expect(() => agentsReportFiltersSchema.parse({})).not.toThrow();
+    expect(() => agentsReportFiltersSchema.parse({ scope: "unassigned" })).not.toThrow();
+    expect(() => agentsReportFiltersSchema.parse({ fromAt: startedAt, toExclusiveAt: stoppedAt })).not.toThrow();
+    expect(() => agentsReportFiltersSchema.parse({ fromAt: startedAt })).toThrow();
+    expect(() => agentsReportFiltersSchema.parse({ from: "2026-08-06", fromAt: startedAt, toExclusiveAt: stoppedAt })).toThrow();
+  });
+
+  it("reports every roster agent with its held share and a headcount by status", () => {
+    const row = {
+      agent,
+      agentSeconds: 3_600,
+      shiftCount: 1,
+      commitsRecorded: 1,
+      commitsPending: 0,
+      commitsMerged: 1,
+      commitsReverted: 0,
+      commitsOrphaned: 0,
+      heldRate: 1,
+    };
+    expect(() => agentsReportRowSchema.parse(row)).not.toThrow();
+    // A roster agent with no activity in range still gets a row: zeros and a null rate.
+    expect(() => agentsReportRowSchema.parse({
+      ...row,
+      agentSeconds: 0,
+      shiftCount: 0,
+      commitsRecorded: 0,
+      commitsMerged: 0,
+      heldRate: null,
+    })).not.toThrow();
+    expect(() => agentsReportRowSchema.parse({ ...row, heldRate: 1.5 })).toThrow();
+
+    const report = {
+      filters: {},
+      headcount: { total: 4, anonymous: 1, registered: 2, retired: 1 },
+      rows: [row],
+    };
+    expect(() => agentsReportResponseSchema.parse(report)).not.toThrow();
+    expect(() => agentsReportResponseSchema.parse({ ...report, rows: [] })).not.toThrow();
+    expect(() => agentsReportResponseSchema.parse({ ...report, headcount: { ...report.headcount, total: -1 } })).toThrow();
+    expect(() => agentsReportResponseSchema.parse({ ...report, headcount: { ...report.headcount, extra: 1 } })).toThrow();
   });
 });
 
