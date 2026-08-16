@@ -472,6 +472,64 @@ export const shiftCommits = pgTable(
   ],
 );
 
+// Token counters read from an agent runtime's own session logs by the desktop
+// app - usage numbers only, never a word of transcript content - bucketed by
+// hour, model, and sidechain flag. Two uniques carry the whole dedup story:
+// (org, user, client_id) makes replayed uploads idempotent, exactly as it does
+// for shift_commits, and (org, agent_session_id, bucket_start_at, model,
+// sidechain) pins one row per bucket so a re-read of the same transcript
+// region restates the bucket total instead of adding to it.
+export const agentUsage = pgTable(
+  "agent_usage",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    organizationId: uuid("organization_id").notNull(),
+    userId: uuid("user_id").notNull(),
+    agentId: uuid("agent_id").notNull(),
+    agentSessionId: uuid("agent_session_id").notNull(),
+    clientId: uuid("client_id").notNull(),
+    // Hour-aligned start of the bucket these counters cover.
+    bucketStartAt: timestamp("bucket_start_at", { mode: "date", withTimezone: true }).notNull(),
+    // Null when the runtime named no model for the bucket; nullsNotDistinct on
+    // the bucket unique keeps null a single bucket rather than one per sighting.
+    model: text("model"),
+    sidechain: boolean("sidechain").notNull(),
+    inputTokens: integer("input_tokens").notNull(),
+    outputTokens: integer("output_tokens").notNull(),
+    cacheCreationInputTokens: integer("cache_creation_input_tokens").notNull(),
+    cacheReadInputTokens: integer("cache_read_input_tokens").notNull(),
+    recordedAt: timestamp("recorded_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),
+    ...auditColumns,
+  },
+  (table) => [
+    unique("agent_usage_organization_user_client_unique").on(table.organizationId, table.userId, table.clientId),
+    unique("agent_usage_organization_session_bucket_unique")
+      .on(table.organizationId, table.agentSessionId, table.bucketStartAt, table.model, table.sidechain)
+      .nullsNotDistinct(),
+    foreignKey({
+      columns: [table.organizationId, table.userId],
+      foreignColumns: [users.organizationId, users.id],
+      name: "agent_usage_organization_user_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.organizationId, table.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+      name: "agent_usage_organization_agent_fk",
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.organizationId, table.agentSessionId],
+      foreignColumns: [agentSessions.organizationId, agentSessions.id],
+      name: "agent_usage_organization_session_fk",
+    }).onDelete("cascade"),
+    check("agent_usage_input_tokens_nonnegative", sql`${table.inputTokens} >= 0`),
+    check("agent_usage_output_tokens_nonnegative", sql`${table.outputTokens} >= 0`),
+    check("agent_usage_cache_creation_input_tokens_nonnegative", sql`${table.cacheCreationInputTokens} >= 0`),
+    check("agent_usage_cache_read_input_tokens_nonnegative", sql`${table.cacheReadInputTokens} >= 0`),
+    check("agent_usage_model_length_valid", sql`${table.model} is null or char_length(${table.model}) between 1 and 200`),
+    index("agent_usage_organization_agent_bucket_idx").on(table.organizationId, table.agentId, table.bucketStartAt),
+  ],
+);
+
 // Per-user mapping from a filesystem path prefix (kind = 'path_prefix', with an optional
 // git remote) or a URL rule pattern (kind = 'url_rule') to a project; the attribution
 // service resolves agent-session cwds and browser-span rule ids against these. The

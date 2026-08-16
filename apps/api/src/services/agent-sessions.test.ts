@@ -103,10 +103,12 @@ class MemoryAgentSessions implements AgentSessionRepository {
     });
   }
 
-  public async advanceLastEvent(current: AuthenticatedSubject, source: AgentSessionRecord["source"], externalSessionId: string, occurredAt: Date): Promise<boolean> {
+  public async advanceLastEvent(current: AuthenticatedSubject, source: AgentSessionRecord["source"], externalSessionId: string, model: string | null, occurredAt: Date): Promise<boolean> {
     const existing = this.find(current, source, externalSessionId);
     if (existing === undefined || existing.status !== "running") return false;
     if (occurredAt > existing.lastEventAt) existing.lastEventAt = occurredAt;
+    // Mirrors coalesce(model, $new): the first assignment wins.
+    existing.model ??= model;
     return true;
   }
 
@@ -184,6 +186,7 @@ function runningTimer(projectId: string): SessionRecord {
 function event(overrides: Partial<AgentSessionEventInput> = {}): AgentSessionEventInput {
   return {
     source: "claude_code",
+    model: null,
     externalSessionId: "session-1",
     event: "started",
     occurredAt: new Date("2026-08-06T13:30:00.000Z"),
@@ -298,6 +301,28 @@ describe("agent-session service", () => {
 
     expect(agentSessions.records).toHaveLength(1);
     expect(agentSessions.records[0]).toMatchObject({ lastEventAt: new Date("2026-08-06T13:40:00.000Z") });
+  });
+
+  it("fills a still-null model from a heartbeat that names one", async () => {
+    const { agentSessions, service } = createService();
+    await service.ingest(subject, [event()]);
+
+    await service.ingest(subject, [
+      event({ event: "heartbeat", model: "claude-opus-4-8", occurredAt: new Date("2026-08-06T13:40:00.000Z") }),
+    ]);
+
+    expect(agentSessions.records[0]).toMatchObject({ model: "claude-opus-4-8" });
+  });
+
+  it("never overwrites a model the shift already carries", async () => {
+    const { agentSessions, service } = createService();
+    await service.ingest(subject, [event({ model: "claude-opus-4-8" })]);
+
+    await service.ingest(subject, [
+      event({ event: "heartbeat", model: "claude-sonnet-4-8", occurredAt: new Date("2026-08-06T13:40:00.000Z") }),
+    ]);
+
+    expect(agentSessions.records[0]).toMatchObject({ model: "claude-opus-4-8" });
   });
 
   it("reaps running sessions stale beyond six hours at their lastEventAt before a batch", async () => {

@@ -201,6 +201,8 @@ fn span_reply(dir: &Path, message: &Value) -> Option<Value> {
             start_head: None,
             model: None,
             rule_id: Some(rule_id.to_string()),
+            transcript_path: None,
+            tokens: None,
         };
         match spool::append(&dir.join("browser-spool.jsonl"), &span) {
             Ok(()) => "span-ack",

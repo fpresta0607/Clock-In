@@ -471,3 +471,155 @@ fn a_started_event_over_a_non_repo_cwd_records_no_head() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn cumulative_token_flags_land_on_the_spool_event() {
+    let dir = temp_dir("argv-tokens");
+    let spool = active_agent_spool(&dir);
+
+    let output = run_hook(
+        &dir,
+        &[
+            "--source",
+            "pi",
+            "--event",
+            "heartbeat",
+            "--session-id",
+            "s1",
+            "--cwd",
+            "/home/dev/Clock-In",
+            "--input-tokens",
+            "1200",
+            "--output-tokens",
+            "300",
+            "--cache-creation-input-tokens",
+            "45",
+            "--cache-read-input-tokens",
+            "90000",
+        ],
+        None,
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let content = std::fs::read_to_string(&spool).expect("spool reads");
+    let value: serde_json::Value =
+        serde_json::from_str(content.lines().next().expect("one line")).expect("line parses");
+    assert_eq!(value["tokens"]["inputTokens"], 1200);
+    assert_eq!(value["tokens"]["outputTokens"], 300);
+    assert_eq!(value["tokens"]["cacheCreationInputTokens"], 45);
+    assert_eq!(value["tokens"]["cacheReadInputTokens"], 90000);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_empty_token_flag_reads_as_absent() {
+    let dir = temp_dir("argv-tokens-empty");
+    let spool = active_agent_spool(&dir);
+
+    // A runtime that cannot name a counter passes an empty string rather than
+    // branching its own hook wiring; that reads as absent, exactly as --model.
+    let output = run_hook(
+        &dir,
+        &[
+            "--source",
+            "pi",
+            "--event",
+            "heartbeat",
+            "--session-id",
+            "s1",
+            "--cwd",
+            "/home/dev/Clock-In",
+            "--input-tokens",
+            "",
+            "--output-tokens",
+            "",
+            "--cache-creation-input-tokens",
+            "",
+            "--cache-read-input-tokens",
+            "",
+        ],
+        None,
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let content = std::fs::read_to_string(&spool).expect("spool reads");
+    let value: serde_json::Value =
+        serde_json::from_str(content.lines().next().expect("one line")).expect("line parses");
+    assert!(
+        value.get("tokens").is_none(),
+        "no token flag with a value means no counters at all: {value}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn token_flags_ride_a_cli_native_stdin_payload() {
+    let dir = temp_dir("argv-tokens-native");
+    let spool = active_agent_spool(&dir);
+
+    // Identity on the command line, payload on stdin (the Cursor/Codex shape):
+    // the flags are the only channel a CLI-native payload has for counters.
+    let output = run_hook(
+        &dir,
+        &[
+            "--source",
+            "cursor",
+            "--event",
+            "heartbeat",
+            "--input-tokens",
+            "42",
+        ],
+        Some(r#"{"conversation_id":"c1","workspace_roots":["C:/dev/Clock-In"]}"#),
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let content = std::fs::read_to_string(&spool).expect("spool reads");
+    let value: serde_json::Value =
+        serde_json::from_str(content.lines().next().expect("one line")).expect("line parses");
+    assert_eq!(value["tokens"]["inputTokens"], 42);
+    assert!(value["tokens"].get("outputTokens").is_none());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_non_numeric_token_flag_exits_non_zero_and_writes_nothing() {
+    let dir = temp_dir("argv-tokens-invalid");
+    let spool = active_agent_spool(&dir);
+
+    let output = run_hook(
+        &dir,
+        &[
+            "--source",
+            "pi",
+            "--event",
+            "heartbeat",
+            "--session-id",
+            "s1",
+            "--cwd",
+            "/home/dev/Clock-In",
+            "--input-tokens",
+            "lots",
+        ],
+        None,
+    );
+
+    assert!(!output.status.success());
+    assert!(!spool.exists());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

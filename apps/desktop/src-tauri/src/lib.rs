@@ -5,6 +5,7 @@
 //! token in it, and stops that fail offline are queued for retry.
 
 mod agent_runtimes;
+mod agent_usage;
 mod api;
 mod app_icons;
 // Shared with the `clock-in-browser-host` binary; the host calls these from
@@ -881,6 +882,7 @@ pub fn run() {
                 recovery_path: recovery_path.clone(),
                 shift_windows_path: spool::shift_windows_path(),
                 shift_commits_path: spool::shift_commits_path(),
+                agent_usage_path: spool::agent_usage_path(),
                 recovery: Arc::clone(&recovery),
             });
 

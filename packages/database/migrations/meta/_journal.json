@@ -99,6 +99,13 @@
       "when": 1786812877838,
       "tag": "0013_agent_identity_key_releases_on_retire",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1786837679808,
+      "tag": "0014_agent_usage",
+      "breakpoints": true
     }
   ]
 }

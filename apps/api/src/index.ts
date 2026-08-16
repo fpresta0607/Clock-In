@@ -16,6 +16,7 @@ export {
   DrizzleActivitySegmentRepository,
   DrizzleAgentRepository,
   DrizzleAgentSessionRepository,
+  DrizzleAgentUsageRepository,
   DrizzlePathMappingRepository,
   DrizzleProjectRepository,
   DrizzleReportRepository,
@@ -25,6 +26,7 @@ export {
 export { createActivityRoutes } from "./routes/activity.js";
 export { createAgentRoutes } from "./routes/agents.js";
 export { createAgentSessionRoutes } from "./routes/agent-sessions.js";
+export { createAgentUsageRoutes } from "./routes/agent-usage.js";
 export { createMeStatsRoutes } from "./routes/me-stats.js";
 export { createPathMappingRoutes } from "./routes/path-mappings.js";
 export { createProjectRoutes } from "./routes/projects.js";
@@ -33,6 +35,8 @@ export { createSessionRoutes } from "./routes/sessions.js";
 export { createShiftCommitRoutes } from "./routes/shift-commits.js";
 export { createActivityService } from "./services/activity.js";
 export { createAgentSessionReaper, createAgentSessionService, rosterEligibleSource } from "./services/agent-sessions.js";
+export { createAgentUsageService } from "./services/agent-usage.js";
+export type { AgentUsageService, AgentUsageServiceDependencies } from "./services/agent-usage.js";
 export { asAgentView, createAgentService } from "./services/agents.js";
 export type { AgentPatchInput, AgentService, AgentServiceDependencies } from "./services/agents.js";
 export { normalizePath, resolveProjectForCwd } from "./services/attribution.js";
@@ -53,7 +57,10 @@ export type {
   AgentShiftRecord,
   AgentStatus,
   AgentUpdatePatch,
+  AgentUsageRecord,
+  AgentUsageRepository,
   UpsertAgentForKey,
+  UpsertAgentUsageBucket,
   CreatePathMapping,
   CreateRunningSession,
   InsertEndedAgentSession,

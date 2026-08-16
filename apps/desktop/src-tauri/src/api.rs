@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::monitor::{ObservedSession, SegmentRecord};
-use crate::spool::{AgentSource, SpoolEvent};
+use crate::spool::{AgentEventKind, AgentSource, SpoolEvent};
 
 /// Matches the `BridgeErrorKind` union the React bridge narrows on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,6 +342,72 @@ pub struct AgentEventOutcome {
 #[derive(Deserialize)]
 struct AgentEventBatchResponse {
     results: Vec<AgentEventOutcome>,
+}
+
+/// What `POST /agent-sessions` accepts, borrowed field-by-field from a spool
+/// event. The spool line carries capture-only fields (`transcript_path`,
+/// cumulative `tokens`) that the server's strict schema would reject - and a
+/// transcript path is not ours to send - so the upload projects explicitly
+/// instead of serializing the spool event itself. `skip_serializing` on the
+/// spool struct is not an option: the same serde impl writes the spool file,
+/// where those fields must survive.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEventUpload<'a> {
+    pub source: &'a AgentSource,
+    pub external_session_id: &'a str,
+    pub event: AgentEventKind,
+    pub occurred_at: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<&'a str>,
+}
+
+impl<'a> From<&'a SpoolEvent> for AgentEventUpload<'a> {
+    fn from(event: &'a SpoolEvent) -> Self {
+        Self {
+            source: &event.source,
+            external_session_id: &event.external_session_id,
+            event: event.event,
+            occurred_at: &event.occurred_at,
+            cwd: event.cwd.as_deref(),
+            model: event.model.as_deref(),
+            rule_id: event.rule_id.as_deref(),
+        }
+    }
+}
+
+/// One session's token counters for one hour bucket, as `POST /agent-usage`
+/// accepts it. Counters are cumulative totals per (bucket, model, sidechain),
+/// restated upward; the server upserts monotonically, so a replayed batch is
+/// always safe to resend.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentUsageUpload {
+    pub client_id: String,
+    pub source: AgentSource,
+    pub external_session_id: String,
+    pub bucket_start_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub sidechain: bool,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+}
+
+/// The server's verdict on an uploaded agent-usage batch. `unknown_session`
+/// is retryable (the shift may not have landed on the server yet); every
+/// other rejection reason is permanent.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentUsageBatchOutcome {
+    pub accepted: u32,
+    pub rejected: Vec<SegmentRejection>,
 }
 
 /// A per-user path prefix → project mapping, as `/path-mappings` returns it.
@@ -956,12 +1022,15 @@ impl ApiClient {
         })
     }
 
-    /// Uploads one drained agent-event batch (at most 500 rows; the caller chunks).
+    /// Uploads one drained agent-event batch (at most 500 rows; the caller
+    /// chunks). The wire shape is projected (`AgentEventUpload`): the spool
+    /// line's capture-only fields never leave the machine.
     pub async fn upload_agent_events(
         &self,
         access_token: &str,
         events: &[SpoolEvent],
     ) -> ApiResult<Vec<AgentEventOutcome>> {
+        let events: Vec<AgentEventUpload> = events.iter().map(AgentEventUpload::from).collect();
         let response = self
             .http
             .post(format!("{}/agent-sessions", self.api_base_url))
@@ -978,6 +1047,32 @@ impl ApiClient {
             BridgeError::unknown("The agent-event upload response could not be read.")
         })?;
         Ok(body.results)
+    }
+
+    /// Uploads one agent-usage batch (at most 500 rows; the caller chunks).
+    /// Idempotent on `clientId`; counters only restate upward, so a replayed
+    /// batch is always safe to resend.
+    pub async fn upload_agent_usage(
+        &self,
+        access_token: &str,
+        usage: &[AgentUsageUpload],
+    ) -> ApiResult<AgentUsageBatchOutcome> {
+        let response = self
+            .http
+            .post(format!("{}/agent-usage", self.api_base_url))
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({ "usage": usage }))
+            .send()
+            .await
+            .map_err(|error| classify_transport(&error))?;
+
+        if !response.status().is_success() {
+            return Err(classify(response.status().as_u16()));
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| BridgeError::unknown("The agent-usage upload response could not be read."))
     }
 
     /// Stats for a range, for the caller or for a named teammate.

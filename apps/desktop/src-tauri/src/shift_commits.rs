@@ -454,6 +454,8 @@ mod tests {
             start_head: None,
             model: None,
             rule_id: None,
+            transcript_path: None,
+            tokens: None,
         }
     }
 
@@ -467,6 +469,8 @@ mod tests {
             start_head: start_head.map(str::to_string),
             model: None,
             rule_id: None,
+            transcript_path: None,
+            tokens: None,
         }
     }
 
