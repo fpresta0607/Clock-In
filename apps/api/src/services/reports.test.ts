@@ -7,6 +7,10 @@ import type {
   AgentRecord,
   AgentRepository,
   AgentShiftRecord,
+  AgentUsageBucketTotalRecord,
+  AgentUsageModelTotalsRecord,
+  AgentUsageRepository,
+  AgentUsageTotalsRecord,
   AppTotalRecord,
   LeaderboardRowRecord,
   PresenceIntervalRecord,
@@ -216,6 +220,107 @@ class ShiftCommits implements ShiftCommitRepository {
     throw new Error("not used");
   }
 }
+
+type UsageSeed = {
+  userId: string;
+  agentId: string;
+  projectId: string | null;
+  model: string | null;
+  bucketStartAt: Date;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+};
+
+function usageSeed(overrides: Partial<UsageSeed> = {}): UsageSeed {
+  return {
+    userId: ids.user,
+    agentId: ids.session,
+    projectId: ids.project,
+    model: null,
+    bucketStartAt: new Date("2026-08-06T14:00:00.000Z"),
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+    ...overrides,
+  };
+}
+
+/** Mirrors the usage sums: same scope predicates as the commit tallies, bucketed by where a bucket's start falls. */
+class Usage implements AgentUsageRepository {
+  public lastBucketQuery: ReportQuery | null = null;
+  public lastAgentQuery: ReportQuery | null = null;
+  public constructor(public rows: UsageSeed[] = []) {}
+  public async findByClientId(): ReturnType<AgentUsageRepository["findByClientId"]> {
+    throw new Error("not used");
+  }
+  public async upsertBucket(): ReturnType<AgentUsageRepository["upsertBucket"]> {
+    throw new Error("not used");
+  }
+  private scoped(query: ReportQuery): UsageSeed[] {
+    return this.rows.filter((row) =>
+      (query.userId === undefined || row.userId === query.userId)
+      && (query.projectId === undefined || row.projectId === query.projectId)
+      && (query.unassignedOnly !== true || row.projectId === null)
+      && (query.from === undefined || row.bucketStartAt >= query.from)
+      && (query.toExclusive === undefined || row.bucketStartAt < query.toExclusive));
+  }
+  public async sumByBucket(_subject: AuthenticatedSubject, query: ReportQuery): Promise<AgentUsageBucketTotalRecord[]> {
+    this.lastBucketQuery = query;
+    const byBucket = new Map<number, AgentUsageBucketTotalRecord>();
+    for (const row of this.scoped(query)) {
+      const key = row.bucketStartAt.getTime();
+      const record = byBucket.get(key) ?? {
+        bucketStartAt: row.bucketStartAt,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 0,
+      };
+      record.inputTokens = (record.inputTokens as number) + row.inputTokens;
+      record.outputTokens = (record.outputTokens as number) + row.outputTokens;
+      record.cacheCreationInputTokens = (record.cacheCreationInputTokens as number) + row.cacheCreationInputTokens;
+      record.cacheReadInputTokens = (record.cacheReadInputTokens as number) + row.cacheReadInputTokens;
+      byBucket.set(key, record);
+    }
+    return [...byBucket.values()];
+  }
+  public async sumByAgent(_subject: AuthenticatedSubject, query: ReportQuery): Promise<AgentUsageTotalsRecord[]> {
+    this.lastAgentQuery = query;
+    const byAgent = new Map<string, AgentUsageTotalsRecord>();
+    for (const row of this.scoped(query)) {
+      const record = byAgent.get(row.agentId) ?? {
+        agentId: row.agentId,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 0,
+        rowCount: 0,
+      };
+      record.inputTokens = (record.inputTokens as number) + row.inputTokens;
+      record.outputTokens = (record.outputTokens as number) + row.outputTokens;
+      record.cacheCreationInputTokens = (record.cacheCreationInputTokens as number) + row.cacheCreationInputTokens;
+      record.cacheReadInputTokens = (record.cacheReadInputTokens as number) + row.cacheReadInputTokens;
+      record.rowCount = (record.rowCount as number) + 1;
+      byAgent.set(row.agentId, record);
+    }
+    return [...byAgent.values()];
+  }
+  public async sumByAgentAndModel(): Promise<AgentUsageModelTotalsRecord[]> {
+    throw new Error("not used");
+  }
+}
+
+/** The token fields an hour nothing reported for carries: nulls, never an invented zero. */
+const nullTokens = { inputTokens: null, outputTokens: null, cacheCreationInputTokens: null, cacheReadInputTokens: null };
+
+/** The token block an agent with no usage rows in range carries: zeros under tokensReported false. */
+const noTokens = {
+  tokens: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+  tokensReported: false,
+};
 
 const noMeasurement = {
   activeSeconds: 0,
@@ -641,15 +746,58 @@ describe("me/stats", () => {
     });
 
     // The series tiles midnight-to-midnight on the caller's calendar, so the
-    // empty early hours are present and the two busy hours read exactly.
+    // empty early hours are present and the two busy hours read exactly. No
+    // usage repository is wired, so every hour's token fields stay null.
     expect(result.hourly).toHaveLength(24);
     const byHour = new Map(result.hourly.map((bucket) => [new Date(bucket.hourStart).getUTCHours(), bucket]));
-    expect(byHour.get(9)).toEqual({ hourStart: "2026-08-05T09:00:00.000Z", activeSeconds: 3_600, agentSeconds: 7_200 });
-    expect(byHour.get(10)).toEqual({ hourStart: "2026-08-05T10:00:00.000Z", activeSeconds: 3_600, agentSeconds: 0 });
+    expect(byHour.get(9)).toEqual({ hourStart: "2026-08-05T09:00:00.000Z", activeSeconds: 3_600, agentSeconds: 7_200, ...nullTokens });
+    expect(byHour.get(10)).toEqual({ hourStart: "2026-08-05T10:00:00.000Z", activeSeconds: 3_600, agentSeconds: 0, ...nullTokens });
     for (let h = 0; h < 24; h++) {
       if (h === 9 || h === 10) continue;
-      expect(byHour.get(h)).toEqual({ hourStart: `2026-08-05T${String(h).padStart(2, "0")}:00:00.000Z`, activeSeconds: 0, agentSeconds: 0 });
+      expect(byHour.get(h)).toEqual({ hourStart: `2026-08-05T${String(h).padStart(2, "0")}:00:00.000Z`, activeSeconds: 0, agentSeconds: 0, ...nullTokens });
     }
+  });
+
+  it("fills hourly token fields from the usage buckets and keeps unreported hours null", async () => {
+    const hour = (h: number): Date => new Date(Date.UTC(2026, 7, 5, h));
+    const reports = new Reports();
+    reports.presenceIntervals = [
+      { user: { id: ids.user, name: "Alex" }, startedAt: hour(9), endedAt: hour(11) },
+    ];
+    reports.agentIntervals = [
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, agentId: ids.session, startedAt: hour(9), endedAt: hour(10) },
+    ];
+    const usage = new Usage([
+      // Two buckets in the 09:00 hour sum together; the 10:00 hour reported nothing.
+      usageSeed({ bucketStartAt: hour(9), inputTokens: 1_000, outputTokens: 100, cacheCreationInputTokens: 50, cacheReadInputTokens: 9_000 }),
+      usageSeed({ bucketStartAt: hour(9), inputTokens: 500, outputTokens: 40, cacheReadInputTokens: 1_000 }),
+      // A teammate's bucket never surfaces on the caller's series.
+      usageSeed({ userId: ids.otherUser, bucketStartAt: hour(9), inputTokens: 9_999 }),
+    ]);
+    const service = createReportService({ reports, reaper: silentReaper, agents, agentUsage: usage });
+
+    const result = await service.meStats(subject, {
+      fromAt: "2026-08-05T00:00:00.000Z",
+      toExclusiveAt: "2026-08-06T00:00:00.000Z",
+    });
+
+    expect(result.hourly).toHaveLength(24);
+    const byHour = new Map(result.hourly.map((bucket) => [new Date(bucket.hourStart).getUTCHours(), bucket]));
+    expect(byHour.get(9)).toEqual({
+      hourStart: "2026-08-05T09:00:00.000Z",
+      activeSeconds: 3_600,
+      agentSeconds: 3_600,
+      inputTokens: 1_500,
+      outputTokens: 140,
+      cacheCreationInputTokens: 50,
+      cacheReadInputTokens: 10_000,
+    });
+    expect(byHour.get(10)).toEqual({ hourStart: "2026-08-05T10:00:00.000Z", activeSeconds: 3_600, agentSeconds: 0, ...nullTokens });
+    expect(usage.lastBucketQuery).toEqual({
+      from: new Date("2026-08-05T00:00:00.000Z"),
+      toExclusive: new Date("2026-08-06T00:00:00.000Z"),
+      userId: ids.user,
+    });
   });
 
   it("leaves the unbounded all-time range without an hourly graph", async () => {
@@ -721,10 +869,11 @@ describe("me/stats", () => {
       commitsOrphaned: 0,
       heldRate: 1,
       models: ["claude-fable-5"],
+      ...noTokens,
     }]);
   });
 
-  it("scopes a shared agent's commit tallies to the caller in meStats while the org report shows every member", async () => {
+  it("scopes a shared agent's commit and token tallies to the caller in meStats while the org report shows every member", async () => {
     const reports = new Reports();
     reports.agentIntervals = [
       { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
@@ -736,7 +885,11 @@ describe("me/stats", () => {
       { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "merged", authoredAt },
       { userId: ids.otherUser, agentId: ids.session, projectId: ids.project, verification: "merged", authoredAt },
     ]);
-    const service = createReportService({ reports, reaper: silentReaper, agents: roster, shiftCommits });
+    const usage = new Usage([
+      usageSeed({ userId: ids.user, inputTokens: 600, outputTokens: 60 }),
+      usageSeed({ userId: ids.otherUser, inputTokens: 300, outputTokens: 30 }),
+    ]);
+    const service = createReportService({ reports, reaper: silentReaper, agents: roster, shiftCommits, agentUsage: usage });
 
     const own = await service.meStats(subject, {});
 
@@ -751,8 +904,11 @@ describe("me/stats", () => {
       commitsOrphaned: 0,
       heldRate: 1,
       models: [],
+      tokens: { inputTokens: 600, outputTokens: 60, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+      tokensReported: true,
     }]);
     expect(shiftCommits.lastCountsQuery).toEqual({ userId: ids.user });
+    expect(usage.lastAgentQuery).toEqual({ userId: ids.user });
 
     const org = await service.agentsReport(subject, {});
 
@@ -767,7 +923,29 @@ describe("me/stats", () => {
       commitsOrphaned: 0,
       heldRate: 1,
       models: [],
+      tokens: { inputTokens: 900, outputTokens: 90, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+      tokensReported: true,
     }]);
+  });
+
+  it("marks tokensReported by the existence of rows, never by a nonzero sum", async () => {
+    const reports = new Reports();
+    reports.agentIntervals = [
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+    ];
+    const roster = new Agents([agentRecord({ id: ids.session }), agentRecord({ id: ids.otherAgent, source: "codex" })]);
+    // A bucket whose counters are all zero is still a report: tokensReported
+    // reads true, and the row ranks above agents that reported nothing.
+    const usage = new Usage([usageSeed({ userId: ids.user })]);
+    const service = createReportService({ reports, reaper: silentReaper, agents: roster, agentUsage: usage });
+
+    const result = await service.agentsReport(subject, {});
+
+    expect(result.rows[0]).toMatchObject({
+      tokens: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+      tokensReported: true,
+    });
+    expect(result.rows[1]).toMatchObject({ ...noTokens });
   });
 });
 
@@ -804,6 +982,7 @@ describe("agents report", () => {
         // merged / decided (merged + reverted + orphaned); "orphaned" decides too.
         heldRate: 0.5,
         models: ["claude-fable-5"],
+        ...noTokens,
       },
       {
         // A registered agent with nothing in range still gets a row: zeros and a null rate, never absence.
@@ -817,6 +996,7 @@ describe("agents report", () => {
         commitsOrphaned: 0,
         heldRate: null,
         models: [],
+        ...noTokens,
       },
     ]);
     expect(result.headcount).toEqual({ total: 2, active: 2, retired: 0 });
@@ -839,6 +1019,7 @@ describe("agents report", () => {
       commitsOrphaned: 0,
       heldRate: null,
       models: [],
+      ...noTokens,
     }]);
     expect(reaper.subjects).toEqual([subject]);
 
@@ -878,6 +1059,7 @@ describe("agents report", () => {
         commitsOrphaned: 0,
         heldRate: 1,
         models: [],
+        ...noTokens,
       },
       {
         agent: { id: ids.otherAgent, name: "Codex @ Side", source: "codex", status: "anonymous", owner: { id: ids.user, name: "Alex" }, project: { id: ids.otherProject, name: "Side" }, createdAt: "2026-08-01T00:00:00.000Z" },
@@ -890,8 +1072,65 @@ describe("agents report", () => {
         commitsOrphaned: 0,
         heldRate: null,
         models: [],
+        ...noTokens,
       },
     ]);
     expect(shiftCommits.lastCountsQuery).toEqual({ projectId: ids.project });
+  });
+
+  it("ranks rows by hours or tokens when the filters ask, non-reporters last, ties in roster order", async () => {
+    const reports = new Reports();
+    reports.agentIntervals = [
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+    ];
+    // Roster order is deliberate: codex first, so the sorts have something to move.
+    const roster = new Agents([
+      agentRecord({ id: ids.otherAgent, name: "Codex @ Side", source: "codex" }),
+      agentRecord({ id: ids.session }),
+      agentRecord({ id: ids.otherProject, name: "Kimi @ Field", source: "kimi_code" }),
+    ]);
+    const usage = new Usage([
+      // Codex burned the most; kimi never reported a bucket.
+      usageSeed({ agentId: ids.otherAgent, inputTokens: 5_000, outputTokens: 500, cacheReadInputTokens: 20_000 }),
+      usageSeed({ agentId: ids.session, inputTokens: 1_000, outputTokens: 100 }),
+    ]);
+    const service = createReportService({ reports, reaper: silentReaper, agents: roster, agentUsage: usage });
+
+    // Absent sort keeps the roster's own order.
+    const unsorted = await service.agentsReport(subject, {});
+    expect(unsorted.rows.map((row) => row.agent.id)).toEqual([ids.otherAgent, ids.session, ids.otherProject]);
+
+    // Hours rank by agentSeconds; everyone else ties at zero and keeps roster order.
+    const byHours = await service.agentsReport(subject, { sort: "hours" });
+    expect(byHours.filters.sort).toBe("hours");
+    expect(byHours.rows.map((row) => [row.agent.id, row.agentSeconds])).toEqual([
+      [ids.session, 3_600],
+      [ids.otherAgent, 0],
+      [ids.otherProject, 0],
+    ]);
+
+    // Tokens rank by the sum of the four counters; the agent that reported
+    // nothing sorts last even though roster order put it third anyway - swap
+    // the roster to prove the ranking, not the seeding, decides.
+    const byTokens = await service.agentsReport(subject, { sort: "tokens" });
+    expect(byTokens.rows.map((row) => [row.agent.id, row.tokensReported])).toEqual([
+      [ids.otherAgent, true],
+      [ids.session, true],
+      [ids.otherProject, false],
+    ]);
+    expect(byTokens.rows[0]?.tokens).toEqual({ inputTokens: 5_000, outputTokens: 500, cacheCreationInputTokens: 0, cacheReadInputTokens: 20_000 });
+
+    const flipped = createReportService({
+      reports,
+      reaper: silentReaper,
+      agents: new Agents([
+        agentRecord({ id: ids.otherProject, name: "Kimi @ Field", source: "kimi_code" }),
+        agentRecord({ id: ids.session }),
+        agentRecord({ id: ids.otherAgent, name: "Codex @ Side", source: "codex" }),
+      ]),
+      agentUsage: usage,
+    });
+    const reranked = await flipped.agentsReport(subject, { sort: "tokens" });
+    expect(reranked.rows.map((row) => row.agent.id)).toEqual([ids.otherAgent, ids.session, ids.otherProject]);
   });
 });

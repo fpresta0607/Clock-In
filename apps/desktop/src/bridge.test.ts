@@ -216,6 +216,49 @@ describe("defaultBridge", () => {
     });
   });
 
+  it("decodes hourly token fields, absent ones as null", async () => {
+    const stats = {
+      filters: {},
+      totalDurationSeconds: 0,
+      attributedSeconds: 0,
+      unattributedSeconds: 0,
+      activeSeconds: 3_600,
+      agentSeconds: 1_800,
+      concurrency: { t0Seconds: 0, t1Seconds: 3_600, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
+      byAgent: [],
+      hourly: [
+        {
+          hourStart: "2026-08-06T09:00:00.000Z",
+          activeSeconds: 3_600,
+          agentSeconds: 1_800,
+          inputTokens: 12_000,
+          outputTokens: 800,
+          cacheCreationInputTokens: 400,
+          cacheReadInputTokens: 60_000,
+        },
+        // An hour nothing reported tokens for keeps nulls, and an API from
+        // before the fields shipped decodes to the same nulls.
+        { hourStart: "2026-08-06T10:00:00.000Z", activeSeconds: 0, agentSeconds: 0 },
+      ],
+      projects: [],
+      apps: [],
+    };
+    invoke.mockResolvedValueOnce(stats);
+
+    await expect(defaultBridge.meStats(undefined, undefined)).resolves.toMatchObject({
+      hourly: [
+        { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
+        { inputTokens: null, outputTokens: null, cacheCreationInputTokens: null, cacheReadInputTokens: null },
+      ],
+    });
+
+    invoke.mockResolvedValueOnce({
+      ...stats,
+      hourly: [{ ...stats.hourly[0], inputTokens: -1 }],
+    });
+    await expect(defaultBridge.meStats(undefined, undefined)).rejects.toMatchObject({ kind: "unknown" });
+  });
+
   it("decodes the pay-run report, with zero-activity agents and a null held rate", async () => {
     const report = {
       headcount: { total: 1, active: 1, retired: 0 },
@@ -237,6 +280,8 @@ describe("defaultBridge", () => {
         commitsOrphaned: 0,
         heldRate: null,
         models: ["claude-fable-5"],
+        tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
+        tokensReported: true,
       }],
     };
     invoke.mockResolvedValueOnce(report);
@@ -246,14 +291,22 @@ describe("defaultBridge", () => {
     await expect(defaultBridge.agentsReport(fromAt, toExclusiveAt)).resolves.toEqual(report);
     expect(invoke).toHaveBeenLastCalledWith("agents_report", { fromAt, toExclusiveAt, scope: undefined });
 
-    // An API from before the models field shipped decodes it as empty.
+    // An API from before the models and token fields shipped decodes them as
+    // empty and absent: no models named, null totals, nothing reported.
     invoke.mockResolvedValueOnce({
       headcount: report.headcount,
-      rows: report.rows.map(({ models: _models, ...row }) => row),
+      rows: report.rows.map(({ models: _models, tokens: _tokens, tokensReported: _tokensReported, ...row }) => row),
     });
     await expect(defaultBridge.agentsReport(fromAt, toExclusiveAt)).resolves.toMatchObject({
-      rows: [{ models: [] }],
+      rows: [{ models: [], tokens: null, tokensReported: false }],
     });
+
+    // A malformed totals object is still a hard failure.
+    invoke.mockResolvedValueOnce({
+      headcount: report.headcount,
+      rows: [{ ...report.rows[0], tokens: { inputTokens: -1 } }],
+    });
+    await expect(defaultBridge.agentsReport(fromAt, toExclusiveAt)).rejects.toMatchObject({ kind: "unknown" });
   });
 
   it("decodes an agent with a null project and a decided held rate, and rejects an out-of-range one", async () => {

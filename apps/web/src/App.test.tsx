@@ -70,8 +70,10 @@ const paystub = {
     commitsReverted: 0,
     commitsOrphaned: 0,
     heldRate: null,
+    tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
+    tokensReported: true,
   },
-  models: [{ model: "claude-fable-5", agentSeconds: 5_400, shiftCount: 2 }],
+  models: [{ model: "claude-fable-5", agentSeconds: 5_400, shiftCount: 2, tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 } }],
   shifts: [{
     id: "00000000-0000-4000-8000-0000000000s1",
     startedAt: "2026-08-06T10:00:00.000Z",
@@ -97,6 +99,8 @@ const agentsReportResponse = {
     commitsOrphaned: 0,
     heldRate: null,
     models: ["claude-fable-5"],
+    tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
+    tokensReported: true,
   }],
 };
 
@@ -474,9 +478,9 @@ describe("dashboard", () => {
       meStats: vi.fn().mockResolvedValue({
         ...memberStats,
         hourly: [
-          { hourStart: "2026-08-15T09:00:00.000Z", activeSeconds: 600, agentSeconds: 300 },
-          { hourStart: "2026-08-15T10:00:00.000Z", activeSeconds: 1_800, agentSeconds: 900 },
-          { hourStart: "2026-08-15T11:00:00.000Z", activeSeconds: 300, agentSeconds: 0 },
+          { hourStart: "2026-08-15T09:00:00.000Z", activeSeconds: 600, agentSeconds: 300, inputTokens: null, outputTokens: null, cacheCreationInputTokens: null, cacheReadInputTokens: null },
+          { hourStart: "2026-08-15T10:00:00.000Z", activeSeconds: 1_800, agentSeconds: 900, inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
+          { hourStart: "2026-08-15T11:00:00.000Z", activeSeconds: 300, agentSeconds: 0, inputTokens: null, outputTokens: null, cacheCreationInputTokens: null, cacheReadInputTokens: null },
         ],
       }),
     }));

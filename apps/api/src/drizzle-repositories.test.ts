@@ -6,6 +6,7 @@ import { AppError } from "./errors.js";
 
 import {
   DrizzleAccountStore,
+  DrizzleAgentUsageRepository,
   DrizzlePathMappingRepository,
   DrizzleProjectRepository,
   DrizzleReportRepository,
@@ -418,5 +419,88 @@ describe("Drizzle path-mapping repository", () => {
     const result = await repository.listForSubject({ organizationId: input.organizationId, userId: input.userId, role: "member" });
     expect(result).toHaveLength(1);
     expect(result[0]!.pathPrefix).toBe("C:/dev");
+  });
+});
+
+describe("Drizzle agent usage repository", () => {
+  const subject = { organizationId: input.organizationId, userId: input.userId, role: "member" as const };
+
+  it("sums counters per hour bucket, preserving postgres sum strings", async () => {
+    const rows = {
+      innerJoin: () => rows,
+      where: () => rows,
+      groupBy: () => rows,
+      orderBy: async () => [{
+        bucketStartAt: new Date("2026-08-06T14:00:00.000Z"),
+        inputTokens: "12000",
+        outputTokens: "800",
+        cacheCreationInputTokens: "400",
+        cacheReadInputTokens: "60000",
+        rowCount: 3,
+      }],
+    };
+    const db = {
+      select: () => ({ from: () => rows }),
+    } as unknown as DatabaseConnection["db"];
+    const repository = new DrizzleAgentUsageRepository(db);
+
+    await expect(repository.sumByBucket(subject, {})).resolves.toEqual([{
+      bucketStartAt: new Date("2026-08-06T14:00:00.000Z"),
+      inputTokens: "12000",
+      outputTokens: "800",
+      cacheCreationInputTokens: "400",
+      cacheReadInputTokens: "60000",
+      rowCount: 3,
+    }]);
+    // The project scope takes the join branch; the same rows come back.
+    await expect(repository.sumByBucket(subject, { projectId: input.projectId })).resolves.toHaveLength(1);
+    await expect(repository.sumByBucket(subject, { unassignedOnly: true })).resolves.toHaveLength(1);
+  });
+
+  it("sums counters per agent with the row count that feeds tokensReported", async () => {
+    const rows = {
+      innerJoin: () => rows,
+      where: () => rows,
+      groupBy: async () => [{
+        agentId: input.clientId,
+        inputTokens: "5000",
+        outputTokens: "500",
+        cacheCreationInputTokens: "0",
+        cacheReadInputTokens: "20000",
+        rowCount: 2,
+      }],
+    };
+    const db = {
+      select: () => ({ from: () => rows }),
+    } as unknown as DatabaseConnection["db"];
+    const repository = new DrizzleAgentUsageRepository(db);
+
+    await expect(repository.sumByAgent(subject, {})).resolves.toEqual([{
+      agentId: input.clientId,
+      inputTokens: "5000",
+      outputTokens: "500",
+      cacheCreationInputTokens: "0",
+      cacheReadInputTokens: "20000",
+      rowCount: 2,
+    }]);
+    await expect(repository.sumByAgent(subject, { projectId: input.projectId })).resolves.toHaveLength(1);
+  });
+
+  it("sums one agent's counters per model, null-model buckets included", async () => {
+    const rows = {
+      where: () => rows,
+      groupBy: async () => [
+        { model: "claude-fable-5", inputTokens: "100", outputTokens: "10", cacheCreationInputTokens: "0", cacheReadInputTokens: "0", rowCount: 1 },
+        { model: null, inputTokens: "50", outputTokens: "5", cacheCreationInputTokens: "0", cacheReadInputTokens: "2000", rowCount: 1 },
+      ],
+    };
+    const db = {
+      select: () => ({ from: () => rows }),
+    } as unknown as DatabaseConnection["db"];
+    const repository = new DrizzleAgentUsageRepository(db);
+
+    const result = await repository.sumByAgentAndModel(subject, input.clientId, {});
+    expect(result).toHaveLength(2);
+    expect(result[1]?.model).toBeNull();
   });
 });

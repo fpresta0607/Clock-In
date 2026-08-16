@@ -222,6 +222,23 @@ pub struct AgentsReportRow {
     /// Distinct models this agent's shifts named in range; empty when none did.
     #[serde(default)]
     pub models: Vec<String>,
+    /// Token totals over the range; absent on an API that predates token
+    /// reporting, which the webview shows as absence rather than zeros.
+    #[serde(default)]
+    pub tokens: Option<AgentTokenTotals>,
+    /// Whether any usage rows exist for this agent in range - rows, not nonzero sums.
+    #[serde(default)]
+    pub tokens_reported: bool,
+}
+
+/// The four token counters a runtime's own session logs report, summed over a scope.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTokenTotals {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -488,6 +505,26 @@ pub struct ProjectUsage {
     pub agent_session_count: u64,
 }
 
+/// One hour of the caller's local calendar for the line graph: active time
+/// and agent runtime bucketed to the hour, plus the token counters the hour's
+/// usage buckets reported. Token fields are null - never zero - when nothing
+/// in the hour reported tokens.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeStatsHourlyBucket {
+    pub hour_start: String,
+    pub active_seconds: u64,
+    pub agent_seconds: u64,
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_creation_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_read_input_tokens: Option<u64>,
+}
+
 /// The `GET /me/stats` response: the reporting service's attribution totals
 /// scoped to the caller.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -509,6 +546,11 @@ pub struct MeStats {
     // Without this field serde silently drops the array and the TS bridge
     // rejects the whole response as invalid.
     pub apps: Vec<MeStatsApp>,
+    /// Hourly series for the line graph. Defaulted so an API from before the
+    /// field shipped still parses; the webview reads an empty series as "no
+    /// graph", exactly as it already does.
+    #[serde(default)]
+    pub hourly: Vec<MeStatsHourlyBucket>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1333,6 +1375,26 @@ mod tests {
                 "byAgent": [
                     {"source": "claude_code", "model": null, "durationSeconds": 7200},
                     {"source": "codex", "model": "gpt-5", "durationSeconds": 3600}
+                ],
+                "hourly": [
+                    {
+                        "hourStart": "2026-08-06T09:00:00.000Z",
+                        "activeSeconds": 3600,
+                        "agentSeconds": 1800,
+                        "inputTokens": 12000,
+                        "outputTokens": 800,
+                        "cacheCreationInputTokens": 400,
+                        "cacheReadInputTokens": 60000
+                    },
+                    {
+                        "hourStart": "2026-08-06T10:00:00.000Z",
+                        "activeSeconds": 3600,
+                        "agentSeconds": 0,
+                        "inputTokens": null,
+                        "outputTokens": null,
+                        "cacheCreationInputTokens": null,
+                        "cacheReadInputTokens": null
+                    }
                 ]
             }"#,
         )
@@ -1346,11 +1408,21 @@ mod tests {
         assert_eq!(stats.concurrency.away_seconds, 3_600);
         assert_eq!(stats.by_agent[1].source, "codex");
         assert_eq!(stats.by_agent[1].model.as_deref(), Some("gpt-5"));
+        // The hourly series rides through too, null token fields included: a
+        // dropped field here is how the chart once shipped painting nothing.
+        assert_eq!(stats.hourly.len(), 2);
+        assert_eq!(stats.hourly[0].input_tokens, Some(12_000));
+        assert_eq!(stats.hourly[1].input_tokens, None);
         // Re-serialized to the webview in the camelCase the decoder reads.
         let echoed = serde_json::to_value(&stats).expect("stats serialize");
         assert_eq!(echoed["activeSeconds"], 7_000);
         assert_eq!(echoed["concurrency"]["t3PlusSeconds"], 0);
         assert_eq!(echoed["byAgent"][0]["durationSeconds"], 7_200);
+        assert_eq!(echoed["hourly"][0]["cacheReadInputTokens"], 60_000);
+        assert_eq!(
+            echoed["hourly"][1]["cacheReadInputTokens"],
+            serde_json::Value::Null
+        );
 
         assert_eq!(stats.filters.from.as_deref(), Some("2026-08-01"));
         assert_eq!(stats.filters.to, None);
@@ -1361,6 +1433,69 @@ mod tests {
         assert_eq!(stats.projects[0].unattributed_seconds, 1_800);
         assert_eq!(stats.apps[0].process_name, "Code.exe");
         assert_eq!(stats.apps[0].duration_seconds, 4800);
+    }
+
+    #[test]
+    fn reads_agents_report_rows_from_an_api_that_predates_token_fields() {
+        let row: AgentsReportRow = serde_json::from_str(
+            r#"{
+                "agent": {
+                    "id": "a1",
+                    "name": "Claude Code @ Field work",
+                    "source": "claude_code",
+                    "status": "anonymous",
+                    "owner": {"id": "u1", "name": "Alex"},
+                    "project": {"id": "p1", "name": "Field work"}
+                },
+                "agentSeconds": 3600,
+                "shiftCount": 1,
+                "commitsRecorded": 0,
+                "commitsPending": 0,
+                "commitsMerged": 0,
+                "commitsReverted": 0,
+                "commitsOrphaned": 0,
+                "heldRate": null,
+                "models": []
+            }"#,
+        )
+        .expect("row parse");
+
+        // Absent token fields decode as absence, never as a measured zero.
+        assert_eq!(row.tokens, None);
+        assert!(!row.tokens_reported);
+        let echoed = serde_json::to_value(&row).expect("row serialize");
+        assert_eq!(echoed["tokens"], serde_json::Value::Null);
+        assert_eq!(echoed["tokensReported"], false);
+
+        let reported: AgentsReportRow = serde_json::from_str(
+            r#"{
+                "agent": {
+                    "id": "a1",
+                    "name": "Claude Code @ Field work",
+                    "source": "claude_code",
+                    "status": "registered",
+                    "owner": {"id": "u1", "name": "Alex"},
+                    "project": null
+                },
+                "agentSeconds": 3600,
+                "shiftCount": 1,
+                "commitsRecorded": 0,
+                "commitsPending": 0,
+                "commitsMerged": 0,
+                "commitsReverted": 0,
+                "commitsOrphaned": 0,
+                "heldRate": null,
+                "models": ["claude-fable-5"],
+                "tokens": {"inputTokens": 12000, "outputTokens": 800, "cacheCreationInputTokens": 400, "cacheReadInputTokens": 60000},
+                "tokensReported": true
+            }"#,
+        )
+        .expect("row with tokens parses");
+        assert_eq!(
+            reported.tokens.map(|tokens| tokens.input_tokens),
+            Some(12_000)
+        );
+        assert!(reported.tokens_reported);
     }
 
     #[test]

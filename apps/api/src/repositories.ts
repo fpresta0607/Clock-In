@@ -507,6 +507,47 @@ export interface AgentUsageRepository {
    * restate a number upward, never add to it.
    */
   upsertBucket(input: UpsertAgentUsageBucket): Promise<void>;
+  /**
+   * Counters summed per hour bucket over the query's scope, for the local-hour
+   * series. A bucket counts by where its start falls.
+   */
+  sumByBucket(subject: AuthenticatedSubject, query: ReportQuery): Promise<AgentUsageBucketTotalRecord[]>;
+  /** Counters summed per agent over the query's scope, for the pay-run report and /me/stats rows. */
+  sumByAgent(subject: AuthenticatedSubject, query: ReportQuery): Promise<AgentUsageTotalsRecord[]>;
+  /** One agent's counters split by the model each bucket named, for the paystub; null-model buckets included. */
+  sumByAgentAndModel(subject: AuthenticatedSubject, agentId: string, query: ReportQuery): Promise<AgentUsageModelTotalsRecord[]>;
+}
+
+/** One hour bucket's summed token counters; sql sums surface as string/bigint. */
+export interface AgentUsageBucketTotalRecord {
+  bucketStartAt: Date;
+  inputTokens: number | string | bigint | null;
+  outputTokens: number | string | bigint | null;
+  cacheCreationInputTokens: number | string | bigint | null;
+  cacheReadInputTokens: number | string | bigint | null;
+}
+
+/**
+ * One agent's summed token counters over a range. `rowCount` feeds
+ * tokensReported, which counts rows - never whether the sum is nonzero.
+ */
+export interface AgentUsageTotalsRecord {
+  agentId: string;
+  inputTokens: number | string | bigint | null;
+  outputTokens: number | string | bigint | null;
+  cacheCreationInputTokens: number | string | bigint | null;
+  cacheReadInputTokens: number | string | bigint | null;
+  rowCount: number | string | bigint;
+}
+
+/** One agent's summed counters under one model (null when the bucket named none). */
+export interface AgentUsageModelTotalsRecord {
+  model: string | null;
+  inputTokens: number | string | bigint | null;
+  outputTokens: number | string | bigint | null;
+  cacheCreationInputTokens: number | string | bigint | null;
+  cacheReadInputTokens: number | string | bigint | null;
+  rowCount: number | string | bigint;
 }
 
 export interface PathMappingRecord {

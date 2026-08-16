@@ -217,4 +217,15 @@ describe("report routes", () => {
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toEqual({ error: { code: "not_found", message: "Project not found." } });
   });
+
+  it("takes a pay-run sort and echoes it in the filters, rejecting any other", async () => {
+    const headers = { authorization: bearerHeader };
+    const sorted = await app().request("http://api.test/reports/agents?sort=tokens", { headers });
+    expect(sorted.status).toBe(200);
+    await expect(sorted.json()).resolves.toMatchObject({ filters: { sort: "tokens" } });
+
+    const bogus = await app().request("http://api.test/reports/agents?sort=commits", { headers });
+    expect(bogus.status).toBe(400);
+    await expect(bogus.json()).resolves.toEqual({ error: { code: "validation_error", message: "Invalid agents report filters." } });
+  });
 });

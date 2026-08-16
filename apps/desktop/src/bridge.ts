@@ -226,10 +226,25 @@ export type MeStatsAgentSplit = {
   medianSeconds: number | null;
 };
 
+/// The four token counters a runtime's own session logs report, summed over
+/// a scope. Null on a row when the API predates token reporting: absence is
+/// shown as absence, never as a zero the server cannot legitimately send.
+export type TokenTotals = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+};
+
 export type MeStatsHourlyBucket = {
   hourStart: string;
   activeSeconds: number;
   agentSeconds: number;
+  /// Null when nothing in the hour reported tokens; never an invented zero.
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheCreationInputTokens: number | null;
+  cacheReadInputTokens: number | null;
 };
 
 /// The dashboard view state shared with the web app. Only `scope` is
@@ -284,6 +299,10 @@ export type AgentsReportRow = {
   heldRate: number | null;
   /// Distinct models this agent's shifts named in range; empty when none did.
   models: readonly string[];
+  /// Token totals over the range; null when the API predates token reporting.
+  tokens: TokenTotals | null;
+  /// Whether any usage rows exist for this agent in range - rows, not nonzero sums.
+  tokensReported: boolean;
 };
 
 export type AgentsReport = {
@@ -733,6 +752,11 @@ const decodeHourlyBucket = (value: unknown): MeStatsHourlyBucket => {
     hourStart: string(candidate.hourStart),
     activeSeconds: nonnegativeInteger(candidate.activeSeconds),
     agentSeconds: nonnegativeInteger(candidate.agentSeconds),
+    // Absent on an older API decodes to null - absence shown as absence.
+    inputTokens: nonnegativeIntegerOrNull(candidate.inputTokens),
+    outputTokens: nonnegativeIntegerOrNull(candidate.outputTokens),
+    cacheCreationInputTokens: nonnegativeIntegerOrNull(candidate.cacheCreationInputTokens),
+    cacheReadInputTokens: nonnegativeIntegerOrNull(candidate.cacheReadInputTokens),
   };
 };
 
@@ -763,6 +787,18 @@ export const decodeMeStats = (value: unknown): MeStats => {
   };
 };
 
+/// Token totals an older API may not send yet decode to null, not zeros.
+const decodeTokenTotalsOrNull = (value: unknown): TokenTotals | null => {
+  if (value === undefined || value === null) return null;
+  const candidate = record(value);
+  return {
+    inputTokens: nonnegativeInteger(candidate.inputTokens),
+    outputTokens: nonnegativeInteger(candidate.outputTokens),
+    cacheCreationInputTokens: nonnegativeInteger(candidate.cacheCreationInputTokens),
+    cacheReadInputTokens: nonnegativeInteger(candidate.cacheReadInputTokens),
+  };
+};
+
 const decodeAgentsReportRow = (value: unknown): AgentsReportRow => {
   const candidate = record(value);
   const agent = record(candidate.agent);
@@ -787,6 +823,10 @@ const decodeAgentsReportRow = (value: unknown): AgentsReportRow => {
     heldRate: unitRateOrNull(candidate.heldRate),
     // An API from before the field shipped reads as no models named, never an error.
     models: stringArrayOrEmpty(candidate.models),
+    tokens: decodeTokenTotalsOrNull(candidate.tokens),
+    tokensReported: candidate.tokensReported === undefined || candidate.tokensReported === null
+      ? false
+      : boolean(candidate.tokensReported),
   };
 };
 
