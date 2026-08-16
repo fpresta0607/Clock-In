@@ -185,6 +185,7 @@ export type MonitorSettings = {
   awayThresholdMinutes: number;
   agentOverrideEnabled: boolean;
   browserAutoInstall: boolean;
+  agentUsageCapture: boolean;
   deviceId: string;
 };
 
@@ -728,6 +729,7 @@ export const decodeMonitorSettings = (value: unknown): MonitorSettings => {
     awayThresholdMinutes: nonnegativeInteger(candidate.awayThresholdMinutes),
     agentOverrideEnabled: boolean(candidate.agentOverrideEnabled),
     browserAutoInstall: boolean(candidate.browserAutoInstall),
+    agentUsageCapture: boolean(candidate.agentUsageCapture),
     deviceId: string(candidate.deviceId),
   };
 };
@@ -882,10 +884,15 @@ export const decodeAgentsReport = (value: unknown): AgentsReport => {
   const headcount = record(candidate.headcount);
   const rows = candidate.rows;
   if (!Array.isArray(rows)) invalidResponse();
+  // An API deployed before the total/active/retired rename sends
+  // anonymous/registered instead; active === anonymous + registered there.
+  const active = headcount.active === undefined
+    ? nonnegativeInteger(headcount.anonymous) + nonnegativeInteger(headcount.registered)
+    : nonnegativeInteger(headcount.active);
   return {
     headcount: {
       total: nonnegativeInteger(headcount.total),
-      active: nonnegativeInteger(headcount.active),
+      active,
       retired: nonnegativeInteger(headcount.retired),
     },
     rows: (rows as unknown[]).map(decodeAgentsReportRow),

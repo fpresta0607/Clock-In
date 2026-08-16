@@ -302,7 +302,9 @@ Not by policy, but because the code never reads it:
 - **URLs, browsing history, or page content.** The browser extension matches the active tab
   against the user's own URL rules inside the browser and reports only which rule matched;
   the URL, page title, and browsing history never leave the browser.
-- **Document names, file contents, message or email bodies.**
+- **Document names, file contents, message or email bodies.** Token counts and model
+  names read from an AI tool's own session log are the one exception, described in *What is
+  collected* below.
 - **Injection.** Clock-In never reaches inside or controls another app. The monitor is read-only
   Win32 queries plus broadcasts delivered to Clock-In's own hidden window.
 
@@ -310,9 +312,11 @@ What *is* collected: coarse activity segments with timestamps, the foreground pr
 session boundaries with their working directory, browser spans naming which URL rule matched and
 for how long, the start and end of each session the monitor observed, and — for an AI coding shift
 in a git repo — the branch name, and the title, commit id and repository path of each commit
-captured once the shift ends (see *Roster: agents as identities*). A working directory can contain
-a user name, so both it and a repository path are shown only to the owning user and org admins,
-and are redacted from logs.
+captured once the shift ends (see *Roster: agents as identities*). When an AI coding tool keeps a
+session log on this computer, Clock-In reads the token counters and the model name from that log —
+the numbers and names only, never the prompt or response text — and reports them with the shift.
+A working directory can contain a user name, so both it and a repository path are shown only to
+the owning user and org admins, and are redacted from logs.
 
 ## Repository layout
 
@@ -535,6 +539,11 @@ them.
   extension to my browsers automatically" is the opt-out, and switching it off removes the policy
   entry, which uninstalls the extension. The extension still reports only which of the user's own
   URL rules matched - the URL, page title, and browsing history never leave the browser.
+- Reading token counts and model names from an AI tool's own session log is **on by default** and
+  has its own opt-out: the settings toggle "Count tokens and models in my AI tools' session logs".
+  Switching it off stops the reader; counters already captured are kept, exactly as switching
+  recording off keeps hours already earned. Only the numbers and the model name are read and
+  sent - never the prompt or response text.
 - A working directory can contain a user name, so it's shown only to the owning user and org
   admins, and redacted from logs like session descriptions are. A captured commit's repository
   path is a working directory and follows the same rule: a paystub read by anyone else carries

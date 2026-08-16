@@ -126,6 +126,7 @@ describe("defaultBridge", () => {
       awayThresholdMinutes: 10,
       agentOverrideEnabled: true,
       browserAutoInstall: true,
+      agentUsageCapture: true,
       deviceId: "00000000-0000-4000-8000-000000000300",
     };
     invoke.mockResolvedValueOnce(settings);
@@ -396,5 +397,33 @@ describe("defaultBridge", () => {
       rows: [{ ...row, agent: { ...row.agent, status: "fired" } }],
     });
     await expect(defaultBridge.agentsReport()).rejects.toMatchObject({ kind: "unknown" });
+  });
+
+  it("reads an older API's anonymous/registered headcount as active", async () => {
+    const row = {
+      agent: {
+        id: ids.project,
+        name: "Claude Code @ Field work",
+        source: "claude_code",
+        status: "anonymous",
+        owner: { id: ids.user, name: "Timer User" },
+        project: { id: ids.project, name: "Field work" },
+      },
+      agentSeconds: 3_600,
+      shiftCount: 1,
+      commitsRecorded: 0,
+      commitsPending: 0,
+      commitsMerged: 0,
+      commitsReverted: 0,
+      commitsOrphaned: 0,
+      heldRate: null,
+    };
+    invoke.mockResolvedValueOnce({
+      headcount: { total: 3, anonymous: 2, registered: 1, retired: 0 },
+      rows: [row],
+    });
+    await expect(defaultBridge.agentsReport()).resolves.toMatchObject({
+      headcount: { total: 3, active: 3, retired: 0 },
+    });
   });
 });
