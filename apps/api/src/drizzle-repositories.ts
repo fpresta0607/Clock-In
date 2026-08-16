@@ -43,7 +43,10 @@ import {
   type AgentUpdatePatch,
   type UpsertAgentForKey,
   type AgentUsageRecord,
+  type AgentUsageBucketTotalRecord,
+  type AgentUsageModelTotalsRecord,
   type AgentUsageRepository,
+  type AgentUsageTotalsRecord,
   type UpsertAgentUsageBucket,
   type InsertShiftCommit,
   type ShiftCommitCountsRecord,
@@ -1617,6 +1620,89 @@ export class DrizzleAgentUsageRepository implements AgentUsageRepository {
           updatedAt: input.recordedAt,
         },
       });
+  }
+
+  /** Range and member predicates shared by every scoped usage read; the org is always the caller's. */
+  private usageScopeConditions(subject: AuthenticatedSubject, query: ReportQuery) {
+    return [
+      eq(agentUsage.organizationId, subject.organizationId),
+      query.from === undefined ? undefined : gte(agentUsage.bucketStartAt, query.from),
+      query.toExclusive === undefined ? undefined : lt(agentUsage.bucketStartAt, query.toExclusive),
+      query.userId === undefined ? undefined : eq(agentUsage.userId, query.userId),
+    ];
+  }
+
+  /** The counter sums every scoped read aggregates; sql sums surface as strings. */
+  private usageSums() {
+    return {
+      inputTokens: sum(agentUsage.inputTokens),
+      outputTokens: sum(agentUsage.outputTokens),
+      cacheCreationInputTokens: sum(agentUsage.cacheCreationInputTokens),
+      cacheReadInputTokens: sum(agentUsage.cacheReadInputTokens),
+      rowCount: count(),
+    };
+  }
+
+  public async sumByBucket(subject: AuthenticatedSubject, query: ReportQuery): Promise<AgentUsageBucketTotalRecord[]> {
+    const projectScoped = query.projectId !== undefined || query.unassignedOnly === true;
+    const conditions = this.usageScopeConditions(subject, query);
+    const base = this.db
+      .select({ bucketStartAt: agentUsage.bucketStartAt, ...this.usageSums() })
+      .from(agentUsage);
+    // The project scope joins through the shift, exactly like the commit
+    // tallies: Unassigned reads usage whose session resolved no project.
+    const rows = await (projectScoped
+      ? base
+        .innerJoin(agentSessions, and(
+          eq(agentSessions.organizationId, agentUsage.organizationId),
+          eq(agentSessions.id, agentUsage.agentSessionId),
+        ))
+        .where(and(
+          ...conditions,
+          query.projectId === undefined ? isNull(agentSessions.projectId) : eq(agentSessions.projectId, query.projectId),
+        ))
+        .groupBy(agentUsage.bucketStartAt)
+        .orderBy(asc(agentUsage.bucketStartAt))
+      : base
+        .where(and(...conditions))
+        .groupBy(agentUsage.bucketStartAt)
+        .orderBy(asc(agentUsage.bucketStartAt)));
+    return rows;
+  }
+
+  public async sumByAgent(subject: AuthenticatedSubject, query: ReportQuery): Promise<AgentUsageTotalsRecord[]> {
+    const projectScoped = query.projectId !== undefined || query.unassignedOnly === true;
+    const conditions = this.usageScopeConditions(subject, query);
+    const base = this.db
+      .select({ agentId: agentUsage.agentId, ...this.usageSums() })
+      .from(agentUsage);
+    const rows = await (projectScoped
+      ? base
+        .innerJoin(agentSessions, and(
+          eq(agentSessions.organizationId, agentUsage.organizationId),
+          eq(agentSessions.id, agentUsage.agentSessionId),
+        ))
+        .where(and(
+          ...conditions,
+          query.projectId === undefined ? isNull(agentSessions.projectId) : eq(agentSessions.projectId, query.projectId),
+        ))
+        .groupBy(agentUsage.agentId)
+      : base
+        .where(and(...conditions))
+        .groupBy(agentUsage.agentId));
+    return rows;
+  }
+
+  public async sumByAgentAndModel(subject: AuthenticatedSubject, agentId: string, query: ReportQuery): Promise<AgentUsageModelTotalsRecord[]> {
+    const rows = await this.db
+      .select({ model: agentUsage.model, ...this.usageSums() })
+      .from(agentUsage)
+      .where(and(
+        ...this.usageScopeConditions(subject, query),
+        eq(agentUsage.agentId, agentId),
+      ))
+      .groupBy(agentUsage.model);
+    return rows;
   }
 }
 

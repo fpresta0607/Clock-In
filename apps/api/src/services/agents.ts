@@ -4,6 +4,7 @@ import {
   type AgentPaystubFilters,
   type AgentPaystubResponse,
   type Interval,
+  type TokenTotals,
 } from "@clock-in/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
@@ -13,13 +14,15 @@ import type {
   AgentRepository,
   AgentShiftRecord,
   AgentUpdatePatch,
+  AgentUsageModelTotalsRecord,
+  AgentUsageRepository,
   ReportQuery,
   ReportRepository,
   ShiftCommitRecord,
   ShiftCommitRepository,
 } from "../repositories.js";
 import type { AgentSessionReaper } from "./agent-sessions.js";
-import { normalizedQuery } from "./reports.js";
+import { normalizedQuery, safeInteger } from "./reports.js";
 
 export interface AgentPatchInput {
   name?: string;
@@ -33,6 +36,8 @@ export interface AgentServiceDependencies {
   reaper: AgentSessionReaper;
   /** Without it, the paystub's commit record stays at zeros and null heldRate. */
   shiftCommits?: ShiftCommitRepository;
+  /** Without it, the paystub's token totals stay at zeros under tokensReported false, models at null tokens. */
+  agentUsage?: AgentUsageRepository;
   /** Membership lookups for owner changes; ownerUserId must be a member of the org. */
   reports: ReportRepository;
   clock?: () => Date;
@@ -116,6 +121,18 @@ function heldRateOf(commits: readonly ShiftCommitRecord[]): number | null {
   return decided === 0 ? null : merged / decided;
 }
 
+const ZERO_TOKENS: TokenTotals = { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
+
+/** One model's token split, converted from its sql-sum record. */
+function usageTokens(record: AgentUsageModelTotalsRecord): TokenTotals {
+  return {
+    inputTokens: safeInteger(record.inputTokens, "paystub input tokens"),
+    outputTokens: safeInteger(record.outputTokens, "paystub output tokens"),
+    cacheCreationInputTokens: safeInteger(record.cacheCreationInputTokens, "paystub cache creation tokens"),
+    cacheReadInputTokens: safeInteger(record.cacheReadInputTokens, "paystub cache read tokens"),
+  };
+}
+
 export function createAgentService(dependencies: AgentServiceDependencies): AgentService {
   const clock = dependencies.clock ?? (() => new Date());
 
@@ -190,6 +207,9 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
       const commits = dependencies.shiftCommits === undefined
         ? []
         : await dependencies.shiftCommits.listForAgent(subject, agentId, query);
+      const usageByModel = dependencies.agentUsage === undefined
+        ? []
+        : await dependencies.agentUsage.sumByAgentAndModel(subject, agentId, query);
       const commitsBySession = new Map<string, ShiftCommitRecord[]>();
       for (const commit of commits) {
         const existing = commitsBySession.get(commit.agentSessionId) ?? [];
@@ -208,10 +228,19 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
       }));
 
       // The model mix: per-shift seconds (already rounded once per shift)
-      // summed under each distinct model, unnamed shifts under null.
-      const modelMix = new Map<string | null, { model: string | null; agentSeconds: number; shiftCount: number }>();
+      // summed under each distinct model, unnamed shifts under null. Each
+      // entry carries its own token split; a model with no usage rows keeps
+      // null, so absence stays absence.
+      const usageByModelKey = new Map(usageByModel.map((row) => [row.model, row]));
+      const modelMix = new Map<string | null, { model: string | null; agentSeconds: number; shiftCount: number; tokens: TokenTotals | null }>();
       for (const shift of shiftViews) {
-        const entry = modelMix.get(shift.model) ?? { model: shift.model, agentSeconds: 0, shiftCount: 0 };
+        const usage = usageByModelKey.get(shift.model);
+        const entry = modelMix.get(shift.model) ?? {
+          model: shift.model,
+          agentSeconds: 0,
+          shiftCount: 0,
+          tokens: usage === undefined || safeInteger(usage.rowCount, "paystub usage row count") === 0 ? null : usageTokens(usage),
+        };
         entry.agentSeconds += shift.durationSeconds;
         entry.shiftCount += 1;
         modelMix.set(shift.model, entry);
@@ -258,6 +287,18 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
           commitsReverted: commits.filter((commit) => commit.verification === "reverted").length,
           commitsOrphaned: commits.filter((commit) => commit.verification === "orphaned").length,
           heldRate: heldRateOf(commits),
+          // The per-model rows partition the agent's usage (the null-model
+          // bucket included), so their sum is the range total. tokensReported
+          // counts rows, never whether the sum is nonzero.
+          tokens: usageByModel.reduce((totals, row) => {
+            const tokens = usageTokens(row);
+            totals.inputTokens += tokens.inputTokens;
+            totals.outputTokens += tokens.outputTokens;
+            totals.cacheCreationInputTokens += tokens.cacheCreationInputTokens;
+            totals.cacheReadInputTokens += tokens.cacheReadInputTokens;
+            return totals;
+          }, { ...ZERO_TOKENS }),
+          tokensReported: usageByModel.some((row) => safeInteger(row.rowCount, "paystub usage row count") > 0),
         },
         models: [...modelMix.values()],
         shifts: shiftViews,

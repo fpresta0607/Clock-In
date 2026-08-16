@@ -30,6 +30,7 @@ import {
   agentSessionEventSchema,
   apiErrorSchema,
   currentSessionResponseSchema,
+  hourlyBucketSchema,
   leaderboardResponseSchema,
   meResponseSchema,
   isAttributed,
@@ -672,6 +673,8 @@ describe("personal stats contracts", () => {
         commitsOrphaned: 0,
         heldRate: 1,
         models: ["claude-fable-5"],
+        tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
+        tokensReported: true,
       },
     ],
   };
@@ -739,6 +742,34 @@ describe("personal stats contracts", () => {
       ...stats,
       agents: [{ ...stats.agents[0], heldRate: 1.5 }],
     })).toThrow();
+    expect(() => meStatsResponseSchema.parse({
+      ...stats,
+      agents: [{ ...stats.agents[0], tokens: { ...stats.agents[0]!.tokens, inputTokens: -1 } }],
+    })).toThrow();
+    expect(() => meStatsResponseSchema.parse({
+      ...stats,
+      agents: [{ ...stats.agents[0], tokens: undefined }],
+    })).toThrow();
+  });
+
+  it("keeps hourly token fields nullable so an unreported hour never reads as zero", () => {
+    const bucket = {
+      hourStart: startedAt,
+      activeSeconds: 3_600,
+      agentSeconds: 1_800,
+      inputTokens: null,
+      outputTokens: null,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+    };
+    expect(hourlyBucketSchema.parse(bucket)).toEqual(bucket);
+    const reported = { ...bucket, inputTokens: 12_000, cacheReadInputTokens: 60_000 };
+    expect(hourlyBucketSchema.parse(reported)).toEqual(reported);
+    // An invented zero is a different fact than "nothing reported" - but the
+    // schema only insists the fields exist and stay nonnegative integers.
+    expect(() => hourlyBucketSchema.parse({ ...bucket, inputTokens: undefined })).toThrow();
+    expect(() => hourlyBucketSchema.parse({ ...bucket, outputTokens: -1 })).toThrow();
+    expect(() => hourlyBucketSchema.parse({ ...bucket, cacheReadInputTokens: 1.5 })).toThrow();
   });
 });
 
@@ -819,8 +850,10 @@ describe("roster agent contracts", () => {
         commitsReverted: 0,
         commitsOrphaned: 0,
         heldRate: 1,
+        tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
+        tokensReported: true,
       },
-      models: [{ model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1 }],
+      models: [{ model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 } }],
       shifts: [{
         id: ids.session,
         startedAt,
@@ -832,17 +865,34 @@ describe("roster agent contracts", () => {
       trend: [{ periodStartAt: startedAt, agentSeconds: 3_600, shiftCount: 1, heldRate: 1 }],
     };
     expect(() => agentPaystubResponseSchema.parse(paystub)).not.toThrow();
-    // Before any commit capture exists the same shape carries zeros and nulls.
+    // Before any commit or token capture exists the same shape carries zeros
+    // and nulls: a model that reported nothing keeps null tokens, so absence
+    // stays absence.
     expect(() => agentPaystubResponseSchema.parse({
       ...paystub,
-      totals: { ...paystub.totals, commitsRecorded: 0, commitsMerged: 0, heldRate: null },
-      models: [{ model: null, agentSeconds: 3_600, shiftCount: 1 }],
+      totals: {
+        ...paystub.totals,
+        commitsRecorded: 0,
+        commitsMerged: 0,
+        heldRate: null,
+        tokens: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+        tokensReported: false,
+      },
+      models: [{ model: null, agentSeconds: 3_600, shiftCount: 1, tokens: null }],
       shifts: [{ ...paystub.shifts[0], commits: [] }],
       trend: [{ periodStartAt: startedAt, agentSeconds: 0, shiftCount: 0, heldRate: null }],
     })).not.toThrow();
     expect(() => agentPaystubResponseSchema.parse({
       ...paystub,
       totals: { ...paystub.totals, heldRate: 1.5 },
+    })).toThrow();
+    expect(() => agentPaystubResponseSchema.parse({
+      ...paystub,
+      totals: { ...paystub.totals, tokens: undefined },
+    })).toThrow();
+    expect(() => agentPaystubResponseSchema.parse({
+      ...paystub,
+      models: [{ ...paystub.models[0], tokens: { inputTokens: 0 } }],
     })).toThrow();
   });
 
@@ -852,6 +902,12 @@ describe("roster agent contracts", () => {
     expect(() => agentsReportFiltersSchema.parse({ fromAt: startedAt, toExclusiveAt: stoppedAt })).not.toThrow();
     expect(() => agentsReportFiltersSchema.parse({ fromAt: startedAt })).toThrow();
     expect(() => agentsReportFiltersSchema.parse({ from: "2026-08-06", fromAt: startedAt, toExclusiveAt: stoppedAt })).toThrow();
+  });
+
+  it("ranks the pay-run report by hours or tokens when asked, and nothing else", () => {
+    expect(agentsReportFiltersSchema.parse({ sort: "hours" })).toEqual({ sort: "hours" });
+    expect(agentsReportFiltersSchema.parse({ sort: "tokens" })).toEqual({ sort: "tokens" });
+    expect(() => agentsReportFiltersSchema.parse({ sort: "commits" })).toThrow();
   });
 
   it("reports every roster agent with its held share and an active/retired headcount", () => {
@@ -866,10 +922,13 @@ describe("roster agent contracts", () => {
       commitsOrphaned: 0,
       heldRate: 1,
       models: ["claude-fable-5"],
+      tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
+      tokensReported: true,
     };
     expect(() => agentsReportRowSchema.parse(row)).not.toThrow();
     // A roster agent with no activity in range still gets a row: zeros, a null
-    // rate, and no models named.
+    // rate, and no models named. tokensReported false marks the zeros as "no
+    // rows", never as a measured zero.
     expect(() => agentsReportRowSchema.parse({
       ...row,
       agentSeconds: 0,
@@ -878,9 +937,13 @@ describe("roster agent contracts", () => {
       commitsMerged: 0,
       heldRate: null,
       models: [],
+      tokens: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+      tokensReported: false,
     })).not.toThrow();
     expect(() => agentsReportRowSchema.parse({ ...row, heldRate: 1.5 })).toThrow();
     expect(() => agentsReportRowSchema.parse({ ...row, models: Array.from({ length: 21 }, (_, index) => `model-${index}`) })).toThrow();
+    expect(() => agentsReportRowSchema.parse({ ...row, tokens: { ...row.tokens, outputTokens: -1 } })).toThrow();
+    expect(() => agentsReportRowSchema.parse({ ...row, tokensReported: undefined })).toThrow();
 
     const report = {
       filters: {},

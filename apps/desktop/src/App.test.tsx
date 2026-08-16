@@ -125,6 +125,8 @@ const agentsReport = {
     commitsOrphaned: 0,
     heldRate: null,
     models: ["claude-fable-5"],
+    tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
+    tokensReported: true,
   }],
 };
 
@@ -737,9 +739,9 @@ describe("the today panel", () => {
       meStats: vi.fn().mockResolvedValue({
         ...meStats,
         hourly: [
-          { hourStart: "2026-08-15T09:00:00.000Z", activeSeconds: 600, agentSeconds: 300 },
-          { hourStart: "2026-08-15T10:00:00.000Z", activeSeconds: 1_800, agentSeconds: 900 },
-          { hourStart: "2026-08-15T11:00:00.000Z", activeSeconds: 300, agentSeconds: 0 },
+          { hourStart: "2026-08-15T09:00:00.000Z", activeSeconds: 600, agentSeconds: 300, inputTokens: null, outputTokens: null, cacheCreationInputTokens: null, cacheReadInputTokens: null },
+          { hourStart: "2026-08-15T10:00:00.000Z", activeSeconds: 1_800, agentSeconds: 900, inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
+          { hourStart: "2026-08-15T11:00:00.000Z", activeSeconds: 300, agentSeconds: 0, inputTokens: null, outputTokens: null, cacheCreationInputTokens: null, cacheReadInputTokens: null },
         ],
       }),
     })} />);
@@ -1208,6 +1210,8 @@ describe("the agents tab", () => {
             commitsOrphaned: 0,
             heldRate: null,
             models: [],
+            tokens: null,
+            tokensReported: false,
           },
           {
             agent: {
@@ -1227,6 +1231,8 @@ describe("the agents tab", () => {
             commitsOrphaned: 0,
             heldRate: 0.5,
             models: ["claude-fable-5"],
+            tokens: { inputTokens: 8_000, outputTokens: 600, cacheCreationInputTokens: 200, cacheReadInputTokens: 40_000 },
+            tokensReported: true,
           },
         ],
       }),

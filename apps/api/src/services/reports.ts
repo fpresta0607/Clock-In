@@ -19,6 +19,7 @@ import {
   type ReportFilters,
   type ReportResponse,
   type ReportRow,
+  type TokenTotals,
 } from "@clock-in/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
@@ -27,6 +28,9 @@ import type {
   AgentIntervalRecord,
   AgentRecord,
   AgentRepository,
+  AgentUsageBucketTotalRecord,
+  AgentUsageRepository,
+  AgentUsageTotalsRecord,
   AppTotalRecord,
   LeaderboardRowRecord,
   PresenceIntervalRecord,
@@ -63,6 +67,8 @@ export interface ReportServiceDependencies {
   agents: AgentRepository;
   /** Without it, every agent row's commit counts stay at zero and heldRate null. */
   shiftCommits?: ShiftCommitRepository;
+  /** Without it, token totals stay at zero under tokensReported false, and hourly token fields stay null. */
+  agentUsage?: AgentUsageRepository;
 }
 
 const millisecondsPerDay = 24 * 60 * 60 * 1_000;
@@ -229,10 +235,15 @@ function medianDurationSeconds(intervals: readonly Interval[]): number {
  * their start instant - which the dashboards send as the viewer's local
  * midnight - so bucket `k` is local hour `k`. The unbounded "all time" range
  * returns no buckets; its full history lives in the CSV export instead.
+ *
+ * Usage buckets join the tile their start falls inside, and tokens are a
+ * plain sum over them. An hour nothing reported tokens for keeps nulls, never
+ * an invented zero.
  */
 function hourlySeries(
   working: readonly Interval[],
   agents: readonly Interval[],
+  usage: readonly AgentUsageBucketTotalRecord[],
   range: Partial<Interval>,
 ): HourlyBucket[] {
   if (range.start === undefined || range.end === undefined) return [];
@@ -244,13 +255,66 @@ function hourlySeries(
   const buckets: HourlyBucket[] = [];
   for (let cursor = start; cursor < end; cursor += 60 * 60 * 1_000) {
     const hour = { start: cursor, end: Math.min(cursor + 60 * 60 * 1_000, end) };
+    const tokens = usageTokensInHour(usage, hour);
     buckets.push({
       hourStart: new Date(cursor).toISOString(),
       activeSeconds: unionSeconds(working, hour),
       agentSeconds: summedSeconds(agents, hour),
+      inputTokens: tokens?.inputTokens ?? null,
+      outputTokens: tokens?.outputTokens ?? null,
+      cacheCreationInputTokens: tokens?.cacheCreationInputTokens ?? null,
+      cacheReadInputTokens: tokens?.cacheReadInputTokens ?? null,
     });
   }
   return buckets;
+}
+
+/** The token counters summed over the usage buckets whose start falls inside the hour; null when none do. */
+function usageTokensInHour(usage: readonly AgentUsageBucketTotalRecord[], hour: Interval): TokenTotals | null {
+  let totals: TokenTotals | null = null;
+  for (const bucket of usage) {
+    const bucketStart = bucket.bucketStartAt.getTime();
+    if (bucketStart < hour.start || bucketStart >= hour.end) continue;
+    totals ??= { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
+    totals.inputTokens += safeInteger(bucket.inputTokens, "hourly input tokens");
+    totals.outputTokens += safeInteger(bucket.outputTokens, "hourly output tokens");
+    totals.cacheCreationInputTokens += safeInteger(bucket.cacheCreationInputTokens, "hourly cache creation tokens");
+    totals.cacheReadInputTokens += safeInteger(bucket.cacheReadInputTokens, "hourly cache read tokens");
+  }
+  return totals;
+}
+
+const ZERO_TOKENS: TokenTotals = { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
+
+/**
+ * One agent's token totals for a report row: the counters summed over the
+ * range, and tokensReported counting rows - never whether the sum is nonzero.
+ */
+function agentTokenTotals(record: AgentUsageTotalsRecord | undefined): { tokens: TokenTotals; tokensReported: boolean } {
+  if (record === undefined) return { tokens: ZERO_TOKENS, tokensReported: false };
+  return {
+    tokens: {
+      inputTokens: safeInteger(record.inputTokens, "agent input tokens"),
+      outputTokens: safeInteger(record.outputTokens, "agent output tokens"),
+      cacheCreationInputTokens: safeInteger(record.cacheCreationInputTokens, "agent cache creation tokens"),
+      cacheReadInputTokens: safeInteger(record.cacheReadInputTokens, "agent cache read tokens"),
+    },
+    tokensReported: safeInteger(record.rowCount, "agent usage row count") > 0,
+  };
+}
+
+/** Total tokens burned: the sum of the four counters, for the tokens ranking. */
+function totalTokens(tokens: TokenTotals): number {
+  return tokens.inputTokens + tokens.outputTokens + tokens.cacheCreationInputTokens + tokens.cacheReadInputTokens;
+}
+
+/**
+ * The tokens ranking key: reporters rank by their total tokens, and agents
+ * that reported none sit below every reporter - even one whose rows sum to
+ * zero, because a reported zero and no report are different facts.
+ */
+function rankTokens(row: { tokens: TokenTotals; tokensReported: boolean }): number {
+  return row.tokensReported ? totalTokens(row.tokens) + 1 : 0;
 }
 
 /**
@@ -358,7 +422,8 @@ function asLeaderboardEntry(record: LeaderboardRowRecord): {
   };
 }
 
-function safeInteger(value: number | string | bigint | null, field: string): number {
+/** Reads a postgres sum/count - number, string, or bigint - as a safe nonnegative integer; null reads as 0. */
+export function safeInteger(value: number | string | bigint | null, field: string): number {
   if (value === null) return 0;
   const bigint = typeof value === "bigint"
     ? value
@@ -604,19 +669,21 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
         ...(query.projectId === undefined ? {} : { projectId: query.projectId }),
       });
       await dependencies.reaper.reapStale(subject);
-      const [projects, apps, sites, presence, sessionIntervals, agentIntervals] = await Promise.all([
+      const [projects, apps, sites, presence, sessionIntervals, agentIntervals, usageBuckets, usageByAgent] = await Promise.all([
         dependencies.reports.readProjectTotalsForMember(subject, query).then((rows) => rows.map(asProjectTotal)),
         dependencies.reports.readAppTotalsForMember(subject, query).then((rows) => rows.map(asAppTotal)),
         dependencies.reports.readSiteTotalsForMember(subject, query).then((rows) => rows.map(asSiteTotal)),
         dependencies.reports.readPresenceIntervals(subject, query),
         dependencies.reports.readSessionIntervals(subject, query),
         dependencies.reports.readAgentIntervals(subject, query),
+        dependencies.agentUsage === undefined ? Promise.resolve([]) : dependencies.agentUsage.sumByBucket(subject, query),
+        dependencies.agentUsage === undefined ? Promise.resolve([]) : dependencies.agentUsage.sumByAgent(subject, query),
       ]);
       const member = collectMembers(presence, sessionIntervals, agentIntervals).get(query.userId ?? subject.userId);
       const measurement = member === undefined ? EMPTY_MEASUREMENT : measureMember(member, query);
       const hourly = member === undefined
         ? []
-        : hourlySeries(workingIntervals(member, query), member.agents.map((agent) => agent.interval), queryRange(query));
+        : hourlySeries(workingIntervals(member, query), member.agents.map((agent) => agent.interval), usageBuckets, queryRange(query));
 
       const range = queryRange(query);
       const grouped = intervalsByAgentId(agentIntervals);
@@ -624,6 +691,7 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       const rosterById = new Map(roster.map((agent) => [agent.id, agent]));
       const commitCounts = dependencies.shiftCommits === undefined ? [] : await dependencies.shiftCommits.countsByAgent(subject, query);
       const countsById = new Map(commitCounts.map((row) => [row.agentId, row]));
+      const usageById = new Map(usageByAgent.map((row) => [row.agentId, row]));
       // Own agent rows are exactly the roster identities this member's shifts
       // ran under in range - the same boundary the interval read already scoped to.
       const agents: MeStatsAgent[] = [...grouped.keys()]
@@ -634,6 +702,7 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
           ...agentHours(grouped.get(agent.id)?.intervals ?? [], range),
           ...agentCommitCounts(countsById.get(agent.id)),
           models: grouped.get(agent.id)?.models ?? [],
+          ...agentTokenTotals(usageById.get(agent.id)),
         }));
 
       return {
@@ -654,14 +723,16 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       const query: ReportQuery = { ...normalizedQuery(filters), ...scopeQuery(filters.scope) };
       await authorizeFilters(dependencies.reports, subject, query);
       await dependencies.reaper.reapStale(subject);
-      const [roster, agentIntervals, commitCounts] = await Promise.all([
+      const [roster, agentIntervals, commitCounts, usageByAgent] = await Promise.all([
         dependencies.agents.listForOrganization(subject),
         dependencies.reports.readAgentIntervals(subject, query),
         dependencies.shiftCommits === undefined ? Promise.resolve([]) : dependencies.shiftCommits.countsByAgent(subject, query),
+        dependencies.agentUsage === undefined ? Promise.resolve([]) : dependencies.agentUsage.sumByAgent(subject, query),
       ]);
       const range = queryRange(query);
       const grouped = intervalsByAgentId(agentIntervals);
       const countsById = new Map(commitCounts.map((row) => [row.agentId, row]));
+      const usageById = new Map(usageByAgent.map((row) => [row.agentId, row]));
       // Every roster agent gets a row, activity or not: the roster - not the
       // interval data - decides which agents exist.
       const rows = roster.map((agent) => ({
@@ -669,7 +740,15 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
         ...agentHours(grouped.get(agent.id)?.intervals ?? [], range),
         ...agentCommitCounts(countsById.get(agent.id)),
         models: grouped.get(agent.id)?.models ?? [],
+        ...agentTokenTotals(usageById.get(agent.id)),
       }));
+      // A sort ranks heaviest first; ties and non-reporters keep roster order
+      // (the sort is stable). Tokens rank agents that reported none last.
+      if (filters.sort === "hours") {
+        rows.sort((a, b) => b.agentSeconds - a.agentSeconds);
+      } else if (filters.sort === "tokens") {
+        rows.sort((a, b) => rankTokens(b) - rankTokens(a));
+      }
       return {
         filters,
         headcount: {

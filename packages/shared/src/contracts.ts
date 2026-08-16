@@ -153,9 +153,26 @@ export const agentSplitSchema = z
   .strict();
 
 /**
+ * The four token counters a runtime's own session logs report, summed over a
+ * scope. Kept as one strict object so every surface carries the same split.
+ */
+export const tokenTotalsSchema = z
+  .object({
+    inputTokens: z.number().int().nonnegative().safe(),
+    outputTokens: z.number().int().nonnegative().safe(),
+    cacheCreationInputTokens: z.number().int().nonnegative().safe(),
+    cacheReadInputTokens: z.number().int().nonnegative().safe(),
+  })
+  .strict();
+
+/**
  * One hour of the caller's local calendar for the line graphs: active time
  * and agent runtime bucketed to the hour, so the chart's x-axis reads
  * midnight-to-midnight on the viewer's clock rather than UTC's.
+ *
+ * The token fields are null, never zero, when nothing in the hour reported
+ * tokens: the chart breaks its line instead of drawing a zero that never
+ * happened.
  */
 export const hourlyBucketSchema = z
   .object({
@@ -163,6 +180,10 @@ export const hourlyBucketSchema = z
     hourStart: timestampSchema,
     activeSeconds: z.number().int().nonnegative().safe(),
     agentSeconds: z.number().int().nonnegative().safe(),
+    inputTokens: z.number().int().nonnegative().safe().nullable(),
+    outputTokens: z.number().int().nonnegative().safe().nullable(),
+    cacheCreationInputTokens: z.number().int().nonnegative().safe().nullable(),
+    cacheReadInputTokens: z.number().int().nonnegative().safe().nullable(),
   })
   .strict();
 
@@ -564,7 +585,9 @@ const heldRateSchema = z.number().min(0).max(1).nullable();
 /**
  * One agent's pay period: hours, shifts, and the commits it recorded with how
  * they held up. Commit counts are all zero and heldRate null until shift
- * commits exist - the schema ships complete so the web parses one shape.
+ * commits exist - the schema ships complete so the web parses one shape. The
+ * token totals follow the same rule: zeros under `tokensReported: false` until
+ * a usage bucket lands.
  */
 export const agentPaystubResponseSchema = z
   .object({
@@ -581,14 +604,24 @@ export const agentPaystubResponseSchema = z
         commitsOrphaned: z.number().int().nonnegative().safe(),
         /** merged / decided; null while nothing has been decided. */
         heldRate: heldRateSchema,
+        /** Token totals over the range; reads as zeros while tokensReported is false. */
+        tokens: tokenTotalsSchema,
+        /** Whether any usage rows exist for this agent in range - rows, not nonzero sums. */
+        tokensReported: z.boolean(),
       })
       .strict(),
-    /** The model mix in range: one entry per distinct model the shifts named, unnamed shifts under null. */
+    /**
+     * The model mix in range: one entry per distinct model the shifts named,
+     * unnamed shifts under null. `tokens` is the model's own split of the
+     * usage counters; null when this model reported nothing, so absence stays
+     * absence.
+     */
     models: z.array(z
       .object({
         model: z.string().min(1).max(200).nullable(),
         agentSeconds: z.number().int().nonnegative().safe(),
         shiftCount: z.number().int().nonnegative().safe(),
+        tokens: tokenTotalsSchema.nullable(),
       })
       .strict()),
     shifts: z.array(z
@@ -613,6 +646,9 @@ export const agentPaystubResponseSchema = z
   })
   .strict();
 
+export const agentsReportSortValues = ["hours", "tokens"] as const;
+export const agentsReportSortSchema = z.enum(agentsReportSortValues);
+
 export const agentsReportFiltersSchema = z
   .object({
     from: dateSchema.optional(),
@@ -621,6 +657,8 @@ export const agentsReportFiltersSchema = z
     toExclusiveAt: timestampSchema.optional(),
     /** Absent means all projects. */
     scope: projectScopeSchema.optional(),
+    /** Absent keeps roster order; a value ranks rows by that measure, heaviest first. */
+    sort: agentsReportSortSchema.optional(),
   })
   .strict()
   .superRefine(validateCalendarAndInstantBounds);
@@ -644,6 +682,10 @@ export const agentsReportRowSchema = z
     heldRate: heldRateSchema,
     /** Distinct models this agent's shifts named in range, capped; empty when none named one. */
     models: z.array(z.string().min(1).max(200)).max(20),
+    /** Token totals over the range; reads as zeros while tokensReported is false. */
+    tokens: tokenTotalsSchema,
+    /** Whether any usage rows exist for this agent in range - rows, not nonzero sums. */
+    tokensReported: z.boolean(),
   })
   .strict();
 
@@ -937,6 +979,8 @@ export type AgentPaystubResponse = z.infer<typeof agentPaystubResponseSchema>;
 export type AgentsReportFilters = z.infer<typeof agentsReportFiltersSchema>;
 export type AgentsReportRow = z.infer<typeof agentsReportRowSchema>;
 export type AgentsReportResponse = z.infer<typeof agentsReportResponseSchema>;
+export type AgentsReportSort = z.infer<typeof agentsReportSortSchema>;
+export type TokenTotals = z.infer<typeof tokenTotalsSchema>;
 export type MeStatsAgent = z.infer<typeof meStatsAgentSchema>;
 export type ShiftCommitVerification = z.infer<typeof shiftCommitVerificationSchema>;
 export type ShiftCommitView = z.infer<typeof shiftCommitViewSchema>;

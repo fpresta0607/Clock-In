@@ -7,6 +7,8 @@ import type {
   AgentRepository,
   AgentShiftRecord,
   AgentUpdatePatch,
+  AgentUsageModelTotalsRecord,
+  AgentUsageRepository,
   ReportQuery,
   ReportRepository,
   UpsertAgentForKey,
@@ -101,7 +103,7 @@ function shift(overrides: Partial<AgentShiftRecord> = {}): AgentShiftRecord {
   };
 }
 
-function createService(agents: MemoryAgents, members: ReadonlyMap<string, string> = new Map([[ids.user, "Alex"]])) {
+function createService(agents: MemoryAgents, members: ReadonlyMap<string, string> = new Map([[ids.user, "Alex"]]), usage?: MemoryUsage) {
   const reapStale = vi.fn().mockResolvedValue(0);
   const reports = {
     async findUserForOrganization(_subject: AuthenticatedSubject, userId: string) {
@@ -109,8 +111,36 @@ function createService(agents: MemoryAgents, members: ReadonlyMap<string, string
       return name === undefined ? null : { id: userId, name };
     },
   } as ReportRepository;
-  const service = createAgentService({ agents, reaper: { reapStale }, reports, clock: () => now });
+  const service = createAgentService({
+    agents,
+    reaper: { reapStale },
+    reports,
+    clock: () => now,
+    ...(usage === undefined ? {} : { agentUsage: usage }),
+  });
   return { service, reapStale };
+}
+
+/** The paystub's usage sums, grouped per model exactly like the SQL. */
+class MemoryUsage implements AgentUsageRepository {
+  public readonly modelQueries: ReportQuery[] = [];
+  public rows: AgentUsageModelTotalsRecord[] = [];
+  public async findByClientId(): ReturnType<AgentUsageRepository["findByClientId"]> {
+    throw new Error("not used");
+  }
+  public async upsertBucket(): ReturnType<AgentUsageRepository["upsertBucket"]> {
+    throw new Error("not used");
+  }
+  public async sumByBucket(): ReturnType<AgentUsageRepository["sumByBucket"]> {
+    throw new Error("not used");
+  }
+  public async sumByAgent(): ReturnType<AgentUsageRepository["sumByAgent"]> {
+    throw new Error("not used");
+  }
+  public async sumByAgentAndModel(_subject: AuthenticatedSubject, _agentId: string, query: ReportQuery): Promise<AgentUsageModelTotalsRecord[]> {
+    this.modelQueries.push(query);
+    return this.rows;
+  }
 }
 
 describe("agent service", () => {
@@ -239,15 +269,19 @@ describe("agent service", () => {
       shiftCount: 3,
       commitsRecorded: 0,
       heldRate: null,
+      // No usage repository is wired: zeros under tokensReported false.
+      tokens: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+      tokensReported: false,
     });
     const running = paystub.shifts.find((row) => row.id === "d3c7e513-b094-4d4c-ae55-21790ae019a4");
     expect(running).toMatchObject({ endedAt: null, durationSeconds: 1_800 });
 
     // The model mix folds per-shift seconds under each named model, unnamed
-    // shifts under null, in first-seen order.
+    // shifts under null, in first-seen order. With no usage data each model's
+    // token split stays null - absence stays absence.
     expect(paystub.models).toEqual([
-      { model: "claude-fable-5", agentSeconds: 3_600 + 1_800, shiftCount: 2 },
-      { model: null, agentSeconds: 1_800, shiftCount: 1 },
+      { model: "claude-fable-5", agentSeconds: 3_600 + 1_800, shiftCount: 2, tokens: null },
+      { model: null, agentSeconds: 1_800, shiftCount: 1, tokens: null },
     ]);
 
     // Six weekly buckets, oldest first, ending at the range's end.
@@ -255,6 +289,76 @@ describe("agent service", () => {
     expect(paystub.trend[5]!.periodStartAt).toBe("2026-07-30T14:00:00.000Z");
     expect(paystub.trend[5]).toMatchObject({ agentSeconds: 3_600 + 3_600 + 1_800, shiftCount: 3, heldRate: null });
     expect(paystub.trend[0]).toMatchObject({ agentSeconds: 0, shiftCount: 0 });
+  });
+
+  it("splits the paystub's token totals per model, the null-model bucket included", async () => {
+    const agents = new MemoryAgents([agentRecord()]);
+    agents.shifts = [
+      shift(),
+      shift({
+        id: "d3c7e513-b094-4d4c-ae55-21790ae019a4",
+        model: null,
+        status: "ended",
+        startedAt: new Date("2026-08-06T12:00:00.000Z"),
+        endedAt: new Date("2026-08-06T12:30:00.000Z"),
+        lastEventAt: new Date("2026-08-06T12:30:00.000Z"),
+      }),
+    ];
+    const usage = new MemoryUsage();
+    usage.rows = [
+      // Postgres sums surface as strings; the service converts them.
+      { model: "claude-fable-5", inputTokens: "12000", outputTokens: "800", cacheCreationInputTokens: "400", cacheReadInputTokens: "60000", rowCount: 3 },
+      { model: null, inputTokens: 500, outputTokens: 25, cacheCreationInputTokens: 0, cacheReadInputTokens: 2_000, rowCount: 1 },
+    ];
+    const { service } = createService(agents, undefined, usage);
+
+    const paystub = await service.paystub(member, ids.agent, {
+      fromAt: "2026-08-06T09:00:00.000Z",
+      toExclusiveAt: "2026-08-06T14:00:00.000Z",
+    });
+
+    // The range total is the sum over the per-model rows.
+    expect(paystub.totals.tokens).toEqual({
+      inputTokens: 12_500,
+      outputTokens: 825,
+      cacheCreationInputTokens: 400,
+      cacheReadInputTokens: 62_000,
+    });
+    expect(paystub.totals.tokensReported).toBe(true);
+    expect(paystub.models).toEqual([
+      { model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 } },
+      { model: null, agentSeconds: 1_800, shiftCount: 1, tokens: { inputTokens: 500, outputTokens: 25, cacheCreationInputTokens: 0, cacheReadInputTokens: 2_000 } },
+    ]);
+  });
+
+  it("keeps a model's token split null when that model reported nothing", async () => {
+    const agents = new MemoryAgents([agentRecord()]);
+    agents.shifts = [
+      shift(),
+      shift({
+        id: "d3c7e513-b094-4d4c-ae55-21790ae019a4",
+        model: "gpt-5",
+        status: "ended",
+        startedAt: new Date("2026-08-06T12:00:00.000Z"),
+        endedAt: new Date("2026-08-06T12:30:00.000Z"),
+        lastEventAt: new Date("2026-08-06T12:30:00.000Z"),
+      }),
+    ];
+    const usage = new MemoryUsage();
+    // Only claude-fable-5 reported; gpt-5's split stays null while the totals
+    // still count what was reported.
+    usage.rows = [
+      { model: "claude-fable-5", inputTokens: 100, outputTokens: 10, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, rowCount: 1 },
+    ];
+    const { service } = createService(agents, undefined, usage);
+
+    const paystub = await service.paystub(member, ids.agent, {});
+
+    expect(paystub.totals.tokensReported).toBe(true);
+    expect(paystub.models).toEqual([
+      { model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, tokens: { inputTokens: 100, outputTokens: 10, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } },
+      { model: "gpt-5", agentSeconds: 1_800, shiftCount: 1, tokens: null },
+    ]);
   });
 
   it("answers an unknown paystub agent with not_found", async () => {

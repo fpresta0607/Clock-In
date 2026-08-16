@@ -305,6 +305,7 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
       reaper: createAgentSessionReaper({ agentSessions: dependencies.agentSessionRepository, clock }),
       agents: dependencies.agentRepository,
       ...(dependencies.shiftCommitRepository === undefined ? {} : { shiftCommits: dependencies.shiftCommitRepository }),
+      ...(dependencies.agentUsageRepository === undefined ? {} : { agentUsage: dependencies.agentUsageRepository }),
     });
     app.use("/reports", authenticate);
     app.use("/reports/*", authenticate);
@@ -345,6 +346,7 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
       reaper: createAgentSessionReaper({ agentSessions: dependencies.agentSessionRepository, clock }),
       reports: dependencies.reportRepository,
       ...(dependencies.shiftCommitRepository === undefined ? {} : { shiftCommits: dependencies.shiftCommitRepository }),
+      ...(dependencies.agentUsageRepository === undefined ? {} : { agentUsage: dependencies.agentUsageRepository }),
       clock,
     });
     app.use("/agents", authenticate);
