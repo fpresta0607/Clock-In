@@ -97,7 +97,9 @@ When a `shift_commits` batch later reveals `repo_root` for that session, `servic
    The agent row keeps its id, so its hours, shifts, tokens, and commits move with it; nothing is re-summed.
 2. If the upsert collides with an existing `(org, operator, source, repo_root)` agent - another shift got there first - the colliding session is re-stamped onto the existing agent, and its `agent_usage` and `shift_commits` rows follow their session (both tables key evidence by `agent_session_id`, `schema.ts:489` and `:419`, so this is one indexed update per table).
    An unassigned agent left with zero sessions is retired automatically; its history is empty by construction, so retiring loses nothing.
-3. `agent_usage` has the same late-mint site (`services/agent-usage.ts:62-69`) and follows the same rule.
+3. If the evidence names a `repo_root` that differs from the session's agent's current `repo_root` - the agent already graduated to a different repo, or was repo-keyed all along - that session is re-stamped onto find-or-create `(org, operator, source, evidence repo_root)` through the same `upsertForKey` path, and its `agent_usage` and `shift_commits` rows follow it exactly as in rule 2.
+   This is what keeps the old-installer degradation path (section 6, step 6: every session starts repo-less in the shared per-operator unassigned bucket) correct for an operator working several repos before any commits arrive: the bucket graduates to the first repo reported, and each later report re-homes only its own session.
+4. `agent_usage` has the same late-mint site (`services/agent-usage.ts:62-69`) and follows the same rule.
 
 A directory mapped to a project *after* agents minted moves nothing in identity: the agent's `project_id` is re-derived from its `repo_root` against the current mappings (the same longest-prefix match, `attribution.ts:30-49`) whenever the paystub or report reads it, or lazily on the next event for that agent.
 Session rows keep their own ingest-time `project_id` exactly as today; per-session attribution and per-agent identity are separate questions.
