@@ -449,6 +449,10 @@ describe("dashboard", () => {
     const sessions = stats.getByTestId("agent-sessions");
     expect(sessions).toHaveTextContent("claude-fable-5");
     expect(sessions).toHaveTextContent("Claude Code");
+    // A shift whose hook named no model reads "not recorded", never a blank -
+    // with the footnote naming why.
+    expect(sessions).toHaveTextContent("not recorded");
+    expect(sessions).toHaveTextContent("Sessions recorded before model capture show not recorded.");
     expect(stats.getByText("General")).toBeInTheDocument();
     // claude.exe reads as the tool it is, so the team sees Claude usage plainly.
     expect(stats.getAllByText("Claude Code").length).toBeGreaterThan(0);
@@ -468,6 +472,8 @@ describe("dashboard", () => {
     const stats = within(await screen.findByRole("region", { name: /Alex · Last 30 days/ }));
     const sessions = stats.getByTestId("agent-sessions");
     expect(sessions).toHaveTextContent("claude-fable-5");
+    // Every visible row named its model, so no "not recorded" label or footnote.
+    expect(sessions).not.toHaveTextContent("not recorded");
     const cells = within(sessions).getAllByRole("cell").map((cell) => cell.textContent?.trim());
     expect(cells).toContain("0");
     expect(cells).toContain("0s");

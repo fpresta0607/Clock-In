@@ -509,7 +509,7 @@ describe("today", () => {
     expect(within(panel).getAllByText("Claude Code").length).toBeGreaterThan(0);
   });
 
-  it("shows absence as a dash when the API predates the session details", async () => {
+  it("shows absence as a dash when the API predates the session details, and names an unrecorded model", async () => {
     const person = userEvent.setup();
     render(<App bridge={bridgeFor({
       meStats: vi.fn().mockResolvedValue({
@@ -523,9 +523,11 @@ describe("today", () => {
     const panel = await openAllStats(person);
     const sessions = await within(panel).findByTestId("agent-sessions");
     const cells = [...sessions.querySelectorAll("tbody td")].map((cell) => cell.textContent);
-    // Runtime and model lead; sessions, max at once and median are dashes,
-    // never fake zeros; the duration the API did send still renders.
-    expect(cells).toEqual(["Claude Code", "-", "-", "-", "1h 00m", "-"]);
+    // Runtime leads; sessions, max at once and median are dashes, never fake
+    // zeros; the duration the API did send still renders. A null model is a
+    // shift whose hook named none - said out loud, never a bare dash.
+    expect(cells).toEqual(["Claude Code", "not recorded", "-", "-", "1h 00m", "-"]);
+    expect(sessions).toHaveTextContent("Sessions recorded before model capture show not recorded.");
   });
 });
 

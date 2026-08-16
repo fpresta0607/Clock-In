@@ -193,7 +193,10 @@ const AgentSessionsTable = ({ byAgent }: { byAgent: MeStatsResponse["byAgent"] }
           {byAgent.map((split) => (
             <tr key={`${split.source}|${split.model ?? ""}`}>
               <td>{agentRuntimeLabel(split.source)}</td>
-              <td>{split.model ?? "-"}</td>
+              {/* A null model is a shift whose hook named none - recorded
+                  before model capture, or a runtime that never reports one.
+                  Say so; a bare dash reads as broken. */}
+              <td className={split.model === null ? "subtle-cell" : undefined}>{split.model ?? "not recorded"}</td>
               <td className="numeric">{split.sessionCount ?? 0}</td>
               <td className="numeric">{split.maxConcurrent ?? 0}</td>
               <td className="numeric">{formatHumanDuration(split.durationSeconds)}</td>
@@ -202,6 +205,9 @@ const AgentSessionsTable = ({ byAgent }: { byAgent: MeStatsResponse["byAgent"] }
           ))}
         </tbody>
       </table>
+      {byAgent.some((split) => split.model === null) && (
+        <p className="graph-note">Sessions recorded before model capture show not recorded.</p>
+      )}
     </div>
   );
 };
