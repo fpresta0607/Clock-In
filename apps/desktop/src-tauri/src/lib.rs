@@ -38,8 +38,9 @@ use tauri::{
 use tokio::sync::Mutex;
 
 use api::{
-    AgentsReport, ApiClient, ApiResult, BridgeError, ErrorKind, LeaderboardEntry, MeStats,
-    Organization, ProjectUsage, TimerProject, TimerUser, ViewPreferences,
+    AgentPaystubTrend, AgentsReport, ApiClient, ApiResult, BridgeError, ErrorKind,
+    LeaderboardEntry, MeStats, Organization, ProjectUsage, TimerProject, TimerUser,
+    ViewPreferences,
 };
 use monitor::{MonitorSettings, MonitorStatus, SettingsPatch};
 use recovery::RecoveryState;
@@ -548,6 +549,28 @@ async fn agents_report(
         .await
 }
 
+/// One agent's paystub trend: six weekly buckets for the overlay chart on the
+/// Agents tab. Bounds arrive together or not at all; both absent asks for all
+/// time.
+#[tauri::command]
+async fn agent_paystub_trend(
+    state: State<'_, AppState>,
+    agent_id: String,
+    from_at: Option<String>,
+    to_exclusive_at: Option<String>,
+) -> ApiResult<AgentPaystubTrend> {
+    let access_token = state.access_token().await?;
+    state
+        .client
+        .agent_paystub_trend(
+            &access_token,
+            &agent_id,
+            from_at.as_deref(),
+            to_exclusive_at.as_deref(),
+        )
+        .await
+}
+
 /// How much of each coding agent's plan is left, read from what those CLIs
 /// already store on this machine. Answers from cache immediately; a stale
 /// reading refreshes on a background thread rather than holding the UI.
@@ -944,6 +967,7 @@ pub fn run() {
             settings_update,
             me_stats,
             agents_report,
+            agent_paystub_trend,
             app_icons,
             project_create,
             project_update,

@@ -3,6 +3,7 @@ import { userEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App.js";
+import { sourceLabel } from "./agent-sources.js";
 import type { TimerBridge } from "./bridge.js";
 
 vi.mock("./WebGLShader.js", () => ({ WebGLShader: () => null }));
@@ -85,6 +86,8 @@ const meStats = {
   attributedSeconds: 5_400,
   unattributedSeconds: 1_800,
   ...noMeasurement,
+  hourly: [],
+  agents: [],
   projects: [{
     project: { id: project.id, name: project.name },
     durationSeconds: 7_200,
@@ -130,6 +133,18 @@ const agentsReport = {
   }],
 };
 
+/// The paystub trend the Agents tab charts: six weekly buckets, oldest first.
+const agentPaystubTrend = {
+  trend: [
+    { periodStartAt: "2026-07-06T00:00:00.000Z", agentSeconds: 0, shiftCount: 0, heldRate: null },
+    { periodStartAt: "2026-07-13T00:00:00.000Z", agentSeconds: 1_800, shiftCount: 1, heldRate: null },
+    { periodStartAt: "2026-07-20T00:00:00.000Z", agentSeconds: 3_600, shiftCount: 2, heldRate: 0.5 },
+    { periodStartAt: "2026-07-27T00:00:00.000Z", agentSeconds: 900, shiftCount: 1, heldRate: 1 },
+    { periodStartAt: "2026-08-03T00:00:00.000Z", agentSeconds: 5_400, shiftCount: 3, heldRate: null },
+    { periodStartAt: "2026-08-10T00:00:00.000Z", agentSeconds: 2_700, shiftCount: 2, heldRate: null },
+  ],
+};
+
 const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   bootstrap: vi.fn().mockResolvedValue(account),
   login: vi.fn().mockResolvedValue(account),
@@ -161,6 +176,7 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   settingsUpdate: vi.fn().mockResolvedValue(settings),
   meStats: vi.fn().mockResolvedValue(meStats),
   agentsReport: vi.fn().mockResolvedValue(agentsReport),
+  agentPaystubTrend: vi.fn().mockResolvedValue(agentPaystubTrend),
   projectCreate: vi.fn().mockResolvedValue(newProject),
   projectUpdate: vi.fn().mockResolvedValue(project),
   projectUsage: vi.fn().mockResolvedValue({ sessionCount: 0, durationSeconds: 0, agentSessionCount: 0 }),
@@ -746,17 +762,61 @@ describe("the today panel", () => {
       }),
     })} />);
 
-    // The chart must emit <path d="M… L…"> elements, not polylines fed a
-    // path string: `points` cannot parse path commands, so a polyline would
-    // hold zero points and the graph would be an empty frame.
+    // Pin the series by their hooks, never by a path count: gradient areas
+    // are paths too. The chart must emit <path d="M… L…"> elements, not
+    // polylines fed a path string: `points` cannot parse path commands, so a
+    // polyline would hold zero points and the graph would be an empty frame.
     const graph = await screen.findByTestId("hourly-graph");
-    const lines = graph.querySelectorAll("path");
-    expect(lines).toHaveLength(2);
-    for (const line of lines) {
-      const d = line.getAttribute("d");
+    const agentLine = graph.querySelector('path[data-series="agent"]');
+    const humanLine = graph.querySelector('path[data-series="human"]');
+    expect(agentLine).not.toBeNull();
+    expect(humanLine).not.toBeNull();
+    for (const line of [agentLine, humanLine]) {
+      const d = line!.getAttribute("d")!;
       expect(d).toMatch(/^M\d/);
       expect(d).toContain("L");
     }
+    // Geometry is measured, not just present: the busiest hour must plot
+    // highest (smallest y), and an empty hour must sit on the baseline.
+    const points = [...agentLine!.getAttribute("d")!.matchAll(/[ML]([\d.]+),([\d.]+)/g)]
+      .map((match) => ({ x: Number(match[1]), y: Number(match[2]) }));
+    expect(points).toHaveLength(3);
+    expect(points[1]!.y).toBeLessThan(points[0]!.y);
+    expect(points[2]!.y).toBeGreaterThan(points[1]!.y);
+    // Day resolution draws a visible dot per bucket.
+    expect(graph.querySelectorAll('circle[data-point="agent"]')).toHaveLength(3);
+  });
+
+  it("switches the hourly chart to tokens, breaking the line over hours that reported none", async () => {
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(recording),
+      meStats: vi.fn().mockResolvedValue({
+        ...meStats,
+        agents: [{ source: "codex", shiftCount: 2, tokensReported: false }],
+        hourly: [
+          { hourStart: "2026-08-15T09:00:00.000Z", activeSeconds: 600, agentSeconds: 300, inputTokens: 4_000, outputTokens: 200, cacheCreationInputTokens: 0, cacheReadInputTokens: 8_000 },
+          { hourStart: "2026-08-15T10:00:00.000Z", activeSeconds: 1_800, agentSeconds: 900, inputTokens: null, outputTokens: null, cacheCreationInputTokens: null, cacheReadInputTokens: null },
+          { hourStart: "2026-08-15T11:00:00.000Z", activeSeconds: 300, agentSeconds: 100, inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
+        ],
+      }),
+    })} />);
+
+    const graph = await screen.findByTestId("hourly-graph");
+    // The runtime ran shifts but reported no tokens, and the plot says so.
+    expect(graph).toHaveTextContent(`No token data from ${sourceLabel("codex")}.`);
+    const measure = within(graph).getByRole("group", { name: "Chart measure" });
+    await userEvent.click(within(measure).getByRole("button", { name: "Tokens" }));
+
+    const tokensIn = graph.querySelector('path[data-series="tokens-in"]');
+    const tokensOut = graph.querySelector('path[data-series="tokens-out"]');
+    expect(tokensIn).not.toBeNull();
+    expect(tokensOut).not.toBeNull();
+    // The null hour lifts the pen: two subpaths, never a plunge to the baseline.
+    const d = tokensIn!.getAttribute("d")!;
+    expect(d.match(/M/g)).toHaveLength(2);
+    const points = [...d.matchAll(/[ML]([\d.]+),([\d.]+)/g)].map((match) => Number(match[2]));
+    expect(points).toHaveLength(2);
+    expect(points[1]!).toBeLessThan(points[0]!); // 72.4k plots above 12k
   });
 
   it("keeps agent runtimes on their own rows instead of folding them together", async () => {
@@ -1175,8 +1235,20 @@ describe("the agents tab", () => {
     expect(within(roster).getByText("Claude Code @ Field work")).toBeInTheDocument();
     expect(within(roster).getByText(/1h 30m/)).toBeInTheDocument();
     const row = within(roster).getByText("Claude Code @ Field work").closest("li");
-    expect(row).toHaveClass("is-anonymous");
+    // The roster is the selector: the first row opens selected, and its
+    // paystub trend renders underneath as a measured bar per weekly bucket.
+    expect(row).toHaveClass("is-selected");
     expect(row).toHaveTextContent("Claude Code · claude-fable-5 · 2 shifts");
+    await waitFor(() => expect(bridge.agentPaystubTrend).toHaveBeenCalled());
+    expect(vi.mocked(bridge.agentPaystubTrend).mock.calls.at(-1)?.[0]).toBe(agentsReport.rows[0]!.agent.id);
+    const trend = await within(panel).findByTestId("paystub-trend");
+    const bars = trend.querySelectorAll('rect[data-series="week"]');
+    expect(bars).toHaveLength(6);
+    expect(Number(bars[4]!.getAttribute("height"))).toBeGreaterThan(Number(bars[3]!.getAttribute("height")));
+    // The keyboard read-out says what the week holds.
+    trend.querySelector("svg")!.focus();
+    await person.keyboard("{End}");
+    expect(within(trend).getByRole("status")).toHaveTextContent("2 shifts");
     // The human board and its breakdown step aside while Agents is open.
     expect(within(panel).queryByTestId("board-list")).not.toBeInTheDocument();
     expect(within(panel).queryByTestId("member-stats")).not.toBeInTheDocument();
@@ -1185,6 +1257,26 @@ describe("the agents tab", () => {
     await person.click(within(panel).getByRole("button", { name: "Humans" }));
     expect(within(panel).getByTestId("board-list")).toBeInTheDocument();
     expect(within(panel).queryByTestId("agent-roster-list")).not.toBeInTheDocument();
+  });
+
+  it("charts the member's hourly series on the Humans tab", async () => {
+    const bridge = bridgeFor({
+      meStats: vi.fn().mockResolvedValue({
+        ...meStats,
+        hourly: [
+          { hourStart: "2026-08-15T09:00:00.000Z", activeSeconds: 600, agentSeconds: 300, inputTokens: null, outputTokens: null, cacheCreationInputTokens: null, cacheReadInputTokens: null },
+          { hourStart: "2026-08-15T10:00:00.000Z", activeSeconds: 1_800, agentSeconds: 900, inputTokens: null, outputTokens: null, cacheCreationInputTokens: null, cacheReadInputTokens: null },
+        ],
+      }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const panel = await openAllStats(person);
+    const member = await within(panel).findByTestId("member-stats");
+    const graph = await within(member).findByTestId("hourly-graph");
+    expect(graph.querySelector('path[data-series="agent"]')).not.toBeNull();
+    expect(graph.querySelector('path[data-series="human"]')).not.toBeNull();
   });
 
   it("reports every roster agent, zero-activity ones included, with no register control", async () => {

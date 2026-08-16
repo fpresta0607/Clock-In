@@ -10,6 +10,7 @@ import {
   type AgentPaystubResponse,
   type AgentsReportResponse,
   type LeaderboardEntry,
+  type MeStatsAgent,
   type MeStatsResponse,
   type Organization,
   type ProjectListItem,
@@ -102,8 +103,6 @@ export const buildAppRows = (apps: MeStatsResponse["apps"]): AppRowItem[] => {
 };
 
 type BoardSort = "active" | "agent" | "leverage";
-
-type HourlyBucket = MeStatsResponse["hourly"][number];
 
 /// The human/agent split laid out as labeled rows instead of one cramped
 /// sentence: active time up top (Solo is now "Human work"), agent runtime
@@ -207,23 +206,188 @@ const AgentSessionsTable = ({ byAgent }: { byAgent: MeStatsResponse["byAgent"] }
   );
 };
 
-/// Two-line SVG chart - agents in the brand green, the person in gray. No
-/// chart library: a fixed viewBox and two paths are all a day needs, and
-/// the server already buckets to the caller's local hours.
-const HourlyGraph = ({ buckets, personLabel = "You" }: { buckets: readonly HourlyBucket[]; personLabel?: string }) => {
+/// A compact count for token axes and readouts: 950, 12k, 3.4M. Token counts
+/// dwarf durations, so the charts format them on their own scale.
+const formatTokenCount = (value: number): string => {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (value >= 10_000) return `${Math.round(value / 1_000)}k`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  return String(value);
+};
+
+/// The structural slice of an hourly bucket the charts read. Each app's own
+/// bucket type satisfies it, which is what lets the two copies of these
+/// components stay byte-identical.
+type ChartHourlyBucket = {
+  hourStart: string;
+  activeSeconds: number;
+  agentSeconds: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheCreationInputTokens: number | null;
+  cacheReadInputTokens: number | null;
+};
+
+/// One week of an agent's paystub trend, as the API computes it.
+type ChartTrendBucket = {
+  periodStartAt: string;
+  agentSeconds: number;
+  shiftCount: number;
+  heldRate: number | null;
+};
+
+type ChartSeries = {
+  /// The data-series hook tests pin to; one per plotted measure, never a path count.
+  id: string;
+  label: string;
+  /// The brand.css chart token the stroke, points, and gradient read.
+  color: string;
+  values: readonly (number | null)[];
+};
+
+/// The tooltip both charts share: the hovered or keyboard-focused moment, and
+/// each series' value there. Positioned as a percentage of the plot width so
+/// the SVG's viewBox scaling never desyncs it.
+const ChartTooltip = ({
+  left,
+  title,
+  rows,
+}: {
+  left: number;
+  title: string;
+  rows: readonly { color: string; label: string; value: string }[];
+}) => (
+  <div className="graph-tooltip" style={{ left: `${left}%` }}>
+    <p className="graph-tooltip-title">{title}</p>
+    {rows.map((row) => (
+      <p key={row.label} className="graph-tooltip-row">
+        <span className="legend-line" style={{ background: row.color }} aria-hidden="true" />
+        {row.label} {row.value}
+      </p>
+    ))}
+  </div>
+);
+
+/// The smallest 1/2/2.5/5 multiple of a power of ten at or above `raw`.
+const niceStep = (raw: number): number => {
+  const magnitude = 10 ** Math.floor(Math.log10(raw));
+  for (const multiplier of [1, 2, 2.5, 5, 10]) {
+    if (multiplier * magnitude >= raw) return multiplier * magnitude;
+  }
+  return 10 * magnitude;
+};
+
+/// SVG line chart - agents in the brand green, the person in gray, tokens in
+/// blue and purple. No chart library: a fixed viewBox, one path per series,
+/// and a gradient area under each. The server buckets to the caller's local
+/// hours, so the x-axis reads midnight-to-midnight on the viewer's clock.
+/// Token fields are null when nothing in the hour reported; the path breaks
+/// there rather than dropping to a zero that never happened.
+const HourlyGraph = ({
+  buckets,
+  personLabel = "You",
+  formatDuration,
+  tokenBlind = [],
+}: {
+  buckets: readonly ChartHourlyBucket[];
+  personLabel?: string;
+  formatDuration: (seconds: number) => string;
+  /// Runtimes that ran in range but reported no tokens, named beneath the plot.
+  tokenBlind?: readonly string[];
+}) => {
+  const [measure, setMeasure] = useState<"time" | "tokens">("time");
+  const [readout, setReadout] = useState<number | null>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
   if (buckets.length === 0) return null;
+
+  const hasTokens = buckets.some((bucket) => bucket.inputTokens !== null || bucket.outputTokens !== null);
+  // "In" is everything the model consumed: fresh input plus both cache sides.
+  const tokensIn = (bucket: ChartHourlyBucket): number | null =>
+    bucket.inputTokens === null
+      ? null
+      : bucket.inputTokens + (bucket.cacheCreationInputTokens ?? 0) + (bucket.cacheReadInputTokens ?? 0);
+  const series: readonly ChartSeries[] = measure === "tokens"
+    ? [
+        { id: "tokens-in", label: "Tokens in", color: "var(--chart-token-in)", values: buckets.map(tokensIn) },
+        { id: "tokens-out", label: "Tokens out", color: "var(--chart-token-out)", values: buckets.map((bucket) => bucket.outputTokens) },
+      ]
+    : [
+        { id: "agent", label: "Agents", color: "var(--chart-agent)", values: buckets.map((bucket) => bucket.agentSeconds) },
+        { id: "human", label: personLabel, color: "var(--chart-human)", values: buckets.map((bucket) => bucket.activeSeconds) },
+      ];
+  const formatValue = measure === "tokens" ? formatTokenCount : formatDuration;
+
   const width = 640;
   const height = 190;
-  const margin = { left: 38, right: 12, top: 14, bottom: 24 };
+  const margin = { left: 44, right: 12, top: 14, bottom: 24 };
   const plotW = width - margin.left - margin.right;
   const plotH = height - margin.top - margin.bottom;
-  const rawMax = Math.max(60, ...buckets.map((bucket) => Math.max(bucket.activeSeconds, bucket.agentSeconds)));
-  const yMax = Math.max(900, Math.ceil(rawMax / 900) * 900);
+  const rawMax = Math.max(
+    measure === "tokens" ? 3 : 60,
+    ...series.flatMap((entry) => entry.values.filter((value): value is number => value !== null)),
+  );
+  // Gridlines land on thirds of yMax, so the quantum stays divisible by three
+  // and every labeled line reads a round number.
+  const yMax = measure === "tokens"
+    ? 3 * niceStep(Math.ceil(rawMax / 3))
+    : Math.max(900, Math.ceil(rawMax / 900) * 900);
   const x = (index: number): number =>
     buckets.length === 1 ? margin.left + plotW / 2 : margin.left + (index / (buckets.length - 1)) * plotW;
   const y = (value: number): number => margin.top + plotH - (value / yMax) * plotH;
-  const line = (key: "activeSeconds" | "agentSeconds"): string =>
-    buckets.map((bucket, index) => `${index === 0 ? "M" : "L"}${x(index).toFixed(1)},${y(bucket[key]).toFixed(1)}`).join(" ");
+
+  /// One path per series; a null lifts the pen, so a gap reads as a gap
+  /// instead of a plunge to the baseline.
+  const linePath = (values: readonly (number | null)[]): string => {
+    let d = "";
+    let pen = false;
+    values.forEach((value, index) => {
+      if (value === null) {
+        pen = false;
+        return;
+      }
+      d += `${pen ? "L" : "M"}${x(index).toFixed(1)},${y(value).toFixed(1)}`;
+      pen = true;
+    });
+    return d;
+  };
+
+  type Run = { start: number; end: number };
+  /// The contiguous non-null spans of a series; the gradient area fills one
+  /// run at a time so it too breaks over gaps.
+  const runs = (values: readonly (number | null)[]): Run[] => {
+    const spans: Run[] = [];
+    let start: number | null = null;
+    values.forEach((value, index) => {
+      if (value === null) {
+        if (start !== null) spans.push({ start, end: index - 1 });
+        start = null;
+      } else if (start === null) {
+        start = index;
+      }
+    });
+    if (start !== null) spans.push({ start, end: values.length - 1 });
+    return spans;
+  };
+  const areaPath = (values: readonly (number | null)[], run: Run): string => {
+    let d = `M${x(run.start).toFixed(1)},${y(0).toFixed(1)}`;
+    for (let index = run.start; index <= run.end; index += 1) {
+      d += `L${x(index).toFixed(1)},${y(values[index] ?? 0).toFixed(1)}`;
+    }
+    return `${d}L${x(run.end).toFixed(1)},${y(0).toFixed(1)}Z`;
+  };
+
+  // Day ranges show every point; longer ranges thin to each series' local
+  // extrema, plus wherever the read-out sits.
+  const showEveryPoint = buckets.length <= 48;
+  const isExtremum = (values: readonly (number | null)[], index: number): boolean => {
+    const value = values[index];
+    if (value === null || value === undefined) return false;
+    const previous = values[index - 1];
+    const next = values[index + 1];
+    if (previous === null || previous === undefined || next === null || next === undefined) return true;
+    return (value > previous && value > next) || (value < previous && value < next);
+  };
+
   const tickCount = Math.min(7, buckets.length);
   const xTicks = Array.from({ length: tickCount }, (_, tick) => {
     const index = tickCount === 1 ? 0 : Math.round((tick / (tickCount - 1)) * (buckets.length - 1));
@@ -233,23 +397,290 @@ const HourlyGraph = ({ buckets, personLabel = "You" }: { buckets: readonly Hourl
       : date.toLocaleDateString([], { month: "short", day: "numeric" });
     return { index, label };
   });
+
+  const indexFromPointer = (clientX: number): number | null => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (rect === undefined || rect.width === 0) return null;
+    const viewX = ((clientX - rect.left) / rect.width) * width;
+    if (viewX < margin.left || viewX > width - margin.right) return null;
+    if (buckets.length === 1) return 0;
+    return Math.max(0, Math.min(buckets.length - 1, Math.round(((viewX - margin.left) / plotW) * (buckets.length - 1))));
+  };
+
+  /// Arrow keys walk the read-out point; Home/End jump to the edges. Returns
+  /// false for keys the chart does not consume.
+  const moveReadout = (key: string): boolean => {
+    if (key !== "ArrowLeft" && key !== "ArrowRight" && key !== "Home" && key !== "End") return false;
+    setReadout((current) => {
+      if (key === "Home") return 0;
+      if (key === "End") return buckets.length - 1;
+      const base = current ?? (key === "ArrowLeft" ? buckets.length : -1);
+      return Math.max(0, Math.min(buckets.length - 1, base + (key === "ArrowRight" ? 1 : -1)));
+    });
+    return true;
+  };
+
+  const active = readout !== null && readout < buckets.length ? readout : null;
+  const hourLabel = (index: number): string =>
+    new Date(buckets[index]!.hourStart).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const summary = (index: number): string =>
+    `${hourLabel(index)}: ${series
+      .map((entry) => {
+        const value = entry.values[index];
+        return `${entry.label} ${value === null || value === undefined ? "no data" : formatValue(value)}`;
+      })
+      .join(", ")}`;
+
   return (
     <div className="graph" data-testid="hourly-graph">
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Hourly active and agent time">
-        <line x1={margin.left} y1={y(0)} x2={width - margin.right} y2={y(0)} stroke="rgba(163,179,194,.25)" />
-        <line x1={margin.left} y1={y(yMax)} x2={width - margin.right} y2={y(yMax)} stroke="rgba(163,179,194,.12)" />
-        <text x={margin.left - 6} y={y(0) + 3} fill="#a3b3c2" fontSize="9" textAnchor="end">0</text>
-        <text x={margin.left - 6} y={y(yMax) + 3} fill="#a3b3c2" fontSize="9" textAnchor="end">{formatHumanDuration(yMax)}</text>
+      {hasTokens && (
+        <div className="range-toggle graph-mode" role="group" aria-label="Chart measure">
+          {(["time", "tokens"] as const).map((value) => (
+            <button
+              key={value}
+              type="button"
+              className={measure === value ? "is-active" : undefined}
+              onClick={() => setMeasure(value)}
+            >
+              {value === "time" ? "Time" : "Tokens"}
+            </button>
+          ))}
+        </div>
+      )}
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${width} ${height}`}
+        role="img"
+        aria-label={measure === "tokens" ? "Hourly token usage" : "Hourly active and agent time"}
+        tabIndex={0}
+        onMouseMove={(event) => {
+          const index = indexFromPointer(event.clientX);
+          if (index !== null) setReadout(index);
+        }}
+        onMouseLeave={() => setReadout(null)}
+        onKeyDown={(event) => {
+          if (moveReadout(event.key)) event.preventDefault();
+        }}
+      >
+        <defs>
+          {series.map((entry) => (
+            <linearGradient key={entry.id} id={`hourly-graph-fill-${entry.id}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stopColor={entry.color} stopOpacity="0.16" />
+              <stop offset="1" stopColor={entry.color} stopOpacity="0" />
+            </linearGradient>
+          ))}
+        </defs>
+        {[0, 1, 2, 3].map((third) => {
+          const value = (yMax / 3) * third;
+          return (
+            <g key={third}>
+              <line
+                x1={margin.left}
+                y1={y(value)}
+                x2={width - margin.right}
+                y2={y(value)}
+                stroke={third === 0 ? "var(--chart-grid)" : "var(--chart-grid-soft)"}
+              />
+              <text x={margin.left - 6} y={y(value) + 3} fill="var(--chart-axis)" fontSize="9" textAnchor="end">
+                {formatValue(value)}
+              </text>
+            </g>
+          );
+        })}
         {xTicks.map(({ index, label }) => (
-          <text key={index} x={x(index)} y={height - 6} fill="#a3b3c2" fontSize="9" textAnchor="middle">{label}</text>
+          <text key={index} x={x(index)} y={height - 6} fill="var(--chart-axis)" fontSize="9" textAnchor="middle">{label}</text>
         ))}
-        <path d={line("activeSeconds")} fill="none" stroke="#8b98a8" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-        <path d={line("agentSeconds")} fill="none" stroke="#00e59b" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+        {series.map((entry) =>
+          runs(entry.values)
+            .filter((run) => run.end > run.start)
+            .map((run) => (
+              <path key={`${entry.id}-${run.start}`} d={areaPath(entry.values, run)} fill={`url(#hourly-graph-fill-${entry.id})`} stroke="none" />
+            )),
+        )}
+        {active !== null && (
+          <line x1={x(active)} y1={margin.top} x2={x(active)} y2={margin.top + plotH} stroke="var(--chart-grid)" />
+        )}
+        {series.map((entry) => (
+          <path
+            key={entry.id}
+            data-series={entry.id}
+            d={linePath(entry.values)}
+            fill="none"
+            stroke={entry.color}
+            strokeWidth="2"
+            strokeLinejoin="round"
+            strokeLinecap="round"
+          />
+        ))}
+        {series.map((entry) =>
+          entry.values.map((value, index) => {
+            if (value === null) return null;
+            if (!showEveryPoint && !isExtremum(entry.values, index) && index !== active) return null;
+            return (
+              <circle
+                key={`${entry.id}-${index}`}
+                data-point={entry.id}
+                cx={x(index)}
+                cy={y(value)}
+                r={index === active ? 3.5 : 2}
+                fill="var(--chart-point)"
+                stroke={entry.color}
+                strokeWidth="1.5"
+              />
+            );
+          }),
+        )}
       </svg>
+      {active !== null && (
+        <ChartTooltip
+          left={(x(active) / width) * 100}
+          title={hourLabel(active)}
+          rows={series.map((entry) => {
+            const value = entry.values[active];
+            return { color: entry.color, label: entry.label, value: value === null || value === undefined ? "-" : formatValue(value) };
+          })}
+        />
+      )}
+      <p className="visually-hidden" role="status">{active === null ? "" : summary(active)}</p>
       <ul className="legend">
-        <li><span className="legend-line legend-agents" aria-hidden="true" />Agents</li>
-        <li><span className="legend-line legend-humans" aria-hidden="true" />{personLabel}</li>
+        {series.map((entry) => (
+          <li key={entry.id}><span className="legend-line" style={{ background: entry.color }} aria-hidden="true" />{entry.label}</li>
+        ))}
       </ul>
+      {hasTokens && tokenBlind.length > 0 && (
+        <p className="graph-note">No token data from {tokenBlind.join(", ")}.</p>
+      )}
+    </div>
+  );
+};
+
+/// The paystub trend as a compact bar strip: one bar per week, hours above
+/// it, the week beneath, and the same hover and keyboard read-out grammar as
+/// the hourly graph. Replaces the old text list; the aria summary keeps the
+/// shift counts and held rate it carried.
+const TrendStrip = ({
+  buckets,
+  formatDuration,
+}: {
+  buckets: readonly ChartTrendBucket[];
+  formatDuration: (seconds: number) => string;
+}) => {
+  const [readout, setReadout] = useState<number | null>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  if (buckets.length === 0) return null;
+
+  const width = 640;
+  const height = 110;
+  const margin = { left: 4, right: 4, top: 20, bottom: 22 };
+  const plotW = width - margin.left - margin.right;
+  const plotH = height - margin.top - margin.bottom;
+  const yMax = Math.max(3600, Math.ceil(Math.max(...buckets.map((bucket) => bucket.agentSeconds)) / 3600) * 3600);
+  const slot = plotW / buckets.length;
+  const barWidth = Math.min(56, slot * 0.55);
+  const barX = (index: number): number => margin.left + slot * index + (slot - barWidth) / 2;
+  const barHeight = (value: number): number => (value <= 0 ? 0 : Math.max(2, (value / yMax) * plotH));
+  const weekLabel = (index: number): string =>
+    new Date(buckets[index]!.periodStartAt).toLocaleDateString([], { month: "short", day: "numeric" });
+  const summary = (index: number): string => {
+    const bucket = buckets[index]!;
+    const held = bucket.heldRate === null ? "held rate pending" : `${Math.round(bucket.heldRate * 100)}% held`;
+    return `Week of ${weekLabel(index)}: ${formatDuration(bucket.agentSeconds)}, ${bucket.shiftCount} shift${bucket.shiftCount === 1 ? "" : "s"}, ${held}`;
+  };
+
+  const indexFromPointer = (clientX: number): number | null => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (rect === undefined || rect.width === 0) return null;
+    const viewX = ((clientX - rect.left) / rect.width) * width;
+    const index = Math.floor((viewX - margin.left) / slot);
+    return index < 0 || index >= buckets.length ? null : index;
+  };
+
+  const moveReadout = (key: string): boolean => {
+    if (key !== "ArrowLeft" && key !== "ArrowRight" && key !== "Home" && key !== "End") return false;
+    setReadout((current) => {
+      if (key === "Home") return 0;
+      if (key === "End") return buckets.length - 1;
+      const base = current ?? (key === "ArrowLeft" ? buckets.length : -1);
+      return Math.max(0, Math.min(buckets.length - 1, base + (key === "ArrowRight" ? 1 : -1)));
+    });
+    return true;
+  };
+
+  const active = readout !== null && readout < buckets.length ? readout : null;
+
+  return (
+    <div className="graph trend-strip" data-testid="paystub-trend">
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${width} ${height}`}
+        role="img"
+        aria-label="Weekly agent hours, oldest first"
+        tabIndex={0}
+        onMouseMove={(event) => {
+          const index = indexFromPointer(event.clientX);
+          if (index !== null) setReadout(index);
+        }}
+        onMouseLeave={() => setReadout(null)}
+        onKeyDown={(event) => {
+          if (moveReadout(event.key)) event.preventDefault();
+        }}
+      >
+        <defs>
+          <linearGradient id="trend-strip-fill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stopColor="var(--chart-agent)" stopOpacity="0.9" />
+            <stop offset="1" stopColor="var(--chart-agent)" stopOpacity="0.35" />
+          </linearGradient>
+        </defs>
+        <line x1={margin.left} y1={margin.top + plotH} x2={width - margin.right} y2={margin.top + plotH} stroke="var(--chart-grid)" />
+        {buckets.map((bucket, index) => (
+          <g key={bucket.periodStartAt}>
+            {active === index && (
+              <rect
+                x={margin.left + slot * index + 1}
+                y={margin.top - 4}
+                width={slot - 2}
+                height={plotH + 4}
+                fill="var(--chart-grid-soft)"
+              />
+            )}
+            <rect
+              data-series="week"
+              x={barX(index)}
+              y={margin.top + plotH - barHeight(bucket.agentSeconds)}
+              width={barWidth}
+              height={barHeight(bucket.agentSeconds)}
+              rx={2}
+              fill="url(#trend-strip-fill)"
+            />
+            <text
+              x={barX(index) + barWidth / 2}
+              y={margin.top + plotH - barHeight(bucket.agentSeconds) - 5}
+              fill="var(--chart-axis)"
+              fontSize="9"
+              textAnchor="middle"
+            >
+              {formatDuration(bucket.agentSeconds)}
+            </text>
+            <text x={barX(index) + barWidth / 2} y={height - 6} fill="var(--chart-axis)" fontSize="9" textAnchor="middle">
+              {weekLabel(index)}
+            </text>
+          </g>
+        ))}
+      </svg>
+      {active !== null && (
+        <ChartTooltip
+          left={((margin.left + slot * active + slot / 2) / width) * 100}
+          title={`Week of ${weekLabel(active)}`}
+          rows={[{
+            color: "var(--chart-agent)",
+            label: formatDuration(buckets[active]!.agentSeconds),
+            value: `${buckets[active]!.shiftCount} shift${buckets[active]!.shiftCount === 1 ? "" : "s"}${
+              buckets[active]!.heldRate === null ? "" : ` · ${Math.round(buckets[active]!.heldRate! * 100)}% held`
+            }`,
+          }]}
+        />
+      )}
+      <p className="visually-hidden" role="status">{active === null ? "" : summary(active)}</p>
     </div>
   );
 };
@@ -262,6 +693,16 @@ const boardSorters: Record<BoardSort, (a: LeaderboardEntry, b: LeaderboardEntry)
 
 const messageFor = (error: unknown): string =>
   error instanceof ClientError ? error.message : "Something went wrong. Try again.";
+
+/// Runtimes that ran shifts in range but reported no tokens - the honest gap
+/// the tokens view names beneath the plot rather than zeroing over.
+const tokenBlindRuntimes = (agents: readonly MeStatsAgent[] | undefined): string[] => [
+  ...new Set(
+    (agents ?? [])
+      .filter((row) => row.shiftCount > 0 && !row.tokensReported)
+      .map((row) => agentRuntimeLabel(row.agent.source)),
+  ),
+];
 
 export const App = ({ client }: AppProps) => {
   const [booting, setBooting] = useState(true);
@@ -921,6 +1362,8 @@ export const App = ({ client }: AppProps) => {
                 <HourlyGraph
                   buckets={memberStats.hourly ?? []}
                   personLabel={viewingSelf ? "You" : (member?.name ?? "Person")}
+                  formatDuration={formatHumanDuration}
+                  tokenBlind={tokenBlindRuntimes(memberStats.agents)}
                 />
                 {memberStats.projects.length > 0 && (
                   <ul className="stat-list">
@@ -1201,17 +1644,7 @@ const RosterTab = ({
                   </ul>
                 </>
               )}
-              <ul className="stat-list" data-testid="paystub-trend">
-                {paystub.trend.map((bucket) => (
-                  <li key={bucket.periodStartAt} className="stat-row">
-                    <span className="stat-name">Week of {new Date(bucket.periodStartAt).toLocaleDateString()}</span>
-                    <span className="stat-duration">
-                      {formatHumanDuration(bucket.agentSeconds)} · {bucket.shiftCount} shifts
-                      {bucket.heldRate !== null && ` · ${Math.round(bucket.heldRate * 100)}% held`}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+              <TrendStrip buckets={paystub.trend} formatDuration={formatHumanDuration} />
             </>
           )}
         </section>

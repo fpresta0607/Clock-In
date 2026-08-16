@@ -158,6 +158,7 @@ describe("defaultBridge", () => {
       concurrency: { t0Seconds: 3_400, t1Seconds: 3_600, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
       byAgent: [{ source: "claude_code", model: null, durationSeconds: 3_600, sessionCount: 1, maxConcurrent: 1, medianSeconds: 3_600 }],
       hourly: [],
+      agents: [],
     };
     invoke.mockResolvedValueOnce(stats);
 
@@ -185,6 +186,7 @@ describe("defaultBridge", () => {
       hourly: [],
       projects: [],
       apps: [],
+      agents: [],
     };
     invoke.mockResolvedValueOnce(empty);
     await expect(defaultBridge.meStats(undefined, undefined, ids.user)).resolves.toEqual(empty);
@@ -257,6 +259,58 @@ describe("defaultBridge", () => {
       hourly: [{ ...stats.hourly[0], inputTokens: -1 }],
     });
     await expect(defaultBridge.meStats(undefined, undefined)).rejects.toMatchObject({ kind: "unknown" });
+  });
+
+  it("decodes agent activity in stats, absent tokensReported as unknown", async () => {
+    invoke.mockResolvedValueOnce({
+      filters: {},
+      totalDurationSeconds: 0,
+      attributedSeconds: 0,
+      unattributedSeconds: 0,
+      activeSeconds: 0,
+      agentSeconds: 3_600,
+      concurrency: { t0Seconds: 0, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
+      byAgent: [],
+      projects: [],
+      apps: [],
+      agents: [
+        { agent: { id: "a1", source: "claude_code" }, shiftCount: 2, tokensReported: true },
+        { agent: { id: "a2", source: "codex" }, shiftCount: 1 },
+      ],
+    });
+
+    await expect(defaultBridge.meStats(undefined, undefined)).resolves.toMatchObject({
+      agents: [
+        { source: "claude_code", shiftCount: 2, tokensReported: true },
+        // Absent on an older API decodes to null: it cannot say, so nobody is named blind.
+        { source: "codex", shiftCount: 1, tokensReported: null },
+      ],
+    });
+  });
+
+  it("decodes the paystub trend and rejects a payload without one", async () => {
+    invoke.mockResolvedValueOnce({
+      agent: { id: "a1", name: "Claude Code @ Field work" },
+      totals: { agentSeconds: 5_400, shiftCount: 2 },
+      trend: [
+        { periodStartAt: "2026-07-27T00:00:00.000Z", agentSeconds: 3_600, shiftCount: 1, heldRate: null },
+        { periodStartAt: "2026-08-03T00:00:00.000Z", agentSeconds: 1_800, shiftCount: 1, heldRate: 0.5 },
+      ],
+    });
+
+    const fromAt = "2026-08-01T00:00:00.000Z";
+    const toExclusiveAt = "2026-08-08T00:00:00.000Z";
+    await expect(defaultBridge.agentPaystubTrend("a1", fromAt, toExclusiveAt)).resolves.toEqual({
+      trend: [
+        { periodStartAt: "2026-07-27T00:00:00.000Z", agentSeconds: 3_600, shiftCount: 1, heldRate: null },
+        { periodStartAt: "2026-08-03T00:00:00.000Z", agentSeconds: 1_800, shiftCount: 1, heldRate: 0.5 },
+      ],
+    });
+    expect(invoke).toHaveBeenLastCalledWith("agent_paystub_trend", { agentId: "a1", fromAt, toExclusiveAt });
+
+    // The trend is required: an API that cannot send it is invalid, not an empty chart.
+    invoke.mockResolvedValueOnce({ agent: { id: "a1" } });
+    await expect(defaultBridge.agentPaystubTrend("a1")).rejects.toMatchObject({ kind: "unknown" });
   });
 
   it("decodes the pay-run report, with zero-activity agents and a null held rate", async () => {

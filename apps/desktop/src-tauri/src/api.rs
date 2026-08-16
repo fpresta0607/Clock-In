@@ -551,6 +551,53 @@ pub struct MeStats {
     /// graph", exactly as it already does.
     #[serde(default)]
     pub hourly: Vec<MeStatsHourlyBucket>,
+    /// The caller's own agent activity in range, decoded only as far as the
+    /// charts need. Defaulted so an API from before the field shipped still
+    /// parses; the webview reads an empty list as "nothing to name".
+    #[serde(default)]
+    pub agents: Vec<MeStatsAgentActivity>,
+}
+
+/// One agent's activity slice in `/me/stats`: the runtime it ran under, its
+/// shift count, and whether it reported tokens (`None` on an API that
+/// predates the field, which the webview refuses to read as "no").
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeStatsAgentActivity {
+    pub agent: MeStatsAgentActivityRef,
+    pub shift_count: u32,
+    #[serde(default)]
+    pub tokens_reported: Option<bool>,
+}
+
+/// The runtime identity inside an activity row; the rest of the roster agent
+/// is the web dashboard's business.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeStatsAgentActivityRef {
+    pub id: String,
+    pub source: AgentSource,
+}
+
+/// One week of an agent's paystub trend: hours, shifts, and how the week's
+/// commits held up (`None` while nothing has been decided).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPaystubTrendBucket {
+    pub period_start_at: String,
+    pub agent_seconds: u64,
+    pub shift_count: u32,
+    #[serde(default)]
+    pub held_rate: Option<f64>,
+}
+
+/// The slice of the paystub the desktop plots: the weekly trend buckets. The
+/// shifts, models, and totals the paystub also carries are the web
+/// dashboard's business, so serde drops them here.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPaystubTrend {
+    pub trend: Vec<AgentPaystubTrendBucket>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -831,6 +878,26 @@ impl ApiClient {
             query.push_str(&format!("scope={scope}"));
         }
         self.get_json(access_token, &format!("/reports/agents{query}"))
+            .await
+    }
+
+    /// One agent's paystub trend: six weekly buckets ending at the range's
+    /// end (or now, unbounded), for the overlay's agents chart. Bounds arrive
+    /// together or not at all; both absent asks for all time.
+    pub async fn agent_paystub_trend(
+        &self,
+        access_token: &str,
+        agent_id: &str,
+        from_at: Option<&str>,
+        to_exclusive_at: Option<&str>,
+    ) -> ApiResult<AgentPaystubTrend> {
+        let query = match (from_at, to_exclusive_at) {
+            (Some(from_at), Some(to_exclusive_at)) => {
+                format!("?fromAt={from_at}&toExclusiveAt={to_exclusive_at}")
+            }
+            _ => String::new(),
+        };
+        self.get_json(access_token, &format!("/agents/{agent_id}/paystub{query}"))
             .await
     }
 
@@ -1496,6 +1563,89 @@ mod tests {
             Some(12_000)
         );
         assert!(reported.tokens_reported);
+    }
+
+    #[test]
+    fn reads_the_paystub_trend_out_of_a_full_paystub_response() {
+        let trend: AgentPaystubTrend = serde_json::from_str(
+            r#"{
+                "agent": {"id": "a1", "name": "Claude Code @ Field work"},
+                "filters": {},
+                "totals": {"agentSeconds": 5400, "shiftCount": 2},
+                "models": [],
+                "shifts": [{"id": "s1", "startedAt": "2026-08-06T10:00:00.000Z"}],
+                "trend": [
+                    {"periodStartAt": "2026-07-27T00:00:00.000Z", "agentSeconds": 3600, "shiftCount": 1, "heldRate": null},
+                    {"periodStartAt": "2026-08-03T00:00:00.000Z", "agentSeconds": 1800, "shiftCount": 1, "heldRate": 0.5}
+                ]
+            }"#,
+        )
+        .expect("paystub trend parses");
+
+        // The rest of the paystub is the web dashboard's business; only the
+        // weekly buckets ride through to the webview.
+        assert_eq!(trend.trend.len(), 2);
+        assert_eq!(trend.trend[0].agent_seconds, 3_600);
+        assert_eq!(trend.trend[0].held_rate, None);
+        assert_eq!(trend.trend[1].held_rate, Some(0.5));
+        let echoed = serde_json::to_value(&trend).expect("trend serialize");
+        assert_eq!(
+            echoed["trend"][1]["periodStartAt"],
+            "2026-08-03T00:00:00.000Z"
+        );
+        assert_eq!(echoed["trend"][0]["heldRate"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn reads_agent_activity_from_me_stats_and_survives_its_absence() {
+        let stats: MeStats = serde_json::from_str(
+            r#"{
+                "filters": {},
+                "totalDurationSeconds": 7200,
+                "attributedSeconds": 5400,
+                "unattributedSeconds": 1800,
+                "activeSeconds": 7000,
+                "agentSeconds": 3600,
+                "concurrency": {"t0Seconds": 3400, "t1Seconds": 0, "t2Seconds": 0, "t3PlusSeconds": 0, "awaySeconds": 0},
+                "byAgent": [],
+                "projects": [],
+                "apps": [],
+                "agents": [
+                    {"agent": {"id": "a1", "source": "claude_code"}, "shiftCount": 2, "tokensReported": true},
+                    {"agent": {"id": "a2", "source": "codex"}, "shiftCount": 1}
+                ]
+            }"#,
+        )
+        .expect("stats parse");
+
+        // A missing tokensReported stays unknown, never read as "reported none".
+        assert_eq!(stats.agents.len(), 2);
+        assert_eq!(stats.agents[0].tokens_reported, Some(true));
+        assert_eq!(stats.agents[1].tokens_reported, None);
+        let echoed = serde_json::to_value(&stats).expect("stats serialize");
+        assert_eq!(
+            echoed["agents"][1]["tokensReported"],
+            serde_json::Value::Null
+        );
+
+        // An API from before the field shipped parses to an empty list.
+        let older: MeStats = serde_json::from_str(
+            r#"{
+                "filters": {},
+                "totalDurationSeconds": 7200,
+                "attributedSeconds": 5400,
+                "unattributedSeconds": 1800,
+                "activeSeconds": 7000,
+                "agentSeconds": 3600,
+                "concurrency": {"t0Seconds": 3400, "t1Seconds": 0, "t2Seconds": 0, "t3PlusSeconds": 0, "awaySeconds": 0},
+                "byAgent": [],
+                "projects": [],
+                "apps": []
+            }"#,
+        )
+        .expect("older stats parse");
+        assert!(older.agents.is_empty());
+        assert!(older.hourly.is_empty());
     }
 
     #[test]
