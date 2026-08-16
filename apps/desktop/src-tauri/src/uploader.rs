@@ -15,7 +15,8 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use crate::api::{ApiClient, MappingKind, PathMapping, ShiftCommitUpload};
+use crate::agent_usage;
+use crate::api::{AgentUsageUpload, ApiClient, MappingKind, PathMapping, ShiftCommitUpload};
 use crate::monitor::{
     advance_sessions, iso8601, lock, parse_iso8601, unix_now, ActiveAgent, AgentTracking,
     MonitorShared, ObservedSession, SeenAgentEvent, SegmentRecord,
@@ -38,6 +39,7 @@ pub struct UploadPaths {
     pub sessions_path: PathBuf,
     pub shift_windows_path: PathBuf,
     pub shift_commits_path: PathBuf,
+    pub agent_usage_path: PathBuf,
 }
 
 pub async fn upload_loop(
@@ -83,6 +85,13 @@ pub(crate) async fn upload_once(
     )
     .await;
 
+    // Same posture for token capture: the transcript reader tails what the
+    // spool named, on every platform, from this same pass. The settings
+    // opt-out stops the reader; counters already captured are kept.
+    if lock(shared).settings.agent_usage_capture {
+        agent_usage::capture_from_spool(&paths.agent_path, &paths.agent_usage_path);
+    }
+
     let mut complete = upload_segments(client, &token, &paths.segments_path).await;
 
     // Refresh the local mapping cache before the drain resolves suggestions.
@@ -116,9 +125,11 @@ pub(crate) async fn upload_once(
 
     // Shift commits reference an agent session by external id; uploading them
     // before both agent-spool drains have succeeded this pass would race a
-    // session that has not reached the server yet.
+    // session that has not reached the server yet. Usage counters carry the
+    // same reference, so they wait on the same gate.
     if agent_spool_drained && browser_spool_drained {
         complete &= upload_shift_commits_spool(client, &token, &paths.shift_commits_path).await;
+        complete &= upload_agent_usage_spool(client, &token, &paths.agent_usage_path).await;
     }
 
     if complete {
@@ -271,6 +282,69 @@ fn to_shift_commit_upload(entry: &crate::shift_commits::CommitEntry) -> ShiftCom
         authored_at: entry.authored_at.clone(),
         verification: entry.verification.clone(),
         verified_at: entry.verified_at.clone(),
+    }
+}
+
+/// Uploads every unsynced usage entry in batches, under the same verdict
+/// rules as shift commits: accepted rows are marked synced, a permanent
+/// rejection is marked rejected and dropped, `unknown_session` is retryable
+/// and left alone entirely, and a transport failure marks nothing so the
+/// whole batch replays identically next pass.
+async fn upload_agent_usage_spool(
+    client: &ApiClient,
+    token: &str,
+    agent_usage_path: &Path,
+) -> bool {
+    let pending = agent_usage::unsynced(agent_usage_path);
+    if pending.is_empty() {
+        return true;
+    }
+    for chunk in pending.chunks(UPLOAD_BATCH_SIZE) {
+        let uploads: Vec<AgentUsageUpload> = chunk.iter().map(to_agent_usage_upload).collect();
+        let outcome = match client.upload_agent_usage(token, &uploads).await {
+            Ok(outcome) => outcome,
+            Err(_) => return false,
+        };
+        let rejected_ids: std::collections::HashSet<&str> = outcome
+            .rejected
+            .iter()
+            .map(|rejection| rejection.client_id.as_str())
+            .collect();
+        let permanent: Vec<String> = outcome
+            .rejected
+            .iter()
+            .filter(|rejection| rejection.reason != "unknown_session")
+            .map(|rejection| rejection.client_id.clone())
+            .collect();
+        if !permanent.is_empty() {
+            eprintln!(
+                "clock-in: the server rejected {} agent usage row(s)",
+                permanent.len()
+            );
+        }
+        let accepted: Vec<String> = chunk
+            .iter()
+            .map(|entry| entry.client_id.clone())
+            .filter(|client_id| !rejected_ids.contains(client_id.as_str()))
+            .collect();
+        agent_usage::mark_synced(agent_usage_path, &accepted);
+        agent_usage::mark_rejected(agent_usage_path, &permanent);
+    }
+    true
+}
+
+fn to_agent_usage_upload(entry: &agent_usage::UsageEntry) -> AgentUsageUpload {
+    AgentUsageUpload {
+        client_id: entry.client_id.clone(),
+        source: entry.source.clone(),
+        external_session_id: entry.external_session_id.clone(),
+        bucket_start_at: entry.bucket_start_at.clone(),
+        model: entry.model.clone(),
+        sidechain: entry.sidechain,
+        input_tokens: entry.input_tokens,
+        output_tokens: entry.output_tokens,
+        cache_creation_input_tokens: entry.cache_creation_input_tokens,
+        cache_read_input_tokens: entry.cache_read_input_tokens,
     }
 }
 
@@ -896,6 +970,212 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Seeds a usage registry the way a real pass does: a `Started` line
+    /// naming a transcript lands on the agent spool, then capture runs beside
+    /// it. Returns the registry path and the client id capture assigned, so a
+    /// stub verdict can name the row.
+    fn spool_one_usage_entry(dir: &Path) -> (PathBuf, String) {
+        let agent_path = dir.join("agent-spool.jsonl");
+        let usage_path = dir.join("agent-usage.json");
+        let transcript = dir.join("session-1.jsonl");
+        let line = serde_json::json!({
+            "timestamp": "2026-08-06T10:15:00Z",
+            "sessionId": "session-1",
+            "isSidechain": false,
+            "message": {
+                "model": "claude-opus-4.1",
+                "usage": {
+                    "input_tokens": 150,
+                    "output_tokens": 12,
+                    "cache_creation_input_tokens": 3,
+                    "cache_read_input_tokens": 4,
+                },
+            },
+        });
+        std::fs::write(&transcript, format!("{line}\n")).expect("the transcript writes");
+        let event = SpoolEvent {
+            source: source("claude_code"),
+            external_session_id: "session-1".to_string(),
+            event: AgentEventKind::Started,
+            occurred_at: "2026-08-06T10:00:00Z".to_string(),
+            cwd: Some("C:/dev/clock-in".to_string()),
+            start_head: None,
+            model: None,
+            rule_id: None,
+            transcript_path: Some(transcript.to_string_lossy().into_owned()),
+            tokens: None,
+        };
+        spool::append(&agent_path, &event).expect("the spool accepts a line");
+        agent_usage::capture_from_spool(&agent_path, &usage_path);
+        let pending = agent_usage::unsynced(&usage_path);
+        assert_eq!(pending.len(), 1, "capture produced one usage entry");
+        (usage_path, pending[0].client_id.clone())
+    }
+
+    /// Capture feeds upload: a transcript's counters reach `/agent-usage` in
+    /// the contract's shape on the same pass and are marked synced.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn captured_usage_reaches_the_endpoint_and_is_marked_synced() {
+        let dir = temp_dir("usage-accepted");
+        let (path, client_id) = spool_one_usage_entry(&dir);
+
+        let (port, server) = stub_server(200, r#"{"accepted":1,"rejected":[]}"#).await;
+        assert!(
+            upload_agent_usage_spool(&stub_client(port), "token", &path).await,
+            "an accepted batch reports success"
+        );
+
+        let request = server.await.expect("the stub finishes");
+        assert!(
+            request.starts_with("POST /agent-usage "),
+            "the batch goes to the agent-usage endpoint: {request}"
+        );
+        assert!(
+            request.contains(&format!("\"clientId\":\"{client_id}\""))
+                && request.contains("\"bucketStartAt\":\"2026-08-06T10:00:00Z\"")
+                && request.contains("\"externalSessionId\":\"session-1\"")
+                && request.contains("\"model\":\"claude-opus-4.1\"")
+                && request.contains("\"sidechain\":false")
+                && request.contains("\"inputTokens\":150")
+                && request.contains("\"outputTokens\":12")
+                && request.contains("\"cacheCreationInputTokens\":3")
+                && request.contains("\"cacheReadInputTokens\":4"),
+            "the wire payload carries the contract's field names: {request}"
+        );
+
+        assert!(
+            agent_usage::unsynced(&path).is_empty(),
+            "an accepted row is marked synced"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `unknown_session` is retryable: the shift may not have landed on the
+    /// server yet, so the row stays unsynced (and unrejected) and uploads
+    /// again once it has.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unknown_session_rejection_keeps_the_usage_row_retryable() {
+        let dir = temp_dir("usage-unknown-session");
+        let (path, client_id) = spool_one_usage_entry(&dir);
+
+        let (port, server) = stub_server(
+            200,
+            Box::leak(
+                format!(
+                    r#"{{"accepted":0,"rejected":[{{"clientId":"{client_id}","reason":"unknown_session"}}]}}"#
+                )
+                .into_boxed_str(),
+            ),
+        )
+        .await;
+        assert!(
+            upload_agent_usage_spool(&stub_client(port), "token", &path).await,
+            "the server responding at all is a completed pass"
+        );
+        let _ = server.await;
+
+        assert_eq!(
+            agent_usage::unsynced(&path).len(),
+            1,
+            "unknown_session leaves the row retryable"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Any other rejection reason is permanent: the row is marked rejected
+    /// and drops out of the unsynced set for good.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_permanent_usage_rejection_is_marked_rejected_and_dropped() {
+        let dir = temp_dir("usage-rejected");
+        let (path, client_id) = spool_one_usage_entry(&dir);
+
+        let (port, server) = stub_server(
+            200,
+            Box::leak(
+                format!(
+                    r#"{{"accepted":0,"rejected":[{{"clientId":"{client_id}","reason":"validation_error"}}]}}"#
+                )
+                .into_boxed_str(),
+            ),
+        )
+        .await;
+        assert!(upload_agent_usage_spool(&stub_client(port), "token", &path).await);
+        let _ = server.await;
+
+        assert!(
+            agent_usage::unsynced(&path).is_empty(),
+            "a permanent rejection leaves the unsynced set"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The wire trap the projection exists for: the spool line now carries
+    /// capture-only fields (`transcriptPath`, `tokens`), and the strict
+    /// `/agent-sessions` schema 400s on any key it does not declare. Pin the
+    /// exact key set the upload sends.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_uploaded_agent_event_sends_only_the_contract_fields() {
+        let dir = temp_dir("agent-wire-shape");
+        let path = dir.join("agent-spool.jsonl");
+        let event = SpoolEvent {
+            source: source("claude_code"),
+            external_session_id: "session-1".to_string(),
+            event: AgentEventKind::Started,
+            occurred_at: "2026-08-12T13:36:06Z".to_string(),
+            cwd: Some("C:/dev/Clock-In".to_string()),
+            start_head: Some("a".repeat(40)),
+            model: Some("claude-opus-4.1".to_string()),
+            rule_id: None,
+            transcript_path: Some("C:/Users/alex/.claude/projects/x/session-1.jsonl".to_string()),
+            tokens: Some(spool::TokenCounters {
+                input_tokens: Some(150),
+                output_tokens: Some(12),
+                cache_creation_input_tokens: Some(3),
+                cache_read_input_tokens: Some(4),
+            }),
+        };
+        spool::append(&path, &event).expect("the spool accepts a line");
+
+        let (port, server) = stub_server(
+            200,
+            r#"{"results":[{"externalSessionId":"session-1","accepted":true}]}"#,
+        )
+        .await;
+        assert!(
+            upload_agent_spool(&stub_client(port), "token", &path).await,
+            "an accepted batch reports success"
+        );
+
+        let request = server.await.expect("the stub finishes");
+        assert!(
+            request.starts_with("POST /agent-sessions "),
+            "the batch goes to the agent-sessions endpoint: {request}"
+        );
+        let head_end = find_head_end(request.as_bytes()).expect("the request has a head");
+        let body: serde_json::Value =
+            serde_json::from_str(&request[head_end..]).expect("the body parses");
+        let event = body["events"][0].as_object().expect("one event object");
+        let mut keys: Vec<&str> = event.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "cwd",
+                "event",
+                "externalSessionId",
+                "model",
+                "occurredAt",
+                "source"
+            ],
+            "exactly the contract fields, no capture-only keys: {request}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn mapping(id: &str, prefix: &str, project: &str) -> PathMapping {
         PathMapping {
             id: id.to_string(),
@@ -926,6 +1206,8 @@ mod tests {
             start_head: None,
             model: None,
             rule_id: None,
+            transcript_path: None,
+            tokens: None,
         }
     }
 
@@ -945,6 +1227,8 @@ mod tests {
             start_head: Some("a".repeat(40)),
             model: None,
             rule_id: None,
+            transcript_path: None,
+            tokens: None,
         };
         let mut line = serde_json::to_vec(&event).expect("the event encodes");
         line.push(b'\n');

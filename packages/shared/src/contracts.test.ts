@@ -13,6 +13,9 @@ import {
   agentSchema,
   agentsListResponseSchema,
   agentStatusValues,
+  agentUsageBatchRequestSchema,
+  agentUsageBatchResponseSchema,
+  agentUsageUploadSchema,
   shiftCommitBatchRequestSchema,
   shiftCommitBatchResponseSchema,
   shiftCommitUploadSchema,
@@ -924,6 +927,49 @@ describe("shift commit upload contracts", () => {
     expect(() => shiftCommitBatchRequestSchema.parse({ commits: [] })).toThrow();
     expect(() => shiftCommitBatchRequestSchema.parse({ commits: Array.from({ length: 501 }, () => upload) })).toThrow();
     expect(() => shiftCommitBatchResponseSchema.parse({
+      accepted: 1,
+      // unknown_session is the one retryable reason; the client keeps the row unsynced.
+      rejected: [{ clientId: ids.client, reason: "unknown_session" }],
+    })).not.toThrow();
+  });
+});
+
+describe("agent usage upload contracts", () => {
+  const upload = {
+    clientId: ids.client,
+    source: "claude_code",
+    externalSessionId: "session-1",
+    bucketStartAt: startedAt,
+    model: "claude-opus-4-8",
+    sidechain: false,
+    inputTokens: 12_000,
+    outputTokens: 3_400,
+    cacheCreationInputTokens: 800,
+    cacheReadInputTokens: 45_000,
+  };
+
+  it("accepts a named-model upload and one whose runtime named no model", () => {
+    expect(() => agentUsageUploadSchema.parse(upload)).not.toThrow();
+    expect(() => agentUsageUploadSchema.parse({ ...upload, model: undefined })).not.toThrow();
+  });
+
+  it("rejects unknown fields and negative, fractional, or unsafe counters", () => {
+    expect(() => agentUsageUploadSchema.parse({ ...upload, extra: true })).toThrow();
+    expect(() => agentUsageUploadSchema.parse({ ...upload, inputTokens: -1 })).toThrow();
+    expect(() => agentUsageUploadSchema.parse({ ...upload, outputTokens: 1.5 })).toThrow();
+    expect(() => agentUsageUploadSchema.parse({ ...upload, cacheReadInputTokens: Number.MAX_SAFE_INTEGER + 1 })).toThrow();
+  });
+
+  it("rejects an empty model and an empty external session id", () => {
+    expect(() => agentUsageUploadSchema.parse({ ...upload, model: "" })).toThrow();
+    expect(() => agentUsageUploadSchema.parse({ ...upload, externalSessionId: "" })).toThrow();
+  });
+
+  it("accepts a bounded batch and a per-entry accepted/rejected response", () => {
+    expect(() => agentUsageBatchRequestSchema.parse({ usage: [upload] })).not.toThrow();
+    expect(() => agentUsageBatchRequestSchema.parse({ usage: [] })).toThrow();
+    expect(() => agentUsageBatchRequestSchema.parse({ usage: Array.from({ length: 501 }, () => upload) })).toThrow();
+    expect(() => agentUsageBatchResponseSchema.parse({
       accepted: 1,
       // unknown_session is the one retryable reason; the client keeps the row unsynced.
       rejected: [{ clientId: ids.client, reason: "unknown_session" }],

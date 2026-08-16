@@ -701,6 +701,49 @@ export const shiftCommitBatchResponseSchema = z
   })
   .strict();
 
+/**
+ * One bucket of token counters read from an agent runtime's own session logs
+ * by the desktop app - usage numbers only, never a word of transcript content.
+ * `clientId` makes replays idempotent, exactly as it does for shift commits.
+ * `bucketStartAt` is hour-aligned, and every counter is the cumulative total
+ * for its (session, bucket, model, sidechain) tuple, upserted monotonically:
+ * a re-read of the same transcript region can only restate a number, never
+ * add to it.
+ */
+export const agentUsageUploadSchema = z
+  .object({
+    clientId: idSchema,
+    source: agentSourceSchema,
+    externalSessionId: z.string().min(1).max(200),
+    /** Hour-aligned start of the bucket these counters cover. */
+    bucketStartAt: timestampSchema,
+    model: z.string().min(1).max(200).optional(),
+    sidechain: z.boolean(),
+    inputTokens: z.number().int().nonnegative().safe(),
+    outputTokens: z.number().int().nonnegative().safe(),
+    cacheCreationInputTokens: z.number().int().nonnegative().safe(),
+    cacheReadInputTokens: z.number().int().nonnegative().safe(),
+  })
+  .strict();
+
+export const agentUsageBatchRequestSchema = z
+  .object({
+    usage: z.array(agentUsageUploadSchema).min(1).max(500),
+  })
+  .strict();
+
+/**
+ * Per-row accepted/rejected. The reason `"unknown_session"` is retryable: the
+ * entry's shift has not landed on the server yet, so the client keeps the row
+ * unsynced and uploads it again next pass. Every other reason is permanent.
+ */
+export const agentUsageBatchResponseSchema = z
+  .object({
+    accepted: z.number().int().nonnegative(),
+    rejected: z.array(z.object({ clientId: idSchema, reason: z.string().min(1) }).strict()),
+  })
+  .strict();
+
 export const pathMappingKindValues = ["path_prefix", "url_rule"] as const;
 export const pathMappingKindSchema = z.enum(pathMappingKindValues);
 
@@ -900,6 +943,9 @@ export type ShiftCommitView = z.infer<typeof shiftCommitViewSchema>;
 export type ShiftCommitUpload = z.infer<typeof shiftCommitUploadSchema>;
 export type ShiftCommitBatchRequest = z.infer<typeof shiftCommitBatchRequestSchema>;
 export type ShiftCommitBatchResponse = z.infer<typeof shiftCommitBatchResponseSchema>;
+export type AgentUsageUpload = z.infer<typeof agentUsageUploadSchema>;
+export type AgentUsageBatchRequest = z.infer<typeof agentUsageBatchRequestSchema>;
+export type AgentUsageBatchResponse = z.infer<typeof agentUsageBatchResponseSchema>;
 export type ApiError = z.infer<typeof apiErrorSchema>;
 export type ApiErrorCode = z.infer<typeof apiErrorCodeSchema>;
 export type CurrentSessionResponse = z.infer<typeof currentSessionResponseSchema>;

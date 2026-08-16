@@ -384,8 +384,12 @@ export interface AgentSessionRepository {
   closeRunning(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, endedAt: Date, now: Date): Promise<AgentSessionRecord | null>;
   /** Tolerated end-before-start: stores the row directly as ended at occurredAt. */
   insertEnded(input: InsertEndedAgentSession): Promise<void>;
-  /** Advances lastEventAt on a running row; false when nothing matched (unknown or already ended). */
-  advanceLastEvent(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, occurredAt: Date, now: Date): Promise<boolean>;
+  /**
+   * Advances lastEventAt on a running row; false when nothing matched (unknown
+   * or already ended). A heartbeat naming a model fills a still-null model;
+   * an existing model is never overwritten (first assignment wins).
+   */
+  advanceLastEvent(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, model: string | null, occurredAt: Date, now: Date): Promise<boolean>;
   /** Closes running rows whose lastEventAt is older than cutoff, ending them at lastEventAt. Returns the reaped count. */
   reapStale(subject: AuthenticatedSubject, cutoff: Date, now: Date): Promise<number>;
   /**
@@ -460,6 +464,49 @@ export interface ShiftCommitRepository {
   countsByAgent(subject: AuthenticatedSubject, query: ReportQuery): Promise<ShiftCommitCountsRecord[]>;
   /** One agent's commits in the range (authoredAt bounds), for the paystub. */
   listForAgent(subject: AuthenticatedSubject, agentId: string, query: ReportQuery): Promise<ShiftCommitRecord[]>;
+}
+
+export interface AgentUsageRecord {
+  id: string;
+  organizationId: string;
+  userId: string;
+  agentId: string;
+  agentSessionId: string;
+  clientId: string;
+  bucketStartAt: Date;
+  model: string | null;
+  sidechain: boolean;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+}
+
+export interface UpsertAgentUsageBucket {
+  organizationId: string;
+  userId: string;
+  agentId: string;
+  agentSessionId: string;
+  clientId: string;
+  bucketStartAt: Date;
+  model: string | null;
+  sidechain: boolean;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  recordedAt: Date;
+}
+
+export interface AgentUsageRepository {
+  findByClientId(subject: AuthenticatedSubject, clientId: string): Promise<AgentUsageRecord | null>;
+  /**
+   * Inserts the bucket row or, on the (org, session, bucket, model, sidechain)
+   * conflict, moves each counter to GREATEST(existing, incoming): counters are
+   * cumulative totals, so a re-read of the same transcript region can only
+   * restate a number upward, never add to it.
+   */
+  upsertBucket(input: UpsertAgentUsageBucket): Promise<void>;
 }
 
 export interface PathMappingRecord {

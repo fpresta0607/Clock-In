@@ -6,6 +6,7 @@ import {
   activitySegments,
   agents,
   agentSessions,
+  agentUsage,
   organizationAdminClaims,
   organizations,
   projectMemberships,
@@ -41,6 +42,9 @@ import {
   type AgentSessionRepository,
   type AgentUpdatePatch,
   type UpsertAgentForKey,
+  type AgentUsageRecord,
+  type AgentUsageRepository,
+  type UpsertAgentUsageBucket,
   type InsertShiftCommit,
   type ShiftCommitCountsRecord,
   type ShiftCommitRecord,
@@ -1217,11 +1221,15 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
       .onConflictDoNothing({ target: agentSessionKey });
   }
 
-  public async advanceLastEvent(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, occurredAt: Date, now: Date): Promise<boolean> {
+  public async advanceLastEvent(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, model: string | null, occurredAt: Date, now: Date): Promise<boolean> {
     const rows = await this.db
       .update(agentSessions)
       .set({
         lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${occurredAt.toISOString()}::timestamptz)`,
+        // First assignment wins, mirroring the isNull guard in stampAgent: a
+        // heartbeat naming a model fills a still-null model and never
+        // overwrites one the shift already carries.
+        model: sql`coalesce(${agentSessions.model}, ${model})`,
         updatedAt: now,
       })
       .where(and(
@@ -1539,6 +1547,76 @@ export class DrizzleShiftCommitRepository implements ShiftCommitRepository {
       ))
       .orderBy(asc(shiftCommits.authoredAt), asc(shiftCommits.id));
     return rows.map(asShiftCommitRecord);
+  }
+}
+
+function asAgentUsageRecord(row: typeof agentUsage.$inferSelect): AgentUsageRecord {
+  return {
+    id: row.id,
+    organizationId: row.organizationId,
+    userId: row.userId,
+    agentId: row.agentId,
+    agentSessionId: row.agentSessionId,
+    clientId: row.clientId,
+    bucketStartAt: row.bucketStartAt,
+    model: row.model,
+    sidechain: row.sidechain,
+    inputTokens: row.inputTokens,
+    outputTokens: row.outputTokens,
+    cacheCreationInputTokens: row.cacheCreationInputTokens,
+    cacheReadInputTokens: row.cacheReadInputTokens,
+  };
+}
+
+export class DrizzleAgentUsageRepository implements AgentUsageRepository {
+  public constructor(private readonly db: DatabaseConnection["db"]) {}
+
+  public async findByClientId(subject: AuthenticatedSubject, clientId: string): Promise<AgentUsageRecord | null> {
+    const rows = await this.db.select().from(agentUsage).where(and(
+      eq(agentUsage.organizationId, subject.organizationId),
+      eq(agentUsage.userId, subject.userId),
+      eq(agentUsage.clientId, clientId),
+    )).limit(1);
+    return rows[0] === undefined ? null : asAgentUsageRecord(rows[0]);
+  }
+
+  public async upsertBucket(input: UpsertAgentUsageBucket): Promise<void> {
+    // The bucket unique absorbs a re-read of the same transcript region: each
+    // counter moves to GREATEST(existing, incoming), so a restate can only
+    // raise a total, never add to it.
+    await this.db
+      .insert(agentUsage)
+      .values({
+        organizationId: input.organizationId,
+        userId: input.userId,
+        agentId: input.agentId,
+        agentSessionId: input.agentSessionId,
+        clientId: input.clientId,
+        bucketStartAt: input.bucketStartAt,
+        model: input.model,
+        sidechain: input.sidechain,
+        inputTokens: input.inputTokens,
+        outputTokens: input.outputTokens,
+        cacheCreationInputTokens: input.cacheCreationInputTokens,
+        cacheReadInputTokens: input.cacheReadInputTokens,
+        recordedAt: input.recordedAt,
+      })
+      .onConflictDoUpdate({
+        target: [
+          agentUsage.organizationId,
+          agentUsage.agentSessionId,
+          agentUsage.bucketStartAt,
+          agentUsage.model,
+          agentUsage.sidechain,
+        ],
+        set: {
+          inputTokens: sql`greatest(${agentUsage.inputTokens}, excluded.input_tokens)`,
+          outputTokens: sql`greatest(${agentUsage.outputTokens}, excluded.output_tokens)`,
+          cacheCreationInputTokens: sql`greatest(${agentUsage.cacheCreationInputTokens}, excluded.cache_creation_input_tokens)`,
+          cacheReadInputTokens: sql`greatest(${agentUsage.cacheReadInputTokens}, excluded.cache_read_input_tokens)`,
+          updatedAt: input.recordedAt,
+        },
+      });
   }
 }
 

@@ -411,6 +411,9 @@ pub struct MonitorSettings {
     /// Switching it off strips the policy entry, which uninstalls the
     /// extension; the native-host registration is unaffected either way.
     pub browser_auto_install: bool,
+    /// Read token counters and model names from an AI tool's own session log.
+    /// Switching it off stops the reader; counters already captured are kept.
+    pub agent_usage_capture: bool,
     /// Stable per-install device id stamped on every segment; generated once.
     pub device_id: String,
 }
@@ -422,6 +425,7 @@ impl Default for MonitorSettings {
             away_threshold_minutes: 10,
             agent_override_enabled: true,
             browser_auto_install: true,
+            agent_usage_capture: true,
             device_id: String::new(),
         }
     }
@@ -451,6 +455,9 @@ impl MonitorSettings {
             browser_auto_install: patch
                 .browser_auto_install
                 .unwrap_or(self.browser_auto_install),
+            agent_usage_capture: patch
+                .agent_usage_capture
+                .unwrap_or(self.agent_usage_capture),
             device_id: self.device_id.clone(),
         }
     }
@@ -464,6 +471,7 @@ pub struct SettingsPatch {
     pub away_threshold_minutes: Option<u32>,
     pub agent_override_enabled: Option<bool>,
     pub browser_auto_install: Option<bool>,
+    pub agent_usage_capture: Option<bool>,
 }
 
 /// What the drain side reports about agent activity. In-memory only: after a
@@ -1434,6 +1442,7 @@ pub struct MonitorConfig {
     pub recovery_path: PathBuf,
     pub shift_windows_path: PathBuf,
     pub shift_commits_path: PathBuf,
+    pub agent_usage_path: PathBuf,
     pub recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
 }
 
@@ -1461,6 +1470,7 @@ pub struct Monitor {
     recovery_path: PathBuf,
     shift_windows_path: PathBuf,
     shift_commits_path: PathBuf,
+    agent_usage_path: PathBuf,
     recovery: Arc<tokio::sync::Mutex<RecoveryState>>,
     tasks: tokio::sync::Mutex<Option<MonitorTasks>>,
     upload_now: Arc<Notify>,
@@ -1494,6 +1504,7 @@ impl Monitor {
             recovery_path: config.recovery_path,
             shift_windows_path: config.shift_windows_path,
             shift_commits_path: config.shift_commits_path,
+            agent_usage_path: config.agent_usage_path,
             recovery: config.recovery,
             tasks: tokio::sync::Mutex::new(None),
             upload_now: Arc::new(Notify::new()),
@@ -1544,6 +1555,7 @@ impl Monitor {
                 sessions_path: self.session_spool_path(),
                 shift_windows_path: self.shift_windows_path.clone(),
                 shift_commits_path: self.shift_commits_path.clone(),
+                agent_usage_path: self.agent_usage_path.clone(),
             },
             Arc::clone(&self.upload_now),
         ));
@@ -1793,6 +1805,7 @@ impl Monitor {
             sessions_path: self.session_spool_path(),
             shift_windows_path: self.shift_windows_path.clone(),
             shift_commits_path: self.shift_commits_path.clone(),
+            agent_usage_path: self.agent_usage_path.clone(),
         };
         let _ = tokio::time::timeout(
             Duration::from_secs(EXIT_UPLOAD_FLUSH_SECONDS),
@@ -3366,6 +3379,7 @@ mod tests {
         assert_eq!(defaults.away_threshold_minutes, 10);
         assert!(defaults.agent_override_enabled);
         assert!(defaults.browser_auto_install);
+        assert!(defaults.agent_usage_capture);
 
         let parsed: MonitorSettings =
             serde_json::from_str(r#"{"enabled": false}"#).expect("partial settings parse");
@@ -3373,6 +3387,10 @@ mod tests {
         assert_eq!(parsed.away_threshold_minutes, 10);
         assert!(
             parsed.browser_auto_install,
+            "a settings file written before the field existed keeps the default"
+        );
+        assert!(
+            parsed.agent_usage_capture,
             "a settings file written before the field existed keeps the default"
         );
     }
@@ -3509,6 +3527,7 @@ mod tests {
             recovery_path: dir.join("recovery.json"),
             shift_windows_path: dir.join("shift-windows.json"),
             shift_commits_path: dir.join("shift-commits.json"),
+            agent_usage_path: dir.join("agent-usage.json"),
             recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
         });
 
@@ -3559,6 +3578,7 @@ mod tests {
             recovery_path: dir.join("recovery.json"),
             shift_windows_path: dir.join("shift-windows.json"),
             shift_commits_path: dir.join("shift-commits.json"),
+            agent_usage_path: dir.join("agent-usage.json"),
             recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
         });
 
@@ -3595,6 +3615,7 @@ mod tests {
             recovery_path: dir.join("recovery.json"),
             shift_windows_path: dir.join("shift-windows.json"),
             shift_commits_path: dir.join("shift-commits.json"),
+            agent_usage_path: dir.join("agent-usage.json"),
             recovery: Arc::new(tokio::sync::Mutex::new(RecoveryState::default())),
         });
 

@@ -22,6 +22,7 @@ import type {
   ActivitySegmentRepository,
   AgentRepository,
   AgentSessionRepository,
+  AgentUsageRepository,
   PathMappingRepository,
   ProjectRepository,
   ReportRepository,
@@ -32,6 +33,7 @@ import type {
 import { createActivityRoutes } from "./routes/activity.js";
 import { createAgentRoutes } from "./routes/agents.js";
 import { createAgentSessionRoutes } from "./routes/agent-sessions.js";
+import { createAgentUsageRoutes } from "./routes/agent-usage.js";
 import { createMeStatsRoutes } from "./routes/me-stats.js";
 import { createPathMappingRoutes } from "./routes/path-mappings.js";
 import { createPreferencesRoutes } from "./routes/preferences.js";
@@ -41,6 +43,7 @@ import { createSessionRoutes } from "./routes/sessions.js";
 import { createShiftCommitRoutes } from "./routes/shift-commits.js";
 import { createActivityService } from "./services/activity.js";
 import { createAgentSessionReaper, createAgentSessionService } from "./services/agent-sessions.js";
+import { createAgentUsageService } from "./services/agent-usage.js";
 import { createAgentService } from "./services/agents.js";
 import { createPathMappingService } from "./services/path-mappings.js";
 import { createReportService } from "./services/reports.js";
@@ -69,6 +72,7 @@ export interface CreateAppDependencies {
   agentSessionRepository?: AgentSessionRepository;
   agentRepository?: AgentRepository;
   shiftCommitRepository?: ShiftCommitRepository;
+  agentUsageRepository?: AgentUsageRepository;
   pathMappingRepository?: PathMappingRepository;
   viewPreferencesRepository?: ViewPreferencesRepository;
 }
@@ -360,6 +364,20 @@ export function createApp(dependencies: CreateAppDependencies): Hono<ApiEnvironm
     app.use("/shift-commits", authenticate);
     app.use("/shift-commits/*", authenticate);
     app.route("/shift-commits", createShiftCommitRoutes(shiftCommitService));
+  }
+  if (dependencies.agentUsageRepository !== undefined) {
+    if (dependencies.agentSessionRepository === undefined) {
+      throw new Error("An agent session repository is required for agent-usage routes.");
+    }
+    const agentUsageService = createAgentUsageService({
+      agentUsage: dependencies.agentUsageRepository,
+      agentSessions: dependencies.agentSessionRepository,
+      ...(dependencies.agentRepository === undefined ? {} : { agents: dependencies.agentRepository }),
+      clock,
+    });
+    app.use("/agent-usage", authenticate);
+    app.use("/agent-usage/*", authenticate);
+    app.route("/agent-usage", createAgentUsageRoutes(agentUsageService));
   }
   if (dependencies.pathMappingRepository !== undefined) {
     if (dependencies.projectRepository === undefined) {

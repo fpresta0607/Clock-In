@@ -178,8 +178,17 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
           // An end for an already-ended session is a no-op replay.
         } else {
           // Heartbeats only advance lastEventAt; an unknown or ended session is
-          // accepted as a no-op — a heartbeat must never create or resurrect one.
-          await dependencies.agentSessions.advanceLastEvent(subject, event.source, event.externalSessionId, event.occurredAt, now);
+          // accepted as a no-op - a heartbeat must never create or resurrect
+          // one. A heartbeat naming a model fills a still-null model; an
+          // existing model is never overwritten (first assignment wins).
+          await dependencies.agentSessions.advanceLastEvent(
+            subject,
+            event.source,
+            event.externalSessionId,
+            event.model,
+            event.occurredAt,
+            now,
+          );
         }
         results.push({ externalSessionId: event.externalSessionId, accepted: true });
       }

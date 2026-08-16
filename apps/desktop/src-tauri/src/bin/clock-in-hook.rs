@@ -17,7 +17,9 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use clock_in_desktop_lib::git_evidence;
-use clock_in_desktop_lib::spool::{self, AgentEventKind, ArgvContext, HookInput, HookStdin};
+use clock_in_desktop_lib::spool::{
+    self, AgentEventKind, ArgvContext, HookInput, HookStdin, TokenCounters,
+};
 
 fn main() -> ExitCode {
     match run() {
@@ -83,6 +85,10 @@ fn input_from_args(args: &[String]) -> Result<ArgvInput, String> {
     let mut cwd = None;
     let mut occurred_at = None;
     let mut model = None;
+    let mut input_tokens = None;
+    let mut output_tokens = None;
+    let mut cache_creation_input_tokens = None;
+    let mut cache_read_input_tokens = None;
 
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
@@ -96,19 +102,43 @@ fn input_from_args(args: &[String]) -> Result<ArgvInput, String> {
             // A runtime that cannot name its model passes an empty string
             // rather than branching its own hook wiring; that reads as absent.
             "--model" => model = Some(value.clone()).filter(|value| !value.trim().is_empty()),
+            // Cumulative session totals, never per-turn deltas; the usage
+            // registry keeps the maximum restatement per counter. An empty
+            // value reads as absent, exactly as --model does.
+            "--input-tokens" => input_tokens = parse_token_count(value)?,
+            "--output-tokens" => output_tokens = parse_token_count(value)?,
+            "--cache-creation-input-tokens" => {
+                cache_creation_input_tokens = parse_token_count(value)?
+            }
+            "--cache-read-input-tokens" => cache_read_input_tokens = parse_token_count(value)?,
             _ => {
                 return Err(format!(
-                    "unknown flag {flag}; usage: clock-in-hook --source SOURCE --event EVENT [--session-id ID --cwd DIR [--model MODEL] [--occurred-at ISO8601]]"
+                    "unknown flag {flag}; usage: clock-in-hook --source SOURCE --event EVENT [--session-id ID --cwd DIR [--model MODEL] [--occurred-at ISO8601] [--input-tokens N --output-tokens N --cache-creation-input-tokens N --cache-read-input-tokens N]]"
                 ))
             }
         }
     }
 
+    // `None` when no token flag was passed at all, so an event from a runtime
+    // that never reports tokens carries no counters rather than four zeros.
+    let tokens = (input_tokens.is_some()
+        || output_tokens.is_some()
+        || cache_creation_input_tokens.is_some()
+        || cache_read_input_tokens.is_some())
+    .then_some(TokenCounters {
+        input_tokens,
+        output_tokens,
+        cache_creation_input_tokens,
+        cache_read_input_tokens,
+    });
+
     match (source, event, session_id, cwd, occurred_at) {
         // Identity only: stdin carries a CLI-native payload (Cursor, Codex).
-        (Some(source), Some(event), None, None, None) => {
-            Ok(ArgvInput::Stdin(Some(ArgvContext { source, event })))
-        }
+        (Some(source), Some(event), None, None, None) => Ok(ArgvInput::Stdin(Some(ArgvContext {
+            source,
+            event,
+            tokens,
+        }))),
         (Some(source), Some(event), Some(session_id), Some(cwd), occurred_at) => {
             Ok(ArgvInput::Event(
                 HookInput {
@@ -119,6 +149,7 @@ fn input_from_args(args: &[String]) -> Result<ArgvInput, String> {
                     cwd,
                     occurred_at: occurred_at.unwrap_or_else(spool::now_iso8601),
                     model,
+                    tokens,
                 }
                 .validate()?,
             ))
@@ -128,6 +159,19 @@ fn input_from_args(args: &[String]) -> Result<ArgvInput, String> {
                 .to_string(),
         ),
     }
+}
+
+/// One cumulative token counter from the command line: a non-negative integer,
+/// or an empty string for "not reported", exactly as `--model` spells it.
+fn parse_token_count(value: &str) -> Result<Option<u64>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| format!("unrecognized token count \"{value}\""))
 }
 
 /// Reuses the serde aliases so flags accept the same spellings as stdin JSON.

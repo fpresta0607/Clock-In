@@ -72,6 +72,7 @@ pub struct EvidencePaths {
     pub recovery_path: PathBuf,
     pub shift_windows_path: PathBuf,
     pub shift_commits_path: PathBuf,
+    pub agent_usage_path: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,6 +133,7 @@ fn evidence_paths_at(root: &Path, identity: &EvidenceIdentity) -> EvidencePaths 
         recovery_path: browser_dir.join("recovery.json"),
         shift_windows_path: browser_dir.join("shift-windows.json"),
         shift_commits_path: browser_dir.join("shift-commits.json"),
+        agent_usage_path: browser_dir.join("agent-usage.json"),
         browser_dir,
     }
 }
@@ -548,6 +550,22 @@ pub fn default_shift_commits_path() -> PathBuf {
     default_browser_dir().join("shift-commits.json")
 }
 
+pub fn active_agent_usage_path() -> Option<PathBuf> {
+    active_identity().map(|identity| evidence_paths(&identity).agent_usage_path)
+}
+
+/// The durable agent-usage registry: per-session transcript cursors and the
+/// accumulated token counters, with what has synced to the server. Same
+/// identity-namespaced resolution as `agent_spool_path`, so the counters a
+/// shift earned land in the same account's evidence as the shift itself.
+pub fn agent_usage_path() -> PathBuf {
+    active_agent_usage_path().unwrap_or_else(default_agent_usage_path)
+}
+
+pub fn default_agent_usage_path() -> PathBuf {
+    default_browser_dir().join("agent-usage.json")
+}
+
 /// Which agent runtime produced an event.
 ///
 /// Deliberately not an enum. The roster in `agent_runtimes` decides what
@@ -594,6 +612,20 @@ impl AgentSource {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Serde default helper: a session registry entry always sets its source
+    /// before it exists, so the empty placeholder never serializes.
+    pub(crate) fn is_empty_for_default(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Default for AgentSource {
+    /// Only a serde placeholder for an absent field: `parse` still rejects an
+    /// empty id on input, so this value is never constructed by hand.
+    fn default() -> Self {
+        Self(String::new())
+    }
 }
 
 impl TryFrom<String> for AgentSource {
@@ -630,6 +662,13 @@ pub enum AgentEventKind {
 /// `deepseek-v4-pro` is the `pi` runtime, and a model name identifies no
 /// runtime at all. It is absent whenever the hook did not say, because a
 /// guessed model is worse than none.
+///
+/// `transcript_path` and `tokens` are capture-only: the transcript reader
+/// tails the path for usage counters and the counters restate a session's
+/// cumulative totals, but neither is the server's to see — the upload
+/// projects them away (`api::AgentEventUpload`), because the strict
+/// `/agent-sessions` schema would reject the extra keys, and a transcript
+/// path is not ours to send.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpoolEvent {
@@ -648,6 +687,28 @@ pub struct SpoolEvent {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<TokenCounters>,
+}
+
+/// Cumulative session token totals a hook reported (the `--input-tokens`
+/// flag family): the session's totals so far, never per-turn deltas, so the
+/// usage registry keeps the maximum restatement per counter. Each counter is
+/// absent when the hook did not report it; an empty flag reads as absent,
+/// exactly as `--model` does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenCounters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u64>,
 }
 
 /// The hook payload as agent CLIs send it (Claude Code pipe convention).
@@ -663,6 +724,8 @@ pub struct HookInput {
     pub occurred_at: String,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub tokens: Option<TokenCounters>,
 }
 
 impl HookInput {
@@ -700,6 +763,8 @@ impl HookInput {
             start_head: None,
             model: non_empty(self.model.as_deref()),
             rule_id: None,
+            transcript_path: None,
+            tokens: self.tokens,
         }
     }
 }
@@ -714,8 +779,10 @@ fn non_empty(value: Option<&str>) -> Option<String> {
 }
 
 /// Claude Code's native hook payload: its own snake_case field names, no
-/// `version`, no timestamp. Extra fields (`transcript_path`, `source`,
-/// `reason`, …) are tolerated; only the fields Clock-In needs are read.
+/// `version`, no timestamp. Extra fields (`source`, `reason`, …) are
+/// tolerated; only the fields Clock-In needs are read. `transcript_path`
+/// points at the session's own log, which the usage reader tails for token
+/// counters; it never leaves the machine.
 #[derive(Debug, Deserialize)]
 struct ClaudeHookInput {
     hook_event_name: String,
@@ -725,10 +792,15 @@ struct ClaudeHookInput {
     cwd: String,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    transcript_path: Option<String>,
 }
 
 /// The outcome of reading hook stdin: either one event to spool, or a payload
 /// that was understood but carries an event Clock-In does not track.
+// Built once per hook invocation and consumed immediately, so boxing the large
+// variant would buy indirection and nothing else.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum HookStdin {
     Event(SpoolEvent),
@@ -748,6 +820,10 @@ pub enum HookStdin {
 pub struct ArgvContext {
     pub source: AgentSource,
     pub event: AgentEventKind,
+    /// Cumulative token totals passed as flags beside `--source`/`--event`;
+    /// the CLI's own payload never carries them, so the flags are the only
+    /// channel. `None` when no token flags were passed.
+    pub tokens: Option<TokenCounters>,
 }
 
 /// Parses hook stdin, accepting the Clock-In contract first and falling back
@@ -830,6 +906,8 @@ fn translate_claude(
         start_head: None,
         model: non_empty(input.model.as_deref()),
         rule_id: None,
+        transcript_path: non_empty(input.transcript_path.as_deref()),
+        tokens: context.and_then(|context| context.tokens),
     }))
 }
 
@@ -894,6 +972,8 @@ fn translate_native(value: &serde_json::Value, context: &ArgvContext) -> HookStd
         start_head: None,
         model: non_empty(model),
         rule_id: None,
+        transcript_path: None,
+        tokens: context.tokens,
     })
 }
 
@@ -1881,6 +1961,8 @@ mod tests {
             start_head: None,
             model: None,
             rule_id: None,
+            transcript_path: None,
+            tokens: None,
         }
     }
 
@@ -1939,6 +2021,54 @@ mod tests {
     }
 
     #[test]
+    fn claude_transcript_path_lands_on_the_event_for_the_usage_reader() {
+        let started = claude_event(
+            r#"{"session_id":"s1","transcript_path":"/tmp/t.jsonl","cwd":"C:/dev/Clock-In","hook_event_name":"SessionStart","source":"startup"}"#,
+        );
+        assert_eq!(started.transcript_path.as_deref(), Some("/tmp/t.jsonl"));
+
+        // The path is local evidence: it survives the spool round-trip so the
+        // reader finds it again after a restart.
+        let line = serde_json::to_string(&started).expect("event serializes");
+        let value: serde_json::Value = serde_json::from_str(&line).expect("line parses");
+        assert_eq!(value["transcriptPath"], "/tmp/t.jsonl");
+        assert_eq!(
+            serde_json::from_str::<SpoolEvent>(&line).expect("line round-trips"),
+            started
+        );
+    }
+
+    #[test]
+    fn cumulative_token_counters_round_trip_on_the_spool_line() {
+        let mut counted = event("s1");
+        counted.tokens = Some(TokenCounters {
+            input_tokens: Some(1200),
+            output_tokens: Some(300),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(45_000),
+        });
+
+        let line = serde_json::to_string(&counted).expect("event serializes");
+        let value: serde_json::Value = serde_json::from_str(&line).expect("line parses");
+        assert_eq!(value["tokens"]["inputTokens"], 1200);
+        assert_eq!(value["tokens"]["cacheReadInputTokens"], 45_000);
+        assert!(
+            value["tokens"].get("cacheCreationInputTokens").is_none(),
+            "an unreported counter stays absent"
+        );
+        assert_eq!(
+            serde_json::from_str::<SpoolEvent>(&line).expect("line round-trips"),
+            counted
+        );
+
+        // An event without capture-only fields gains no keys at all.
+        let plain = serde_json::to_string(&event("s1")).expect("event serializes");
+        let plain_value: serde_json::Value = serde_json::from_str(&plain).expect("line parses");
+        assert!(plain_value.get("tokens").is_none());
+        assert!(plain_value.get("transcriptPath").is_none());
+    }
+
+    #[test]
     fn other_claude_hook_events_are_accepted_and_ignored() {
         let outcome = parse_stdin(
             r#"{"session_id":"s1","cwd":"/x","hook_event_name":"Notification","message":"hi"}"#,
@@ -1989,6 +2119,7 @@ mod tests {
         ArgvContext {
             source: source("cursor"),
             event: AgentEventKind::Started,
+            tokens: None,
         }
     }
 
@@ -2147,6 +2278,7 @@ mod tests {
         let context = ArgvContext {
             source: source("codex"),
             event: AgentEventKind::Started,
+            tokens: None,
         };
         let HookStdin::Event(event) = parse_stdin_with_context(payload, Some(context))
             .expect("a Claude-shaped payload parses")
@@ -2177,6 +2309,7 @@ mod tests {
             let context = ArgvContext {
                 source: source("pi"),
                 event: AgentEventKind::Started,
+                tokens: None,
             };
             let HookStdin::Event(event) = parse_stdin_with_context(json, Some(context))
                 .expect("native payloads are never errors")
@@ -2186,6 +2319,40 @@ mod tests {
             assert_eq!(event.source.as_str(), "pi");
             assert_eq!(event.model.as_deref(), Some("deepseek-v4-pro"));
         }
+    }
+
+    #[test]
+    fn argv_token_flags_ride_the_event_whatever_shape_stdin_takes() {
+        let tokens = TokenCounters {
+            input_tokens: Some(900),
+            output_tokens: Some(120),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        let context = || ArgvContext {
+            source: source("pi"),
+            event: AgentEventKind::Heartbeat,
+            tokens: Some(tokens),
+        };
+
+        // A CLI-native payload: the flags are the only token channel.
+        let HookStdin::Event(native) =
+            parse_stdin_with_context(r#"{"session_id":"s1","cwd":"/repo"}"#, Some(context()))
+                .expect("native payloads are never errors")
+        else {
+            panic!("the payload carries a session id and cwd");
+        };
+        assert_eq!(native.tokens, Some(tokens));
+
+        // A Claude-shaped payload (Codex registration): same flags, same ride.
+        let HookStdin::Event(claude) = parse_stdin_with_context(
+            r#"{"hook_event_name":"PostToolUse","session_id":"s1","cwd":"/repo"}"#,
+            Some(context()),
+        )
+        .expect("a Claude-shaped payload parses") else {
+            panic!("PostToolUse translates to a heartbeat");
+        };
+        assert_eq!(claude.tokens, Some(tokens));
     }
 
     #[test]
@@ -2244,6 +2411,8 @@ mod tests {
             start_head: None,
             model: None,
             rule_id: Some("r1".to_string()),
+            transcript_path: None,
+            tokens: None,
         };
         let encoded = serde_json::to_string(&line).expect("event serializes");
         let value: serde_json::Value = serde_json::from_str(&encoded).expect("line parses");
