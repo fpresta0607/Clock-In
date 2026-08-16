@@ -259,11 +259,16 @@ a.download-secondary:hover { color: #ffffff; }
 .agent-sessions table { margin-top: 2px; }
 .agent-sessions .numeric { text-align: right; font-variant-numeric: tabular-nums; }
 
-/* Hourly line graphs, lightweight SVG, two lines + legend. */
-.graph { margin-top: 14px; }
+/* SVG charts: the hourly line graph and the weekly trend strip. Colors come
+   from the brand.css chart tokens; only layout lives here. */
+.graph { position: relative; margin-top: 14px; }
 .graph svg { display: block; width: 100%; height: auto; }
+.graph text { font-variant-numeric: tabular-nums; }
+.graph-mode { width: fit-content; margin-top: 10px; }
+.graph-note { margin: 6px 0 0; color: var(--text-secondary); font-size: .74rem; }
+.graph-tooltip { position: absolute; top: 0; z-index: 1; transform: translateX(-50%); border: 1px solid var(--glass-border); border-radius: 6px; padding: 8px 10px; background: var(--chart-tooltip-surface); font-size: .74rem; white-space: nowrap; pointer-events: none; }
+.graph-tooltip-title { margin: 0 0 4px; color: var(--chart-axis); font-weight: 650; }
+.graph-tooltip-row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
 .legend { display: flex; gap: 16px; flex-wrap: wrap; margin: 4px 0 0; padding: 0; list-style: none; color: var(--text-secondary); font-size: .74rem; }
 .legend li { display: flex; align-items: center; gap: 6px; }
 .legend-line { width: 14px; height: 2px; border-radius: 1px; }
-.legend-agents { background: var(--accent-green); }
-.legend-humans { background: #8b98a8; }

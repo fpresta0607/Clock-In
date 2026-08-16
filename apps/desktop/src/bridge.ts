@@ -205,6 +205,17 @@ export type MeStats = {
   hourly: readonly MeStatsHourlyBucket[];
   projects: readonly MeStatsProject[];
   apps: readonly MeStatsApp[];
+  /// The caller's own agent activity in range; empty on an API that predates it.
+  agents: readonly MeStatsAgentActivity[];
+};
+
+/// One agent's activity in `/me/stats`, decoded only as far as the charts
+/// need: which runtime ran, and whether it reported tokens. A null
+/// tokensReported means the API predates the field and cannot say.
+export type MeStatsAgentActivity = {
+  source: string;
+  shiftCount: number;
+  tokensReported: boolean | null;
 };
 
 export type MeStatsConcurrency = {
@@ -310,6 +321,21 @@ export type AgentsReport = {
   rows: readonly AgentsReportRow[];
 };
 
+/// One week of an agent's paystub trend: hours, shifts, and how the week's
+/// commits held up (null while nothing has been decided).
+export type AgentPaystubTrendBucket = {
+  periodStartAt: string;
+  agentSeconds: number;
+  shiftCount: number;
+  heldRate: number | null;
+};
+
+/// The slice of the paystub the desktop plots: the six weekly trend buckets.
+/// The shifts, models, and totals it also carries are the web's business.
+export type AgentPaystubTrend = {
+  trend: readonly AgentPaystubTrendBucket[];
+};
+
 export type ProjectCreateInput = {
   name: string;
 };
@@ -347,6 +373,9 @@ export interface TimerBridge {
   /// The pay-run report: every roster agent's hours, shifts, and held share
   /// for a range. Both bounds absent asks for all time.
   agentsReport(fromAt?: string, toExclusiveAt?: string, scope?: string): Promise<AgentsReport>;
+  /// One agent's paystub trend: six weekly buckets ending at the range's end
+  /// (or now, unbounded), for the overlay's agents chart.
+  agentPaystubTrend(agentId: string, fromAt?: string, toExclusiveAt?: string): Promise<AgentPaystubTrend>;
   projectCreate(input: ProjectCreateInput): Promise<TimerProject>;
   projectUpdate(id: string, input: { name?: string; isArchived?: boolean }): Promise<TimerProject>;
   projectUsage(id: string): Promise<ProjectUsage>;
@@ -767,8 +796,10 @@ export const decodeMeStats = (value: unknown): MeStats => {
   const apps = candidate.apps;
   const byAgent = candidate.byAgent;
   const hourly = candidate.hourly;
+  const agents = candidate.agents;
   if (!Array.isArray(projects) || !Array.isArray(apps) || !Array.isArray(byAgent)) invalidResponse();
   if (hourly !== undefined && hourly !== null && !Array.isArray(hourly)) invalidResponse();
+  if (agents !== undefined && agents !== null && !Array.isArray(agents)) invalidResponse();
   const totalDurationSeconds = nonnegativeInteger(candidate.totalDurationSeconds);
   const attributedSeconds = nonnegativeInteger(candidate.attributedSeconds);
   if (attributedSeconds > totalDurationSeconds) invalidResponse();
@@ -784,6 +815,22 @@ export const decodeMeStats = (value: unknown): MeStats => {
     hourly: (Array.isArray(hourly) ? hourly : []).map(decodeHourlyBucket),
     projects: (projects as unknown[]).map(decodeMeStatsProject),
     apps: (apps as unknown[]).map(decodeMeStatsApp),
+    // Absent on an older API decodes as none known, never an error.
+    agents: (Array.isArray(agents) ? agents : []).map(decodeMeStatsAgentActivity),
+  };
+};
+
+/// Only the fields the charts read; the rest of the row is the web's business.
+const decodeMeStatsAgentActivity = (value: unknown): MeStatsAgentActivity => {
+  const candidate = record(value);
+  const agent = record(candidate.agent);
+  return {
+    source: string(agent.source),
+    shiftCount: nonnegativeInteger(candidate.shiftCount),
+    // Absent on an older API means it cannot say, which decodes to null.
+    tokensReported: candidate.tokensReported === undefined || candidate.tokensReported === null
+      ? null
+      : boolean(candidate.tokensReported),
   };
 };
 
@@ -845,6 +892,26 @@ export const decodeAgentsReport = (value: unknown): AgentsReport => {
   };
 };
 
+const decodeAgentPaystubTrendBucket = (value: unknown): AgentPaystubTrendBucket => {
+  const candidate = record(value);
+  return {
+    periodStartAt: string(candidate.periodStartAt),
+    agentSeconds: nonnegativeInteger(candidate.agentSeconds),
+    shiftCount: nonnegativeInteger(candidate.shiftCount),
+    heldRate: unitRateOrNull(candidate.heldRate),
+  };
+};
+
+/// The paystub arrives whole; the desktop keeps only the trend it plots. The
+/// trend itself is required - an API that cannot send it is an invalid
+/// response, not an empty chart.
+export const decodeAgentPaystubTrend = (value: unknown): AgentPaystubTrend => {
+  const candidate = record(value);
+  const trend = candidate.trend;
+  if (!Array.isArray(trend)) invalidResponse();
+  return { trend: (trend as unknown[]).map(decodeAgentPaystubTrendBucket) };
+};
+
 export const decodeViewPreferences = (value: unknown): ViewPreferences => {
   const candidate = record(value);
   return { scope: string(candidate.scope), range: string(candidate.range) };
@@ -894,6 +961,7 @@ export const defaultBridge: TimerBridge = {
   settingsUpdate: (input) => invokeDecoded("settings_update", decodeMonitorSettings, { input }),
   meStats: (fromAt, toExclusiveAt, userId, scope) => invokeDecoded("me_stats", decodeMeStats, { fromAt, toExclusiveAt, userId, scope }),
   agentsReport: (fromAt, toExclusiveAt, scope) => invokeDecoded("agents_report", decodeAgentsReport, { fromAt, toExclusiveAt, scope }),
+  agentPaystubTrend: (agentId, fromAt, toExclusiveAt) => invokeDecoded("agent_paystub_trend", decodeAgentPaystubTrend, { agentId, fromAt, toExclusiveAt }),
   projectCreate: (input) => invokeDecoded("project_create", decodeProject, { input }),
   projectUpdate: (id, input) => invokeDecoded("project_update", decodeProject, { id, input }),
   projectUsage: (id) => invokeDecoded("project_usage", decodeProjectUsage, { id }),

@@ -46,6 +46,7 @@ const memberStats = {
     { processName: "Code.exe", durationSeconds: 1_800 },
   ],
   sites: [],
+  agents: [],
 };
 
 const rosterAgent = {
@@ -486,17 +487,91 @@ describe("dashboard", () => {
     }));
 
     const stats = within(await screen.findByRole("region", { name: /Alex · Last 30 days/ }));
-    // The chart must emit <path d="M… L…"> elements, not polylines fed a
-    // path string: `points` cannot parse path commands, so a polyline would
-    // hold zero points and the graph would be an empty frame.
+    // Pin the series by their hooks, never by a path count: gradient areas
+    // are paths too. The chart must emit <path d="M… L…"> elements, not
+    // polylines fed a path string: `points` cannot parse path commands, so a
+    // polyline would hold zero points and the graph would be an empty frame.
     const graph = stats.getByTestId("hourly-graph");
-    const lines = graph.querySelectorAll("path");
-    expect(lines).toHaveLength(2);
-    for (const line of lines) {
-      const d = line.getAttribute("d");
+    const agentLine = graph.querySelector('path[data-series="agent"]');
+    const humanLine = graph.querySelector('path[data-series="human"]');
+    expect(agentLine).not.toBeNull();
+    expect(humanLine).not.toBeNull();
+    for (const line of [agentLine, humanLine]) {
+      const d = line!.getAttribute("d")!;
       expect(d).toMatch(/^M\d/);
       expect(d).toContain("L");
     }
+    // Geometry is measured, not just present: the busiest hour must plot
+    // highest (smallest y), and an empty hour must sit on the baseline.
+    const points = [...agentLine!.getAttribute("d")!.matchAll(/[ML]([\d.]+),([\d.]+)/g)]
+      .map((match) => ({ x: Number(match[1]), y: Number(match[2]) }));
+    expect(points).toHaveLength(3);
+    expect(points[1]!.y).toBeLessThan(points[0]!.y);
+    expect(points[2]!.y).toBeGreaterThan(points[1]!.y);
+    // Day resolution draws a visible dot per bucket.
+    expect(graph.querySelectorAll('circle[data-point="agent"]')).toHaveLength(3);
+  });
+
+  it("switches the hourly chart to tokens, breaking the line over hours that reported none", async () => {
+    await signIn(clientFor({
+      meStats: vi.fn().mockResolvedValue({
+        ...memberStats,
+        agents: [{
+          agent: { ...rosterAgent, owner: undefined },
+          agentSeconds: 3_600,
+          shiftCount: 2,
+          commitsRecorded: 0,
+          commitsPending: 0,
+          commitsMerged: 0,
+          commitsReverted: 0,
+          commitsOrphaned: 0,
+          heldRate: null,
+          models: [],
+          tokens: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+          tokensReported: false,
+        }],
+        hourly: [
+          { hourStart: "2026-08-15T09:00:00.000Z", activeSeconds: 600, agentSeconds: 300, inputTokens: 4_000, outputTokens: 200, cacheCreationInputTokens: 0, cacheReadInputTokens: 8_000 },
+          { hourStart: "2026-08-15T10:00:00.000Z", activeSeconds: 1_800, agentSeconds: 900, inputTokens: null, outputTokens: null, cacheCreationInputTokens: null, cacheReadInputTokens: null },
+          { hourStart: "2026-08-15T11:00:00.000Z", activeSeconds: 300, agentSeconds: 100, inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
+        ],
+      }),
+    }));
+
+    const stats = within(await screen.findByRole("region", { name: /Alex · Last 30 days/ }));
+    const graph = stats.getByTestId("hourly-graph");
+    // The agent ran shifts but reported no tokens, and the plot says so.
+    expect(graph).toHaveTextContent("No token data from Claude Code.");
+    const measure = within(graph).getByRole("group", { name: "Chart measure" });
+    await userEvent.click(within(measure).getByRole("button", { name: "Tokens" }));
+
+    const tokensIn = graph.querySelector('path[data-series="tokens-in"]');
+    const tokensOut = graph.querySelector('path[data-series="tokens-out"]');
+    expect(tokensIn).not.toBeNull();
+    expect(tokensOut).not.toBeNull();
+    // The null hour lifts the pen: two subpaths, never a plunge to the baseline.
+    const d = tokensIn!.getAttribute("d")!;
+    expect(d.match(/M/g)).toHaveLength(2);
+    const points = [...d.matchAll(/[ML]([\d.]+),([\d.]+)/g)].map((match) => Number(match[2]));
+    expect(points).toHaveLength(2);
+    expect(points[1]!).toBeLessThan(points[0]!); // 72.4k plots above 12k
+  });
+
+  it("hides the tokens measure when nothing in the range reported tokens", async () => {
+    await signIn(clientFor({
+      meStats: vi.fn().mockResolvedValue({
+        ...memberStats,
+        hourly: [
+          { hourStart: "2026-08-15T09:00:00.000Z", activeSeconds: 600, agentSeconds: 300, inputTokens: null, outputTokens: null, cacheCreationInputTokens: null, cacheReadInputTokens: null },
+          { hourStart: "2026-08-15T10:00:00.000Z", activeSeconds: 1_800, agentSeconds: 900, inputTokens: null, outputTokens: null, cacheCreationInputTokens: null, cacheReadInputTokens: null },
+        ],
+      }),
+    }));
+
+    const stats = within(await screen.findByRole("region", { name: /Alex · Last 30 days/ }));
+    const graph = stats.getByTestId("hourly-graph");
+    expect(within(graph).queryByRole("group", { name: "Chart measure" })).not.toBeInTheDocument();
+    expect(graph).not.toHaveTextContent("No token data from");
   });
 
   it("labels 3+ concurrency and away time in plain words", async () => {
@@ -779,7 +854,15 @@ describe("the roster tab", () => {
     expect(detail).toHaveTextContent("1h 30m");
     expect(detail).toHaveTextContent("Shifts");
     expect(within(detail).getByTestId("paystub-shifts")).toHaveTextContent("claude-fable-5");
-    expect(within(detail).getByTestId("paystub-trend")).toHaveTextContent("2 shifts");
+    // The trend is a bar strip now: one measured bar per weekly bucket.
+    const trend = within(detail).getByTestId("paystub-trend");
+    const bars = trend.querySelectorAll('rect[data-series="week"]');
+    expect(bars).toHaveLength(1);
+    expect(Number(bars[0]!.getAttribute("height"))).toBeGreaterThan(0);
+    // The keyboard read-out still says what the old text list said.
+    trend.querySelector("svg")!.focus();
+    await person.keyboard("{ArrowLeft}");
+    expect(within(trend).getByRole("status")).toHaveTextContent("2 shifts");
     // Nothing decided yet reads as pending, not 0%.
     expect(detail).toHaveTextContent("pending");
   });
