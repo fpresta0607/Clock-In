@@ -40,11 +40,12 @@ decides the hours:
   native-messaging host the desktop registers. The URL, page title, and browsing history never
   leave the browser.
 
-Reports measure three things, deliberately distinct: **active time** — the union of a
+Reports measure four things, deliberately distinct: **active time** — the union of a
 person's working intervals, overlaps collapsed, which can never exceed wall clock and is what
 the leaderboard ranks by; **agent time** — the summed runtime of every agent, which parallel
-agents can legitimately push past active time; and **leverage** — agent ÷ active, shown as
-`2.4x`. Concurrency then splits active time into how many agents ran at once. The older
+agents can legitimately push past active time; **leverage** — agent ÷ active, shown as
+`2.4x`; and **token usage** — the tokens an AI coding agent consumed and produced, read from
+its own session logs and reported only where the tool logs them. Concurrency then splits active time into how many agents ran at once. The older
 **attributed** / **unattributed** split remains as a per-session label: hours something named
 a project for versus hours that fell to the default project because nothing did. Neither is
 hidden or penalized. That's the posture: guessing isn't prevented, it's labelled.
@@ -133,7 +134,7 @@ second of work is dropped or counted twice.
 
 ### How time is counted
 
-The leaderboard reports three measurements, deliberately distinct:
+The leaderboard reports three time measurements, deliberately distinct:
 
 - **Active time** is the union of a person's working intervals — active OS segments and
   completed sessions — with overlaps collapsed. It can never exceed wall clock, which is what
@@ -159,11 +160,15 @@ active time and the agent split sums to agent time; one shared module,
 `packages/shared/src/intervals.ts`, computes all of it so the invariants
 (`active = t0+t1+t2+t3+`, `agent = Σ n·tn + away`) hold everywhere.
 
-Both surfaces also chart active time and agent time per hour — agents in green, the person in
-gray — as lightweight SVG with no chart library. Hours are bucketed to the viewer's local
-midnight-to-midnight calendar, never UTC. The web dashboard reuses its existing
-today/7d/30d/90d range filter for the graph; **All time** is unbounded and has no graph — its
-full history lives in the CSV export. The desktop app charts the course of the day.
+Both surfaces also chart each hour as lightweight SVG with no chart library, with a
+**Time | Tokens** switch shown only when the range holds token data: active and agent time on
+the time side — agents in green, the person in gray — and tokens in (blue) and out (purple) on
+the token side. An hour with no token data breaks the token line rather than drawing a zero
+that never happened. Hours are bucketed to the viewer's local midnight-to-midnight calendar,
+never UTC. The web dashboard reuses its existing today/7d/30d/90d range filter for the graph;
+**All time** is unbounded and has no graph — its full history lives in the CSV export. The
+desktop app charts the course of the day on its main screen, and its All-stats overlay charts
+both tabs.
 
 The board lists every member of the workspace, not just the people with recorded time: a
 teammate whose range has no evidence reads as `0s`, never as missing.
@@ -421,10 +426,11 @@ organization are derived from verified claims, never from the request body.
 | `GET` | `/me/stats` | the caller's totals per project, per app, and per agent; an optional `?userId=` opens a teammate's |
 | `GET` `PUT` | `/me/preferences` | the web dashboard's scope+range view state |
 | `GET` | `/agents` | the org's roster of agent identities |
-| `PATCH` | `/agents/:id` | rename, register, retire, or re-own an agent |
+| `PATCH` | `/agents/:id` | rename (which registers an anonymous agent), retire, or re-own an agent |
 | `POST` | `/agents/:id/merge` | merge one agent into another; admin-only |
-| `GET` | `/agents/:id/paystub` | one agent's shifts and captured commits |
+| `GET` | `/agents/:id/paystub` | one agent's shifts, captured commits, token usage, and model mix |
 | `POST` | `/shift-commits` | batch upload of commits captured during a shift |
+| `POST` | `/agent-usage` | batch upload of token counters read from an agent's session logs |
 
 **Invariants the server enforces**, not the client: a session must end after it starts and
 not in the future; it must start inside the 7-day freshness window; its idle seconds cannot

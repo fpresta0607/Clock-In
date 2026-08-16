@@ -513,8 +513,8 @@ export const agentSessionEventBatchResponseSchema = z
 
 /**
  * A roster agent's standing. Everything starts `anonymous` when first seen;
- * a member registering it is a naming ceremony, and `retired` is where merged
- * losers and decommissioned workers go - rows are never deleted.
+ * a member naming one registers it in the same write, and `retired` is where
+ * merged losers and decommissioned workers go - rows are never deleted.
  */
 export const agentStatusValues = ["anonymous", "registered", "retired"] as const;
 export const agentStatusSchema = z.enum(agentStatusValues);
