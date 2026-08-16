@@ -540,6 +540,8 @@ select:disabled { opacity: .55; }
 .agent-sessions { margin-top: 14px; }
 .agent-sessions table { margin-top: 2px; }
 .agent-sessions .numeric { text-align: right; font-variant-numeric: tabular-nums; }
+/* A model that was never recorded reads muted, not as a bare gap. */
+.agent-sessions .subtle-cell { color: var(--text-secondary); }
 
 /* SVG charts: the hourly line graph and the weekly trend strip. Colors come
    from the brand.css chart tokens; only layout lives here. */
