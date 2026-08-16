@@ -158,7 +158,11 @@ pub struct LeaderboardEntry {
     pub user: LeaderboardMember,
     pub duration_seconds: u64,
     pub session_count: u32,
+    /// The active/agent split arrived with effort reporting; an API that
+    /// predates it still decodes, the entry just carries no measured split.
+    #[serde(default)]
     pub active_seconds: u64,
+    #[serde(default)]
     pub agent_seconds: u64,
 }
 
@@ -231,23 +235,65 @@ pub struct AgentsReportRow {
     pub tokens_reported: bool,
 }
 
-/// The four token counters a runtime's own session logs report, summed over a scope.
+/// The four token counters a runtime's own session logs report, summed over a
+/// scope. Every counter is optional-with-default: the API deploys before any
+/// installer can, so a counter added after this build must never break decode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentTokenTotals {
+    #[serde(default)]
     pub input_tokens: u64,
+    #[serde(default)]
     pub output_tokens: u64,
+    #[serde(default)]
     pub cache_creation_input_tokens: u64,
+    #[serde(default)]
     pub cache_read_input_tokens: u64,
 }
 
+/// The roster's headcount. The API deploys before any installer can, and the
+/// standing split was renamed after 0.1.7 shipped (`active` replaced
+/// `anonymous` + `registered`), so an installer can meet either spelling.
+/// Decoding accepts both and normalizes to `active`; a required field here is
+/// how an installer generation once lost its Agents tab to a decode error.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "AgentsReportHeadcountWire")]
 pub struct AgentsReportHeadcount {
     pub total: u32,
     /// Everyone still on the clock: anonymous and registered alike.
     pub active: u32,
     pub retired: u32,
+}
+
+/// The headcount as a deployed API may actually send it: `active` today,
+/// `anonymous` + `registered` before the rename. Additive fields are
+/// optional-with-default; unknown future fields serde ignores on its own.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentsReportHeadcountWire {
+    total: u32,
+    #[serde(default)]
+    active: Option<u32>,
+    #[serde(default)]
+    retired: u32,
+    #[serde(default)]
+    anonymous: Option<u32>,
+    #[serde(default)]
+    registered: Option<u32>,
+}
+
+impl From<AgentsReportHeadcountWire> for AgentsReportHeadcount {
+    fn from(wire: AgentsReportHeadcountWire) -> Self {
+        Self {
+            total: wire.total,
+            // The pre-rename API splits the active count in two; the rename
+            // is a sum away.
+            active: wire
+                .active
+                .unwrap_or(wire.anonymous.unwrap_or(0) + wire.registered.unwrap_or(0)),
+            retired: wire.retired,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1563,6 +1609,92 @@ mod tests {
             Some(12_000)
         );
         assert!(reported.tokens_reported);
+    }
+
+    #[test]
+    fn reads_the_agents_report_as_the_previous_release_sent_it() {
+        // The 0.1.7-era API spelled the headcount anonymous/registered and
+        // sent no models or token fields. A required `active` here is what
+        // dead-ended the Agents tab for every older installer.
+        let report: AgentsReport = serde_json::from_str(
+            r#"{
+                "headcount": {"total": 3, "anonymous": 2, "registered": 1, "retired": 0},
+                "rows": [
+                    {
+                        "agent": {
+                            "id": "a1",
+                            "name": "Claude Code @ Field work",
+                            "source": "claude_code",
+                            "status": "anonymous",
+                            "owner": {"id": "u1", "name": "Alex"}
+                        },
+                        "agentSeconds": 3600,
+                        "shiftCount": 1,
+                        "commitsRecorded": 0,
+                        "commitsPending": 0,
+                        "commitsMerged": 0,
+                        "commitsReverted": 0,
+                        "commitsOrphaned": 0,
+                        "heldRate": null
+                    }
+                ]
+            }"#,
+        )
+        .expect("previous-release report parses");
+
+        // The pre-rename split normalizes to the active count it always was.
+        assert_eq!(report.headcount.active, 3);
+        assert_eq!(report.headcount.total, 3);
+        assert_eq!(report.headcount.retired, 0);
+        assert_eq!(report.rows[0].models, Vec::<String>::new());
+        assert_eq!(report.rows[0].tokens, None);
+        assert!(!report.rows[0].tokens_reported);
+        // And re-serializes in the current spelling the webview decodes.
+        let echoed = serde_json::to_value(&report).expect("report serialize");
+        assert_eq!(echoed["headcount"]["active"], 3);
+        assert!(echoed["headcount"].get("anonymous").is_none());
+
+        // The current spelling decodes too, and wins when both are present.
+        let current: AgentsReportHeadcount = serde_json::from_str(
+            r#"{"total": 3, "active": 2, "retired": 1, "anonymous": 9, "registered": 9}"#,
+        )
+        .expect("current headcount parses");
+        assert_eq!(current.active, 2);
+        assert_eq!(current.retired, 1);
+    }
+
+    #[test]
+    fn reads_token_totals_with_a_counter_the_build_predates() {
+        // Counters are optional-with-default inside the totals object: a
+        // counter the API has not grown yet decodes to zero rather than
+        // failing the whole row.
+        let totals: AgentTokenTotals = serde_json::from_str(
+            r#"{"inputTokens": 12000, "outputTokens": 800, "cacheCreationInputTokens": 400}"#,
+        )
+        .expect("partial totals parse");
+        assert_eq!(totals.input_tokens, 12_000);
+        assert_eq!(totals.cache_read_input_tokens, 0);
+    }
+
+    #[test]
+    fn reads_leaderboard_entries_from_before_the_active_agent_split() {
+        let body: LeaderboardResponse = serde_json::from_str(
+            r#"{
+                "entries": [
+                    {
+                        "rank": 1,
+                        "user": {"id": "u1", "name": "Alex"},
+                        "durationSeconds": 7200,
+                        "sessionCount": 3
+                    }
+                ]
+            }"#,
+        )
+        .expect("previous-release leaderboard parses");
+
+        assert_eq!(body.entries[0].duration_seconds, 7_200);
+        assert_eq!(body.entries[0].active_seconds, 0);
+        assert_eq!(body.entries[0].agent_seconds, 0);
     }
 
     #[test]
