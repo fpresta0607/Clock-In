@@ -133,6 +133,15 @@ timer once said RECORDING above a card reading "Turn on recording in settings".
   build). Background polls keep last-good data and surface a banner only after
   several consecutive failures or when there is no data at all - a single failed
   poll must never blip the UI.
+- The API deploys before any installer can, so the desktop's response structs in
+  `api.rs` never get a new required field: additive fields are always
+  `#[serde(default)]`, and a renamed field decodes through a wire struct that
+  accepts both spellings (`AgentsReportHeadcount` still reads the 0.1.7
+  `anonymous`/`registered` headcount - a required `active` there is what
+  dead-ended the Agents tab with "The server response could not be read." for
+  every older installer when the rename deployed). The `bridge.ts` decoders hold
+  the same line on the webview side: an absent field decodes to `null`/`[]`,
+  never a crash.
 - Claude Code's SessionStart/SessionEnd hook payloads carry no model key (verified
   live against Claude Code 2.1.233 on 2026-08-15: the payloads carry `session_id`,
   `transcript_path`, `cwd`, `hook_event_name`, and `source`/`reason` only; `model`
