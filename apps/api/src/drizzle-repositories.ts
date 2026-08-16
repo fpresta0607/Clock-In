@@ -1225,7 +1225,13 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
   }
 
   public async advanceLastEvent(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, model: string | null, occurredAt: Date, now: Date): Promise<boolean> {
-    const rows = await this.db
+    const key = and(
+      eq(agentSessions.organizationId, subject.organizationId),
+      eq(agentSessions.userId, subject.userId),
+      eq(agentSessions.source, source),
+      eq(agentSessions.externalSessionId, externalSessionId),
+    );
+    const running = await this.db
       .update(agentSessions)
       .set({
         lastEventAt: sql`greatest(${agentSessions.lastEventAt}, ${occurredAt.toISOString()}::timestamptz)`,
@@ -1235,15 +1241,23 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
         model: sql`coalesce(${agentSessions.model}, ${model})`,
         updatedAt: now,
       })
-      .where(and(
-        eq(agentSessions.organizationId, subject.organizationId),
-        eq(agentSessions.userId, subject.userId),
-        eq(agentSessions.source, source),
-        eq(agentSessions.externalSessionId, externalSessionId),
-        eq(agentSessions.status, "running"),
-      ))
+      .where(and(key, eq(agentSessions.status, "running")))
       .returning({ id: agentSessions.id });
-    return rows.length > 0;
+    if (running.length > 0) return true;
+    // A model-bearing heartbeat can arrive after the end that closed a short
+    // session (start and end inside one upload interval), so the still-null
+    // model is filled on an ended row too - without touching lastEventAt or
+    // resurrecting it, and never when the heartbeat itself names no model.
+    if (model === null) return false;
+    const ended = await this.db
+      .update(agentSessions)
+      .set({
+        model: sql`coalesce(${agentSessions.model}, ${model})`,
+        updatedAt: now,
+      })
+      .where(and(key, eq(agentSessions.status, "ended")))
+      .returning({ id: agentSessions.id });
+    return ended.length > 0;
   }
 
   public async reapStale(subject: AuthenticatedSubject, cutoff: Date, now: Date): Promise<number> {

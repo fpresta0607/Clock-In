@@ -105,9 +105,15 @@ class MemoryAgentSessions implements AgentSessionRepository {
 
   public async advanceLastEvent(current: AuthenticatedSubject, source: AgentSessionRecord["source"], externalSessionId: string, model: string | null, occurredAt: Date): Promise<boolean> {
     const existing = this.find(current, source, externalSessionId);
-    if (existing === undefined || existing.status !== "running") return false;
-    if (occurredAt > existing.lastEventAt) existing.lastEventAt = occurredAt;
-    // Mirrors coalesce(model, $new): the first assignment wins.
+    if (existing === undefined) return false;
+    if (existing.status === "running") {
+      if (occurredAt > existing.lastEventAt) existing.lastEventAt = occurredAt;
+      // Mirrors coalesce(model, $new): the first assignment wins.
+      existing.model ??= model;
+      return true;
+    }
+    if (model === null) return false;
+    // A model-bearing heartbeat also fills a still-null model on an ended row.
     existing.model ??= model;
     return true;
   }
@@ -312,6 +318,18 @@ describe("agent-session service", () => {
     ]);
 
     expect(agentSessions.records[0]).toMatchObject({ model: "claude-opus-4-8" });
+  });
+
+  it("fills a still-null model from a heartbeat that arrives after the session ended", async () => {
+    const { agentSessions, service } = createService();
+    await service.ingest(subject, [event()]);
+    await service.ingest(subject, [event({ event: "ended", occurredAt: new Date("2026-08-06T13:50:00.000Z") })]);
+
+    await service.ingest(subject, [
+      event({ event: "heartbeat", model: "claude-opus-4-8", occurredAt: new Date("2026-08-06T13:51:00.000Z") }),
+    ]);
+
+    expect(agentSessions.records[0]).toMatchObject({ status: "ended", model: "claude-opus-4-8", endedAt: new Date("2026-08-06T13:50:00.000Z") });
   });
 
   it("never overwrites a model the shift already carries", async () => {

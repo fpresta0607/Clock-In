@@ -1,5 +1,6 @@
 import { desc, sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   check,
   foreignKey,
@@ -494,10 +495,10 @@ export const agentUsage = pgTable(
     // the bucket unique keeps null a single bucket rather than one per sighting.
     model: text("model"),
     sidechain: boolean("sidechain").notNull(),
-    inputTokens: integer("input_tokens").notNull(),
-    outputTokens: integer("output_tokens").notNull(),
-    cacheCreationInputTokens: integer("cache_creation_input_tokens").notNull(),
-    cacheReadInputTokens: integer("cache_read_input_tokens").notNull(),
+    inputTokens: bigint("input_tokens", { mode: "number" }).notNull(),
+    outputTokens: bigint("output_tokens", { mode: "number" }).notNull(),
+    cacheCreationInputTokens: bigint("cache_creation_input_tokens", { mode: "number" }).notNull(),
+    cacheReadInputTokens: bigint("cache_read_input_tokens", { mode: "number" }).notNull(),
     recordedAt: timestamp("recorded_at", { mode: "date", withTimezone: true }).defaultNow().notNull(),
     ...auditColumns,
   },

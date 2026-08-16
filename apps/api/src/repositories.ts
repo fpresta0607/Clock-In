@@ -385,9 +385,12 @@ export interface AgentSessionRepository {
   /** Tolerated end-before-start: stores the row directly as ended at occurredAt. */
   insertEnded(input: InsertEndedAgentSession): Promise<void>;
   /**
-   * Advances lastEventAt on a running row; false when nothing matched (unknown
-   * or already ended). A heartbeat naming a model fills a still-null model;
-   * an existing model is never overwritten (first assignment wins).
+   * Advances lastEventAt on a running row; false when nothing matched (unknown).
+   * A heartbeat naming a model fills a still-null model; an existing model is
+   * never overwritten (first assignment wins). A model-bearing heartbeat also
+   * fills a still-null model on an already-ended row - the transcript reader's
+   * backfill can land after the end that closed a short session - without
+   * advancing lastEventAt or reopening it.
    */
   advanceLastEvent(subject: AuthenticatedSubject, source: AgentSource, externalSessionId: string, model: string | null, occurredAt: Date, now: Date): Promise<boolean>;
   /** Closes running rows whose lastEventAt is older than cutoff, ending them at lastEventAt. Returns the reaped count. */

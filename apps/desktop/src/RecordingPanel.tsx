@@ -51,6 +51,7 @@ const KEPT = [
   "The name of the app in front of you, like “chrome” or “code”. The name only.",
   "When an AI coding tool starts and finishes, and which folder it worked in.",
   "For AI coding shifts in a git repo: the branch name, and the title, commit id, and repository folder of each commit made during the shift, checked later on this machine, read-only. The repository folder is shown only to you and your workspace's admins.",
+  "For AI coding shifts that keep a session log: the number of tokens used and which model the tool ran, read from that log on this computer. The numbers and the model name only.",
 ];
 
 const NEVER = [
@@ -58,7 +59,7 @@ const NEVER = [
   "Pictures of your screen.",
   "The titles of your windows, files, or documents. Commit titles are the one exception, listed above.",
   "Web addresses, or the pages you visit.",
-  "Anything inside your files, messages, or email.",
+  "Anything inside your files, messages, or email. Token counts and model names from an AI tool's own session log are the one exception, listed above.",
   "Anything you type into a form, chat, or document.",
   "Clock-In never reaches inside or controls your other apps.",
 ];
