@@ -134,13 +134,15 @@ Sequence:
    This works on the currently deployed API, immediately stops new stamps onto them visually, and - because both the old and the new partial uniques exclude `retired` - clears the key-space collision the schema migration would otherwise hit (both old rows are `(org, gianluca, claude_code)` with `repo_root` about to be null, which the new unassigned index would reject as a duplicate).
 3. **Apply the schema migration** (section 6).
 4. **Deploy the new API.** New shifts now mint v2 identities on their own.
+   Steps 2 through 4 run back-to-back in a single ops window: the old API keeps minting v1-keyed agents through `upsertForKey` until it is replaced, and a row re-minted in that gap both re-creates the duplicate the new unassigned partial unique rejects and lands outside a backfill that sweeps only retired rows.
 5. **Run the backfill** as a one-off, deliberately invoked routine (an API-side script under `scripts/`, not a drizzle migration - migrations here are generated from `schema.ts`, never hand-written):
-   - For every roster-eligible `agent_sessions` row whose `agent_id` names a retired v1 agent: operator = `agent_sessions.user_id`; repo = the session's own `shift_commits.repo_root` when one exists, else null.
+   - For every roster-eligible `agent_sessions` row whose `agent_id` names any agent still keyed on the v1 identity `(org, source, project)`, regardless of status - the 2 retired rows plus any row minted before the v2 API deployed, including one re-minted in the step 2-to-4 window: operator = `agent_sessions.user_id`; repo = the session's own `shift_commits.repo_root` when one exists, else null.
+     The dry run prints both counts - sessions on the 2 retired rows and sessions on any other v1-keyed row - before anything writes.
    - Find-or-create the v2 agent through the same `upsertForKey` path (default name composes as in production).
    - Re-stamp the session, then update `agent_usage.agent_id` and `shift_commits.agent_id` for that `agent_session_id`.
      `stampAgent`'s `isNull` guard (`drizzle-repositories.ts:1277-1287`) does not apply here; the backfill uses an explicit re-stamp that overwrites, which is also the graduation machinery from section 2 reused with a force flag.
    - Francesco's 183 unstamped legacy rows are offered the same pass as an explicit, separately confirmed step: roster-eligible ones (source <> 'browser') mint and stamp under their owner's v2 identity.
-     The dry run prints both counts before anything writes.
+     Its dry run prints the eligible and skipped counts before anything writes.
 6. **Verify.** Zero `agent_sessions`, `shift_commits`, and `agent_usage` rows reference the retired agents; the roster shows one row per (operator, runtime, repo); the paystub hours for a re-stamped agent equal the sum of its sessions before and after.
 7. **Leave the 2 old rows retired** as audit trail.
    Deletion is possible once step 6 shows zero references (all three FKs are `restrict`, so the database itself enforces that precondition), but retirement is the default end state.
