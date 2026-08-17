@@ -507,9 +507,9 @@ describe("leaderboard", () => {
       { user: { id: ids.otherUser, name: "Sam" }, projectId: ids.project, attribution: "selected", startedAt: hour(9), stoppedAt: hour(10) },
     ];
     reports.agentIntervals = [
-      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
-      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
-      { user: { id: ids.user, name: "Alex" }, source: "codex", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
+      { user: { id: ids.user, name: "Alex" }, source: "codex", model: null, cwd: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
     ];
     const service = createReportService({ reports, reaper: silentReaper, agents });
 
@@ -735,8 +735,8 @@ describe("me/stats", () => {
     ];
     // Two agents running in parallel count twice inside that hour.
     reports.agentIntervals = [
-      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
-      { user: { id: ids.user, name: "Alex" }, source: "codex", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
+      { user: { id: ids.user, name: "Alex" }, source: "codex", model: null, cwd: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
     ];
     const service = createReportService({ reports, reaper: silentReaper, agents });
 
@@ -765,7 +765,7 @@ describe("me/stats", () => {
       { user: { id: ids.user, name: "Alex" }, startedAt: hour(9), endedAt: hour(11) },
     ];
     reports.agentIntervals = [
-      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, agentId: ids.session, startedAt: hour(9), endedAt: hour(10) },
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: null, projectId: ids.project, agentId: ids.session, startedAt: hour(9), endedAt: hour(10) },
     ];
     const usage = new Usage([
       // Two buckets in the 09:00 hour sum together; the 10:00 hour reported nothing.
@@ -807,7 +807,7 @@ describe("me/stats", () => {
       { user: { id: ids.user, name: "Alex" }, startedAt: hour(9), endedAt: hour(11) },
     ];
     reports.agentIntervals = [
-      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: null, projectId: ids.project, startedAt: hour(9), endedAt: hour(10) },
     ];
     const service = createReportService({ reports, reaper: silentReaper, agents });
 
@@ -844,9 +844,9 @@ describe("me/stats", () => {
   it("carries the caller's own agent rows, scoped exactly like the org-wide pay-run report", async () => {
     const reports = new Reports();
     reports.agentIntervals = [
-      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: "claude-fable-5", projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: "claude-fable-5", cwd: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
       // A teammate's shift under a different roster identity must never surface here.
-      { user: { id: ids.otherUser, name: "Sam" }, source: "codex", model: null, projectId: ids.project, agentId: ids.otherAgent, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+      { user: { id: ids.otherUser, name: "Sam" }, source: "codex", model: null, cwd: null, projectId: ids.project, agentId: ids.otherAgent, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
     ];
     const roster = new Agents([agentRecord({ id: ids.session }), agentRecord({ id: ids.otherAgent, source: "codex" })]);
     const authoredAt = new Date("2026-08-06T14:30:00.000Z");
@@ -869,6 +869,7 @@ describe("me/stats", () => {
       commitsOrphaned: 0,
       heldRate: 1,
       models: ["claude-fable-5"],
+      repos: [],
       ...noTokens,
     }]);
   });
@@ -876,8 +877,8 @@ describe("me/stats", () => {
   it("scopes a shared agent's commit and token tallies to the caller in meStats while the org report shows every member", async () => {
     const reports = new Reports();
     reports.agentIntervals = [
-      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
-      { user: { id: ids.otherUser, name: "Sam" }, source: "claude_code", model: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+      { user: { id: ids.otherUser, name: "Sam" }, source: "claude_code", model: null, cwd: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
     ];
     const roster = new Agents([agentRecord({ id: ids.session })]);
     const authoredAt = new Date("2026-08-06T14:30:00.000Z");
@@ -904,6 +905,7 @@ describe("me/stats", () => {
       commitsOrphaned: 0,
       heldRate: 1,
       models: [],
+      repos: [],
       tokens: { inputTokens: 600, outputTokens: 60, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
       tokensReported: true,
     }]);
@@ -923,6 +925,7 @@ describe("me/stats", () => {
       commitsOrphaned: 0,
       heldRate: 1,
       models: [],
+      repos: [],
       tokens: { inputTokens: 900, outputTokens: 90, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
       tokensReported: true,
     }]);
@@ -931,7 +934,7 @@ describe("me/stats", () => {
   it("marks tokensReported by the existence of rows, never by a nonzero sum", async () => {
     const reports = new Reports();
     reports.agentIntervals = [
-      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
     ];
     const roster = new Agents([agentRecord({ id: ids.session }), agentRecord({ id: ids.otherAgent, source: "codex" })]);
     // A bucket whose counters are all zero is still a report: tokensReported
@@ -953,7 +956,7 @@ describe("agents report", () => {
   it("lists every roster agent with hours, shifts, and held share - zero-activity agents included", async () => {
     const reports = new Reports();
     reports.agentIntervals = [
-      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: "claude-fable-5", projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: "claude-fable-5", cwd: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
     ];
     const roster = new Agents([
       agentRecord({ id: ids.session }),
@@ -982,6 +985,7 @@ describe("agents report", () => {
         // merged / decided (merged + reverted + orphaned); "orphaned" decides too.
         heldRate: 0.5,
         models: ["claude-fable-5"],
+        repos: [],
         ...noTokens,
       },
       {
@@ -996,6 +1000,7 @@ describe("agents report", () => {
         commitsOrphaned: 0,
         heldRate: null,
         models: [],
+        repos: [],
         ...noTokens,
       },
     ]);
@@ -1019,6 +1024,7 @@ describe("agents report", () => {
       commitsOrphaned: 0,
       heldRate: null,
       models: [],
+      repos: [],
       ...noTokens,
     }]);
     expect(reaper.subjects).toEqual([subject]);
@@ -1028,11 +1034,28 @@ describe("agents report", () => {
       .rejects.toMatchObject({ code: "not_found" });
   });
 
+  it("names each agent's codebases from its shifts' working directories, deduped and path-free", async () => {
+    const reports = new Reports();
+    reports.agentIntervals = [
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:\\dev\\clock-in", projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+      // A deeper directory in the same codebase adds no second label.
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/clock-in/", projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T15:00:00.000Z"), endedAt: new Date("2026-08-06T16:00:00.000Z") },
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "/home/alex/src/pocket-piggies", projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T16:00:00.000Z"), endedAt: new Date("2026-08-06T17:00:00.000Z") },
+      // A shift that recorded no directory contributes nothing rather than a blank.
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T17:00:00.000Z"), endedAt: new Date("2026-08-06T18:00:00.000Z") },
+    ];
+    const service = createReportService({ reports, reaper: silentReaper, agents: new Agents([agentRecord({ id: ids.session })]) });
+
+    const result = await service.agentsReport(subject, {});
+
+    expect(result.rows[0]!.repos).toEqual(["clock-in", "pocket-piggies"]);
+  });
+
   it("narrows commit tallies to the same project scope as the hours", async () => {
     const reports = new Reports();
     reports.agentIntervals = [
-      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
-      { user: { id: ids.user, name: "Alex" }, source: "codex", model: null, projectId: ids.otherProject, agentId: ids.otherAgent, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+      { user: { id: ids.user, name: "Alex" }, source: "codex", model: null, cwd: null, projectId: ids.otherProject, agentId: ids.otherAgent, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
     ];
     const roster = new Agents([
       agentRecord({ id: ids.session }),
@@ -1059,6 +1082,7 @@ describe("agents report", () => {
         commitsOrphaned: 0,
         heldRate: 1,
         models: [],
+        repos: [],
         ...noTokens,
       },
       {
@@ -1072,6 +1096,7 @@ describe("agents report", () => {
         commitsOrphaned: 0,
         heldRate: null,
         models: [],
+        repos: [],
         ...noTokens,
       },
     ]);
@@ -1081,7 +1106,7 @@ describe("agents report", () => {
   it("ranks rows by hours or tokens when the filters ask, non-reporters last, ties in roster order", async () => {
     const reports = new Reports();
     reports.agentIntervals = [
-      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
     ];
     // Roster order is deliberate: codex first, so the sorts have something to move.
     const roster = new Agents([

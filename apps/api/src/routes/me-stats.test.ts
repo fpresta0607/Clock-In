@@ -267,6 +267,7 @@ class MemoryReports implements ReportRepository {
         user: { id: agent.userId, name: this.nameOf(agent.userId) },
         source: agent.source,
         model: null,
+        cwd: null,
         projectId: null,
         startedAt: agent.startedAt,
         endedAt: agent.endedAt ?? agent.lastEventAt,

@@ -13,6 +13,19 @@ export function normalizePath(value: string): string {
 }
 
 /**
+ * A working directory's codebase label: its last path segment, separators
+ * unified so a Windows path and a POSIX one read the same. A name, never a
+ * path - which is what lets every member of the workspace see which codebase an
+ * agent worked while the path itself stays behind the `repoRoot` rule. Null
+ * when nothing is left to name.
+ */
+export function repoLabel(path: string): string | null {
+  const segments = path.replace(/\\/g, "/").replace(/\/+$/, "").split("/");
+  const last = segments[segments.length - 1] ?? "";
+  return last === "" ? null : last.slice(0, 200);
+}
+
+/**
  * A prefix matches only on a path-segment boundary: `c:/dev/clock` matches
  * `c:/dev/clock` and `c:/dev/clock/src` but never `c:/dev/clock-in-extra`.
  */

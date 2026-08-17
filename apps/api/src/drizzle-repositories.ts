@@ -829,6 +829,7 @@ export class DrizzleReportRepository implements ReportRepository {
         userName: users.name,
         source: agentSessions.source,
         model: agentSessions.model,
+        cwd: agentSessions.cwd,
         projectId: agentSessions.projectId,
         agentId: agentSessions.agentId,
         startedAt: agentSessions.startedAt,
@@ -856,6 +857,7 @@ export class DrizzleReportRepository implements ReportRepository {
       user: { id: row.userId, name: row.userName },
       source: row.source,
       model: row.model,
+      cwd: row.cwd,
       projectId: row.projectId,
       agentId: row.agentId,
       startedAt: row.startedAt,
@@ -1422,6 +1424,7 @@ export class DrizzleAgentRepository implements AgentRepository {
       .select({
         id: agentSessions.id,
         model: agentSessions.model,
+        cwd: agentSessions.cwd,
         status: agentSessions.status,
         startedAt: agentSessions.startedAt,
         endedAt: agentSessions.endedAt,
@@ -1682,6 +1685,21 @@ export class DrizzleAgentUsageRepository implements AgentUsageRepository {
         .groupBy(agentUsage.bucketStartAt)
         .orderBy(asc(agentUsage.bucketStartAt)));
     return rows;
+  }
+
+  public async sumByBucketForAgent(
+    subject: AuthenticatedSubject,
+    agentId: string,
+    query: ReportQuery,
+  ): Promise<AgentUsageBucketTotalRecord[]> {
+    // The paystub filters carry no project scope, so the agent id is the whole
+    // narrowing and no join through the shift is needed.
+    return this.db
+      .select({ bucketStartAt: agentUsage.bucketStartAt, ...this.usageSums() })
+      .from(agentUsage)
+      .where(and(...this.usageScopeConditions(subject, query), eq(agentUsage.agentId, agentId)))
+      .groupBy(agentUsage.bucketStartAt)
+      .orderBy(asc(agentUsage.bucketStartAt));
   }
 
   public async sumByAgent(subject: AuthenticatedSubject, query: ReportQuery): Promise<AgentUsageTotalsRecord[]> {

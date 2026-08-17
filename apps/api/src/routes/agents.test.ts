@@ -179,6 +179,9 @@ const orgMembers = {
 const membershipReports = {
   findUserForOrganization: async (_subject: { organizationId: string }, userId: string) =>
     orgMembers[userId as keyof typeof orgMembers] ?? null,
+  // The paystub measures the agent's runtime against its owner's presence; no
+  // segments here, so every shift reads as time the owner was away.
+  readPresenceIntervals: async () => [],
 } as unknown as import("../repositories.js").ReportRepository;
 
 const emptyProjects = {

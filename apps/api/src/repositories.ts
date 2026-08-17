@@ -222,6 +222,8 @@ export interface AgentIntervalRecord {
   user: ReportLookupRecord;
   source: string;
   model: string | null;
+  /** The shift's working directory; the codebase labels on report rows come from it. */
+  cwd: string | null;
   projectId: string | null;
   /** Null for legacy sessions recorded before roster minting shipped. */
   agentId: string | null;
@@ -307,6 +309,8 @@ export interface AgentUpdatePatch {
 export interface AgentShiftRecord {
   id: string;
   model: string | null;
+  /** The shift's working directory; the paystub's codebase label falls back to it. */
+  cwd: string | null;
   status: "running" | "ended";
   startedAt: Date;
   endedAt: Date | null;
@@ -515,6 +519,8 @@ export interface AgentUsageRepository {
    * series. A bucket counts by where its start falls.
    */
   sumByBucket(subject: AuthenticatedSubject, query: ReportQuery): Promise<AgentUsageBucketTotalRecord[]>;
+  /** The same per-hour sums narrowed to one agent, for the paystub's own series. */
+  sumByBucketForAgent(subject: AuthenticatedSubject, agentId: string, query: ReportQuery): Promise<AgentUsageBucketTotalRecord[]>;
   /** Counters summed per agent over the query's scope, for the pay-run report and /me/stats rows. */
   sumByAgent(subject: AuthenticatedSubject, query: ReportQuery): Promise<AgentUsageTotalsRecord[]>;
   /** One agent's counters split by the model each bucket named, for the paystub; null-model buckets included. */

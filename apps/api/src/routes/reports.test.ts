@@ -187,6 +187,7 @@ describe("report routes", () => {
       user: { id: ids.user, name: "Alex" },
       source: "claude_code",
       model: null,
+      cwd: "C:\\dev\\clock-in",
       projectId: ids.project,
       agentId: "e1c7e513-b094-4d4c-ae55-21790ae019a4",
       startedAt: new Date("2026-08-06T14:00:00.000Z"),
@@ -208,7 +209,15 @@ describe("report routes", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
       headcount: { total: 1, active: 1, retired: 0 },
-      rows: [{ agent: { id: agentRecord.id, name: "Claude Code @ Timer" }, agentSeconds: 3_600, shiftCount: 1, heldRate: null, models: [] }],
+      rows: [{
+        agent: { id: agentRecord.id, name: "Claude Code @ Timer" },
+        agentSeconds: 3_600,
+        shiftCount: 1,
+        heldRate: null,
+        models: [],
+        // The codebase reaches every member as a name, never as the path.
+        repos: ["clock-in"],
+      }],
     });
   });
 

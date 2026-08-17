@@ -44,6 +44,7 @@ import type {
   ShiftCommitRepository,
   SiteTotalRecord,
 } from "../repositories.js";
+import { repoLabel } from "./attribution.js";
 import type { AgentSessionReaper } from "./agent-sessions.js";
 
 export interface ReportService {
@@ -198,7 +199,7 @@ function clippedIntervals(intervals: readonly Interval[], range: Partial<Interva
 }
 
 /** Peak number of the given intervals overlapping at once, via a sweep line. */
-function maxConcurrentCount(intervals: readonly Interval[]): number {
+export function maxConcurrentCount(intervals: readonly Interval[]): number {
   const starts = intervals.map((interval) => interval.start).sort((a, b) => a - b);
   const ends = intervals.map((interval) => interval.end).sort((a, b) => a - b);
   let startIndex = 0;
@@ -219,7 +220,7 @@ function maxConcurrentCount(intervals: readonly Interval[]): number {
 }
 
 /** Median in-range session length in seconds; 0 with no sessions. */
-function medianDurationSeconds(intervals: readonly Interval[]): number {
+export function medianDurationSeconds(intervals: readonly Interval[]): number {
   const lengths = intervals
     .map((interval) => interval.end - interval.start)
     .filter((ms) => ms > 0)
@@ -240,7 +241,7 @@ function medianDurationSeconds(intervals: readonly Interval[]): number {
  * plain sum over them. An hour nothing reported tokens for keeps nulls, never
  * an invented zero.
  */
-function hourlySeries(
+export function hourlySeries(
   working: readonly Interval[],
   agents: readonly Interval[],
   usage: readonly AgentUsageBucketTotalRecord[],
@@ -540,24 +541,33 @@ function agentCommitCounts(counts: ShiftCommitCountsRecord | undefined): {
   };
 }
 
-/** One roster agent's intervals plus the distinct models they named, capped like the contract's rows. */
+/**
+ * One roster agent's intervals plus the distinct models its shifts named and
+ * the distinct codebases they worked, both capped like the contract's rows.
+ */
 interface AgentIntervals {
   intervals: Interval[];
   models: string[];
+  repos: string[];
 }
 
-const agentModelsCap = 20;
+const agentLabelCap = 20;
+
+/** Appends a label once, up to the contract's cap. */
+function collectLabel(labels: string[], label: string | null): void {
+  if (label === null || labels.includes(label) || labels.length >= agentLabelCap) return;
+  labels.push(label);
+}
 
 /** Roster agents' intervals grouped by agentId; legacy sessions with no roster identity carry no row to group into. */
 function intervalsByAgentId(intervals: readonly AgentIntervalRecord[]): Map<string, AgentIntervals> {
   const grouped = new Map<string, AgentIntervals>();
   for (const row of intervals) {
     if (row.agentId === null) continue;
-    const existing = grouped.get(row.agentId) ?? { intervals: [], models: [] };
+    const existing = grouped.get(row.agentId) ?? { intervals: [], models: [], repos: [] };
     existing.intervals.push(asInterval(row.startedAt, row.endedAt));
-    if (row.model !== null && !existing.models.includes(row.model) && existing.models.length < agentModelsCap) {
-      existing.models.push(row.model);
-    }
+    collectLabel(existing.models, row.model);
+    collectLabel(existing.repos, row.cwd === null ? null : repoLabel(row.cwd));
     grouped.set(row.agentId, existing);
   }
   return grouped;
@@ -702,6 +712,7 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
           ...agentHours(grouped.get(agent.id)?.intervals ?? [], range),
           ...agentCommitCounts(countsById.get(agent.id)),
           models: grouped.get(agent.id)?.models ?? [],
+          repos: grouped.get(agent.id)?.repos ?? [],
           ...agentTokenTotals(usageById.get(agent.id)),
         }));
 
@@ -740,6 +751,7 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
         ...agentHours(grouped.get(agent.id)?.intervals ?? [], range),
         ...agentCommitCounts(countsById.get(agent.id)),
         models: grouped.get(agent.id)?.models ?? [],
+        repos: grouped.get(agent.id)?.repos ?? [],
         ...agentTokenTotals(usageById.get(agent.id)),
       }));
       // A sort ranks heaviest first; ties and non-reporters keep roster order

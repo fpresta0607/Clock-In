@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizePath, resolveProjectForCwd, resolveProjectForRule, type PathMappingCandidate } from "./attribution.js";
+import { normalizePath, repoLabel, resolveProjectForCwd, resolveProjectForRule, type PathMappingCandidate } from "./attribution.js";
 
 const projectA = "a1c7e513-b094-4d4c-ae55-21790ae019a4";
 const projectB = "b1c7e513-b094-4d4c-ae55-21790ae019a4";
@@ -10,6 +10,27 @@ function mapping(pathPrefix: string, projectId: string, kind: "path_prefix" | "u
   serial += 1;
   return { id: `m${serial}`, kind, pathPrefix, projectId };
 }
+
+describe("repoLabel", () => {
+  it("names the last segment of a path, whatever separators it uses", () => {
+    expect(repoLabel("C:\\dev\\clock-in")).toBe("clock-in");
+    expect(repoLabel("C:/dev/clock-in/")).toBe("clock-in");
+    expect(repoLabel("/home/alex/src/Pocket-Piggies")).toBe("Pocket-Piggies");
+  });
+
+  it("keeps the label's own case, unlike the matching path normalizer", () => {
+    expect(repoLabel("C:\\Dev\\Clock-In")).toBe("Clock-In");
+  });
+
+  it("returns null when there is no segment left to name", () => {
+    expect(repoLabel("/")).toBeNull();
+    expect(repoLabel("")).toBeNull();
+  });
+
+  it("caps a pathological segment at the contract's length", () => {
+    expect(repoLabel(`/src/${"n".repeat(500)}`)).toHaveLength(200);
+  });
+});
 
 describe("normalizePath", () => {
   it("unifies case and separators and strips trailing separators", () => {
