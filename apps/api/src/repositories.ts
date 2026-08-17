@@ -219,9 +219,13 @@ export interface SessionIntervalRecord {
 
 /** One agent session's runtime interval; running sessions end at their last event. */
 export interface AgentIntervalRecord {
+  /** The agent session's id, so report reads can join per-shift facts like commit repo roots. */
+  sessionId: string;
   user: ReportLookupRecord;
   source: string;
   model: string | null;
+  /** The shift's working directory; the codebase label falls back to it when no commit named a repo root. */
+  cwd: string | null;
   projectId: string | null;
   /** Null for legacy sessions recorded before roster minting shipped. */
   agentId: string | null;
@@ -307,6 +311,8 @@ export interface AgentUpdatePatch {
 export interface AgentShiftRecord {
   id: string;
   model: string | null;
+  /** The shift's working directory; the paystub's codebase label falls back to it. */
+  cwd: string | null;
   status: "running" | "ended";
   startedAt: Date;
   endedAt: Date | null;
@@ -437,6 +443,13 @@ export interface InsertShiftCommit {
   recordedAt: Date;
 }
 
+/** One shift's first commit's repo root, so report rows can label codebases the way the paystub does. */
+export interface ShiftRepoRootRecord {
+  agentId: string;
+  agentSessionId: string;
+  repoRoot: string;
+}
+
 /** One agent's commit tally over a range, for the pay-run report and paystub totals. */
 export interface ShiftCommitCountsRecord {
   agentId: string;
@@ -465,6 +478,8 @@ export interface ShiftCommitRepository {
   ): Promise<boolean>;
   /** Per-agent commit tallies over the range (authoredAt bounds). */
   countsByAgent(subject: AuthenticatedSubject, query: ReportQuery): Promise<ShiftCommitCountsRecord[]>;
+  /** Each shift's first commit's repo root over the range (authoredAt bounds); a shift with no commits carries no row. */
+  repoRootsByAgent(subject: AuthenticatedSubject, query: ReportQuery): Promise<ShiftRepoRootRecord[]>;
   /** One agent's commits in the range (authoredAt bounds), for the paystub. */
   listForAgent(subject: AuthenticatedSubject, agentId: string, query: ReportQuery): Promise<ShiftCommitRecord[]>;
 }
@@ -515,6 +530,8 @@ export interface AgentUsageRepository {
    * series. A bucket counts by where its start falls.
    */
   sumByBucket(subject: AuthenticatedSubject, query: ReportQuery): Promise<AgentUsageBucketTotalRecord[]>;
+  /** The same per-hour sums narrowed to one agent, for the paystub's own series. */
+  sumByBucketForAgent(subject: AuthenticatedSubject, agentId: string, query: ReportQuery): Promise<AgentUsageBucketTotalRecord[]>;
   /** Counters summed per agent over the query's scope, for the pay-run report and /me/stats rows. */
   sumByAgent(subject: AuthenticatedSubject, query: ReportQuery): Promise<AgentUsageTotalsRecord[]>;
   /** One agent's counters split by the model each bucket named, for the paystub; null-model buckets included. */

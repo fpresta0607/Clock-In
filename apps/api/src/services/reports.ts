@@ -42,8 +42,10 @@ import type {
   SessionIntervalRecord,
   ShiftCommitCountsRecord,
   ShiftCommitRepository,
+  ShiftRepoRootRecord,
   SiteTotalRecord,
 } from "../repositories.js";
+import { repoLabel } from "./attribution.js";
 import type { AgentSessionReaper } from "./agent-sessions.js";
 
 export interface ReportService {
@@ -198,7 +200,7 @@ function clippedIntervals(intervals: readonly Interval[], range: Partial<Interva
 }
 
 /** Peak number of the given intervals overlapping at once, via a sweep line. */
-function maxConcurrentCount(intervals: readonly Interval[]): number {
+export function maxConcurrentCount(intervals: readonly Interval[]): number {
   const starts = intervals.map((interval) => interval.start).sort((a, b) => a - b);
   const ends = intervals.map((interval) => interval.end).sort((a, b) => a - b);
   let startIndex = 0;
@@ -219,7 +221,7 @@ function maxConcurrentCount(intervals: readonly Interval[]): number {
 }
 
 /** Median in-range session length in seconds; 0 with no sessions. */
-function medianDurationSeconds(intervals: readonly Interval[]): number {
+export function medianDurationSeconds(intervals: readonly Interval[]): number {
   const lengths = intervals
     .map((interval) => interval.end - interval.start)
     .filter((ms) => ms > 0)
@@ -240,7 +242,7 @@ function medianDurationSeconds(intervals: readonly Interval[]): number {
  * plain sum over them. An hour nothing reported tokens for keeps nulls, never
  * an invented zero.
  */
-function hourlySeries(
+export function hourlySeries(
   working: readonly Interval[],
   agents: readonly Interval[],
   usage: readonly AgentUsageBucketTotalRecord[],
@@ -540,24 +542,43 @@ function agentCommitCounts(counts: ShiftCommitCountsRecord | undefined): {
   };
 }
 
-/** One roster agent's intervals plus the distinct models they named, capped like the contract's rows. */
+/**
+ * One roster agent's intervals plus the distinct models its shifts named and
+ * the distinct codebases they worked, both capped like the contract's rows.
+ */
 interface AgentIntervals {
   intervals: Interval[];
   models: string[];
+  repos: string[];
 }
 
-const agentModelsCap = 20;
+const agentLabelCap = 20;
 
-/** Roster agents' intervals grouped by agentId; legacy sessions with no roster identity carry no row to group into. */
-function intervalsByAgentId(intervals: readonly AgentIntervalRecord[]): Map<string, AgentIntervals> {
+/** Appends a label once, up to the contract's cap. */
+function collectLabel(labels: string[], label: string | null): void {
+  if (label === null || labels.includes(label) || labels.length >= agentLabelCap) return;
+  labels.push(label);
+}
+
+/**
+ * Roster agents' intervals grouped by agentId; legacy sessions with no roster
+ * identity carry no row to group into. A shift's codebase follows the
+ * paystub's shiftRepoLabel rule: its commit's repo root when it recorded one,
+ * its working directory otherwise.
+ */
+function intervalsByAgentId(
+  intervals: readonly AgentIntervalRecord[],
+  repoRoots: readonly ShiftRepoRootRecord[],
+): Map<string, AgentIntervals> {
+  const rootBySession = new Map(repoRoots.map((row) => [row.agentSessionId, row.repoRoot]));
   const grouped = new Map<string, AgentIntervals>();
   for (const row of intervals) {
     if (row.agentId === null) continue;
-    const existing = grouped.get(row.agentId) ?? { intervals: [], models: [] };
+    const existing = grouped.get(row.agentId) ?? { intervals: [], models: [], repos: [] };
     existing.intervals.push(asInterval(row.startedAt, row.endedAt));
-    if (row.model !== null && !existing.models.includes(row.model) && existing.models.length < agentModelsCap) {
-      existing.models.push(row.model);
-    }
+    collectLabel(existing.models, row.model);
+    const root = rootBySession.get(row.sessionId) ?? row.cwd;
+    collectLabel(existing.repos, root === null ? null : repoLabel(root));
     grouped.set(row.agentId, existing);
   }
   return grouped;
@@ -686,10 +707,15 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
         : hourlySeries(workingIntervals(member, query), member.agents.map((agent) => agent.interval), usageBuckets, queryRange(query));
 
       const range = queryRange(query);
-      const grouped = intervalsByAgentId(agentIntervals);
+      const [commitCounts, repoRoots] = dependencies.shiftCommits === undefined
+        ? [[], []]
+        : await Promise.all([
+          dependencies.shiftCommits.countsByAgent(subject, query),
+          dependencies.shiftCommits.repoRootsByAgent(subject, query),
+        ]);
+      const grouped = intervalsByAgentId(agentIntervals, repoRoots);
       const roster = await dependencies.agents.listForOrganization(subject);
       const rosterById = new Map(roster.map((agent) => [agent.id, agent]));
-      const commitCounts = dependencies.shiftCommits === undefined ? [] : await dependencies.shiftCommits.countsByAgent(subject, query);
       const countsById = new Map(commitCounts.map((row) => [row.agentId, row]));
       const usageById = new Map(usageByAgent.map((row) => [row.agentId, row]));
       // Own agent rows are exactly the roster identities this member's shifts
@@ -702,6 +728,7 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
           ...agentHours(grouped.get(agent.id)?.intervals ?? [], range),
           ...agentCommitCounts(countsById.get(agent.id)),
           models: grouped.get(agent.id)?.models ?? [],
+          repos: grouped.get(agent.id)?.repos ?? [],
           ...agentTokenTotals(usageById.get(agent.id)),
         }));
 
@@ -723,14 +750,15 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       const query: ReportQuery = { ...normalizedQuery(filters), ...scopeQuery(filters.scope) };
       await authorizeFilters(dependencies.reports, subject, query);
       await dependencies.reaper.reapStale(subject);
-      const [roster, agentIntervals, commitCounts, usageByAgent] = await Promise.all([
+      const [roster, agentIntervals, commitCounts, repoRoots, usageByAgent] = await Promise.all([
         dependencies.agents.listForOrganization(subject),
         dependencies.reports.readAgentIntervals(subject, query),
         dependencies.shiftCommits === undefined ? Promise.resolve([]) : dependencies.shiftCommits.countsByAgent(subject, query),
+        dependencies.shiftCommits === undefined ? Promise.resolve([]) : dependencies.shiftCommits.repoRootsByAgent(subject, query),
         dependencies.agentUsage === undefined ? Promise.resolve([]) : dependencies.agentUsage.sumByAgent(subject, query),
       ]);
       const range = queryRange(query);
-      const grouped = intervalsByAgentId(agentIntervals);
+      const grouped = intervalsByAgentId(agentIntervals, repoRoots);
       const countsById = new Map(commitCounts.map((row) => [row.agentId, row]));
       const usageById = new Map(usageByAgent.map((row) => [row.agentId, row]));
       // Every roster agent gets a row, activity or not: the roster - not the
@@ -740,6 +768,7 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
         ...agentHours(grouped.get(agent.id)?.intervals ?? [], range),
         ...agentCommitCounts(countsById.get(agent.id)),
         models: grouped.get(agent.id)?.models ?? [],
+        repos: grouped.get(agent.id)?.repos ?? [],
         ...agentTokenTotals(usageById.get(agent.id)),
       }));
       // A sort ranks heaviest first; ties and non-reporters keep roster order

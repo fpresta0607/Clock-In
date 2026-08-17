@@ -9,7 +9,9 @@
    content on some Chrome/GPU stacks. */
 .shader-bg { position: fixed; inset: 0; width: 100%; height: 100%; display: block; z-index: -1; }
 
-.shell { position: relative; z-index: 1; max-width: 960px; margin: 0 auto; padding: 32px 20px 64px; display: grid; gap: 20px; }
+/* Wide enough for a six-column Agent-sessions table and a roster row's facts
+   to sit on one line on a desktop screen; the rows wrap on their own below it. */
+.shell { position: relative; z-index: 1; max-width: 1120px; margin: 0 auto; padding: 32px 20px 64px; display: grid; gap: 20px; }
 .auth-shell { min-height: 100vh; place-content: center; max-width: 420px; }
 
 .masthead { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
@@ -84,10 +86,33 @@ a.primary { display: inline-block; text-decoration: none; }
 .board-agent { color: var(--text-secondary); font-size: .74rem; font-variant-numeric: tabular-nums; }
 
 /* The roster tab: every row carries an inline Rename beside the board choice;
-   naming an anonymous agent is what registers it, so there is no grey state. */
-.roster-list li { display: flex; align-items: center; gap: 8px; }
-.roster-list li .board-choice { flex: 1; min-width: 0; }
+   naming an anonymous agent is what registers it, so there is no grey state.
+   A roster row also carries far more than a rank and a number - runtime,
+   owner, models, codebases, shifts, held rate - so it gets two rows of its
+   own instead of one right-aligned line that clips. The facts wrap between
+   themselves at any width; only the name is allowed to ellipsize. */
+.roster-list li { display: flex; align-items: flex-start; gap: 8px; }
+.roster-list li .board-choice {
+  flex: 1;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  row-gap: 4px;
+}
+.board-facts { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 8px; color: var(--text-secondary); font-size: .78rem; }
+.board-fact { display: inline-block; overflow-wrap: anywhere; }
+/* The separator trails its own fact rather than leading the next one, so a
+   wrapped line never begins with a dangling dot. */
+.board-fact:not(:last-child)::after { content: "·"; margin-left: 8px; color: var(--glass-border); }
+/* The codebase is the fact org members came here for, so it reads at full
+   contrast while the rest of the line stays secondary. */
+.board-fact.is-repo { color: var(--mint); }
 .roster-rename { flex: none; }
+
+/* Six columns will not fit a narrow viewport; the table scrolls inside its
+   own box rather than pushing the card sideways. */
+.table-scroll { overflow-x: auto; }
+.shift-repo { margin-left: 8px; color: var(--mint); }
 .manage-rename { display: flex; flex: 1; gap: 8px; align-items: center; }
 .manage-rename input { flex: 1; min-width: 0; }
 
@@ -236,8 +261,11 @@ a.download-secondary:hover { color: #ffffff; }
 .help-foot strong { color: #ffffff; font-weight: 650; }
 
 /* The human/agent metric breakdown: labeled rows, not one cramped sentence. */
-.breakdown { display: grid; gap: 0; }
-.group-label { margin: 14px 0 5px; color: var(--text-secondary); font-size: .72rem; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
+/* A single shrinkable track: without minmax(0, ...) the grid sizes to its
+   widest min-content - an owner's long name in the uppercase group label -
+   and drags every metric row past the panel's edge. */
+.breakdown { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
+.group-label { margin: 14px 0 5px; color: var(--text-secondary); font-size: .72rem; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; overflow-wrap: anywhere; }
 .group-label:first-child { margin-top: 0; }
 .metric-row { display: flex; align-items: baseline; gap: 10px; padding: 5px 2px; border-bottom: 1px solid rgba(163, 179, 194, .08); font-size: .85rem; }
 .metric-row:last-child { border-bottom: 0; }
@@ -257,7 +285,7 @@ a.download-secondary:hover { color: #ffffff; }
 /* Which models ran, with session count, overlap, and length. */
 .agent-sessions { margin-top: 14px; }
 .agent-sessions table { margin-top: 2px; }
-.agent-sessions .numeric { text-align: right; font-variant-numeric: tabular-nums; }
+.agent-sessions .numeric { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* SVG charts: the hourly line graph and the weekly trend strip. Colors come
    from the brand.css chart tokens; only layout lives here. */

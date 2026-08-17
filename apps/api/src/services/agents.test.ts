@@ -7,10 +7,14 @@ import type {
   AgentRepository,
   AgentShiftRecord,
   AgentUpdatePatch,
+  AgentUsageBucketTotalRecord,
   AgentUsageModelTotalsRecord,
   AgentUsageRepository,
+  PresenceIntervalRecord,
   ReportQuery,
   ReportRepository,
+  ShiftCommitRecord,
+  ShiftCommitRepository,
   UpsertAgentForKey,
 } from "../repositories.js";
 import { createAgentService } from "./agents.js";
@@ -95,6 +99,7 @@ function shift(overrides: Partial<AgentShiftRecord> = {}): AgentShiftRecord {
   return {
     id: "d1c7e513-b094-4d4c-ae55-21790ae019a4",
     model: "claude-fable-5",
+    cwd: null,
     status: "ended",
     startedAt: new Date("2026-08-06T10:00:00.000Z"),
     endedAt: new Date("2026-08-06T11:00:00.000Z"),
@@ -103,12 +108,25 @@ function shift(overrides: Partial<AgentShiftRecord> = {}): AgentShiftRecord {
   };
 }
 
-function createService(agents: MemoryAgents, members: ReadonlyMap<string, string> = new Map([[ids.user, "Alex"]]), usage?: MemoryUsage) {
+function createService(
+  agents: MemoryAgents,
+  members: ReadonlyMap<string, string> = new Map([[ids.user, "Alex"]]),
+  usage?: MemoryUsage,
+  presence: PresenceIntervalRecord[] = [],
+  shiftCommits?: MemoryShiftCommits,
+) {
   const reapStale = vi.fn().mockResolvedValue(0);
+  const presenceQueries: ReportQuery[] = [];
   const reports = {
     async findUserForOrganization(_subject: AuthenticatedSubject, userId: string) {
       const name = members.get(userId);
       return name === undefined ? null : { id: userId, name };
+    },
+    async readPresenceIntervals(_subject: AuthenticatedSubject, query: ReportQuery) {
+      presenceQueries.push(query);
+      return presence.filter((row) =>
+        (query.from === undefined || row.endedAt > query.from)
+        && (query.toExclusive === undefined || row.startedAt < query.toExclusive));
     },
   } as ReportRepository;
   const service = createAgentService({
@@ -117,14 +135,16 @@ function createService(agents: MemoryAgents, members: ReadonlyMap<string, string
     reports,
     clock: () => now,
     ...(usage === undefined ? {} : { agentUsage: usage }),
+    ...(shiftCommits === undefined ? {} : { shiftCommits }),
   });
-  return { service, reapStale };
+  return { service, reapStale, presenceQueries };
 }
 
-/** The paystub's usage sums, grouped per model exactly like the SQL. */
+/** The paystub's usage sums, grouped per model and per hour exactly like the SQL. */
 class MemoryUsage implements AgentUsageRepository {
   public readonly modelQueries: ReportQuery[] = [];
   public rows: AgentUsageModelTotalsRecord[] = [];
+  public buckets: AgentUsageBucketTotalRecord[] = [];
   public async findByClientId(): ReturnType<AgentUsageRepository["findByClientId"]> {
     throw new Error("not used");
   }
@@ -134,11 +154,56 @@ class MemoryUsage implements AgentUsageRepository {
   public async sumByBucket(): ReturnType<AgentUsageRepository["sumByBucket"]> {
     throw new Error("not used");
   }
+  public async sumByBucketForAgent(): Promise<AgentUsageBucketTotalRecord[]> {
+    return this.buckets;
+  }
   public async sumByAgent(): ReturnType<AgentUsageRepository["sumByAgent"]> {
     throw new Error("not used");
   }
   public async sumByAgentAndModel(_subject: AuthenticatedSubject, _agentId: string, query: ReportQuery): Promise<AgentUsageModelTotalsRecord[]> {
     this.modelQueries.push(query);
+    return this.rows;
+  }
+}
+
+function commitRecord(overrides: Partial<ShiftCommitRecord> = {}): ShiftCommitRecord {
+  return {
+    id: "e1c7e513-b094-4d4c-ae55-21790ae019a4",
+    organizationId: ids.organization,
+    userId: ids.user,
+    agentId: ids.agent,
+    agentSessionId: "d1c7e513-b094-4d4c-ae55-21790ae019a4",
+    clientId: "f2c7e513-b094-4d4c-ae55-21790ae019a4",
+    repoRoot: "C:\\dev\\clock-in",
+    branch: "main",
+    sha: "0".repeat(40),
+    subject: "feat: ship it",
+    authoredAt: new Date("2026-08-06T10:30:00.000Z"),
+    verification: "pending",
+    verifiedAt: null,
+    ...overrides,
+  };
+}
+
+/** Only the paystub read is exercised; the write paths belong to their own suite. */
+class MemoryShiftCommits implements ShiftCommitRepository {
+  public constructor(public rows: ShiftCommitRecord[] = []) {}
+  public async findByClientId(): ReturnType<ShiftCommitRepository["findByClientId"]> {
+    throw new Error("not used");
+  }
+  public async insert(): ReturnType<ShiftCommitRepository["insert"]> {
+    throw new Error("not used");
+  }
+  public async advanceVerification(): Promise<boolean> {
+    throw new Error("not used");
+  }
+  public async countsByAgent(): ReturnType<ShiftCommitRepository["countsByAgent"]> {
+    throw new Error("not used");
+  }
+  public async repoRootsByAgent(): ReturnType<ShiftCommitRepository["repoRootsByAgent"]> {
+    throw new Error("not used");
+  }
+  public async listForAgent(): Promise<ShiftCommitRecord[]> {
     return this.rows;
   }
 }
@@ -278,10 +343,12 @@ describe("agent service", () => {
 
     // The model mix folds per-shift seconds under each named model, unnamed
     // shifts under null, in first-seen order. With no usage data each model's
-    // token split stays null - absence stays absence.
+    // token split stays null - absence stays absence. The session facts come
+    // from the clipped shifts, so the two Fable shifts never overlap (max 1)
+    // and their median is the midpoint of 1h and the clipped half hour.
     expect(paystub.models).toEqual([
-      { model: "claude-fable-5", agentSeconds: 3_600 + 1_800, shiftCount: 2, tokens: null },
-      { model: null, agentSeconds: 1_800, shiftCount: 1, tokens: null },
+      { model: "claude-fable-5", agentSeconds: 3_600 + 1_800, shiftCount: 2, maxConcurrent: 1, medianSeconds: 2_700, tokens: null },
+      { model: null, agentSeconds: 1_800, shiftCount: 1, maxConcurrent: 1, medianSeconds: 1_800, tokens: null },
     ]);
 
     // Six weekly buckets, oldest first, ending at the range's end.
@@ -326,8 +393,8 @@ describe("agent service", () => {
     });
     expect(paystub.totals.tokensReported).toBe(true);
     expect(paystub.models).toEqual([
-      { model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 } },
-      { model: null, agentSeconds: 1_800, shiftCount: 1, tokens: { inputTokens: 500, outputTokens: 25, cacheCreationInputTokens: 0, cacheReadInputTokens: 2_000 } },
+      { model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, maxConcurrent: 1, medianSeconds: 3_600, tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 } },
+      { model: null, agentSeconds: 1_800, shiftCount: 1, maxConcurrent: 1, medianSeconds: 1_800, tokens: { inputTokens: 500, outputTokens: 25, cacheCreationInputTokens: 0, cacheReadInputTokens: 2_000 } },
     ]);
   });
 
@@ -356,9 +423,100 @@ describe("agent service", () => {
 
     expect(paystub.totals.tokensReported).toBe(true);
     expect(paystub.models).toEqual([
-      { model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, tokens: { inputTokens: 100, outputTokens: 10, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } },
-      { model: "gpt-5", agentSeconds: 1_800, shiftCount: 1, tokens: null },
+      { model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, maxConcurrent: 1, medianSeconds: 3_600, tokens: { inputTokens: 100, outputTokens: 10, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } },
+      { model: "gpt-5", agentSeconds: 1_800, shiftCount: 1, maxConcurrent: 1, medianSeconds: 1_800, tokens: null },
     ]);
+  });
+
+  it("labels each shift's codebase, preferring the commit's repo root over the working directory", async () => {
+    const agents = new MemoryAgents([agentRecord()]);
+    agents.shifts = [
+      // A commit names the repository itself; the cwd sits inside it.
+      shift({ cwd: "C:\\dev\\clock-in\\apps\\web" }),
+      // No commit, so the working directory is the only label there is.
+      shift({
+        id: "d3c7e513-b094-4d4c-ae55-21790ae019a4",
+        cwd: "/home/alex/src/pocket-piggies/",
+        startedAt: new Date("2026-08-06T12:00:00.000Z"),
+        endedAt: new Date("2026-08-06T12:30:00.000Z"),
+        lastEventAt: new Date("2026-08-06T12:30:00.000Z"),
+      }),
+      // Nothing recorded either: null, never a guess.
+      shift({
+        id: "d4c7e513-b094-4d4c-ae55-21790ae019a4",
+        startedAt: new Date("2026-08-06T13:00:00.000Z"),
+        endedAt: new Date("2026-08-06T13:15:00.000Z"),
+        lastEventAt: new Date("2026-08-06T13:15:00.000Z"),
+      }),
+    ];
+    const commits = new MemoryShiftCommits([
+      commitRecord({ agentSessionId: "d1c7e513-b094-4d4c-ae55-21790ae019a4", repoRoot: "C:\\dev\\clock-in" }),
+    ]);
+    const { service } = createService(agents, undefined, undefined, [], commits);
+
+    const paystub = await service.paystub(member, ids.agent, {
+      fromAt: "2026-08-06T09:00:00.000Z",
+      toExclusiveAt: "2026-08-06T14:00:00.000Z",
+    });
+
+    expect(paystub.shifts.map((row) => row.repo)).toEqual(["clock-in", "pocket-piggies", null]);
+    // Heaviest first, so the codebase an agent spent its hours in leads.
+    expect(paystub.codebases).toEqual([
+      { repo: "clock-in", agentSeconds: 3_600, shiftCount: 1 },
+      { repo: "pocket-piggies", agentSeconds: 1_800, shiftCount: 1 },
+      { repo: null, agentSeconds: 900, shiftCount: 1 },
+    ]);
+  });
+
+  it("splits the agent's runtime against its owner's presence, and plots the pair hourly", async () => {
+    const agents = new MemoryAgents([agentRecord()]);
+    agents.shifts = [
+      // 10:00-11:00, of which the owner was present for the first half hour.
+      shift(),
+      // 12:00-12:30, entirely while the owner was away.
+      shift({
+        id: "d3c7e513-b094-4d4c-ae55-21790ae019a4",
+        startedAt: new Date("2026-08-06T12:00:00.000Z"),
+        endedAt: new Date("2026-08-06T12:30:00.000Z"),
+        lastEventAt: new Date("2026-08-06T12:30:00.000Z"),
+      }),
+    ];
+    const presence: PresenceIntervalRecord[] = [
+      { user: { id: ids.user, name: "Alex" }, startedAt: new Date("2026-08-06T10:00:00.000Z"), endedAt: new Date("2026-08-06T10:30:00.000Z") },
+    ];
+    const { service, presenceQueries } = createService(agents, undefined, undefined, presence);
+
+    const paystub = await service.paystub(member, ids.agent, {
+      fromAt: "2026-08-06T09:00:00.000Z",
+      toExclusiveAt: "2026-08-06T14:00:00.000Z",
+    });
+
+    // Presence is read for the agent's owner, never for the caller.
+    expect(presenceQueries[0]).toMatchObject({ userId: ids.user });
+    expect(paystub.totals).toMatchObject({
+      agentSeconds: 3_600 + 1_800,
+      ownerActiveSeconds: 1_800,
+      awaySeconds: 1_800 + 1_800,
+    });
+
+    // One bucket per hour of the range, the owner's active time beside the
+    // agent's runtime, and no token line where nothing reported.
+    expect(paystub.hourly).toHaveLength(5);
+    expect(paystub.hourly[1]).toMatchObject({
+      hourStart: "2026-08-06T10:00:00.000Z",
+      activeSeconds: 1_800,
+      agentSeconds: 3_600,
+      inputTokens: null,
+    });
+    expect(paystub.hourly[3]).toMatchObject({ hourStart: "2026-08-06T12:00:00.000Z", activeSeconds: 0, agentSeconds: 1_800 });
+  });
+
+  it("leaves the hourly series empty for the unbounded range", async () => {
+    const agents = new MemoryAgents([agentRecord()]);
+    agents.shifts = [shift()];
+    const { service } = createService(agents);
+
+    await expect(service.paystub(member, ids.agent, {})).resolves.toMatchObject({ hourly: [] });
   });
 
   it("answers an unknown paystub agent with not_found", async () => {

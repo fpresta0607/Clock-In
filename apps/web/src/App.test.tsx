@@ -73,14 +73,22 @@ const paystub = {
     heldRate: null,
     tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
     tokensReported: true,
+    ownerActiveSeconds: 3_600,
+    awaySeconds: 1_800,
   },
-  models: [{ model: "claude-fable-5", agentSeconds: 5_400, shiftCount: 2, tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 } }],
+  models: [
+    { model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, maxConcurrent: 2, medianSeconds: 3_600, tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 } },
+    { model: null, agentSeconds: 1_800, shiftCount: 1, maxConcurrent: 1, medianSeconds: 1_800, tokens: null },
+  ],
+  codebases: [{ repo: "clock-in", agentSeconds: 5_400, shiftCount: 2 }],
+  hourly: [],
   shifts: [{
     id: "00000000-0000-4000-8000-0000000000s1",
     startedAt: "2026-08-06T10:00:00.000Z",
     endedAt: "2026-08-06T11:00:00.000Z",
     model: "claude-fable-5",
     durationSeconds: 3_600,
+    repo: "clock-in",
     commits: [],
   }],
   trend: [{ periodStartAt: "2026-07-30T00:00:00.000Z", agentSeconds: 5_400, shiftCount: 2, heldRate: null }],
@@ -100,6 +108,7 @@ const agentsReportResponse = {
     commitsOrphaned: 0,
     heldRate: null,
     models: ["claude-fable-5"],
+    repos: ["clock-in"],
     tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
     tokensReported: true,
   }],
@@ -444,15 +453,11 @@ describe("dashboard", () => {
     expect(breakdown).toHaveTextContent("Human work");
     expect(breakdown).toHaveTextContent("With 1 agent");
     expect(breakdown).not.toHaveTextContent("With 2 agents");
-    expect(breakdown).not.toHaveTextContent("Agents while away");
-    // The model table lists what ran, how many sessions, and their lengths.
-    const sessions = stats.getByTestId("agent-sessions");
-    expect(sessions).toHaveTextContent("claude-fable-5");
-    expect(sessions).toHaveTextContent("Claude Code");
-    // A shift whose hook named no model reads "not recorded", never a blank -
-    // with the footnote naming why.
-    expect(sessions).toHaveTextContent("not recorded");
-    expect(sessions).toHaveTextContent("Sessions recorded before model capture show not recorded.");
+    // What the agents themselves added up to is the agent's number, not the
+    // person's; it lives on the Agents tab now, with its own table.
+    expect(breakdown).not.toHaveTextContent("while away");
+    expect(breakdown).not.toHaveTextContent("Total agent time");
+    expect(stats.queryByTestId("agent-sessions")).not.toBeInTheDocument();
     expect(stats.getByText("General")).toBeInTheDocument();
     // claude.exe reads as the tool it is, so the team sees Claude usage plainly.
     expect(stats.getAllByText("Claude Code").length).toBeGreaterThan(0);
@@ -460,23 +465,13 @@ describe("dashboard", () => {
     expect(stats.getByText(/30m of that landed in the default project/)).toBeInTheDocument();
   });
 
-  it("renders an older API response that lacks the hourly series and per-session counts", async () => {
-    const olderStats = {
-      ...memberStats,
-      hourly: undefined,
-      byAgent: [{ source: "claude_code", model: "claude-fable-5", durationSeconds: 3_000 }],
-    } as unknown as MeStatsResponse;
+  it("renders an older API response that lacks the hourly series", async () => {
+    const olderStats = { ...memberStats, hourly: undefined } as unknown as MeStatsResponse;
     await signIn(clientFor({ meStats: vi.fn().mockResolvedValue(olderStats) }));
 
     expect(await screen.findByRole("heading", { name: "SIQstack" })).toBeInTheDocument();
     const stats = within(await screen.findByRole("region", { name: /Alex · Last 30 days/ }));
-    const sessions = stats.getByTestId("agent-sessions");
-    expect(sessions).toHaveTextContent("claude-fable-5");
-    // Every visible row named its model, so no "not recorded" label or footnote.
-    expect(sessions).not.toHaveTextContent("not recorded");
-    const cells = within(sessions).getAllByRole("cell").map((cell) => cell.textContent?.trim());
-    expect(cells).toContain("0");
-    expect(cells).toContain("0s");
+    expect(stats.getByTestId("breakdown")).toHaveTextContent("Active time");
     expect(stats.queryByTestId("hourly-graph")).not.toBeInTheDocument();
   });
 
@@ -580,7 +575,7 @@ describe("dashboard", () => {
     expect(graph).not.toHaveTextContent("No token data from");
   });
 
-  it("labels 3+ concurrency and away time in plain words", async () => {
+  it("labels 3+ concurrency in plain words and leaves the agents' own totals to their tab", async () => {
     await signIn(clientFor({
       meStats: vi.fn().mockResolvedValue({
         ...memberStats,
@@ -592,10 +587,9 @@ describe("dashboard", () => {
     const breakdown = stats.getByTestId("breakdown");
     expect(breakdown).toHaveTextContent("With 3+ agents");
     expect(breakdown).toHaveTextContent("1h 30m");
-    expect(breakdown).toHaveTextContent("Agents while away");
-    expect(breakdown).toHaveTextContent("30m");
     expect(breakdown).not.toHaveTextContent("With 2 agents");
     expect(breakdown).not.toHaveTextContent("With 1 agent");
+    expect(breakdown).not.toHaveTextContent("while away");
   });
 
   it("keeps the breakdown quiet when there is nothing recorded", async () => {
@@ -813,7 +807,12 @@ describe("the roster tab", () => {
 
     const roster = await screen.findByTestId("roster-list");
     const row = within(roster).getByText("Claude Code @ General").closest("li");
-    expect(row).toHaveTextContent("Claude Code · Alex · claude-fable-5");
+    // Every secondary fact is its own span, so the line wraps rather than
+    // clipping; the separators are drawn, not written into the text.
+    await waitFor(() => expect(within(row!).getByText("clock-in")).toBeInTheDocument());
+    for (const fact of ["Claude Code", "Alex", "claude-fable-5", "clock-in", "2 shifts", "held pending"]) {
+      expect(within(row!).getByText(fact)).toHaveClass("board-fact");
+    }
     // The pay-run report's hours land on the matching roster row.
     await waitFor(() => expect(row).toHaveTextContent("1h 30m"));
     expect(within(row as HTMLElement).getByRole("button", { name: "Rename" })).toBeInTheDocument();
@@ -836,7 +835,8 @@ describe("the roster tab", () => {
     // anonymous agent registered when a member names it.
     await waitFor(() => expect(patchAgent).toHaveBeenCalledWith(rosterAgent.id, { name: "Reviewer" }));
     const row = (await screen.findByText("Reviewer")).closest("li");
-    expect(row).toHaveTextContent("Claude Code · Alex · claude-fable-5");
+    expect(within(row!).getByText("Claude Code")).toHaveClass("board-fact");
+    expect(within(row!).getByText("Alex")).toHaveClass("board-fact");
   });
 
   it("opens an agent's paystub for the range on screen", async () => {
@@ -856,10 +856,27 @@ describe("the roster tab", () => {
     expect(query.get("toExclusiveAt")).not.toBeNull();
 
     const detail = await screen.findByTestId("agent-paystub");
-    expect(detail).toHaveTextContent("Hours");
-    expect(detail).toHaveTextContent("1h 30m");
-    expect(detail).toHaveTextContent("Shifts");
-    expect(within(detail).getByTestId("paystub-shifts")).toHaveTextContent("claude-fable-5");
+    // The runtime block reads against its owner's hours, by name, and the
+    // ratio divides by those hours rather than the caller's.
+    const breakdown = within(detail).getByTestId("agent-breakdown");
+    expect(breakdown).toHaveTextContent("Agent runtime — summed, may exceed Alex's hours");
+    expect(breakdown).toHaveTextContent("While Alex was there");
+    expect(breakdown).toHaveTextContent("Total agent time · leverage");
+    expect(breakdown).toHaveTextContent("1h 30m · 1.5×");
+    expect(breakdown).toHaveTextContent("Shifts");
+    // The sessions table is this agent's shifts folded per model; its Runtime
+    // column is the agent's one runtime, never another worker's.
+    const cells = [...within(detail).getByTestId("agent-sessions").querySelectorAll("tbody td")]
+      .map((cell) => cell.textContent);
+    expect(cells).toEqual([
+      "Claude Code", "claude-fable-5", "1", "2", "1h 00m", "1h 00m",
+      "Claude Code", "not recorded", "1", "1", "30m", "30m",
+    ]);
+    expect(within(detail).getByTestId("paystub-codebases")).toHaveTextContent("clock-in");
+    const shifts = within(detail).getByTestId("paystub-shifts");
+    expect(shifts).toHaveTextContent("claude-fable-5");
+    // The codebase rides each shift as a name, never as a working directory.
+    expect(within(shifts).getByText("clock-in")).toBeInTheDocument();
     // The trend is a bar strip now: one measured bar per weekly bucket.
     const trend = within(detail).getByTestId("paystub-trend");
     const bars = trend.querySelectorAll('rect[data-series="week"]');

@@ -6,7 +6,8 @@ import { sourceLabel } from "./agent-sources.js";
 import {
   bridgeError,
   defaultBridge,
-  type AgentPaystubTrend,
+  type AgentPaystub,
+  type AgentPaystubModel,
   type AgentsReport,
   type BrowserHealth,
   type MeStats,
@@ -109,14 +110,12 @@ const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
   return [...kept, { key: "everything-else", label: "Everything else", durationSeconds: rest, agent: false }];
 };
 
-/// The human/agent split laid out as labeled rows instead of one cramped
-/// sentence: active time up top (Solo is now "Human work"), agent runtime
-/// below, and the leverage ratio as the agent-side headline.
+/// A person's active time laid out as labeled rows: the hours up top, then
+/// how many agents were running through them. What those agents added up to
+/// belongs to the agent, not the person, so it lives on the Agents tab -
+/// see `AgentBreakdown`.
 const MemberBreakdown = ({ stats, self }: { stats: MeStats; self: boolean }) => {
-  const { activeSeconds, agentSeconds, concurrency } = stats;
-  const awaySeconds = concurrency.awaySeconds;
-  const presentAgentSeconds = Math.max(0, agentSeconds - awaySeconds);
-  const ratio = leverage(stats);
+  const { activeSeconds, concurrency } = stats;
   return (
     <div className="breakdown" data-testid="breakdown">
       <p className="group-label">{self ? "Your active time — the hours you were at this computer" : "Active time — the hours they were at this computer"}</p>
@@ -150,70 +149,96 @@ const MemberBreakdown = ({ stats, self }: { stats: MeStats; self: boolean }) => 
           <span className="metric-value">{formatHuman(concurrency.t3PlusSeconds)}</span>
         </div>
       )}
-      {agentSeconds > 0 && (
-        <>
-          <p className="group-label">{self ? "Agent runtime — summed, may exceed your hours" : "Agent runtime — summed, may exceed their hours"}</p>
-          <div className="metric-row is-subtotal">
-            <span className="metric-name">{self ? "While you were there" : "While they were there"}</span>
-            <span className="metric-value">{formatHuman(presentAgentSeconds)}</span>
-          </div>
-          {awaySeconds > 0 && (
-            <div className="metric-row">
-              <span className="metric-swatch swatch-away" aria-hidden="true" />
-              <span className="metric-name">Agents while away <span className="metric-hint">({self ? "never your hours" : "never their hours"})</span></span>
-              <span className="metric-value">{formatHuman(awaySeconds)}</span>
-            </div>
-          )}
-          <div className="metric-row is-subtotal is-headline">
-            <span className="metric-name">Total agent time · leverage</span>
-            <span className="metric-value">{formatHuman(agentSeconds)}{ratio !== null && ` · ${ratio}×`}</span>
-          </div>
-        </>
-      )}
     </div>
   );
 };
 
-/// Which runtimes actually ran, with the model each was driving, how many
-/// sessions that was, how many overlapped at once, and how long a session
-/// typically lasted - all already in the agent_sessions table, now presented
-/// rather than folded into a note.
-const AgentSessionsTable = ({ byAgent }: { byAgent: readonly MeStats["byAgent"][number][] }) => {
-  if (byAgent.length === 0) return null;
+/// One agent's runtime, read against the hours its owner was actually at the
+/// computer. Summed, so parallel shifts legitimately exceed those hours -
+/// that is leverage, not an error. Null owner numbers mean the deployed API
+/// predates them, and the split simply is not claimed.
+const AgentBreakdown = ({ paystub, ownerName }: { paystub: AgentPaystub; ownerName: string }) => {
+  const { agentSeconds, ownerActiveSeconds, awaySeconds, shiftCount, commitsRecorded, heldRate } = paystub.totals;
+  const presentSeconds = awaySeconds === null ? null : Math.max(0, agentSeconds - awaySeconds);
+  const ratio = ownerActiveSeconds === null ? null : leverage({ activeSeconds: ownerActiveSeconds, agentSeconds });
+  return (
+    <div className="breakdown" data-testid="agent-breakdown">
+      <p className="group-label">Agent runtime — summed, may exceed {ownerName}'s hours</p>
+      {presentSeconds !== null && (
+        <div className="metric-row is-subtotal">
+          <span className="metric-name">While {ownerName} was there</span>
+          <span className="metric-value">{formatHuman(presentSeconds)}</span>
+        </div>
+      )}
+      {awaySeconds !== null && awaySeconds > 0 && (
+        <div className="metric-row">
+          <span className="metric-swatch swatch-away" aria-hidden="true" />
+          <span className="metric-name">Ran while away <span className="metric-hint">(never their hours)</span></span>
+          <span className="metric-value">{formatHuman(awaySeconds)}</span>
+        </div>
+      )}
+      <div className="metric-row is-subtotal is-headline">
+        <span className="metric-name">Total agent time{ratio !== null && " · leverage"}</span>
+        <span className="metric-value">{formatHuman(agentSeconds)}{ratio !== null && ` · ${ratio}×`}</span>
+      </div>
+      <div className="metric-row">
+        <span className="metric-name">Shifts <span className="metric-hint">(one terminal session each)</span></span>
+        <span className="metric-value">{shiftCount}</span>
+      </div>
+      <div className="metric-row">
+        <span className="metric-name">Commits recorded</span>
+        <span className="metric-value">{commitsRecorded}</span>
+      </div>
+      <div className="metric-row">
+        <span className="metric-name">Held rate <span className="metric-hint">(self-reported by the machine that ran the shift)</span></span>
+        <span className="metric-value">{heldRate === null ? "pending" : `${Math.round(heldRate * 100)}%`}</span>
+      </div>
+    </div>
+  );
+};
+
+/// Which models this agent's runtime drove, how many shifts that was, how
+/// many overlapped at once, and how long a shift typically lasted. Every row
+/// belongs to the one roster agent on screen, which is what keeps another
+/// worker's shifts out of it.
+const AgentSessionsTable = ({ source, models }: { source: string; models: readonly AgentPaystubModel[] }) => {
+  if (models.length === 0) return null;
   return (
     <div className="agent-sessions" data-testid="agent-sessions">
       <p className="group-label">Agent sessions</p>
-      <table>
-        <thead>
-          <tr>
-            <th>Runtime</th>
-            <th>Model</th>
-            <th className="numeric">Sessions</th>
-            <th className="numeric">Max at once</th>
-            <th className="numeric">Total</th>
-            <th className="numeric">Median</th>
-          </tr>
-        </thead>
-        <tbody>
-          {byAgent.map((split) => (
-            <tr key={`${split.source}|${split.model ?? ""}`}>
-              <td>{sourceLabel(split.source)}</td>
-              {/* A null model is a shift whose hook named none - recorded
-                  before model capture, or a runtime that never reports one.
-                  Say so; a bare dash reads as broken. */}
-              <td className={split.model === null ? "subtle-cell" : undefined}>{split.model ?? "not recorded"}</td>
-              {/* Null means the deployed API predates the field: absence
-                  shown as absence, never as a zero that never happened. */}
-              <td className="numeric">{split.sessionCount ?? "-"}</td>
-              <td className="numeric">{split.maxConcurrent ?? "-"}</td>
-              <td className="numeric">{formatHuman(split.durationSeconds)}</td>
-              <td className="numeric">{split.medianSeconds === null ? "-" : formatHuman(split.medianSeconds)}</td>
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Runtime</th>
+              <th>Model</th>
+              <th className="numeric">Shifts</th>
+              <th className="numeric">Max at once</th>
+              <th className="numeric">Total</th>
+              <th className="numeric">Median</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-      {byAgent.some((split) => split.model === null) && (
-        <p className="graph-note">Sessions recorded before model capture show not recorded.</p>
+          </thead>
+          <tbody>
+            {models.map((split) => (
+              <tr key={split.model ?? ""}>
+                <td>{sourceLabel(source)}</td>
+                {/* A null model is a shift whose hook named none - recorded
+                    before model capture, or a runtime that never reports one.
+                    Say so; a bare dash reads as broken. */}
+                <td className={split.model === null ? "subtle-cell" : undefined}>{split.model ?? "not recorded"}</td>
+                <td className="numeric">{split.shiftCount}</td>
+                {/* Null means the deployed API predates the field: absence
+                    shown as absence, never as a zero that never happened. */}
+                <td className="numeric">{split.maxConcurrent ?? "-"}</td>
+                <td className="numeric">{formatHuman(split.agentSeconds)}</td>
+                <td className="numeric">{split.medianSeconds === null ? "-" : formatHuman(split.medianSeconds)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {models.some((split) => split.model === null) && (
+        <p className="graph-note">Shifts recorded before model capture show not recorded.</p>
       )}
     </div>
   );
@@ -886,11 +911,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
   const [overlayTab, setOverlayTab] = useState<"humans" | "agents">("humans");
   const [agentsReport, setAgentsReport] = useState<AgentsReport | undefined>();
   const [agentsReportError, setAgentsReportError] = useState<string | undefined>();
-  /// The roster row whose trend the Agents tab charts; undefined picks the
+  /// The roster row whose paystub the Agents tab shows; undefined picks the
   /// first row, the same default the web roster's paystub opens on.
   const [overlayAgentId, setOverlayAgentId] = useState<string | undefined>();
-  const [agentTrend, setAgentTrend] = useState<AgentPaystubTrend | undefined>();
-  const [agentTrendError, setAgentTrendError] = useState<string | undefined>();
+  const [agentPaystub, setAgentPaystub] = useState<AgentPaystub | undefined>();
+  const [agentPaystubError, setAgentPaystubError] = useState<string | undefined>();
   const [settings, setSettings] = useState<MonitorSettings | undefined>();
   const [settingsError, setSettingsError] = useState<string | undefined>();
   const [quietDraft, setQuietDraft] = useState("");
@@ -1191,41 +1216,41 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bridge, allStatsOpen, overlayTab, boardRange, signedIn?.user.id, statsTick]);
 
-  /// The roster row the Agents tab charts: the picked agent, or the first row
+  /// The roster row the Agents tab details: the picked agent, or the first row
   /// when nobody has been picked yet.
   const selectedAgentRow = overlayTab === "agents"
     ? agentsReport?.rows.find((row) => row.agent.id === overlayAgentId) ?? agentsReport?.rows[0]
     : undefined;
 
-  // The Agents tab chart: the selected agent's paystub trend over the
+  // The Agents tab's detail panel: the selected agent's paystub over the
   // overlay's range. The fetch answers a visible selection, so a failure says
-  // so where the chart would be rather than keeping last-good data.
+  // so where the panel would be rather than keeping last-good data.
   useEffect(() => {
     if (signedIn === undefined || !allStatsOpen || selectedAgentRow === undefined) return undefined;
     let active = true;
     const service = bridge;
     const generation = bridgeGeneration.current;
     const bounds = rangeBounds(boardRange);
-    setAgentTrend(undefined);
-    setAgentTrendError(undefined);
-    void service.agentPaystubTrend(
+    setAgentPaystub(undefined);
+    setAgentPaystubError(undefined);
+    void service.agentPaystub(
       selectedAgentRow.agent.id,
       bounds?.fromAt,
       bounds?.toExclusiveAt,
     ).then(
       (result) => {
-        if (active && isCurrent(service, generation)) setAgentTrend(result);
+        if (active && isCurrent(service, generation)) setAgentPaystub(result);
       },
       (error: unknown) => {
         if (!active || !isCurrent(service, generation)) return;
         const problem = bridgeError(error);
         if (problem.kind === "auth") return;
-        setAgentTrendError(problem.message);
+        setAgentPaystubError(problem.message);
       },
     );
     return () => { active = false; };
     // `selectedAgentRow` is read for the pick alone; re-running on every
-    // roster refresh would refetch a trend that cannot have moved.
+    // roster refresh would refetch a paystub that cannot have moved.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bridge, allStatsOpen, overlayTab, selectedAgentRow?.agent.id, boardRange, signedIn?.user.id, statsTick]);
 
@@ -2104,9 +2129,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
               ) : agentsReport.rows.length === 0 ? (
                 <p className="subtle">No agents on the roster yet. Coding-agent shifts mint them automatically.</p>
               ) : (
-                <ol className="board-list" data-testid="agent-roster-list">
+                <ol className="board-list is-roster" data-testid="agent-roster-list">
                   {/* The roster is the selector, like the Humans board: the
-                      picked agent's trend strip renders underneath. */}
+                      picked agent's whole panel renders underneath. Each
+                      secondary fact is its own span so the line wraps between
+                      them instead of clipping in a narrow window. */}
                   {agentsReport.rows.map((row) => (
                     <li key={row.agent.id} className={row.agent.id === selectedAgentRow?.agent.id ? "is-selected" : undefined}>
                       <button
@@ -2115,18 +2142,21 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                         aria-pressed={row.agent.id === selectedAgentRow?.agent.id}
                         onClick={() => setOverlayAgentId(row.agent.id)}
                       >
-                        <span className="board-rank" aria-hidden="true" />
                         <span className="board-name">
                           {row.agent.name}
                           {row.agent.status === "retired" && <span className="you-tag"> retired</span>}
                         </span>
-                        <span className="board-times">
-                          <span className="board-hours">{formatHuman(row.agentSeconds)}</span>
-                          <span className="board-agent">
-                            {sourceLabel(row.agent.source)}
-                            {row.models.length > 0 && ` · ${row.models.join(", ")}`}
-                            {` · ${row.shiftCount} shift${row.shiftCount === 1 ? "" : "s"}`}
-                            {row.heldRate === null ? " · pending" : ` · ${Math.round(row.heldRate * 100)}% held`}
+                        <span className="board-hours">{formatHuman(row.agentSeconds)}</span>
+                        <span className="board-facts">
+                          <span className="board-fact">{sourceLabel(row.agent.source)}</span>
+                          <span className="board-fact">{row.agent.owner.name}</span>
+                          {row.models.map((model) => <span key={model} className="board-fact">{model}</span>)}
+                          {/* The codebases the shifts worked - names, not
+                              paths, so they reach every member. */}
+                          {row.repos.map((repo) => <span key={repo} className="board-fact is-repo">{repo}</span>)}
+                          <span className="board-fact">{row.shiftCount} shift{row.shiftCount === 1 ? "" : "s"}</span>
+                          <span className="board-fact">
+                            {row.heldRate === null ? "held pending" : `${Math.round(row.heldRate * 100)}% held`}
                           </span>
                         </span>
                       </button>
@@ -2140,14 +2170,36 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                   <div className="member-stats-head">
                     <h3 id="overlay-agent-title">{selectedAgentRow.agent.name} · {RANGE_LABEL[boardRange]}</h3>
                   </div>
-                  {agentTrendError !== undefined ? (
-                    <p className="form-error" role="alert">{agentTrendError}</p>
-                  ) : agentTrend === undefined ? (
+                  {agentPaystubError !== undefined ? (
+                    <p className="form-error" role="alert">{agentPaystubError}</p>
+                  ) : agentPaystub === undefined ? (
                     <p className="subtle">Loading…</p>
-                  ) : agentTrend.trend.length === 0 ? (
-                    <p className="subtle">No recorded shifts in this range.</p>
                   ) : (
-                    <TrendStrip buckets={agentTrend.trend} formatDuration={formatHuman} />
+                    <>
+                      <AgentBreakdown paystub={agentPaystub} ownerName={selectedAgentRow.agent.owner.name} />
+                      <AgentSessionsTable source={selectedAgentRow.agent.source} models={agentPaystub.models} />
+                      <HourlyGraph
+                        buckets={agentPaystub.hourly}
+                        personLabel={selectedAgentRow.agent.owner.name}
+                        formatDuration={formatHuman}
+                        tokenBlind={selectedAgentRow.tokensReported ? [] : [sourceLabel(selectedAgentRow.agent.source)]}
+                      />
+                      {agentPaystub.codebases.length > 0 && (
+                        <ul className="app-list" data-testid="agent-codebase-list">
+                          {agentPaystub.codebases.map((entry) => (
+                            <li key={entry.repo ?? ""} className="app-row">
+                              <span className="app-name">{entry.repo ?? "No codebase recorded"}</span>
+                              <span className="app-duration">{formatHuman(entry.agentSeconds)}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {agentPaystub.trend.length === 0 ? (
+                        <p className="subtle">No recorded shifts in this range.</p>
+                      ) : (
+                        <TrendStrip buckets={agentPaystub.trend} formatDuration={formatHuman} />
+                      )}
+                    </>
                   )}
                 </section>
               )}
@@ -2210,7 +2262,6 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                 {boardMeasurement !== undefined && (
                   <>
                     <MemberBreakdown stats={boardMeasurement} self={viewingSelf} />
-                    <AgentSessionsTable byAgent={boardMeasurement.byAgent} />
                     <HourlyGraph
                       buckets={boardMeasurement.hourly}
                       personLabel={viewingSelf ? "You" : viewedMember.name}

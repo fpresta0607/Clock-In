@@ -563,6 +563,13 @@ export const agentPaystubFiltersSchema = z
 export const shiftCommitVerificationValues = ["pending", "merged", "reverted", "orphaned"] as const;
 export const shiftCommitVerificationSchema = z.enum(shiftCommitVerificationValues);
 
+/**
+ * A codebase label: the last segment of a repo root or working directory, so
+ * the surfaces can say which codebase an agent worked without handing anyone a
+ * path. Paths themselves stay behind the `repoRoot` rule.
+ */
+export const repoLabelSchema = z.string().min(1).max(200);
+
 export const shiftCommitViewSchema = z
   .object({
     id: idSchema,
@@ -608,20 +615,52 @@ export const agentPaystubResponseSchema = z
         tokens: tokenTotalsSchema,
         /** Whether any usage rows exist for this agent in range - rows, not nonzero sums. */
         tokensReported: z.boolean(),
+        /**
+         * The union of the owner's working intervals in range - their active
+         * time, the denominator leverage divides this agent's runtime by.
+         * Optional the way every field added after a response shipped is: the
+         * API and the dashboard deploy separately, so a client built after
+         * this must read its absence as absence rather than as a zero.
+         */
+        ownerActiveSeconds: z.number().int().nonnegative().safe().optional(),
+        /**
+         * This agent's runtime that fell outside its owner's presence
+         * entirely; `agentSeconds - awaySeconds` is the runtime they were
+         * there for. Same split the member breakdown reads, scoped to one
+         * agent instead of all of a person's.
+         */
+        awaySeconds: z.number().int().nonnegative().safe().optional(),
       })
       .strict(),
     /**
      * The model mix in range: one entry per distinct model the shifts named,
      * unnamed shifts under null. `tokens` is the model's own split of the
      * usage counters; null when this model reported nothing, so absence stays
-     * absence.
+     * absence. The session facts mirror `agentSplitSchema`, so the Agent
+     * sessions table reads the same six columns for an agent as for a person.
      */
     models: z.array(z
       .object({
         model: z.string().min(1).max(200).nullable(),
         agentSeconds: z.number().int().nonnegative().safe(),
         shiftCount: z.number().int().nonnegative().safe(),
+        /** Peak number of this model's shifts running at the same moment in range. */
+        maxConcurrent: z.number().int().nonnegative().safe().optional(),
+        /** Median length of those shifts, in seconds; 0 with no shifts. */
+        medianSeconds: z.number().int().nonnegative().safe().optional(),
         tokens: tokenTotalsSchema.nullable(),
+      })
+      .strict()),
+    /**
+     * Which codebases the agent worked in range, heaviest first: the shifts'
+     * own repo labels grouped and summed. Shifts whose working directory
+     * nothing recorded group under null.
+     */
+    codebases: z.array(z
+      .object({
+        repo: repoLabelSchema.nullable(),
+        agentSeconds: z.number().int().nonnegative().safe(),
+        shiftCount: z.number().int().nonnegative().safe(),
       })
       .strict()),
     shifts: z.array(z
@@ -631,6 +670,14 @@ export const agentPaystubResponseSchema = z
         endedAt: timestampSchema.nullable(),
         model: z.string().min(1).max(200).nullable(),
         durationSeconds: z.number().int().nonnegative().safe(),
+        /**
+         * The codebase this shift worked in - the last segment of its repo
+         * root, or of its working directory when it recorded no commit. A
+         * name, not a path, so it reaches every member of the workspace; the
+         * path itself stays under the `repoRoot` rule. Null when the shift
+         * recorded neither.
+         */
+        repo: repoLabelSchema.nullable(),
         commits: z.array(shiftCommitViewSchema),
       })
       .strict()),
@@ -643,6 +690,14 @@ export const agentPaystubResponseSchema = z
         heldRate: heldRateSchema,
       })
       .strict()),
+    /**
+     * The agent's own hourly series over the filter range, tiled exactly like
+     * the member-stats one: `agentSeconds` is this agent's summed runtime,
+     * `activeSeconds` its owner's active time in the same hour (the human
+     * line the runtime is read against), and the token fields stay null in
+     * hours nothing reported. Empty for the unbounded range.
+     */
+    hourly: z.array(hourlyBucketSchema),
   })
   .strict();
 
@@ -682,6 +737,8 @@ export const agentsReportRowSchema = z
     heldRate: heldRateSchema,
     /** Distinct models this agent's shifts named in range, capped; empty when none named one. */
     models: z.array(z.string().min(1).max(200)).max(20),
+    /** Distinct codebases this agent's shifts worked in range, capped; empty when none recorded one. */
+    repos: z.array(repoLabelSchema).max(20),
     /** Token totals over the range; reads as zeros while tokensReported is false. */
     tokens: tokenTotalsSchema,
     /** Whether any usage rows exist for this agent in range - rows, not nonzero sums. */

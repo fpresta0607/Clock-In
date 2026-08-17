@@ -51,6 +51,7 @@ import {
   type InsertShiftCommit,
   type ShiftCommitCountsRecord,
   type ShiftCommitRecord,
+  type ShiftRepoRootRecord,
   type ShiftCommitRepository,
   type ShiftCommitVerificationState,
   type AppTotalRecord,
@@ -825,10 +826,12 @@ export class DrizzleReportRepository implements ReportRepository {
     const intervalEnd = sql<Date>`coalesce(${agentSessions.endedAt}, ${agentSessions.lastEventAt})`;
     const rows = await this.db
       .select({
+        sessionId: agentSessions.id,
         userId: users.id,
         userName: users.name,
         source: agentSessions.source,
         model: agentSessions.model,
+        cwd: agentSessions.cwd,
         projectId: agentSessions.projectId,
         agentId: agentSessions.agentId,
         startedAt: agentSessions.startedAt,
@@ -853,9 +856,11 @@ export class DrizzleReportRepository implements ReportRepository {
         ...(query.toExclusive === undefined ? [] : [lt(agentSessions.startedAt, query.toExclusive)]),
       ));
     return rows.map((row) => ({
+      sessionId: row.sessionId,
       user: { id: row.userId, name: row.userName },
       source: row.source,
       model: row.model,
+      cwd: row.cwd,
       projectId: row.projectId,
       agentId: row.agentId,
       startedAt: row.startedAt,
@@ -1422,6 +1427,7 @@ export class DrizzleAgentRepository implements AgentRepository {
       .select({
         id: agentSessions.id,
         model: agentSessions.model,
+        cwd: agentSessions.cwd,
         status: agentSessions.status,
         startedAt: agentSessions.startedAt,
         endedAt: agentSessions.endedAt,
@@ -1549,6 +1555,40 @@ export class DrizzleShiftCommitRepository implements ShiftCommitRepository {
       : base
         .where(and(...conditions))
         .groupBy(shiftCommits.agentId));
+    return rows;
+  }
+
+  public async repoRootsByAgent(subject: AuthenticatedSubject, query: ReportQuery): Promise<ShiftRepoRootRecord[]> {
+    const projectScoped = query.projectId !== undefined || query.unassignedOnly === true;
+    const conditions = [
+      eq(shiftCommits.organizationId, subject.organizationId),
+      query.from === undefined ? undefined : gte(shiftCommits.authoredAt, query.from),
+      query.toExclusive === undefined ? undefined : lt(shiftCommits.authoredAt, query.toExclusive),
+      query.userId === undefined ? undefined : eq(shiftCommits.userId, query.userId),
+    ];
+    const base = this.db
+      .select({
+        agentId: shiftCommits.agentId,
+        agentSessionId: shiftCommits.agentSessionId,
+        // The shift's first commit in the range, the same commit the paystub's
+        // shiftRepoLabel reads (listForAgent orders by authoredAt, then id).
+        repoRoot: sql<string>`(array_agg(${shiftCommits.repoRoot} order by ${shiftCommits.authoredAt} asc, ${shiftCommits.id} asc))[1]`,
+      })
+      .from(shiftCommits);
+    const rows = await (projectScoped
+      ? base
+        .innerJoin(agentSessions, and(
+          eq(agentSessions.organizationId, shiftCommits.organizationId),
+          eq(agentSessions.id, shiftCommits.agentSessionId),
+        ))
+        .where(and(
+          ...conditions,
+          query.projectId === undefined ? isNull(agentSessions.projectId) : eq(agentSessions.projectId, query.projectId),
+        ))
+        .groupBy(shiftCommits.agentId, shiftCommits.agentSessionId)
+      : base
+        .where(and(...conditions))
+        .groupBy(shiftCommits.agentId, shiftCommits.agentSessionId));
     return rows;
   }
 
@@ -1682,6 +1722,21 @@ export class DrizzleAgentUsageRepository implements AgentUsageRepository {
         .groupBy(agentUsage.bucketStartAt)
         .orderBy(asc(agentUsage.bucketStartAt)));
     return rows;
+  }
+
+  public async sumByBucketForAgent(
+    subject: AuthenticatedSubject,
+    agentId: string,
+    query: ReportQuery,
+  ): Promise<AgentUsageBucketTotalRecord[]> {
+    // The paystub filters carry no project scope, so the agent id is the whole
+    // narrowing and no join through the shift is needed.
+    return this.db
+      .select({ bucketStartAt: agentUsage.bucketStartAt, ...this.usageSums() })
+      .from(agentUsage)
+      .where(and(...this.usageScopeConditions(subject, query), eq(agentUsage.agentId, agentId)))
+      .groupBy(agentUsage.bucketStartAt)
+      .orderBy(asc(agentUsage.bucketStartAt));
   }
 
   public async sumByAgent(subject: AuthenticatedSubject, query: ReportQuery): Promise<AgentUsageTotalsRecord[]> {

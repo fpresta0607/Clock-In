@@ -1,6 +1,7 @@
 import {
   agentSchema,
   clipInterval,
+  measureTime,
   type AgentPaystubFilters,
   type AgentPaystubResponse,
   type Interval,
@@ -22,7 +23,8 @@ import type {
   ShiftCommitRepository,
 } from "../repositories.js";
 import type { AgentSessionReaper } from "./agent-sessions.js";
-import { normalizedQuery, safeInteger } from "./reports.js";
+import { repoLabel } from "./attribution.js";
+import { hourlySeries, maxConcurrentCount, medianDurationSeconds, normalizedQuery, safeInteger } from "./reports.js";
 
 export interface AgentPatchInput {
   name?: string;
@@ -123,6 +125,16 @@ function heldRateOf(commits: readonly ShiftCommitRecord[]): number | null {
 
 const ZERO_TOKENS: TokenTotals = { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
 
+/**
+ * The codebase a shift worked: its own commit's repo root when it recorded
+ * one - the actual repository - and otherwise its working directory, which may
+ * sit inside the repo. Either way a label, never a path.
+ */
+function shiftRepoLabel(cwd: string | null, commits: readonly ShiftCommitRecord[]): string | null {
+  const root = commits[0]?.repoRoot ?? cwd;
+  return root === null || root === undefined ? null : repoLabel(root);
+}
+
 /** One model's token split, converted from its sql-sum record. */
 function usageTokens(record: AgentUsageModelTotalsRecord): TokenTotals {
   return {
@@ -210,6 +222,13 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
       const usageByModel = dependencies.agentUsage === undefined
         ? []
         : await dependencies.agentUsage.sumByAgentAndModel(subject, agentId, query);
+      const usageBuckets = dependencies.agentUsage === undefined
+        ? []
+        : await dependencies.agentUsage.sumByBucketForAgent(subject, agentId, query);
+      // The owner's presence is what "while they were there" and leverage are
+      // measured against; the paystub carries no project scope, so their
+      // working intervals are presence itself.
+      const ownerPresence = await dependencies.reports.readPresenceIntervals(subject, { ...query, userId: agent.owner.id });
       const commitsBySession = new Map<string, ShiftCommitRecord[]>();
       for (const commit of commits) {
         const existing = commitsBySession.get(commit.agentSessionId) ?? [];
@@ -218,33 +237,75 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
       }
 
       const showRepoRoot = subject.role === "admin" || agent.owner.id === subject.userId;
-      const shiftViews = shifts.map((shift) => ({
-        id: shift.id,
-        startedAt: shift.startedAt.toISOString(),
-        endedAt: shift.endedAt === null ? null : shift.endedAt.toISOString(),
-        model: shift.model,
-        durationSeconds: clippedSeconds(shift, range),
-        commits: (commitsBySession.get(shift.id) ?? []).map((commit) => asCommitView(commit, showRepoRoot)),
-      }));
+      const shiftViews = shifts.map((shift) => {
+        const shiftCommits = commitsBySession.get(shift.id) ?? [];
+        return {
+          id: shift.id,
+          startedAt: shift.startedAt.toISOString(),
+          endedAt: shift.endedAt === null ? null : shift.endedAt.toISOString(),
+          model: shift.model,
+          durationSeconds: clippedSeconds(shift, range),
+          repo: shiftRepoLabel(shift.cwd, shiftCommits),
+          commits: shiftCommits.map((commit) => asCommitView(commit, showRepoRoot)),
+        };
+      });
+      // The in-range slice of each shift, keyed by shift id, so the session
+      // facts (max at once, median) measure exactly the time the totals count.
+      const clippedById = new Map<string, Interval>();
+      for (const shift of shifts) {
+        const clipped = clipInterval(shiftInterval(shift), range);
+        if (clipped !== null) clippedById.set(shift.id, clipped);
+      }
 
       // The model mix: per-shift seconds (already rounded once per shift)
       // summed under each distinct model, unnamed shifts under null. Each
       // entry carries its own token split; a model with no usage rows keeps
-      // null, so absence stays absence.
+      // null, so absence stays absence. Max-at-once and median come from the
+      // clipped shift intervals, the same measurement the member breakdown's
+      // Agent-sessions table makes.
       const usageByModelKey = new Map(usageByModel.map((row) => [row.model, row]));
-      const modelMix = new Map<string | null, { model: string | null; agentSeconds: number; shiftCount: number; tokens: TokenTotals | null }>();
+      const modelMix = new Map<string | null, {
+        model: string | null;
+        agentSeconds: number;
+        shiftCount: number;
+        intervals: Interval[];
+        tokens: TokenTotals | null;
+      }>();
       for (const shift of shiftViews) {
         const usage = usageByModelKey.get(shift.model);
         const entry = modelMix.get(shift.model) ?? {
           model: shift.model,
           agentSeconds: 0,
           shiftCount: 0,
+          intervals: [],
           tokens: usage === undefined || safeInteger(usage.rowCount, "paystub usage row count") === 0 ? null : usageTokens(usage),
         };
         entry.agentSeconds += shift.durationSeconds;
         entry.shiftCount += 1;
+        const clipped = clippedById.get(shift.id);
+        if (clipped !== undefined) entry.intervals.push(clipped);
         modelMix.set(shift.model, entry);
       }
+
+      // The codebase mix, folded the same way: which repositories this agent
+      // worked, heaviest first, so a member can see where its hours went.
+      const codebaseMix = new Map<string | null, { repo: string | null; agentSeconds: number; shiftCount: number }>();
+      for (const shift of shiftViews) {
+        const entry = codebaseMix.get(shift.repo) ?? { repo: shift.repo, agentSeconds: 0, shiftCount: 0 };
+        entry.agentSeconds += shift.durationSeconds;
+        entry.shiftCount += 1;
+        codebaseMix.set(shift.repo, entry);
+      }
+
+      // The owner's active time and the runtime that fell outside it, measured
+      // by the one time model every other surface measures through.
+      const shiftIntervals = [...clippedById.values()];
+      const measurement = measureTime(
+        ownerPresence.map((row) => ({ start: row.startedAt.getTime(), end: row.endedAt.getTime() })),
+        shiftIntervals,
+        range,
+      );
+      const agentSeconds = shiftViews.reduce((sum, shift) => sum + shift.durationSeconds, 0);
 
       // Six weekly buckets ending at the range's end (or now, unbounded),
       // oldest first, read from their own window rather than the filter's.
@@ -279,7 +340,7 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
         agent: asAgentView(agent),
         filters,
         totals: {
-          agentSeconds: shiftViews.reduce((sum, shift) => sum + shift.durationSeconds, 0),
+          agentSeconds,
           shiftCount: countShifts(shifts, range),
           commitsRecorded: commits.length,
           commitsPending: commits.filter((commit) => commit.verification === "pending").length,
@@ -299,10 +360,27 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
             return totals;
           }, { ...ZERO_TOKENS }),
           tokensReported: usageByModel.some((row) => safeInteger(row.rowCount, "paystub usage row count") > 0),
+          ownerActiveSeconds: measurement.activeSeconds,
+          // The totals round once per shift and the sweep rounds once overall,
+          // so away is held inside agentSeconds - "while they were there"
+          // can never come out negative over a rounding remainder.
+          awaySeconds: Math.min(agentSeconds, measurement.concurrency.awaySeconds),
         },
-        models: [...modelMix.values()],
+        models: [...modelMix.values()].map(({ intervals, ...entry }) => ({
+          ...entry,
+          maxConcurrent: maxConcurrentCount(intervals),
+          medianSeconds: medianDurationSeconds(intervals),
+        })),
+        codebases: [...codebaseMix.values()]
+          .sort((a, b) => b.agentSeconds - a.agentSeconds || (a.repo ?? "").localeCompare(b.repo ?? "")),
         shifts: shiftViews,
         trend,
+        hourly: hourlySeries(
+          ownerPresence.map((row) => ({ start: row.startedAt.getTime(), end: row.endedAt.getTime() })),
+          shiftIntervals,
+          usageBuckets,
+          range,
+        ),
       };
     },
   };

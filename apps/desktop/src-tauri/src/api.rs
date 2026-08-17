@@ -226,6 +226,10 @@ pub struct AgentsReportRow {
     /// Distinct models this agent's shifts named in range; empty when none did.
     #[serde(default)]
     pub models: Vec<String>,
+    /// Distinct codebases this agent's shifts worked in range - names, never
+    /// paths; empty when no shift recorded a working directory.
+    #[serde(default)]
+    pub repos: Vec<String>,
     /// Token totals over the range; absent on an API that predates token
     /// reporting, which the webview shows as absence rather than zeros.
     #[serde(default)]
@@ -637,12 +641,68 @@ pub struct AgentPaystubTrendBucket {
     pub held_rate: Option<f64>,
 }
 
-/// The slice of the paystub the desktop plots: the weekly trend buckets. The
-/// shifts, models, and totals the paystub also carries are the web
-/// dashboard's business, so serde drops them here.
+/// One model's slice of an agent's paystub. The session facts are optional:
+/// an API from before they shipped sends neither, and the webview shows that
+/// absence as a dash rather than a zero nothing measured.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentPaystubTrend {
+pub struct AgentPaystubModel {
+    #[serde(default)]
+    pub model: Option<String>,
+    pub agent_seconds: u64,
+    pub shift_count: u32,
+    #[serde(default)]
+    pub max_concurrent: Option<u32>,
+    #[serde(default)]
+    pub median_seconds: Option<u64>,
+}
+
+/// One codebase's slice of an agent's paystub; `repo` is null for shifts that
+/// recorded no working directory.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPaystubCodebase {
+    #[serde(default)]
+    pub repo: Option<String>,
+    pub agent_seconds: u64,
+    pub shift_count: u32,
+}
+
+/// An agent's totals for the range. The paystub has always sent this block,
+/// so it is required; every field added to it since is optional-with-default,
+/// because the API deploys before any installer can.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPaystubTotals {
+    pub agent_seconds: u64,
+    pub shift_count: u32,
+    pub commits_recorded: u32,
+    #[serde(default)]
+    pub held_rate: Option<f64>,
+    #[serde(default)]
+    pub tokens: Option<AgentTokenTotals>,
+    #[serde(default)]
+    pub tokens_reported: bool,
+    /// The owner's active time in range - leverage's denominator.
+    #[serde(default)]
+    pub owner_active_seconds: Option<u64>,
+    /// Runtime that fell outside the owner's presence entirely.
+    #[serde(default)]
+    pub away_seconds: Option<u64>,
+}
+
+/// The slice of the paystub the desktop's Agents tab renders. The shift list
+/// is the web dashboard's business, so serde drops it here.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPaystub {
+    pub totals: AgentPaystubTotals,
+    #[serde(default)]
+    pub models: Vec<AgentPaystubModel>,
+    #[serde(default)]
+    pub codebases: Vec<AgentPaystubCodebase>,
+    #[serde(default)]
+    pub hourly: Vec<MeStatsHourlyBucket>,
     pub trend: Vec<AgentPaystubTrendBucket>,
 }
 
@@ -927,16 +987,16 @@ impl ApiClient {
             .await
     }
 
-    /// One agent's paystub trend: six weekly buckets ending at the range's
-    /// end (or now, unbounded), for the overlay's agents chart. Bounds arrive
-    /// together or not at all; both absent asks for all time.
-    pub async fn agent_paystub_trend(
+    /// One agent's paystub: its totals, model and codebase mixes, hourly
+    /// series and six weekly trend buckets, for the overlay's Agents tab.
+    /// Bounds arrive together or not at all; both absent asks for all time.
+    pub async fn agent_paystub(
         &self,
         access_token: &str,
         agent_id: &str,
         from_at: Option<&str>,
         to_exclusive_at: Option<&str>,
-    ) -> ApiResult<AgentPaystubTrend> {
+    ) -> ApiResult<AgentPaystub> {
         let query = match (from_at, to_exclusive_at) {
             (Some(from_at), Some(to_exclusive_at)) => {
                 format!("?fromAt={from_at}&toExclusiveAt={to_exclusive_at}")
@@ -1698,34 +1758,77 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_paystub_trend_out_of_a_full_paystub_response() {
-        let trend: AgentPaystubTrend = serde_json::from_str(
+    fn reads_the_agents_tab_slice_out_of_a_full_paystub_response() {
+        let paystub: AgentPaystub = serde_json::from_str(
             r#"{
                 "agent": {"id": "a1", "name": "Claude Code @ Field work"},
                 "filters": {},
-                "totals": {"agentSeconds": 5400, "shiftCount": 2},
-                "models": [],
+                "totals": {
+                    "agentSeconds": 5400,
+                    "shiftCount": 2,
+                    "commitsRecorded": 3,
+                    "heldRate": 0.5,
+                    "tokens": {"inputTokens": 12000, "outputTokens": 800, "cacheCreationInputTokens": 0, "cacheReadInputTokens": 0},
+                    "tokensReported": true,
+                    "ownerActiveSeconds": 3600,
+                    "awaySeconds": 1800
+                },
+                "models": [
+                    {"model": "claude-fable-5", "agentSeconds": 3600, "shiftCount": 1, "maxConcurrent": 2, "medianSeconds": 3600, "tokens": null}
+                ],
+                "codebases": [{"repo": "clock-in", "agentSeconds": 5400, "shiftCount": 2}],
                 "shifts": [{"id": "s1", "startedAt": "2026-08-06T10:00:00.000Z"}],
+                "hourly": [
+                    {"hourStart": "2026-08-06T10:00:00.000Z", "activeSeconds": 1800, "agentSeconds": 3600, "inputTokens": null, "outputTokens": null, "cacheCreationInputTokens": null, "cacheReadInputTokens": null}
+                ],
                 "trend": [
                     {"periodStartAt": "2026-07-27T00:00:00.000Z", "agentSeconds": 3600, "shiftCount": 1, "heldRate": null},
                     {"periodStartAt": "2026-08-03T00:00:00.000Z", "agentSeconds": 1800, "shiftCount": 1, "heldRate": 0.5}
                 ]
             }"#,
         )
-        .expect("paystub trend parses");
+        .expect("paystub parses");
 
-        // The rest of the paystub is the web dashboard's business; only the
-        // weekly buckets ride through to the webview.
-        assert_eq!(trend.trend.len(), 2);
-        assert_eq!(trend.trend[0].agent_seconds, 3_600);
-        assert_eq!(trend.trend[0].held_rate, None);
-        assert_eq!(trend.trend[1].held_rate, Some(0.5));
-        let echoed = serde_json::to_value(&trend).expect("trend serialize");
+        // The shift list is the web dashboard's business; everything the
+        // Agents tab renders rides through to the webview.
+        assert_eq!(paystub.totals.owner_active_seconds, Some(3_600));
+        assert_eq!(paystub.totals.away_seconds, Some(1_800));
+        assert_eq!(paystub.models[0].max_concurrent, Some(2));
+        assert_eq!(paystub.models[0].median_seconds, Some(3_600));
+        assert_eq!(paystub.codebases[0].repo.as_deref(), Some("clock-in"));
+        assert_eq!(paystub.hourly[0].agent_seconds, 3_600);
+        assert_eq!(paystub.trend.len(), 2);
+        assert_eq!(paystub.trend[0].held_rate, None);
+        assert_eq!(paystub.trend[1].held_rate, Some(0.5));
+        let echoed = serde_json::to_value(&paystub).expect("paystub serialize");
         assert_eq!(
             echoed["trend"][1]["periodStartAt"],
             "2026-08-03T00:00:00.000Z"
         );
         assert_eq!(echoed["trend"][0]["heldRate"], serde_json::Value::Null);
+        assert_eq!(echoed["models"][0]["maxConcurrent"], 2);
+    }
+
+    #[test]
+    fn reads_a_paystub_from_before_the_agents_tab_fields_shipped() {
+        // The API deploys before any installer can, so the reverse is also
+        // true: an installer built after these fields can meet an API from
+        // before them. Absence stays absence - never a zero nothing measured.
+        let paystub: AgentPaystub = serde_json::from_str(
+            r#"{
+                "totals": {"agentSeconds": 5400, "shiftCount": 2, "commitsRecorded": 0, "heldRate": null},
+                "models": [{"model": null, "agentSeconds": 5400, "shiftCount": 2}],
+                "trend": []
+            }"#,
+        )
+        .expect("previous-release paystub parses");
+
+        assert_eq!(paystub.totals.owner_active_seconds, None);
+        assert_eq!(paystub.totals.away_seconds, None);
+        assert_eq!(paystub.models[0].max_concurrent, None);
+        assert_eq!(paystub.models[0].median_seconds, None);
+        assert!(paystub.codebases.is_empty());
+        assert!(paystub.hourly.is_empty());
     }
 
     #[test]
