@@ -957,6 +957,29 @@ describe("the roster tab", () => {
     expect(row).toHaveTextContent("1h 30m");
   });
 
+  // The pay-run report already drops these; the web roster used to render them
+  // anyway, from its own agents list, as a row reading "-" for hours with no
+  // shifts, held rate, models or repos.
+  it("drops a retired agent the report has nothing for, and keeps it in the headcount", async () => {
+    const retired = { ...rosterAgent, id: "a9", name: "Claude Code @ 01M06FSGP392MH6VJNRX8T364A", status: "retired" };
+    const person = await signIn(clientFor({
+      agents: vi.fn().mockResolvedValue({ agents: [rosterAgent, retired] }),
+      agentsReport: vi.fn().mockResolvedValue({
+        ...agentsReportResponse,
+        headcount: { total: 2, active: 1, retired: 1 },
+      }),
+    }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+
+    const roster = await screen.findByTestId("roster-list");
+    await waitFor(() => expect(within(roster).getAllByRole("listitem")).toHaveLength(1));
+    expect(within(roster).queryByText(retired.name)).not.toBeInTheDocument();
+    // Hiding an empty row is not un-retiring anyone.
+    expect(screen.getByTestId("roster-headcount")).toHaveTextContent("Headcount 2 - 1 retired");
+  });
+
   it("names the retired share of the headcount once anyone is retired", async () => {
     const agentsReport = vi.fn().mockResolvedValue({
       ...agentsReportResponse,

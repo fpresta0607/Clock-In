@@ -1336,7 +1336,7 @@ export class DrizzleAgentRepository implements AgentRepository {
         // repo-less identity reads as "unassigned". A replay only touches
         // updatedAt - the name, owner and status a member may have set are
         // never overwritten.
-        name: defaultAgentName(input.name, input.repoRoot),
+        name: defaultAgentName(input.name, repoRoot),
       })
       .onConflictDoUpdate({
         target: unassigned

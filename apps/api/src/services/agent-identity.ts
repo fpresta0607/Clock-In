@@ -43,11 +43,6 @@ export async function graduateAgentForSession(
   now: Date,
 ): Promise<string | null> {
   if (!rosterEligibleSource(source)) return null;
-  // Evidence that names no codebase graduates nothing. A commit authored
-  // inside a per-run worktree reports that worktree as its repo root, and
-  // promoting a bucket onto it would strand the shift on an identity named
-  // after a run. The shift stays where it is until real evidence arrives.
-  if (identityRepoRoot(repoRoot) === null) return session.agentId;
 
   const mintIdentity = async (): Promise<string> => {
     const minted = await dependencies.agents.upsertForKey({
@@ -63,13 +58,25 @@ export async function graduateAgentForSession(
   };
 
   // A shift that started before the roster existed, or before its identity
-  // could be stamped, mints straight onto the codebase the evidence names.
+  // could be stamped, mints straight onto the codebase the evidence names -
+  // and into its operator's unassigned bucket when the evidence names only a
+  // run, because upsertForKey normalizes an opaque root away. This runs before
+  // the refusal below on purpose: an unstamped shift must never leave here
+  // without an identity, or the caller rejects its commit for a reason the
+  // uploader treats as permanent and the evidence is dropped rather than
+  // parked until a real codebase names it.
   if (session.agentId === null) {
     const agentId = await mintIdentity();
     await dependencies.agentSessions.stampAgent(subject, session.id, agentId, now);
     session.agentId = agentId;
     return agentId;
   }
+
+  // Evidence that names no codebase re-homes nothing. A commit authored
+  // inside a per-run worktree reports that worktree as its repo root, and
+  // promoting a stamped agent onto it would strand the shift on an identity
+  // named after a run. The shift stays where it is until real evidence arrives.
+  if (identityRepoRoot(repoRoot) === null) return session.agentId;
 
   const current = await dependencies.agents.findById(subject, session.agentId);
   // An agent the caller cannot see is not one to re-home a shift onto.

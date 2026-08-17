@@ -1563,6 +1563,15 @@ const RosterTab = ({
   const [renameDraft, setRenameDraft] = useState("");
   const selected = agents.find((agent) => agent.id === selectedAgentId);
   const rowsByAgentId = new Map(agentsReport?.rows.map((row) => [row.agent.id, row]));
+  // The pay-run report already drops a retired agent with nothing to show in
+  // the range, so the roster follows it rather than rendering a row with a
+  // dash for hours and no shifts, held rate, models or repos. Until the report
+  // arrives nothing is dropped - a missing row means "not loaded", not
+  // "nothing to show" - and the headcount above counts the retirement either
+  // way.
+  const listed = agentsReport === undefined || agentsReportFailed
+    ? agents
+    : agents.filter((agent) => agent.status !== "retired" || rowsByAgentId.has(agent.id));
   return (
     <>
       {agentsReport !== undefined && !agentsReportFailed && (
@@ -1573,10 +1582,10 @@ const RosterTab = ({
       )}
       {agentsFailed ? (
         <p className="subtle">Could not load the roster.</p>
-      ) : agents.length === 0 ? (
+      ) : listed.length === 0 ? (
         <p className="subtle">No agents on the roster yet. Coding-agent shifts mint them automatically.</p>
       ) : (
-        byOperatorThenRepo(agents).map((group) => (
+        byOperatorThenRepo(listed).map((group) => (
           <div className="roster-group" key={group.owner.id}>
             <p className="group-label">{group.owner.name}</p>
             <ol className="board-list roster-list" data-testid="roster-list">

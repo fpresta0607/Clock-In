@@ -251,6 +251,23 @@ describe("shift-commit service", () => {
     expect(shiftCommits.records[0]).toMatchObject({ agentId: ids.otherAgent });
   });
 
+  // A gate run commits from a worktree named after the run. That names no
+  // codebase, but the shift still has to come out of graduation with an
+  // identity: the rejection below is permanent to the uploader, so returning
+  // none here would drop the commit for good instead of parking it.
+  it("keeps the commit of an unstamped shift whose only evidence names a run", async () => {
+    const sessions = new MemoryAgentSessions([sessionRecord({ agentId: null })]);
+    const agents = new MemoryAgents();
+    const { service, shiftCommits } = createService({ agentSessions: sessions, agents });
+    const repoRoot = "C:/Users/alex/.no-mistakes/repos/3245fe18a7c8.git/worktrees/01M06FSGP392MH6VJNRX8T364A";
+
+    const result = await service.ingest(subject, [commitUpload({ repoRoot })]);
+
+    expect(result).toEqual({ accepted: 1, rejected: [] });
+    expect(sessions.stamps).toEqual([{ sessionId: ids.session, agentId: ids.otherAgent }]);
+    expect(shiftCommits.records[0]).toMatchObject({ agentId: ids.otherAgent, repoRoot });
+  });
+
   it("rejects a commit whose verifiedAt presence disagrees with its verification", async () => {
     const { service } = createService();
 

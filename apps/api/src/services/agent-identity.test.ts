@@ -9,6 +9,7 @@ import type {
   UpsertAgentForKey,
 } from "../repositories.js";
 import { graduateAgentForSession } from "./agent-identity.js";
+import { identityRepoRoot } from "./attribution.js";
 
 const ids = {
   organization: "0e59dfd6-3d1f-4795-9420-3ab65f0df843",
@@ -21,6 +22,8 @@ const subject: AuthenticatedSubject = { organizationId: ids.organization, userId
 const now = new Date("2026-08-16T14:00:00.000Z");
 const clockIn = "C:/dev/clock-in";
 const piggies = "C:/dev/pocket-piggies";
+/** What a gate run checks out: a directory named after the run, not a codebase. */
+const gateWorktree = "C:/Users/alex/.no-mistakes/repos/3245fe18a7c8.git/worktrees/01M06FSGP392MH6VJNRX8T364A";
 
 function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
   return {
@@ -72,12 +75,16 @@ class MemoryAgents implements AgentRepository {
 
   public async upsertForKey(input: UpsertAgentForKey): Promise<{ id: string }> {
     this.upserts.push(input);
+    // The real door normalizes a root that names no codebase away before it
+    // keys on one, so this does too: otherwise a per-run worktree mints an
+    // identity here that postgres would never have created.
+    const repoRoot = identityRepoRoot(input.repoRoot);
     const existing = this.rows.find((row) => row.status !== "retired"
       && row.owner.id === input.ownerUserId
       && row.source === input.source
-      && row.repoRoot === input.repoRoot);
+      && row.repoRoot === repoRoot);
     if (existing !== undefined) return { id: existing.id };
-    const minted = agentRecord({ id: crypto.randomUUID(), repoRoot: input.repoRoot, name: input.name });
+    const minted = agentRecord({ id: crypto.randomUUID(), repoRoot, name: input.name });
     this.rows.push(minted);
     return { id: minted.id };
   }
@@ -215,6 +222,38 @@ describe("late repo discovery", () => {
     expect(bucketGraduated).toBe(ids.bucket);
     expect(rehomed).not.toBe(ids.bucket);
     expect(agents.restamped).toEqual([{ agentSessionId: "s2", agentId: rehomed }]);
+  });
+
+  // Evidence naming a per-run worktree must never cost a shift its identity:
+  // the caller rejects a commit whose shift has none, and its uploader treats
+  // that rejection as permanent, so the evidence would be dropped for good.
+  it("parks an unstamped shift in the unassigned bucket when the evidence names only a run", async () => {
+    const agents = new MemoryAgents();
+    const row = session({ agentId: null });
+
+    const { agentSessions, result } = graduate(agents, row, gateWorktree);
+    const minted = await result;
+
+    expect(minted).not.toBeNull();
+    // The bucket, not a row named after the run - and the shift is stamped
+    // with it, so its commit records against a real identity.
+    expect(agents.rows[0]!.repoRoot).toBeNull();
+    expect(agentSessions.stamped).toEqual([{ sessionId: ids.session, agentId: minted }]);
+    expect(row.agentId).toBe(minted);
+  });
+
+  it("leaves a stamped shift where it is rather than re-homing it onto a run directory", async () => {
+    const agents = new MemoryAgents([agentRecord()]);
+    const row = session();
+
+    await expect(graduate(agents, row, gateWorktree).result).resolves.toBe(ids.bucket);
+
+    // The bucket never takes the run's directory as its codebase, and no
+    // second identity is minted for it either.
+    expect(agents.rows).toHaveLength(1);
+    expect(agents.rows[0]!.repoRoot).toBeNull();
+    expect(agents.upserts).toEqual([]);
+    expect(agents.restamped).toEqual([]);
   });
 
   it("mints nothing for a source that is not on the roster", async () => {

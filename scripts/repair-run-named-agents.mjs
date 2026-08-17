@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Folds agents named after a run back into their operator's unassigned bucket.
- * Dry run by default: prints exactly what would move and exits. Pass --confirm
- * to perform it.
+ * Folds agents named after a run back into their operator's unassigned bucket,
+ * and clears the placeholder models stored beside them. Dry run by default:
+ * prints exactly what would move and exits. Pass --confirm to perform it.
  *
  *   DATABASE_URL=postgres://... node scripts/repair-run-named-agents.mjs [--confirm]
  *
@@ -24,6 +24,15 @@
  * follow, then the emptied row is retired. Nothing is deleted, and an agent a
  * member has renamed is left alone - a name someone chose is not ours to
  * revisit, even on a row keyed this way.
+ *
+ * It also clears the model a runtime never attested. A CLI marks the entries
+ * it writes about itself - Claude Code stamps them `<synthetic>` - and a
+ * desktop old enough to read one out of a transcript stored it as the shift's
+ * model, which is why the roster read "Claude Code · <synthetic>". Both the
+ * reader and the API refuse it now, but the rows already stored keep rendering
+ * it until they are nulled. `agent_usage.model` is deliberately left alone:
+ * its bucket unique is nullsNotDistinct and the upsert folds with GREATEST, so
+ * collapsing two distinct buckets onto null would undercount the tokens.
  */
 import process from "node:process";
 
@@ -64,23 +73,36 @@ async function main() {
     order by organization_id, owner_user_id, source, id
   `;
   const runNamed = candidates.filter((agent) => namesOnlyARun(agent.repo_root));
+  // A name in angle brackets is a placeholder, never a model: `like '<%>'`
+  // mirrors `attestedModel` in apps/api/src/services/agent-sessions.ts exactly.
+  const [placeholders] = await sql`
+    select count(*)::int as count from agent_sessions where model like '<%>'
+  `;
+
   if (runNamed.length === 0) {
-    console.log("No agent is named after a run. Nothing to repair.");
+    console.log("No agent is named after a run.");
+  } else {
+    console.log(`${runNamed.length} agent(s) named after a run:`);
+    for (const agent of runNamed) console.log(`  ${agent.name}  (${agent.id})`);
+  }
+  console.log(`${placeholders.count} shift(s) store a placeholder where a model should be.`);
+
+  if (runNamed.length === 0 && placeholders.count === 0) {
+    console.log("Nothing to repair.");
     await sql.end();
     return;
   }
 
-  console.log(`${runNamed.length} agent(s) named after a run:`);
-  for (const agent of runNamed) console.log(`  ${agent.name}  (${agent.id})`);
-
   if (!confirm) {
-    console.log("\nDry run. Pass --confirm to fold these into their operator's unassigned bucket.");
+    console.log("\nDry run. Pass --confirm to fold the agents into their operator's unassigned bucket and clear the placeholder models.");
     await sql.end();
     return;
   }
 
   let merged = 0;
   let movedShifts = 0;
+  let movedCommits = 0;
+  let heldCommits = 0;
   for (const loser of runNamed) {
     await sql.begin(async (tx) => {
       // The operator's unassigned bucket for this runtime, minted if this is
@@ -95,8 +117,6 @@ async function main() {
           do update set updated_at = now()
         returning id
       `;
-      if (winner.id === loser.id) return;
-
       const shifts = await tx`
         update agent_sessions set agent_id = ${winner.id}, updated_at = now()
         where organization_id = ${loser.organization_id} and agent_id = ${loser.id}
@@ -107,10 +127,34 @@ async function main() {
       // the evidence does not follow its shift on its own: re-pointing only
       // the shift would strand every commit tally and token total on the row
       // being retired, and the merged agent would report neither.
-      await tx`
-        update shift_commits set agent_id = ${winner.id}
+      //
+      // The commit re-point is guarded the way DrizzleAgentRepository.merge
+      // guards its own: two shifts in the same worktree straddling the API
+      // deploy can leave the bucket already recording a commit this row also
+      // holds, and (organization, agent, repo_root, sha) is unique. A row the
+      // bucket already has stays where it is - it is a duplicate sighting, not
+      // a tally to lose - rather than aborting the fold mid-run.
+      const commits = await tx`
+        update shift_commits as loser_commits set agent_id = ${winner.id}
+        where loser_commits.organization_id = ${loser.organization_id}
+          and loser_commits.agent_id = ${loser.id}
+          and not exists (
+            select 1 from shift_commits as winner_commits
+            where winner_commits.organization_id = loser_commits.organization_id
+              and winner_commits.agent_id = ${winner.id}
+              and winner_commits.repo_root = loser_commits.repo_root
+              and winner_commits.sha = loser_commits.sha
+          )
+        returning loser_commits.id
+      `;
+      movedCommits += commits.length;
+      const held = await tx`
+        select id from shift_commits
         where organization_id = ${loser.organization_id} and agent_id = ${loser.id}
       `;
+      heldCommits += held.length;
+      // `agent_usage` needs no such guard: its bucket unique is keyed on
+      // agent_session_id, which does not move, so re-pointing cannot collide.
       await tx`
         update agent_usage set agent_id = ${winner.id}
         where organization_id = ${loser.organization_id} and agent_id = ${loser.id}
@@ -123,7 +167,17 @@ async function main() {
     });
   }
 
-  console.log(`\nFolded ${merged} agent(s) in, carrying ${movedShifts} shift(s). No evidence row was deleted.`);
+  const repairedModels = await sql`
+    update agent_sessions set model = null, updated_at = now()
+    where model like '<%>'
+    returning id
+  `;
+
+  console.log(`\nFolded ${merged} agent(s) in, carrying ${movedShifts} shift(s) and ${movedCommits} commit(s). No evidence row was deleted.`);
+  if (heldCommits > 0) {
+    console.log(`${heldCommits} commit(s) stayed on a retired row: the bucket already records that sha for the same repository.`);
+  }
+  console.log(`Cleared the placeholder model on ${repairedModels.length} shift(s).`);
 
   // The verification step, run for you: no anonymous agent may still be keyed
   // on a directory that names only a run. Renamed rows are excluded on
