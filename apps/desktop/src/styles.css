@@ -391,8 +391,10 @@ select:disabled { opacity: .55; }
 /* All stats carries a six-column table and two-line roster rows, so it takes
    whatever width the window has rather than staying at the settings panel's.
    In the default 520px window that is still 100%; resize wider and the rows
-   stop wrapping instead of staying cramped. */
-.today-card.modal { width: min(100%, 760px); }
+   stop wrapping instead of staying cramped. 760px still wrapped "Max at once"
+   and truncated "Median" on a maximised window, which is the whole point of
+   the box being wide. */
+.today-card.modal { width: min(100%, 1100px); }
 .modal-close { min-height: 30px; padding: 3px 10px; font-size: .72rem; text-transform: none; letter-spacing: normal; }
 
 /* Collapsible settings groups: native details/summary, one heading each. The
@@ -570,11 +572,14 @@ select:disabled { opacity: .55; }
 
 /* Which models ran, with session count, overlap, and length. */
 .agent-sessions { margin-top: 14px; }
-/* Six columns have to fit the 520px window the app opens at, so the cells
-   give up their side padding before the table gives up a column; the scroll
-   box behind them only engages if a window is narrower still. */
-.agent-sessions table { margin-top: 2px; font-size: .82rem; }
-.agent-sessions th, .agent-sessions td { padding-left: 5px; padding-right: 5px; }
+/* Six columns at the brand table's own size and rhythm - the same one the
+   Humans tab's rows read at. Squeezing the font and the side padding to make
+   them fit a 520px window is what made every column cramped at every width;
+   the columns keep their room and `.table-scroll` carries a narrow window
+   instead. A heading never wraps: "Max at once" over three lines is what the
+   header row looked like before. */
+.agent-sessions table { margin-top: 2px; }
+.agent-sessions th { white-space: nowrap; }
 .agent-sessions .numeric { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* A model that was never recorded reads muted, not as a bare gap. */
 .agent-sessions .subtle-cell { color: var(--text-secondary); }

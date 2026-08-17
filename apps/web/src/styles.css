@@ -289,6 +289,8 @@ a.download-secondary:hover { color: #ffffff; }
 /* Which models ran, with session count, overlap, and length. */
 .agent-sessions { margin-top: 14px; }
 .agent-sessions table { margin-top: 2px; }
+/* A heading never wraps; `.table-scroll` carries a narrow viewport instead. */
+.agent-sessions th { white-space: nowrap; }
 .agent-sessions .numeric { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* SVG charts: the hourly line graph and the weekly trend strip. Colors come
