@@ -683,6 +683,13 @@ pub struct SpoolEvent {
     /// it; every other event kind leaves it absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_head: Option<String>,
+    /// The repository the working directory sits in, probed by the hook at the
+    /// same moment as `start_head`. Unlike `start_head` this is contract data,
+    /// not sidecar-local: it names the codebase the shift's identity is keyed
+    /// on, so it rides all the way to the server. A cwd outside a repository,
+    /// or a machine without git, records nothing rather than an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -761,6 +768,7 @@ impl HookInput {
             occurred_at: self.occurred_at,
             cwd: Some(self.cwd),
             start_head: None,
+            repo_root: None,
             model: non_empty(self.model.as_deref()),
             rule_id: None,
             transcript_path: None,
@@ -904,6 +912,7 @@ fn translate_claude(
         occurred_at: now_iso8601(),
         cwd: Some(input.cwd),
         start_head: None,
+        repo_root: None,
         model: non_empty(input.model.as_deref()),
         rule_id: None,
         transcript_path: non_empty(input.transcript_path.as_deref()),
@@ -970,6 +979,7 @@ fn translate_native(value: &serde_json::Value, context: &ArgvContext) -> HookStd
         occurred_at: now_iso8601(),
         cwd: Some(cwd.to_string()),
         start_head: None,
+        repo_root: None,
         model: non_empty(model),
         rule_id: None,
         transcript_path: None,
@@ -1959,6 +1969,7 @@ mod tests {
             occurred_at: "2026-08-07T12:00:00Z".to_string(),
             cwd: Some("C:/dev/Clock-In".to_string()),
             start_head: None,
+            repo_root: None,
             model: None,
             rule_id: None,
             transcript_path: None,
@@ -2409,6 +2420,7 @@ mod tests {
             occurred_at: "2026-08-09T12:00:00Z".to_string(),
             cwd: None,
             start_head: None,
+            repo_root: None,
             model: None,
             rule_id: Some("r1".to_string()),
             transcript_path: None,

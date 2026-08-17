@@ -1000,6 +1000,7 @@ mod tests {
             occurred_at: "2026-08-06T10:00:00Z".to_string(),
             cwd: Some("C:/dev/clock-in".to_string()),
             start_head: None,
+            repo_root: None,
             model: None,
             rule_id: None,
             transcript_path: Some(transcript.to_string_lossy().into_owned()),
@@ -1127,6 +1128,7 @@ mod tests {
             occurred_at: "2026-08-12T13:36:06Z".to_string(),
             cwd: Some("C:/dev/Clock-In".to_string()),
             start_head: Some("a".repeat(40)),
+            repo_root: Some("C:/dev/Clock-In".to_string()),
             model: Some("claude-opus-4.1".to_string()),
             rule_id: None,
             transcript_path: Some("C:/Users/alex/.claude/projects/x/session-1.jsonl".to_string()),
@@ -1168,10 +1170,15 @@ mod tests {
                 "externalSessionId",
                 "model",
                 "occurredAt",
+                "repoRoot",
                 "source"
             ],
             "exactly the contract fields, no capture-only keys: {request}"
         );
+        // repoRoot is contract data and rides through; startHead is
+        // sidecar-local and must not, even though the hook writes them
+        // together from the same probe.
+        assert_eq!(event["repoRoot"], "C:/dev/Clock-In");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1204,6 +1211,7 @@ mod tests {
             occurred_at: occurred_at.to_string(),
             cwd: Some(cwd.to_string()),
             start_head: None,
+            repo_root: None,
             model: None,
             rule_id: None,
             transcript_path: None,
@@ -1225,6 +1233,7 @@ mod tests {
             occurred_at: "2026-08-12T13:36:06Z".to_string(),
             cwd: Some("C:/dev/Clock-In".to_string()),
             start_head: Some("a".repeat(40)),
+            repo_root: None,
             model: None,
             rule_id: None,
             transcript_path: None,

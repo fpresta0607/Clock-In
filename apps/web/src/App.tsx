@@ -1518,6 +1518,25 @@ type RosterTabProps = {
   agentsReportFailed: boolean;
 };
 
+/// The roster grouped the way v2 keys identity: by operator first, then by
+/// the codebase each of their agents works. The owner stops being a fact on
+/// the secondary line and becomes the heading a group sits under, which is
+/// what makes "whose agents are these" answerable at a glance.
+const byOperatorThenRepo = (agents: readonly Agent[]): { owner: Agent["owner"]; agents: Agent[] }[] => {
+  const groups = new Map<string, { owner: Agent["owner"]; agents: Agent[] }>();
+  for (const agent of agents) {
+    const group = groups.get(agent.owner.id) ?? { owner: agent.owner, agents: [] };
+    group.agents.push(agent);
+    groups.set(agent.owner.id, group);
+  }
+  for (const group of groups.values()) {
+    // The unassigned bucket sorts last within an operator: it is where shifts
+    // wait for a codebase, not a codebase of its own.
+    group.agents.sort((a, b) => (a.repoName ?? "￿").localeCompare(b.repoName ?? "￿") || a.name.localeCompare(b.name));
+  }
+  return [...groups.values()].sort((a, b) => a.owner.name.localeCompare(b.owner.name));
+};
+
 /// The roster in the board's own grammar, with an agent's paystub in the
 /// detail region below. Hours come from the pay-run report, keyed by agent id.
 const RosterTab = ({
@@ -1550,8 +1569,11 @@ const RosterTab = ({
       ) : agents.length === 0 ? (
         <p className="subtle">No agents on the roster yet. Coding-agent shifts mint them automatically.</p>
       ) : (
-        <ol className="board-list roster-list" data-testid="roster-list">
-          {agents.map((agent) => {
+        byOperatorThenRepo(agents).map((group) => (
+          <div className="roster-group" key={group.owner.id}>
+            <p className="group-label">{group.owner.name}</p>
+            <ol className="board-list roster-list" data-testid="roster-list">
+          {group.agents.map((agent) => {
             const row = rowsByAgentId.get(agent.id);
             return (
               <li
@@ -1595,11 +1617,15 @@ const RosterTab = ({
                       </span>
                       <span className="board-facts">
                         <span className="board-fact">{agentRuntimeLabel(agent.source)}</span>
-                        <span className="board-fact">{agent.owner.name}</span>
+                        {/* The codebase this identity is keyed on - a name,
+                            never the path, which reaches only its owner and
+                            workspace admins. The owner is the group heading
+                            now, so it leaves this line. */}
+                        {agent.repoName !== undefined && <span className="board-fact is-repo">{agent.repoName}</span>}
                         {(row?.models ?? []).map((model) => <span key={model} className="board-fact">{model}</span>)}
-                        {/* The codebases the shifts worked - names, not paths,
-                            so they reach every member of the workspace. */}
-                        {(row?.repos ?? []).map((repo) => <span key={repo} className="board-fact is-repo">{repo}</span>)}
+                        {/* Codebases its shifts touched beyond its own. */}
+                        {(row?.repos ?? []).filter((repo) => repo !== agent.repoName)
+                          .map((repo) => <span key={repo} className="board-fact is-repo">{repo}</span>)}
                         {row !== undefined && (
                           <>
                             <span className="board-fact">{row.shiftCount} shift{row.shiftCount === 1 ? "" : "s"}</span>
@@ -1623,13 +1649,21 @@ const RosterTab = ({
               </li>
             );
           })}
-        </ol>
+            </ol>
+          </div>
+        ))
       )}
 
       {selected !== undefined && (
         <section className="member-stats" aria-labelledby="paystub-title" data-testid="agent-paystub">
           <div className="member-stats-head">
-            <h3 id="paystub-title">{selected.name} · {rangeLabel}</h3>
+            {/* The header names the codebase beside the agent, so a paystub
+                is never ambiguous between an operator's two repos. */}
+            <h3 id="paystub-title">
+              {selected.name}
+              {selected.repoName !== undefined && <span className="paystub-repo"> · {selected.repoName}</span>}
+              {" · "}{rangeLabel}
+            </h3>
           </div>
           {paystubFailed ? (
             <p className="subtle">Could not load this agent's paystub.</p>

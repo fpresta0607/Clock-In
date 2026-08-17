@@ -34,8 +34,15 @@ directory (`repoLabel`) - while the path itself stays under the `repoRoot` rule.
 recorded no directory is `null` and reads "No codebase recorded"; there is no default codebase, just
 as `resolveProjectForCwd` returns null rather than falling back to a project.
 
-Agents are durable identities, not rows per run: one `agents` row per `(organization, source,
-project)` — the harness working a project — and each `agent_sessions` row is one of its shifts.
+Agents are durable identities, not rows per run: one `agents` row per `(organization, owner, source,
+repo_root)` — one person's harness working one codebase — and each `agent_sessions` row is one of its
+shifts. The operator is the authenticated uploader, so the dimension costs each runtime nothing. A
+null `repo_root` is that operator's unassigned bucket, a real roster row that graduates in place when
+a commit names its codebase (`graduateAgentForSession`); `project_id` stays on the row as a
+re-derivable attribute and never as identity. Both partial uniques exclude retired rows, and
+`upsertForKey`'s ON CONFLICT `targetWhere` must restate each index's predicate exactly - postgres
+matches an arbiter to a partial index by that predicate, and a mismatch passes every mocked
+repository and then fails every insert.
 A model is an attribute of a shift, never an identity: `agent_sessions.model` says what the runtime
 was driving, and neither it nor `source` is ever derived from the other. Browser spans are attention
 rather than payroll, so `rosterEligibleSource` keeps them off the roster. Commits made during a

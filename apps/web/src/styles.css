@@ -91,6 +91,9 @@ a.primary { display: inline-block; text-decoration: none; }
    owner, models, codebases, shifts, held rate - so it gets two rows of its
    own instead of one right-aligned line that clips. The facts wrap between
    themselves at any width; only the name is allowed to ellipsize. */
+/* Operator groups: the owner is a heading now, not a fact on every row. */
+.roster-group + .roster-group { margin-top: 12px; }
+.roster-group .group-label { margin: 0 0 4px; }
 .roster-list li { display: flex; align-items: flex-start; gap: 8px; }
 .roster-list li .board-choice {
   flex: 1;
@@ -113,6 +116,7 @@ a.primary { display: inline-block; text-decoration: none; }
    own box rather than pushing the card sideways. */
 .table-scroll { overflow-x: auto; }
 .shift-repo { margin-left: 8px; color: var(--mint); }
+.paystub-repo { color: var(--mint); }
 .manage-rename { display: flex; flex: 1; gap: 8px; align-items: center; }
 .manage-rename input { flex: 1; min-width: 0; }
 

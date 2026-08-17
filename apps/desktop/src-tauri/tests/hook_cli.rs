@@ -433,6 +433,13 @@ fn a_started_event_over_a_git_repo_records_the_head_at_shift_start() {
     let value: serde_json::Value =
         serde_json::from_str(content.lines().next().expect("one line")).expect("line parses");
     assert_eq!(value["startHead"], head);
+    // The same probe names the codebase the shift's identity is keyed on.
+    // Both come from one `Started` line; only this one is contract data.
+    let recorded = value["repoRoot"].as_str().expect("the repo root records");
+    assert_eq!(
+        std::fs::canonicalize(recorded).expect("canonical"),
+        std::fs::canonicalize(&repo).expect("canonical")
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -468,6 +475,9 @@ fn a_started_event_over_a_non_repo_cwd_records_no_head() {
     let value: serde_json::Value =
         serde_json::from_str(content.lines().next().expect("one line")).expect("line parses");
     assert!(value.get("startHead").is_none());
+    // A cwd outside a repository names no codebase; the shift lands in its
+    // operator's unassigned bucket and graduates from a later commit.
+    assert!(value.get("repoRoot").is_none());
 
     let _ = std::fs::remove_dir_all(&dir);
 }

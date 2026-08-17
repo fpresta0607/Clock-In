@@ -2150,10 +2150,14 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                         <span className="board-facts">
                           <span className="board-fact">{sourceLabel(row.agent.source)}</span>
                           <span className="board-fact">{row.agent.owner.name}</span>
+                          {/* The codebase this identity is keyed on - a name,
+                              never the path, which reaches only its owner and
+                              workspace admins. */}
+                          {row.agent.repoName !== null && <span className="board-fact is-repo">{row.agent.repoName}</span>}
                           {row.models.map((model) => <span key={model} className="board-fact">{model}</span>)}
-                          {/* The codebases the shifts worked - names, not
-                              paths, so they reach every member. */}
-                          {row.repos.map((repo) => <span key={repo} className="board-fact is-repo">{repo}</span>)}
+                          {/* Codebases its shifts touched beyond its own. */}
+                          {row.repos.filter((repo) => repo !== row.agent.repoName)
+                            .map((repo) => <span key={repo} className="board-fact is-repo">{repo}</span>)}
                           <span className="board-fact">{row.shiftCount} shift{row.shiftCount === 1 ? "" : "s"}</span>
                           <span className="board-fact">
                             {row.heldRate === null ? "held pending" : `${Math.round(row.heldRate * 100)}% held`}
