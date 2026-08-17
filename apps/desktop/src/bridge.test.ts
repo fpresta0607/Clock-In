@@ -157,7 +157,7 @@ describe("defaultBridge", () => {
       activeSeconds: 7_000,
       agentSeconds: 3_600,
       concurrency: { t0Seconds: 3_400, t1Seconds: 3_600, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 },
-      byAgent: [{ source: "claude_code", model: null, durationSeconds: 3_600, sessionCount: 1, maxConcurrent: 1, medianSeconds: 3_600 }],
+      byAgent: [{ source: "claude_code", model: null, durationSeconds: 3_600 }],
       hourly: [],
       agents: [],
     };
@@ -198,7 +198,7 @@ describe("defaultBridge", () => {
     });
   });
 
-  it("tolerates a stats payload from an API that predates hourly and session details", async () => {
+  it("tolerates a stats payload from an API that predates the hourly series", async () => {
     invoke.mockResolvedValueOnce({
       filters: {},
       totalDurationSeconds: 0,
@@ -214,8 +214,7 @@ describe("defaultBridge", () => {
 
     await expect(defaultBridge.meStats(undefined, undefined)).resolves.toMatchObject({
       hourly: [],
-      // Absent fields decode to null - absence shown as absence, not zero.
-      byAgent: [{ source: "claude_code", model: null, durationSeconds: 0, sessionCount: null, maxConcurrent: null, medianSeconds: null }],
+      byAgent: [{ source: "claude_code", model: null, durationSeconds: 0 }],
     });
   });
 
@@ -289,10 +288,23 @@ describe("defaultBridge", () => {
     });
   });
 
-  it("decodes the paystub trend and rejects a payload without one", async () => {
+  it("decodes the paystub the Agents tab renders and rejects a payload without a trend", async () => {
     invoke.mockResolvedValueOnce({
       agent: { id: "a1", name: "Claude Code @ Field work" },
-      totals: { agentSeconds: 5_400, shiftCount: 2 },
+      totals: {
+        agentSeconds: 5_400,
+        shiftCount: 2,
+        commitsRecorded: 3,
+        heldRate: 0.5,
+        tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
+        tokensReported: true,
+        ownerActiveSeconds: 3_600,
+        awaySeconds: 1_800,
+      },
+      models: [{ model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, maxConcurrent: 2, medianSeconds: 3_600, tokens: null }],
+      codebases: [{ repo: "clock-in", agentSeconds: 5_400, shiftCount: 2 }],
+      // The shift list is the web dashboard's business; serde already drops it.
+      hourly: [],
       trend: [
         { periodStartAt: "2026-07-27T00:00:00.000Z", agentSeconds: 3_600, shiftCount: 1, heldRate: null },
         { periodStartAt: "2026-08-03T00:00:00.000Z", agentSeconds: 1_800, shiftCount: 1, heldRate: 0.5 },
@@ -301,17 +313,44 @@ describe("defaultBridge", () => {
 
     const fromAt = "2026-08-01T00:00:00.000Z";
     const toExclusiveAt = "2026-08-08T00:00:00.000Z";
-    await expect(defaultBridge.agentPaystubTrend("a1", fromAt, toExclusiveAt)).resolves.toEqual({
+    await expect(defaultBridge.agentPaystub("a1", fromAt, toExclusiveAt)).resolves.toEqual({
+      totals: {
+        agentSeconds: 5_400,
+        shiftCount: 2,
+        commitsRecorded: 3,
+        heldRate: 0.5,
+        tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
+        tokensReported: true,
+        ownerActiveSeconds: 3_600,
+        awaySeconds: 1_800,
+      },
+      models: [{ model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, maxConcurrent: 2, medianSeconds: 3_600 }],
+      codebases: [{ repo: "clock-in", agentSeconds: 5_400, shiftCount: 2 }],
+      hourly: [],
       trend: [
         { periodStartAt: "2026-07-27T00:00:00.000Z", agentSeconds: 3_600, shiftCount: 1, heldRate: null },
         { periodStartAt: "2026-08-03T00:00:00.000Z", agentSeconds: 1_800, shiftCount: 1, heldRate: 0.5 },
       ],
     });
-    expect(invoke).toHaveBeenLastCalledWith("agent_paystub_trend", { agentId: "a1", fromAt, toExclusiveAt });
+    expect(invoke).toHaveBeenLastCalledWith("agent_paystub", { agentId: "a1", fromAt, toExclusiveAt });
+
+    // An API from before the Agents tab's fields shows absence as absence: a
+    // dash in the table, never a zero nothing measured.
+    invoke.mockResolvedValueOnce({
+      totals: { agentSeconds: 5_400, shiftCount: 2, commitsRecorded: 0, heldRate: null },
+      models: [{ model: null, agentSeconds: 5_400, shiftCount: 2 }],
+      trend: [],
+    });
+    await expect(defaultBridge.agentPaystub("a1")).resolves.toMatchObject({
+      totals: { ownerActiveSeconds: null, awaySeconds: null, tokens: null, tokensReported: false },
+      models: [{ maxConcurrent: null, medianSeconds: null }],
+      codebases: [],
+      hourly: [],
+    });
 
     // The trend is required: an API that cannot send it is invalid, not an empty chart.
-    invoke.mockResolvedValueOnce({ agent: { id: "a1" } });
-    await expect(defaultBridge.agentPaystubTrend("a1")).rejects.toMatchObject({ kind: "unknown" });
+    invoke.mockResolvedValueOnce({ agent: { id: "a1" }, totals: { agentSeconds: 0, shiftCount: 0, commitsRecorded: 0, heldRate: null } });
+    await expect(defaultBridge.agentPaystub("a1")).rejects.toMatchObject({ kind: "unknown" });
   });
 
   it("decodes the pay-run report, with zero-activity agents and a null held rate", async () => {
@@ -335,6 +374,7 @@ describe("defaultBridge", () => {
         commitsOrphaned: 0,
         heldRate: null,
         models: ["claude-fable-5"],
+        repos: ["clock-in"],
         tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
         tokensReported: true,
       }],
@@ -346,14 +386,14 @@ describe("defaultBridge", () => {
     await expect(defaultBridge.agentsReport(fromAt, toExclusiveAt)).resolves.toEqual(report);
     expect(invoke).toHaveBeenLastCalledWith("agents_report", { fromAt, toExclusiveAt, scope: undefined });
 
-    // An API from before the models and token fields shipped decodes them as
-    // empty and absent: no models named, null totals, nothing reported.
+    // An API from before the models, codebase and token fields shipped decodes
+    // them as empty and absent: nothing named, null totals, nothing reported.
     invoke.mockResolvedValueOnce({
       headcount: report.headcount,
-      rows: report.rows.map(({ models: _models, tokens: _tokens, tokensReported: _tokensReported, ...row }) => row),
+      rows: report.rows.map(({ models: _models, repos: _repos, tokens: _tokens, tokensReported: _tokensReported, ...row }) => row),
     });
     await expect(defaultBridge.agentsReport(fromAt, toExclusiveAt)).resolves.toMatchObject({
-      rows: [{ models: [], tokens: null, tokensReported: false }],
+      rows: [{ models: [], repos: [], tokens: null, tokensReported: false }],
     });
 
     // A malformed totals object is still a hard failure.

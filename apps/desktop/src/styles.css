@@ -359,11 +359,38 @@ select:disabled { opacity: .55; }
 .board-times { display: grid; justify-items: end; gap: 2px; }
 .board-agent { color: var(--text-secondary); font-size: .72rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
+/* A roster row carries far more than a rank and a number - runtime, owner,
+   models, codebases, shifts, held rate - so it gets two rows of its own
+   instead of one right-aligned line that clips. The facts wrap between
+   themselves at any width; only the name is allowed to ellipsize. */
+.board-list.is-roster { max-height: 16rem; }
+.board-list.is-roster .board-choice {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  row-gap: 4px;
+  padding: 7px 8px;
+}
+.board-facts { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 8px; color: var(--text-secondary); font-size: .72rem; }
+.board-fact { display: inline-block; overflow-wrap: anywhere; }
+.board-fact + .board-fact::before { content: "·"; margin-right: 8px; color: var(--glass-border); }
+/* The codebase is the fact org members came here for, so it reads at full
+   contrast while the rest of the line stays secondary. */
+.board-fact.is-repo { color: var(--mint); }
+
+/* Six columns in a 520px-wide window will not fit; the table scrolls inside
+   its own box rather than pushing the panel sideways. */
+.table-scroll { overflow-x: auto; }
+
 /* Settings overlay, same pattern as the web app's help dialog. */
 .modal-overlay { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 20px; background: rgba(3, 5, 10, .72); }
 /* The overlay panels carry more padding than a plain card: their content runs
    edge to edge otherwise, which is what made settings feel cramped. */
 .modal { width: min(100%, 440px); max-height: calc(100vh - 60px); padding: 22px 24px 24px; overflow-y: auto; text-align: left; }
+/* All stats carries a six-column table and two-line roster rows, so it takes
+   whatever width the window has rather than staying at the settings panel's.
+   In the default 520px window that is still 100%; resize wider and the rows
+   stop wrapping instead of staying cramped. */
+.today-card.modal { width: min(100%, 760px); }
 .modal-close { min-height: 30px; padding: 3px 10px; font-size: .72rem; text-transform: none; letter-spacing: normal; }
 
 /* Collapsible settings groups: native details/summary, one heading each. The

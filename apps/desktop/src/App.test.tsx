@@ -129,13 +129,33 @@ const agentsReport = {
     commitsOrphaned: 0,
     heldRate: null,
     models: ["claude-fable-5"],
+    repos: ["clock-in"],
     tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
     tokensReported: true,
   }],
 };
 
-/// The paystub trend the Agents tab charts: six weekly buckets, oldest first.
-const agentPaystubTrend = {
+/// The paystub the Agents tab renders for the picked roster agent.
+const agentPaystub = {
+  totals: {
+    agentSeconds: 5_400,
+    shiftCount: 2,
+    commitsRecorded: 3,
+    heldRate: 0.5,
+    tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
+    tokensReported: true,
+    ownerActiveSeconds: 3_600,
+    awaySeconds: 1_800,
+  },
+  models: [
+    { model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, maxConcurrent: 2, medianSeconds: 3_600 },
+    { model: null, agentSeconds: 1_800, shiftCount: 1, maxConcurrent: 1, medianSeconds: 1_800 },
+  ],
+  codebases: [
+    { repo: "clock-in", agentSeconds: 3_600, shiftCount: 1 },
+    { repo: null, agentSeconds: 1_800, shiftCount: 1 },
+  ],
+  hourly: [],
   trend: [
     { periodStartAt: "2026-07-06T00:00:00.000Z", agentSeconds: 0, shiftCount: 0, heldRate: null },
     { periodStartAt: "2026-07-13T00:00:00.000Z", agentSeconds: 1_800, shiftCount: 1, heldRate: null },
@@ -177,7 +197,7 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   settingsUpdate: vi.fn().mockResolvedValue(settings),
   meStats: vi.fn().mockResolvedValue(meStats),
   agentsReport: vi.fn().mockResolvedValue(agentsReport),
-  agentPaystubTrend: vi.fn().mockResolvedValue(agentPaystubTrend),
+  agentPaystub: vi.fn().mockResolvedValue(agentPaystub),
   projectCreate: vi.fn().mockResolvedValue(newProject),
   projectUpdate: vi.fn().mockResolvedValue(project),
   projectUsage: vi.fn().mockResolvedValue({ sessionCount: 0, durationSeconds: 0, agentSessionCount: 0 }),
@@ -194,6 +214,14 @@ const openAllStats = async (person: ReturnType<typeof userEvent.setup>): Promise
   await person.click(await screen.findByTestId("all-stats-trigger"));
   // The overlay is titled by the workspace it shows.
   return screen.getByRole("dialog", { name: /SIQstack|All stats/ });
+};
+
+/// Opens All stats and switches to the Agents tab, returning the dialog.
+const openAgentsTab = async (person: ReturnType<typeof userEvent.setup>): Promise<HTMLElement> => {
+  const panel = await openAllStats(person);
+  await person.click(within(panel).getByRole("button", { name: "Agents" }));
+  await within(panel).findByTestId("agent-roster-list");
+  return panel;
 };
 
 /// Opens the settings overlay from the titlebar gear and returns the dialog.
@@ -487,47 +515,15 @@ describe("today", () => {
     expect(within(panel).getByText("VS Code")).toBeInTheDocument();
   });
 
-  it("lists every model in the agent sessions table, including background-only runtimes", async () => {
+  it("keeps the agent session stats off the Humans tab - they belong to the agent", async () => {
     const person = userEvent.setup();
-    render(<App bridge={bridgeFor({
-      meStats: vi.fn().mockResolvedValue({
-        ...meStats,
-        apps: [{ processName: "claude.exe", durationSeconds: 3_600 }],
-        byAgent: [
-          { source: "claude_code", model: "claude-fable-5", durationSeconds: 3_000, sessionCount: 4, maxConcurrent: 2, medianSeconds: 750 },
-          { source: "codex", model: null, durationSeconds: 600, sessionCount: 1, maxConcurrent: 1, medianSeconds: 600 },
-        ],
-      }),
-    })} />);
+    render(<App bridge={bridgeFor()} />);
 
     const panel = await openAllStats(person);
-    const sessions = await within(panel).findByTestId("agent-sessions");
-    expect(sessions).toHaveTextContent("claude-fable-5");
-    expect(sessions).toHaveTextContent("Codex");
-    // The app row still folds the CLI into one friendly "Claude Code" row,
-    // and the sessions table names the same runtime in its Runtime column.
-    expect(within(panel).getAllByText("Claude Code").length).toBeGreaterThan(0);
-  });
-
-  it("shows absence as a dash when the API predates the session details, and names an unrecorded model", async () => {
-    const person = userEvent.setup();
-    render(<App bridge={bridgeFor({
-      meStats: vi.fn().mockResolvedValue({
-        ...meStats,
-        byAgent: [
-          { source: "claude_code", model: null, durationSeconds: 3_600, sessionCount: null, maxConcurrent: null, medianSeconds: null },
-        ],
-      }),
-    })} />);
-
-    const panel = await openAllStats(person);
-    const sessions = await within(panel).findByTestId("agent-sessions");
-    const cells = [...sessions.querySelectorAll("tbody td")].map((cell) => cell.textContent);
-    // Runtime leads; sessions, max at once and median are dashes, never fake
-    // zeros; the duration the API did send still renders. A null model is a
-    // shift whose hook named none - said out loud, never a bare dash.
-    expect(cells).toEqual(["Claude Code", "not recorded", "-", "-", "1h 00m", "-"]);
-    expect(sessions).toHaveTextContent("Sessions recorded before model capture show not recorded.");
+    const stats = await within(panel).findByTestId("member-stats");
+    expect(within(stats).queryByTestId("agent-sessions")).not.toBeInTheDocument();
+    expect(within(stats).queryByTestId("agent-breakdown")).not.toBeInTheDocument();
+    expect(within(stats).getByTestId("breakdown")).not.toHaveTextContent("Total agent time");
   });
 });
 
@@ -1081,9 +1077,11 @@ describe("the team board", () => {
     expect(breakdown).toHaveTextContent("With 1 agent");
     expect(breakdown).toHaveTextContent("With 3+ agents");
     expect(breakdown).toHaveTextContent("1h 30m");
-    expect(breakdown).toHaveTextContent("Agents while away");
-    expect(breakdown).toHaveTextContent("30m");
     expect(breakdown).not.toHaveTextContent("With 2 agents");
+    // What the agents themselves added up to is the agent's number, not the
+    // person's; it lives on the Agents tab now.
+    expect(breakdown).not.toHaveTextContent("while away");
+    expect(breakdown).not.toHaveTextContent("Total agent time");
   });
 
   it("keeps the breakdown quiet when there is nothing recorded", async () => {
@@ -1243,10 +1241,14 @@ describe("the agents tab", () => {
     const row = within(roster).getByText("Claude Code @ Field work").closest("li");
     // The roster is the selector: the first row opens selected, and its
     // paystub trend renders underneath as a measured bar per weekly bucket.
+    // Every secondary fact is its own span, so the line wraps rather than
+    // clipping; the separators are drawn, not written into the text.
     expect(row).toHaveClass("is-selected");
-    expect(row).toHaveTextContent("Claude Code · claude-fable-5 · 2 shifts");
-    await waitFor(() => expect(bridge.agentPaystubTrend).toHaveBeenCalled());
-    expect(vi.mocked(bridge.agentPaystubTrend).mock.calls.at(-1)?.[0]).toBe(agentsReport.rows[0]!.agent.id);
+    for (const fact of ["Claude Code", "Timer User", "claude-fable-5", "clock-in", "2 shifts", "held pending"]) {
+      expect(within(row!).getByText(fact)).toHaveClass("board-fact");
+    }
+    await waitFor(() => expect(bridge.agentPaystub).toHaveBeenCalled());
+    expect(vi.mocked(bridge.agentPaystub).mock.calls.at(-1)?.[0]).toBe(agentsReport.rows[0]!.agent.id);
     const trend = await within(panel).findByTestId("paystub-trend");
     const bars = trend.querySelectorAll('rect[data-series="week"]');
     expect(bars).toHaveLength(6);
@@ -1285,6 +1287,64 @@ describe("the agents tab", () => {
     expect(graph.querySelector('path[data-series="human"]')).not.toBeNull();
   });
 
+  it("puts the agent's runtime split, sessions table and codebases under the picked agent", async () => {
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor()} />);
+
+    const panel = await openAgentsTab(person);
+    const stats = await within(panel).findByTestId("overlay-agent-stats");
+
+    // The runtime block reads against its owner's hours, by name, and the
+    // ratio divides by those hours rather than the caller's.
+    const breakdown = await within(stats).findByTestId("agent-breakdown");
+    expect(breakdown).toHaveTextContent("Agent runtime — summed, may exceed Timer User's hours");
+    expect(breakdown).toHaveTextContent("While Timer User was there");
+    expect(breakdown).toHaveTextContent("1h 00m");
+    expect(breakdown).toHaveTextContent("Ran while away");
+    expect(breakdown).toHaveTextContent("Total agent time · leverage");
+    expect(breakdown).toHaveTextContent("1h 30m · 1.5×");
+    expect(breakdown).toHaveTextContent("50%");
+
+    // The sessions table is this agent's shifts, folded per model - the
+    // runtime column is its one runtime, never another worker's.
+    const sessions = within(stats).getByTestId("agent-sessions");
+    const cells = [...sessions.querySelectorAll("tbody td")].map((cell) => cell.textContent);
+    expect(cells).toEqual([
+      "Claude Code", "claude-fable-5", "1", "2", "1h 00m", "1h 00m",
+      "Claude Code", "not recorded", "1", "1", "30m", "30m",
+    ]);
+
+    const codebases = within(stats).getByTestId("agent-codebase-list");
+    expect(codebases).toHaveTextContent("clock-in");
+    expect(codebases).toHaveTextContent("No codebase recorded");
+  });
+
+  it("shows a dash rather than a zero when the API predates the session facts", async () => {
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor({
+      agentPaystub: vi.fn().mockResolvedValue({
+        ...agentPaystub,
+        totals: { ...agentPaystub.totals, ownerActiveSeconds: null, awaySeconds: null },
+        models: [{ model: null, agentSeconds: 5_400, shiftCount: 2, maxConcurrent: null, medianSeconds: null }],
+        codebases: [],
+      }),
+    })} />);
+
+    const panel = await openAgentsTab(person);
+    const stats = await within(panel).findByTestId("overlay-agent-stats");
+
+    const cells = [...within(stats).getByTestId("agent-sessions").querySelectorAll("tbody td")]
+      .map((cell) => cell.textContent);
+    // A null model is a shift whose hook named none - said out loud, never a
+    // bare dash; max at once and median are dashes, never fake zeros.
+    expect(cells).toEqual(["Claude Code", "not recorded", "2", "-", "1h 30m", "-"]);
+    // Nothing claims a split the API never sent.
+    const breakdown = within(stats).getByTestId("agent-breakdown");
+    expect(breakdown).not.toHaveTextContent("While Timer User was there");
+    expect(breakdown).not.toHaveTextContent("leverage");
+    expect(within(stats).queryByTestId("agent-codebase-list")).not.toBeInTheDocument();
+  });
+
   it("reports every roster agent, zero-activity ones included, with no register control", async () => {
     const bridge = bridgeFor({
       agentsReport: vi.fn().mockResolvedValue({
@@ -1308,6 +1368,7 @@ describe("the agents tab", () => {
             commitsOrphaned: 0,
             heldRate: null,
             models: [],
+            repos: [],
             tokens: null,
             tokensReported: false,
           },
@@ -1329,6 +1390,7 @@ describe("the agents tab", () => {
             commitsOrphaned: 0,
             heldRate: 0.5,
             models: ["claude-fable-5"],
+            repos: ["pocket-piggies"],
             tokens: { inputTokens: 8_000, outputTokens: 600, cacheCreationInputTokens: 200, cacheReadInputTokens: 40_000 },
             tokensReported: true,
           },
@@ -1347,10 +1409,12 @@ describe("the agents tab", () => {
     expect(zeroRow).not.toHaveClass("is-anonymous");
     expect(zeroRow).toHaveTextContent("0s");
     expect(zeroRow).toHaveTextContent("0 shifts");
-    expect(zeroRow).toHaveTextContent("pending");
+    expect(zeroRow).toHaveTextContent("held pending");
     const retiredRow = within(roster).getByText("Claude Code @ Field work").closest("li");
     expect(retiredRow).toHaveTextContent("retired");
     expect(retiredRow).toHaveTextContent("50% held");
+    // The codebase rides the row so a member can see where the hours went.
+    expect(within(retiredRow!).getByText("pocket-piggies")).toBeInTheDocument();
   });
 });
 

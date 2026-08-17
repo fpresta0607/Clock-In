@@ -227,15 +227,14 @@ export type MeStatsConcurrency = {
   awaySeconds: number;
 };
 
+/// One (runtime, model) pair's share of a member's agent time. The session
+/// facts the API also sends stay behind: the desktop reads this split only to
+/// name the models a runtime has driven, and the Agents tab measures shifts
+/// from the paystub instead.
 export type MeStatsAgentSplit = {
   source: string;
   model: string | null;
   durationSeconds: number;
-  /// Null when the API predates these fields: absence shown as absence,
-  /// never as a zero the server can't legitimately send.
-  sessionCount: number | null;
-  maxConcurrent: number | null;
-  medianSeconds: number | null;
 };
 
 /// The four token counters a runtime's own session logs report, summed over
@@ -311,6 +310,9 @@ export type AgentsReportRow = {
   heldRate: number | null;
   /// Distinct models this agent's shifts named in range; empty when none did.
   models: readonly string[];
+  /// Distinct codebases this agent worked in range - names, never paths;
+  /// empty when no shift recorded a working directory.
+  repos: readonly string[];
   /// Token totals over the range; null when the API predates token reporting.
   tokens: TokenTotals | null;
   /// Whether any usage rows exist for this agent in range - rows, not nonzero sums.
@@ -331,9 +333,44 @@ export type AgentPaystubTrendBucket = {
   heldRate: number | null;
 };
 
-/// The slice of the paystub the desktop plots: the six weekly trend buckets.
-/// The shifts, models, and totals it also carries are the web's business.
-export type AgentPaystubTrend = {
+/// One model's slice of an agent's paystub, as the Agent-sessions table reads
+/// it. The session facts are null when the API predates them: absence shown
+/// as absence, never a zero nothing measured.
+export type AgentPaystubModel = {
+  model: string | null;
+  agentSeconds: number;
+  shiftCount: number;
+  maxConcurrent: number | null;
+  medianSeconds: number | null;
+};
+
+/// One codebase's slice of an agent's paystub; `repo` is null for shifts that
+/// recorded no working directory.
+export type AgentPaystubCodebase = {
+  repo: string | null;
+  agentSeconds: number;
+  shiftCount: number;
+};
+
+/// The slice of the paystub the desktop's Agents tab renders. The shift list
+/// it also carries is the web dashboard's business.
+export type AgentPaystub = {
+  totals: {
+    agentSeconds: number;
+    shiftCount: number;
+    commitsRecorded: number;
+    heldRate: number | null;
+    tokens: TokenTotals | null;
+    tokensReported: boolean;
+    /// The owner's active time in range - leverage's denominator; null when
+    /// the API predates the field.
+    ownerActiveSeconds: number | null;
+    /// Runtime outside the owner's presence; null when the API predates it.
+    awaySeconds: number | null;
+  };
+  models: readonly AgentPaystubModel[];
+  codebases: readonly AgentPaystubCodebase[];
+  hourly: readonly MeStatsHourlyBucket[];
   trend: readonly AgentPaystubTrendBucket[];
 };
 
@@ -374,9 +411,9 @@ export interface TimerBridge {
   /// The pay-run report: every roster agent's hours, shifts, and held share
   /// for a range. Both bounds absent asks for all time.
   agentsReport(fromAt?: string, toExclusiveAt?: string, scope?: string): Promise<AgentsReport>;
-  /// One agent's paystub trend: six weekly buckets ending at the range's end
-  /// (or now, unbounded), for the overlay's agents chart.
-  agentPaystubTrend(agentId: string, fromAt?: string, toExclusiveAt?: string): Promise<AgentPaystubTrend>;
+  /// One agent's paystub: totals, model and codebase mixes, hourly series and
+  /// six weekly trend buckets, for the overlay's Agents tab.
+  agentPaystub(agentId: string, fromAt?: string, toExclusiveAt?: string): Promise<AgentPaystub>;
   projectCreate(input: ProjectCreateInput): Promise<TimerProject>;
   projectUpdate(id: string, input: { name?: string; isArchived?: boolean }): Promise<TimerProject>;
   projectUsage(id: string): Promise<ProjectUsage>;
@@ -771,9 +808,6 @@ const decodeAgentSplit = (value: unknown): MeStatsAgentSplit => {
     source: string(candidate.source),
     model: stringOrNull(candidate.model ?? null),
     durationSeconds: nonnegativeInteger(candidate.durationSeconds),
-    sessionCount: nonnegativeIntegerOrNull(candidate.sessionCount),
-    maxConcurrent: nonnegativeIntegerOrNull(candidate.maxConcurrent),
-    medianSeconds: nonnegativeIntegerOrNull(candidate.medianSeconds),
   };
 };
 
@@ -872,6 +906,7 @@ const decodeAgentsReportRow = (value: unknown): AgentsReportRow => {
     heldRate: unitRateOrNull(candidate.heldRate),
     // An API from before the field shipped reads as no models named, never an error.
     models: stringArrayOrEmpty(candidate.models),
+    repos: stringArrayOrEmpty(candidate.repos),
     tokens: decodeTokenTotalsOrNull(candidate.tokens),
     tokensReported: candidate.tokensReported === undefined || candidate.tokensReported === null
       ? false
@@ -909,14 +944,55 @@ const decodeAgentPaystubTrendBucket = (value: unknown): AgentPaystubTrendBucket 
   };
 };
 
-/// The paystub arrives whole; the desktop keeps only the trend it plots. The
-/// trend itself is required - an API that cannot send it is an invalid
-/// response, not an empty chart.
-export const decodeAgentPaystubTrend = (value: unknown): AgentPaystubTrend => {
+const decodeAgentPaystubModel = (value: unknown): AgentPaystubModel => {
   const candidate = record(value);
+  return {
+    model: stringOrNull(candidate.model ?? null),
+    agentSeconds: nonnegativeInteger(candidate.agentSeconds),
+    shiftCount: nonnegativeInteger(candidate.shiftCount),
+    // Null means the API predates the field; the table shows a dash there,
+    // never a zero nothing measured.
+    maxConcurrent: nonnegativeIntegerOrNull(candidate.maxConcurrent),
+    medianSeconds: nonnegativeIntegerOrNull(candidate.medianSeconds),
+  };
+};
+
+const decodeAgentPaystubCodebase = (value: unknown): AgentPaystubCodebase => {
+  const candidate = record(value);
+  return {
+    repo: stringOrNull(candidate.repo ?? null),
+    agentSeconds: nonnegativeInteger(candidate.agentSeconds),
+    shiftCount: nonnegativeInteger(candidate.shiftCount),
+  };
+};
+
+/// The paystub arrives whole; the desktop keeps what its Agents tab renders.
+/// The totals and the trend are required - an API that cannot send them is an
+/// invalid response, not an empty panel - and everything added since decodes
+/// as absence when a deployed API is older than this build.
+export const decodeAgentPaystub = (value: unknown): AgentPaystub => {
+  const candidate = record(value);
+  const totals = record(candidate.totals);
   const trend = candidate.trend;
   if (!Array.isArray(trend)) invalidResponse();
-  return { trend: (trend as unknown[]).map(decodeAgentPaystubTrendBucket) };
+  return {
+    totals: {
+      agentSeconds: nonnegativeInteger(totals.agentSeconds),
+      shiftCount: nonnegativeInteger(totals.shiftCount),
+      commitsRecorded: nonnegativeInteger(totals.commitsRecorded),
+      heldRate: unitRateOrNull(totals.heldRate),
+      tokens: decodeTokenTotalsOrNull(totals.tokens),
+      tokensReported: totals.tokensReported === undefined || totals.tokensReported === null
+        ? false
+        : boolean(totals.tokensReported),
+      ownerActiveSeconds: nonnegativeIntegerOrNull(totals.ownerActiveSeconds),
+      awaySeconds: nonnegativeIntegerOrNull(totals.awaySeconds),
+    },
+    models: (Array.isArray(candidate.models) ? candidate.models : []).map(decodeAgentPaystubModel),
+    codebases: (Array.isArray(candidate.codebases) ? candidate.codebases : []).map(decodeAgentPaystubCodebase),
+    hourly: (Array.isArray(candidate.hourly) ? candidate.hourly : []).map(decodeHourlyBucket),
+    trend: (trend as unknown[]).map(decodeAgentPaystubTrendBucket),
+  };
 };
 
 export const decodeViewPreferences = (value: unknown): ViewPreferences => {
@@ -968,7 +1044,7 @@ export const defaultBridge: TimerBridge = {
   settingsUpdate: (input) => invokeDecoded("settings_update", decodeMonitorSettings, { input }),
   meStats: (fromAt, toExclusiveAt, userId, scope) => invokeDecoded("me_stats", decodeMeStats, { fromAt, toExclusiveAt, userId, scope }),
   agentsReport: (fromAt, toExclusiveAt, scope) => invokeDecoded("agents_report", decodeAgentsReport, { fromAt, toExclusiveAt, scope }),
-  agentPaystubTrend: (agentId, fromAt, toExclusiveAt) => invokeDecoded("agent_paystub_trend", decodeAgentPaystubTrend, { agentId, fromAt, toExclusiveAt }),
+  agentPaystub: (agentId, fromAt, toExclusiveAt) => invokeDecoded("agent_paystub", decodeAgentPaystub, { agentId, fromAt, toExclusiveAt }),
   projectCreate: (input) => invokeDecoded("project_create", decodeProject, { input }),
   projectUpdate: (id, input) => invokeDecoded("project_update", decodeProject, { id, input }),
   projectUsage: (id) => invokeDecoded("project_usage", decodeProjectUsage, { id }),
