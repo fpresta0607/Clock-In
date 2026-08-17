@@ -152,13 +152,15 @@ rows are the agent-assisted share — still the person's hours, split by how man
 beside them at once. An agent still working while the person is away feeds agent time only,
 never the person's hours.
 
-The per-agent split (Claude vs Codex, read from the data roster — nothing hardcoded) is now an
-**agent-sessions table**, not a muted note: each (runtime, model) pair shows how many sessions
-ran, the peak number at once, the total runtime, and the median session length, with runtime
-and model as independent columns never derived from each other. The concurrency split sums to
-active time and the agent split sums to agent time; one shared module,
-`packages/shared/src/intervals.ts`, computes all of it so the invariants
-(`active = t0+t1+t2+t3+`, `agent = Σ n·tn + away`) hold everywhere.
+A person's breakdown stops at what is the person's: their active time and those concurrency
+rows. Every measure of what the agents themselves did lives on the **Agents tab**, under the
+picked roster agent: an **agent-sessions table** with one row per model of that agent's shifts
+(how many ran, the peak number at once, the total runtime, the median shift length), beside
+its runtime split, its hourly chart, and the codebases it worked. "While they were there",
+"ran while away", and leverage there are measured against that agent's owner's presence, not
+the viewer's. The concurrency split sums to active time and the agent split sums to agent
+time; one shared module, `packages/shared/src/intervals.ts`, computes all of it so the
+invariants (`active = t0+t1+t2+t3+`, `agent = Σ n·tn + away`) hold everywhere.
 
 Both surfaces also chart each hour as lightweight SVG with no chart library, with a
 **Time | Tokens** switch shown only when the range holds token data: active and agent time on
@@ -428,7 +430,7 @@ organization are derived from verified claims, never from the request body.
 | `GET` | `/agents` | the org's roster of agent identities |
 | `PATCH` | `/agents/:id` | rename (which registers an anonymous agent), retire, or re-own an agent |
 | `POST` | `/agents/:id/merge` | merge one agent into another; admin-only |
-| `GET` | `/agents/:id/paystub` | one agent's shifts, captured commits, token usage, and model mix |
+| `GET` | `/agents/:id/paystub` | one agent's shifts, captured commits, codebase labels, token usage, per-model session facts, its owner's presence, and an hourly series |
 | `POST` | `/shift-commits` | batch upload of commits captured during a shift |
 | `POST` | `/agent-usage` | batch upload of token counters read from an agent's session logs |
 
@@ -553,7 +555,9 @@ them.
 - A working directory can contain a user name, so it's shown only to the owning user and org
   admins, and redacted from logs like session descriptions are. A captured commit's repository
   path is a working directory and follows the same rule: a paystub read by anyone else carries
-  the commit without it.
+  the commit without it. What every member does see is the codebase's **label** - the path's
+  last segment, a name like `clock-in` - which says which codebase an agent worked in without
+  saying where it lives.
 - `clock-in-hook` holds no credentials and opens no sockets. The spool file is its entire
   interface.
 - The desktop app never persists the session token: Rust keeps it in the OS credential store,
