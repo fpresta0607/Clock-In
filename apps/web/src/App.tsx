@@ -1668,7 +1668,7 @@ const RosterTab = ({
                           {/* The codebase the shift worked, as a name. The
                               repo root itself stays on the commit, where only
                               the owner and workspace admins are sent it. */}
-                          {shift.repo !== null && <span className="shift-repo">{shift.repo}</span>}
+                          {shift.repo != null && <span className="shift-repo">{shift.repo}</span>}
                           {shift.model !== null && <span className="metric-hint"> · {shift.model}</span>}
                           {shift.commits.map((commit) => (
                             <span

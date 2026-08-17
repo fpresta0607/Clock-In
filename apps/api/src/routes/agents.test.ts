@@ -149,6 +149,10 @@ class MemoryShiftCommits implements ShiftCommitRepository {
     return [];
   }
 
+  public async repoRootsByAgent(): Promise<never[]> {
+    return [];
+  }
+
   public async listForAgent(_subject: { organizationId: string }, agentId: string): Promise<ShiftCommitRecord[]> {
     return this.records.filter((record) => record.agentId === agentId);
   }

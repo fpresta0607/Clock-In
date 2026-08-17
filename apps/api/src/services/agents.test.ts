@@ -200,6 +200,9 @@ class MemoryShiftCommits implements ShiftCommitRepository {
   public async countsByAgent(): ReturnType<ShiftCommitRepository["countsByAgent"]> {
     throw new Error("not used");
   }
+  public async repoRootsByAgent(): ReturnType<ShiftCommitRepository["repoRootsByAgent"]> {
+    throw new Error("not used");
+  }
   public async listForAgent(): Promise<ShiftCommitRecord[]> {
     return this.rows;
   }

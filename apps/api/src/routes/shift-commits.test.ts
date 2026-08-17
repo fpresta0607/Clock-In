@@ -15,6 +15,7 @@ import type {
   ShiftCommitRecord,
   ShiftCommitRepository,
   ShiftCommitVerificationState,
+  ShiftRepoRootRecord,
   UpsertAgentForKey,
 } from "../repositories.js";
 import { createTestAuth } from "../test-tokens.js";
@@ -138,6 +139,7 @@ class MemoryShiftCommits implements ShiftCommitRepository {
   }
 
   public async countsByAgent(): Promise<ShiftCommitCountsRecord[]> { throw new Error("not used"); }
+  public async repoRootsByAgent(): Promise<ShiftRepoRootRecord[]> { throw new Error("not used"); }
   public async listForAgent(): Promise<ShiftCommitRecord[]> { throw new Error("not used"); }
 }
 

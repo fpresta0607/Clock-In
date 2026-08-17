@@ -42,6 +42,7 @@ import type {
   SessionIntervalRecord,
   ShiftCommitCountsRecord,
   ShiftCommitRepository,
+  ShiftRepoRootRecord,
   SiteTotalRecord,
 } from "../repositories.js";
 import { repoLabel } from "./attribution.js";
@@ -559,15 +560,25 @@ function collectLabel(labels: string[], label: string | null): void {
   labels.push(label);
 }
 
-/** Roster agents' intervals grouped by agentId; legacy sessions with no roster identity carry no row to group into. */
-function intervalsByAgentId(intervals: readonly AgentIntervalRecord[]): Map<string, AgentIntervals> {
+/**
+ * Roster agents' intervals grouped by agentId; legacy sessions with no roster
+ * identity carry no row to group into. A shift's codebase follows the
+ * paystub's shiftRepoLabel rule: its commit's repo root when it recorded one,
+ * its working directory otherwise.
+ */
+function intervalsByAgentId(
+  intervals: readonly AgentIntervalRecord[],
+  repoRoots: readonly ShiftRepoRootRecord[],
+): Map<string, AgentIntervals> {
+  const rootBySession = new Map(repoRoots.map((row) => [row.agentSessionId, row.repoRoot]));
   const grouped = new Map<string, AgentIntervals>();
   for (const row of intervals) {
     if (row.agentId === null) continue;
     const existing = grouped.get(row.agentId) ?? { intervals: [], models: [], repos: [] };
     existing.intervals.push(asInterval(row.startedAt, row.endedAt));
     collectLabel(existing.models, row.model);
-    collectLabel(existing.repos, row.cwd === null ? null : repoLabel(row.cwd));
+    const root = rootBySession.get(row.sessionId) ?? row.cwd;
+    collectLabel(existing.repos, root === null ? null : repoLabel(root));
     grouped.set(row.agentId, existing);
   }
   return grouped;
@@ -696,10 +707,15 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
         : hourlySeries(workingIntervals(member, query), member.agents.map((agent) => agent.interval), usageBuckets, queryRange(query));
 
       const range = queryRange(query);
-      const grouped = intervalsByAgentId(agentIntervals);
+      const [commitCounts, repoRoots] = dependencies.shiftCommits === undefined
+        ? [[], []]
+        : await Promise.all([
+          dependencies.shiftCommits.countsByAgent(subject, query),
+          dependencies.shiftCommits.repoRootsByAgent(subject, query),
+        ]);
+      const grouped = intervalsByAgentId(agentIntervals, repoRoots);
       const roster = await dependencies.agents.listForOrganization(subject);
       const rosterById = new Map(roster.map((agent) => [agent.id, agent]));
-      const commitCounts = dependencies.shiftCommits === undefined ? [] : await dependencies.shiftCommits.countsByAgent(subject, query);
       const countsById = new Map(commitCounts.map((row) => [row.agentId, row]));
       const usageById = new Map(usageByAgent.map((row) => [row.agentId, row]));
       // Own agent rows are exactly the roster identities this member's shifts
@@ -734,14 +750,15 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       const query: ReportQuery = { ...normalizedQuery(filters), ...scopeQuery(filters.scope) };
       await authorizeFilters(dependencies.reports, subject, query);
       await dependencies.reaper.reapStale(subject);
-      const [roster, agentIntervals, commitCounts, usageByAgent] = await Promise.all([
+      const [roster, agentIntervals, commitCounts, repoRoots, usageByAgent] = await Promise.all([
         dependencies.agents.listForOrganization(subject),
         dependencies.reports.readAgentIntervals(subject, query),
         dependencies.shiftCommits === undefined ? Promise.resolve([]) : dependencies.shiftCommits.countsByAgent(subject, query),
+        dependencies.shiftCommits === undefined ? Promise.resolve([]) : dependencies.shiftCommits.repoRootsByAgent(subject, query),
         dependencies.agentUsage === undefined ? Promise.resolve([]) : dependencies.agentUsage.sumByAgent(subject, query),
       ]);
       const range = queryRange(query);
-      const grouped = intervalsByAgentId(agentIntervals);
+      const grouped = intervalsByAgentId(agentIntervals, repoRoots);
       const countsById = new Map(commitCounts.map((row) => [row.agentId, row]));
       const usageById = new Map(usageByAgent.map((row) => [row.agentId, row]));
       // Every roster agent gets a row, activity or not: the roster - not the

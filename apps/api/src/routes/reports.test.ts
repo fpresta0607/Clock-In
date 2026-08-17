@@ -184,6 +184,7 @@ describe("report routes", () => {
   it("returns the pay-run report with every roster agent and a headcount", async () => {
     const reports = new Reports();
     reports.agentIntervals = [{
+      sessionId: "11c7e513-b094-4d4c-ae55-21790ae019a4",
       user: { id: ids.user, name: "Alex" },
       source: "claude_code",
       model: null,
