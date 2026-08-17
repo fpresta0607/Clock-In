@@ -13,16 +13,46 @@ export function normalizePath(value: string): string {
 }
 
 /**
+ * A directory named after a run rather than after a codebase. Tooling that
+ * checks a repo out per run - a no-mistakes gate worktree lives at
+ * `<hash>.git/worktrees/<ULID>`, and CI runners use similar shapes - leaves a
+ * working directory whose last segment is an opaque id. A ULID (26 Crockford
+ * base32 characters), a UUID, or a bare hex hash names no codebase to anyone.
+ */
+const OPAQUE_SEGMENT =
+  /^(?:[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{12,})$/i;
+
+/**
  * A working directory's codebase label: its last path segment, separators
  * unified so a Windows path and a POSIX one read the same. A name, never a
  * path - which is what lets every member of the workspace see which codebase an
  * agent worked while the path itself stays behind the `repoRoot` rule. Null
  * when nothing is left to name.
+ *
+ * An opaque id is *not* a name. A shift worked inside a per-run worktree used
+ * to label itself with that run's id - "Claude Code @ 01M06FSGP392MH6VJNRX8T364A" -
+ * and, because the identity key is the repo root, minted a fresh agent for
+ * every run. Reading absence as absence is the rule the rest of the model
+ * already follows: no codebase name, rather than a wrong one.
  */
 export function repoLabel(path: string): string | null {
   const segments = path.replace(/\\/g, "/").replace(/\/+$/, "").split("/");
   const last = segments[segments.length - 1] ?? "";
-  return last === "" ? null : last.slice(0, 200);
+  if (last === "" || OPAQUE_SEGMENT.test(last)) return null;
+  return last.slice(0, 200);
+}
+
+/**
+ * The repo root an agent identity is keyed on. A directory that names no
+ * codebase cannot identify one either: keying on it mints a separate agent for
+ * every run, which is how one operator's roster filled with a row per
+ * no-mistakes gate worktree. Such a shift belongs in that operator's
+ * unassigned bucket, and graduates in place if a commit ever names its
+ * codebase - the same late-discovery path an un-probed session takes.
+ */
+export function identityRepoRoot(root: string | null): string | null {
+  if (root === null) return null;
+  return repoLabel(root) === null ? null : root;
 }
 
 /**

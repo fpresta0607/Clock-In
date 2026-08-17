@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizePath, repoLabel, resolveProjectForCwd, resolveProjectForRule, type PathMappingCandidate } from "./attribution.js";
+import { identityRepoRoot, normalizePath, repoLabel, resolveProjectForCwd, resolveProjectForRule, type PathMappingCandidate } from "./attribution.js";
 
 const projectA = "a1c7e513-b094-4d4c-ae55-21790ae019a4";
 const projectB = "b1c7e513-b094-4d4c-ae55-21790ae019a4";
@@ -25,6 +25,39 @@ describe("repoLabel", () => {
   it("returns null when there is no segment left to name", () => {
     expect(repoLabel("/")).toBeNull();
     expect(repoLabel("")).toBeNull();
+  });
+
+  // The roster filled with rows called "Claude Code @ 01M06FSGP392MH6VJNRX8T364A":
+  // a no-mistakes gate checks the repo out at `<hash>.git/worktrees/<run ULID>`,
+  // so the working directory's last segment was the run's id.
+  it("refuses an opaque id as a codebase name", () => {
+    expect(repoLabel("C:/Users/dev/.no-mistakes/repos/3946e592fa2c.git/worktrees/01M084ACAR719XGACT0GQT43HN")).toBeNull();
+    expect(repoLabel("/tmp/01M06FSGP392MH6VJNRX8T364A")).toBeNull();
+    expect(repoLabel("/runs/3f2504e0-4f89-11d3-9a0c-0305e82c3301")).toBeNull();
+    expect(repoLabel("/checkouts/3946e592fa2c")).toBeNull();
+  });
+
+  // Refusing ids must not start refusing codebases. These are real repo names
+  // that a careless rule would swallow: hex-looking but too short, digits with
+  // a separator, and a 26-character name that is not base32.
+  it("keeps names that only resemble one", () => {
+    expect(repoLabel("/src/deadbeef")).toBe("deadbeef");
+    expect(repoLabel("/src/2024-migrations")).toBe("2024-migrations");
+    expect(repoLabel("/src/clock-in-desktop-ui")).toBe("clock-in-desktop-ui");
+    expect(repoLabel("/src/v2")).toBe("v2");
+  });
+
+  describe("identityRepoRoot", () => {
+    it("keeps a root that names a codebase", () => {
+      expect(identityRepoRoot("C:/dev/clock-in")).toBe("C:/dev/clock-in");
+      expect(identityRepoRoot(null)).toBeNull();
+    });
+
+    // Keying identity on a per-run worktree minted one agent per run, which is
+    // what buried the roster. Such a shift belongs in the unassigned bucket.
+    it("drops a root that names only a run", () => {
+      expect(identityRepoRoot("/repos/3946e592fa2c.git/worktrees/01M084ACAR719XGACT0GQT43HN")).toBeNull();
+    });
   });
 
   it("caps a pathological segment at the contract's length", () => {

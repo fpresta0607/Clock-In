@@ -1,0 +1,148 @@
+#!/usr/bin/env node
+/**
+ * Folds agents named after a run back into their operator's unassigned bucket.
+ * Dry run by default: prints exactly what would move and exits. Pass --confirm
+ * to perform it.
+ *
+ *   DATABASE_URL=postgres://... node scripts/repair-run-named-agents.mjs [--confirm]
+ *
+ * Tooling that checks a repo out per run leaves a working directory named after
+ * the run rather than the codebase - a no-mistakes gate worktree lives at
+ * `<hash>.git/worktrees/<ULID>`. Because identity keys on the repo root, every
+ * such run minted its own agent, and because the default name is composed from
+ * the root's last segment, each read
+ * "Claude Code @ 01M06FSGP392MH6VJNRX8T364A". The identity-v2 backfill did not
+ * create these; it re-attributed shifts onto the roots the commits named, which
+ * is what surfaced them at scale.
+ *
+ * The API now refuses an opaque segment as a codebase name (`repoLabel`) and as
+ * an identity key (`identityRepoRoot`), so no new row can be minted this way.
+ * This repairs the rows already stored.
+ *
+ * Each run-named agent merges into the one unassigned agent for its
+ * (organization, owner, source): shifts, `shift_commits` and `agent_usage`
+ * follow, then the emptied row is retired. Nothing is deleted, and an agent a
+ * member has renamed is left alone - a name someone chose is not ours to
+ * revisit, even on a row keyed this way.
+ */
+import process from "node:process";
+
+import postgres from "postgres";
+
+const confirm = process.argv.includes("--confirm");
+const databaseUrl = process.env.DATABASE_URL;
+if (databaseUrl === undefined || databaseUrl === "") {
+  console.error("DATABASE_URL is required.");
+  process.exit(2);
+}
+
+const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+
+/**
+ * Mirrors `OPAQUE_SEGMENT` in apps/api/src/services/attribution.ts: a ULID, a
+ * UUID, or a bare hex hash names no codebase to anyone.
+ */
+const OPAQUE_SEGMENT =
+  /^(?:[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{12,})$/i;
+
+const lastSegment = (path) => {
+  const segments = path.replace(/\\/g, "/").replace(/\/+$/, "").split("/");
+  return segments[segments.length - 1] ?? "";
+};
+
+const namesOnlyARun = (repoRoot) =>
+  repoRoot !== null && OPAQUE_SEGMENT.test(lastSegment(repoRoot));
+
+async function main() {
+  // Only anonymous rows. Naming an agent registers it in the same write, so
+  // `registered` means a member chose that name - not ours to revisit, even on
+  // a row keyed this way.
+  const candidates = await sql`
+    select id, organization_id, owner_user_id, source, repo_root, name, status
+    from agents
+    where repo_root is not null and status = 'anonymous'
+    order by organization_id, owner_user_id, source, id
+  `;
+  const runNamed = candidates.filter((agent) => namesOnlyARun(agent.repo_root));
+  if (runNamed.length === 0) {
+    console.log("No agent is named after a run. Nothing to repair.");
+    await sql.end();
+    return;
+  }
+
+  console.log(`${runNamed.length} agent(s) named after a run:`);
+  for (const agent of runNamed) console.log(`  ${agent.name}  (${agent.id})`);
+
+  if (!confirm) {
+    console.log("\nDry run. Pass --confirm to fold these into their operator's unassigned bucket.");
+    await sql.end();
+    return;
+  }
+
+  let merged = 0;
+  let movedShifts = 0;
+  for (const loser of runNamed) {
+    await sql.begin(async (tx) => {
+      // The operator's unassigned bucket for this runtime, minted if this is
+      // the first shift to need it. The partial unique excludes retired rows,
+      // so the arbiter restates that predicate exactly.
+      const name = `${loser.name.split(" @ ")[0]} @ unassigned`;
+      const [winner] = await tx`
+        insert into agents (organization_id, owner_user_id, source, repo_root, name)
+        values (${loser.organization_id}, ${loser.owner_user_id}, ${loser.source}, null, ${name})
+        on conflict (organization_id, owner_user_id, source)
+          where repo_root is null and status <> 'retired'
+          do update set updated_at = now()
+        returning id
+      `;
+      if (winner.id === loser.id) return;
+
+      const shifts = await tx`
+        update agent_sessions set agent_id = ${winner.id}, updated_at = now()
+        where organization_id = ${loser.organization_id} and agent_id = ${loser.id}
+        returning id
+      `;
+      movedShifts += shifts.length;
+      // `shift_commits` and `agent_usage` each carry their own `agent_id`, so
+      // the evidence does not follow its shift on its own: re-pointing only
+      // the shift would strand every commit tally and token total on the row
+      // being retired, and the merged agent would report neither.
+      await tx`
+        update shift_commits set agent_id = ${winner.id}
+        where organization_id = ${loser.organization_id} and agent_id = ${loser.id}
+      `;
+      await tx`
+        update agent_usage set agent_id = ${winner.id}
+        where organization_id = ${loser.organization_id} and agent_id = ${loser.id}
+      `;
+      await tx`
+        update agents set status = 'retired', updated_at = now()
+        where organization_id = ${loser.organization_id} and id = ${loser.id}
+      `;
+      merged += 1;
+    });
+  }
+
+  console.log(`\nFolded ${merged} agent(s) in, carrying ${movedShifts} shift(s). No evidence row was deleted.`);
+
+  // The verification step, run for you: no anonymous agent may still be keyed
+  // on a directory that names only a run. Renamed rows are excluded on
+  // purpose - they were never candidates - and counted separately so the
+  // number is never mistaken for work left undone.
+  const remaining = await sql`
+    select repo_root, status from agents where repo_root is not null and status <> 'retired'
+  `;
+  const stillKeyed = remaining.filter((agent) => namesOnlyARun(agent.repo_root));
+  const anonymous = stillKeyed.filter((agent) => agent.status === "anonymous").length;
+  console.log(`Anonymous agents still keyed on a run directory: ${anonymous}`);
+  if (stillKeyed.length > anonymous) {
+    console.log(`Left alone because a member named them: ${stillKeyed.length - anonymous}`);
+  }
+  await sql.end();
+}
+
+main().catch(async (error) => {
+  console.error(error);
+  await sql.end({ timeout: 5 });
+  process.exit(1);
+});

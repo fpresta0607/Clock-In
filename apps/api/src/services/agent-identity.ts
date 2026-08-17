@@ -3,6 +3,7 @@ import { agentRuntimeLabel, type AgentSource } from "@clock-in/shared";
 import type { AuthenticatedSubject } from "../auth.js";
 import type { AgentRepository, AgentSessionRecord, AgentSessionRepository } from "../repositories.js";
 import { rosterEligibleSource } from "./agent-sessions.js";
+import { identityRepoRoot } from "./attribution.js";
 
 export interface AgentIdentityDependencies {
   agents: AgentRepository;
@@ -42,6 +43,11 @@ export async function graduateAgentForSession(
   now: Date,
 ): Promise<string | null> {
   if (!rosterEligibleSource(source)) return null;
+  // Evidence that names no codebase graduates nothing. A commit authored
+  // inside a per-run worktree reports that worktree as its repo root, and
+  // promoting a bucket onto it would strand the shift on an identity named
+  // after a run. The shift stays where it is until real evidence arrives.
+  if (identityRepoRoot(repoRoot) === null) return session.agentId;
 
   const mintIdentity = async (): Promise<string> => {
     const minted = await dependencies.agents.upsertForKey({

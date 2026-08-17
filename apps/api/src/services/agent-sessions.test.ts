@@ -327,6 +327,26 @@ describe("agent-session service", () => {
     expect(agentSessions.records[0]).toMatchObject({ model: "claude-opus-4-8" });
   });
 
+  // The roster read "Claude Code · <synthetic>": a CLI marks the entries it
+  // writes about itself, and a desktop old enough to read one out of a
+  // transcript still reports it. A placeholder is not a model.
+  it("records no model when the runtime sends a placeholder rather than one", async () => {
+    const { agentSessions, service } = createService();
+
+    await service.ingest(subject, [event({ model: "<synthetic>" })]);
+    await service.ingest(subject, [
+      event({ event: "heartbeat", model: "<synthetic>", occurredAt: new Date("2026-08-06T13:40:00.000Z") }),
+    ]);
+
+    expect(agentSessions.records[0]).toMatchObject({ model: null });
+
+    // A real model still lands afterwards - the placeholder never took the slot.
+    await service.ingest(subject, [
+      event({ event: "heartbeat", model: "claude-opus-4-8", occurredAt: new Date("2026-08-06T13:45:00.000Z") }),
+    ]);
+    expect(agentSessions.records[0]).toMatchObject({ model: "claude-opus-4-8" });
+  });
+
   it("fills a still-null model from a heartbeat that arrives after the session ended", async () => {
     const { agentSessions, service } = createService();
     await service.ingest(subject, [event()]);

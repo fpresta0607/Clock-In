@@ -29,7 +29,7 @@ import type {
   OrganizationRecord,
 } from "./auth.js";
 import { AppError } from "./errors.js";
-import { repoLabel } from "./services/attribution.js";
+import { identityRepoRoot, repoLabel } from "./services/attribution.js";
 import {
   PathMappingRepositoryError,
   SessionRepositoryError,
@@ -1317,14 +1317,19 @@ export class DrizzleAgentRepository implements AgentRepository {
     // exclusion constraint matching the ON CONFLICT specification" - which no
     // mocked repository can catch. A repo-less sighting arbitrates on the
     // index that collapses one operator's null repos onto a single row.
-    const unassigned = input.repoRoot === null;
+    // A working directory that names no codebase - a per-run worktree named
+    // after its run id - identifies none either, so it lands in the operator's
+    // unassigned bucket instead of minting one agent per run. Normalized here,
+    // at the one door every caller goes through.
+    const repoRoot = identityRepoRoot(input.repoRoot);
+    const unassigned = repoRoot === null;
     const rows = await this.db
       .insert(agents)
       .values({
         organizationId: input.organizationId,
         ownerUserId: input.ownerUserId,
         projectId: input.projectId,
-        repoRoot: input.repoRoot,
+        repoRoot,
         source: input.source,
         // The default name is the runtime label beside the repo's folder
         // name, composed here because the basename needs no round trip; a

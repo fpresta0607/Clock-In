@@ -1074,6 +1074,28 @@ describe("agents report", () => {
     expect(result.rows[0]!.repos).toEqual(["clock-in", "pocket-piggies"]);
   });
 
+  // The Overlord's roster was mostly rows reading "0s · 0 shifts · pending"
+  // under a RETIRED tag. A retired agent that did nothing in the range is
+  // neither on the clock nor evidence of anything; the headcount is what says
+  // the retirement happened.
+  it("drops a retired agent with no activity in the range, but keeps one that worked", async () => {
+    const reports = new Reports();
+    reports.agentIntervals = [
+      { user: { id: ids.user, name: "Alex" }, source: "codex", model: null, cwd: null, projectId: ids.project, agentId: ids.otherAgent, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+    ];
+    const roster = new Agents([
+      agentRecord({ id: ids.session, name: "Pi @ unassigned", source: "pi", status: "retired" }),
+      agentRecord({ id: ids.otherAgent, name: "Codex @ Side", source: "codex", status: "retired" }),
+    ]);
+    const service = createReportService({ reports, reaper: silentReaper, agents: roster });
+
+    const result = await service.agentsReport(subject, {});
+
+    expect(result.rows.map((row) => row.agent.id)).toEqual([ids.otherAgent]);
+    // Both are still counted: hiding an empty row is not un-retiring anyone.
+    expect(result.headcount).toMatchObject({ total: 2, retired: 2 });
+  });
+
   it("labels a shift by its commit's repo root over its working directory, the paystub's rule", async () => {
     const reports = new Reports();
     reports.agentIntervals = [

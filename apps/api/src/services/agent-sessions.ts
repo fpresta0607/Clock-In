@@ -19,6 +19,21 @@ const defaultStaleThresholdMs = 6 * 60 * 60 * 1_000;
  */
 export const rosterEligibleSource = (source: AgentSource): boolean => source !== "browser";
 
+/**
+ * The model a runtime attested, or null when what it sent names none. A CLI
+ * marks the entries it writes about itself - Claude Code stamps them
+ * `<synthetic>` - and a desktop old enough to read one out of a transcript
+ * reports it here, which put "Claude Code · <synthetic>" on the roster. A name
+ * in angle brackets is a placeholder, and absence shown as absence is the
+ * model's own rule: the shift reads "not recorded" instead.
+ *
+ * The reader that produced these was fixed in `agent_usage.rs`, but the API
+ * deploys before any installer can, so this holds the line for the desktops
+ * still sending it.
+ */
+export const attestedModel = (model: string | null): string | null =>
+  model === null || (model.startsWith("<") && model.endsWith(">")) ? null : model;
+
 export interface AgentSessionEventInput {
   source: AgentSource;
   /**
@@ -162,7 +177,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
             organizationId: subject.organizationId,
             userId: subject.userId,
             source: event.source,
-            model: event.model,
+            model: attestedModel(event.model),
             externalSessionId: event.externalSessionId,
             cwd: event.cwd,
             ruleId: event.ruleId,
@@ -181,7 +196,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
               organizationId: subject.organizationId,
               userId: subject.userId,
               source: event.source,
-              model: event.model,
+              model: attestedModel(event.model),
               externalSessionId: event.externalSessionId,
               cwd: event.cwd,
               ruleId: event.ruleId,
@@ -205,7 +220,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
             subject,
             event.source,
             event.externalSessionId,
-            event.model,
+            attestedModel(event.model),
             event.occurredAt,
             now,
           );
