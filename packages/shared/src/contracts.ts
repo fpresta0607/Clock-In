@@ -631,6 +631,12 @@ export const agentPaystubResponseSchema = z
         endedAt: timestampSchema.nullable(),
         model: z.string().min(1).max(200).nullable(),
         durationSeconds: z.number().int().nonnegative().safe(),
+        /**
+         * The shift's working directory - a codebase label, so it follows the
+         * commit repoRoot rule: owner and workspace admins only, absent for
+         * everyone else.
+         */
+        cwd: z.string().min(1).max(1_000).optional(),
         commits: z.array(shiftCommitViewSchema),
       })
       .strict()),
@@ -643,6 +649,14 @@ export const agentPaystubResponseSchema = z
         heldRate: heldRateSchema,
       })
       .strict()),
+    /**
+     * The agent's own hourly series over the filter range, tiled exactly like
+     * the member stats one: `activeSeconds` is the union of its shift
+     * intervals (wall-clock presence), `agentSeconds` their sum (runtime, so
+     * overlapping shifts legitimately exceed presence), and the token fields
+     * stay null in hours nothing reported. Empty for the unbounded range.
+     */
+    hourly: z.array(hourlyBucketSchema),
   })
   .strict();
 
