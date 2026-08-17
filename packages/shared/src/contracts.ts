@@ -618,15 +618,18 @@ export const agentPaystubResponseSchema = z
         /**
          * The union of the owner's working intervals in range - their active
          * time, the denominator leverage divides this agent's runtime by.
+         * Optional the way every field added after a response shipped is: the
+         * API and the dashboard deploy separately, so a client built after
+         * this must read its absence as absence rather than as a zero.
          */
-        ownerActiveSeconds: z.number().int().nonnegative().safe(),
+        ownerActiveSeconds: z.number().int().nonnegative().safe().optional(),
         /**
          * This agent's runtime that fell outside its owner's presence
          * entirely; `agentSeconds - awaySeconds` is the runtime they were
          * there for. Same split the member breakdown reads, scoped to one
          * agent instead of all of a person's.
          */
-        awaySeconds: z.number().int().nonnegative().safe(),
+        awaySeconds: z.number().int().nonnegative().safe().optional(),
       })
       .strict(),
     /**
@@ -642,9 +645,9 @@ export const agentPaystubResponseSchema = z
         agentSeconds: z.number().int().nonnegative().safe(),
         shiftCount: z.number().int().nonnegative().safe(),
         /** Peak number of this model's shifts running at the same moment in range. */
-        maxConcurrent: z.number().int().nonnegative().safe(),
+        maxConcurrent: z.number().int().nonnegative().safe().optional(),
         /** Median length of those shifts, in seconds; 0 with no shifts. */
-        medianSeconds: z.number().int().nonnegative().safe(),
+        medianSeconds: z.number().int().nonnegative().safe().optional(),
         tokens: tokenTotalsSchema.nullable(),
       })
       .strict()),

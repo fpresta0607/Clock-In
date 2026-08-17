@@ -673,6 +673,7 @@ describe("personal stats contracts", () => {
         commitsOrphaned: 0,
         heldRate: 1,
         models: ["claude-fable-5"],
+        repos: ["clock-in"],
         tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
         tokensReported: true,
       },
@@ -852,17 +853,22 @@ describe("roster agent contracts", () => {
         heldRate: 1,
         tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
         tokensReported: true,
+        ownerActiveSeconds: 1_800,
+        awaySeconds: 1_800,
       },
-      models: [{ model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 } }],
+      models: [{ model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, maxConcurrent: 1, medianSeconds: 3_600, tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 } }],
+      codebases: [{ repo: "clock-in", agentSeconds: 3_600, shiftCount: 1 }],
       shifts: [{
         id: ids.session,
         startedAt,
         endedAt: stoppedAt,
         model: "claude-fable-5",
         durationSeconds: 3_600,
+        repo: "clock-in",
         commits: [commit],
       }],
       trend: [{ periodStartAt: startedAt, agentSeconds: 3_600, shiftCount: 1, heldRate: 1 }],
+      hourly: [],
     };
     expect(() => agentPaystubResponseSchema.parse(paystub)).not.toThrow();
     // Before any commit or token capture exists the same shape carries zeros
@@ -878,8 +884,9 @@ describe("roster agent contracts", () => {
         tokens: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
         tokensReported: false,
       },
-      models: [{ model: null, agentSeconds: 3_600, shiftCount: 1, tokens: null }],
-      shifts: [{ ...paystub.shifts[0], commits: [] }],
+      models: [{ model: null, agentSeconds: 3_600, shiftCount: 1, maxConcurrent: 1, medianSeconds: 3_600, tokens: null }],
+      codebases: [{ repo: null, agentSeconds: 3_600, shiftCount: 1 }],
+      shifts: [{ ...paystub.shifts[0], repo: null, commits: [] }],
       trend: [{ periodStartAt: startedAt, agentSeconds: 0, shiftCount: 0, heldRate: null }],
     })).not.toThrow();
     expect(() => agentPaystubResponseSchema.parse({
@@ -893,6 +900,19 @@ describe("roster agent contracts", () => {
     expect(() => agentPaystubResponseSchema.parse({
       ...paystub,
       models: [{ ...paystub.models[0], tokens: { inputTokens: 0 } }],
+    })).toThrow();
+    // The owner split and the per-model session facts are optional the way
+    // every field added after a response shipped is: the API and the
+    // dashboard deploy separately, so a client must read absence as absence.
+    expect(() => agentPaystubResponseSchema.parse({
+      ...paystub,
+      totals: { ...paystub.totals, ownerActiveSeconds: undefined, awaySeconds: undefined },
+      models: [{ model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, tokens: null }],
+    })).not.toThrow();
+    // A codebase label is a name, never a path.
+    expect(() => agentPaystubResponseSchema.parse({
+      ...paystub,
+      shifts: [{ ...paystub.shifts[0], repo: "x".repeat(201) }],
     })).toThrow();
   });
 
@@ -922,6 +942,7 @@ describe("roster agent contracts", () => {
       commitsOrphaned: 0,
       heldRate: 1,
       models: ["claude-fable-5"],
+      repos: ["clock-in"],
       tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
       tokensReported: true,
     };
@@ -937,6 +958,7 @@ describe("roster agent contracts", () => {
       commitsMerged: 0,
       heldRate: null,
       models: [],
+      repos: [],
       tokens: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
       tokensReported: false,
     })).not.toThrow();

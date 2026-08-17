@@ -104,14 +104,12 @@ export const buildAppRows = (apps: MeStatsResponse["apps"]): AppRowItem[] => {
 
 type BoardSort = "active" | "agent" | "leverage";
 
-/// The human/agent split laid out as labeled rows instead of one cramped
-/// sentence: active time up top (Solo is now "Human work"), agent runtime
-/// below, and the leverage ratio as the agent-side headline.
+/// A person's active time laid out as labeled rows: the hours up top, then
+/// how many agents were running through them. What those agents added up to
+/// belongs to the agent, not the person, so it lives on the Agents tab -
+/// see `AgentBreakdown`.
 const MemberBreakdown = ({ stats, self }: { stats: MeStatsResponse; self: boolean }) => {
-  const { activeSeconds, agentSeconds, concurrency } = stats;
-  const awaySeconds = concurrency.awaySeconds;
-  const presentAgentSeconds = Math.max(0, agentSeconds - awaySeconds);
-  const ratio = leverage(stats);
+  const { activeSeconds, concurrency } = stats;
   return (
     <div className="breakdown" data-testid="breakdown">
       <p className="group-label">{self ? "Your active time — the hours you were at this computer" : "Active time — the hours they were at this computer"}</p>
@@ -145,68 +143,99 @@ const MemberBreakdown = ({ stats, self }: { stats: MeStatsResponse; self: boolea
           <span className="metric-value">{formatHumanDuration(concurrency.t3PlusSeconds)}</span>
         </div>
       )}
-      {agentSeconds > 0 && (
-        <>
-          <p className="group-label">{self ? "Agent runtime — summed, may exceed your hours" : "Agent runtime — summed, may exceed their hours"}</p>
-          <div className="metric-row is-subtotal">
-            <span className="metric-name">{self ? "While you were there" : "While they were there"}</span>
-            <span className="metric-value">{formatHumanDuration(presentAgentSeconds)}</span>
-          </div>
-          {awaySeconds > 0 && (
-            <div className="metric-row">
-              <span className="metric-swatch swatch-away" aria-hidden="true" />
-              <span className="metric-name">Agents while away <span className="metric-hint">({self ? "never your hours" : "never their hours"})</span></span>
-              <span className="metric-value">{formatHumanDuration(awaySeconds)}</span>
-            </div>
-          )}
-          <div className="metric-row is-subtotal is-headline">
-            <span className="metric-name">Total agent time · leverage</span>
-            <span className="metric-value">{formatHumanDuration(agentSeconds)}{ratio !== null && ` · ${ratio}×`}</span>
-          </div>
-        </>
-      )}
     </div>
   );
 };
 
-/// Which runtimes actually ran, with the model each was driving, how many
-/// sessions that was, how many overlapped at once, and how long a session
-/// typically lasted - all already in the agent_sessions table, now presented
-/// rather than folded into a note.
-const AgentSessionsTable = ({ byAgent }: { byAgent: MeStatsResponse["byAgent"] }) => {
-  if (byAgent.length === 0) return null;
+/// One agent's runtime, read against the hours its owner was actually at the
+/// computer. Summed, so parallel shifts legitimately exceed those hours -
+/// that is leverage, not an error. The owner numbers are absent on an API
+/// that predates them, and the split is then simply not claimed.
+const AgentBreakdown = ({ paystub, ownerName }: { paystub: AgentPaystubResponse; ownerName: string }) => {
+  const { agentSeconds, ownerActiveSeconds, awaySeconds, shiftCount, commitsRecorded, heldRate } = paystub.totals;
+  const presentSeconds = awaySeconds === undefined ? null : Math.max(0, agentSeconds - awaySeconds);
+  const ratio = ownerActiveSeconds === undefined ? null : leverage({ activeSeconds: ownerActiveSeconds, agentSeconds });
+  return (
+    <div className="breakdown" data-testid="agent-breakdown">
+      <p className="group-label">Agent runtime — summed, may exceed {ownerName}'s hours</p>
+      {presentSeconds !== null && (
+        <div className="metric-row is-subtotal">
+          <span className="metric-name">While {ownerName} was there</span>
+          <span className="metric-value">{formatHumanDuration(presentSeconds)}</span>
+        </div>
+      )}
+      {awaySeconds !== undefined && awaySeconds > 0 && (
+        <div className="metric-row">
+          <span className="metric-swatch swatch-away" aria-hidden="true" />
+          <span className="metric-name">Ran while away <span className="metric-hint">(never their hours)</span></span>
+          <span className="metric-value">{formatHumanDuration(awaySeconds)}</span>
+        </div>
+      )}
+      <div className="metric-row is-subtotal is-headline">
+        <span className="metric-name">Total agent time{ratio !== null && " · leverage"}</span>
+        <span className="metric-value">{formatHumanDuration(agentSeconds)}{ratio !== null && ` · ${ratio}×`}</span>
+      </div>
+      <div className="metric-row">
+        <span className="metric-name">Shifts <span className="metric-hint">(one terminal session each)</span></span>
+        <span className="metric-value">{shiftCount}</span>
+      </div>
+      <div className="metric-row">
+        <span className="metric-name">Commits recorded</span>
+        <span className="metric-value">{commitsRecorded}</span>
+      </div>
+      <div className="metric-row">
+        <span className="metric-name">
+          Held rate
+          <span className="metric-hint"> · self-reported by the machine that ran the shift</span>
+        </span>
+        <span className="metric-value">{heldRate === null ? "pending" : `${Math.round(heldRate * 100)}%`}</span>
+      </div>
+    </div>
+  );
+};
+
+/// Which models this agent's runtime drove, how many shifts that was, how
+/// many overlapped at once, and how long a shift typically lasted. Every row
+/// belongs to the one roster agent on screen, which is what keeps another
+/// worker's shifts out of it.
+const AgentSessionsTable = ({ source, models }: { source: string; models: AgentPaystubResponse["models"] }) => {
+  if (models.length === 0) return null;
   return (
     <div className="agent-sessions" data-testid="agent-sessions">
       <p className="group-label">Agent sessions</p>
-      <table>
-        <thead>
-          <tr>
-            <th>Runtime</th>
-            <th>Model</th>
-            <th className="numeric">Sessions</th>
-            <th className="numeric">Max at once</th>
-            <th className="numeric">Total</th>
-            <th className="numeric">Median</th>
-          </tr>
-        </thead>
-        <tbody>
-          {byAgent.map((split) => (
-            <tr key={`${split.source}|${split.model ?? ""}`}>
-              <td>{agentRuntimeLabel(split.source)}</td>
-              {/* A null model is a shift whose hook named none - recorded
-                  before model capture, or a runtime that never reports one.
-                  Say so; a bare dash reads as broken. */}
-              <td className={split.model === null ? "subtle-cell" : undefined}>{split.model ?? "not recorded"}</td>
-              <td className="numeric">{split.sessionCount ?? 0}</td>
-              <td className="numeric">{split.maxConcurrent ?? 0}</td>
-              <td className="numeric">{formatHumanDuration(split.durationSeconds)}</td>
-              <td className="numeric">{formatHumanDuration(split.medianSeconds ?? 0)}</td>
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Runtime</th>
+              <th>Model</th>
+              <th className="numeric">Shifts</th>
+              <th className="numeric">Max at once</th>
+              <th className="numeric">Total</th>
+              <th className="numeric">Median</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-      {byAgent.some((split) => split.model === null) && (
-        <p className="graph-note">Sessions recorded before model capture show not recorded.</p>
+          </thead>
+          <tbody>
+            {models.map((split) => (
+              <tr key={split.model ?? ""}>
+                <td>{agentRuntimeLabel(source)}</td>
+                {/* A null model is a shift whose hook named none - recorded
+                    before model capture, or a runtime that never reports one.
+                    Say so; a bare dash reads as broken. */}
+                <td className={split.model === null ? "subtle-cell" : undefined}>{split.model ?? "not recorded"}</td>
+                <td className="numeric">{split.shiftCount}</td>
+                {/* Undefined means the deployed API predates the field:
+                    absence shown as absence, never a zero nothing measured. */}
+                <td className="numeric">{split.maxConcurrent ?? "-"}</td>
+                <td className="numeric">{formatHumanDuration(split.agentSeconds)}</td>
+                <td className="numeric">{split.medianSeconds === undefined ? "-" : formatHumanDuration(split.medianSeconds)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {models.some((split) => split.model === null) && (
+        <p className="graph-note">Shifts recorded before model capture show not recorded.</p>
       )}
     </div>
   );
@@ -1364,7 +1393,6 @@ export const App = ({ client }: AppProps) => {
             ) : (
               <>
                 <MemberBreakdown stats={memberStats} self={viewingSelf} />
-                <AgentSessionsTable byAgent={memberStats.byAgent} />
                 <HourlyGraph
                   buckets={memberStats.hourly ?? []}
                   personLabel={viewingSelf ? "You" : (member?.name ?? "Person")}
@@ -1524,7 +1552,7 @@ const RosterTab = ({
       ) : (
         <ol className="board-list roster-list" data-testid="roster-list">
           {agents.map((agent) => {
-            const models = rowsByAgentId.get(agent.id)?.models ?? [];
+            const row = rowsByAgentId.get(agent.id);
             return (
               <li
                 key={agent.id}
@@ -1550,27 +1578,36 @@ const RosterTab = ({
                   </form>
                 ) : (
                   <>
+                    {/* Every secondary fact is its own span, so the line
+                        wraps between them at any width instead of clipping. */}
                     <button
                       type="button"
                       className="board-choice"
                       aria-pressed={agent.id === selectedAgentId}
                       onClick={() => onSelect(agent.id)}
                     >
-                      <span className="board-rank" aria-hidden="true" />
                       <span className="board-name">
                         {agent.name}
                         {agent.status === "retired" && <span className="you-tag"> retired</span>}
                       </span>
-                      <span className="board-times">
-                        <span className="board-hours">
-                          {rowsByAgentId.get(agent.id)?.agentSeconds !== undefined
-                            ? formatHumanDuration(rowsByAgentId.get(agent.id)!.agentSeconds)
-                            : "-"}
-                        </span>
-                        <span className="board-agent">
-                          {agentRuntimeLabel(agent.source)} · {agent.owner.name}
-                          {models.length > 0 && ` · ${models.join(", ")}`}
-                        </span>
+                      <span className="board-hours">
+                        {row === undefined ? "-" : formatHumanDuration(row.agentSeconds)}
+                      </span>
+                      <span className="board-facts">
+                        <span className="board-fact">{agentRuntimeLabel(agent.source)}</span>
+                        <span className="board-fact">{agent.owner.name}</span>
+                        {(row?.models ?? []).map((model) => <span key={model} className="board-fact">{model}</span>)}
+                        {/* The codebases the shifts worked - names, not paths,
+                            so they reach every member of the workspace. */}
+                        {(row?.repos ?? []).map((repo) => <span key={repo} className="board-fact is-repo">{repo}</span>)}
+                        {row !== undefined && (
+                          <>
+                            <span className="board-fact">{row.shiftCount} shift{row.shiftCount === 1 ? "" : "s"}</span>
+                            <span className="board-fact">
+                              {row.heldRate === null ? "held pending" : `${Math.round(row.heldRate * 100)}% held`}
+                            </span>
+                          </>
+                        )}
                       </span>
                     </button>
                     <button
@@ -1600,29 +1637,24 @@ const RosterTab = ({
             <p className="subtle" role="status">Loading…</p>
           ) : (
             <>
-              <div className="breakdown">
-                <div className="metric-row is-headline">
-                  <span className="metric-name">Hours</span>
-                  <span className="metric-value">{formatHumanDuration(paystub.totals.agentSeconds)}</span>
-                </div>
-                <div className="metric-row">
-                  <span className="metric-name">Shifts</span>
-                  <span className="metric-value">{paystub.totals.shiftCount}</span>
-                </div>
-                <div className="metric-row">
-                  <span className="metric-name">Commits recorded</span>
-                  <span className="metric-value">{paystub.totals.commitsRecorded}</span>
-                </div>
-                <div className="metric-row">
-                  <span className="metric-name">
-                    Held rate
-                    <span className="metric-hint"> · self-reported by the machine that ran the shift</span>
-                  </span>
-                  <span className="metric-value">
-                    {paystub.totals.heldRate === null ? "pending" : `${Math.round(paystub.totals.heldRate * 100)}%`}
-                  </span>
-                </div>
-              </div>
+              <AgentBreakdown paystub={paystub} ownerName={selected.owner.name} />
+              <AgentSessionsTable source={selected.source} models={paystub.models} />
+              <HourlyGraph
+                buckets={paystub.hourly ?? []}
+                personLabel={selected.owner.name}
+                formatDuration={formatHumanDuration}
+                tokenBlind={paystub.totals.tokensReported ? [] : [agentRuntimeLabel(selected.source)]}
+              />
+              {(paystub.codebases ?? []).length > 0 && (
+                <ul className="stat-list" data-testid="paystub-codebases">
+                  {paystub.codebases.map((entry) => (
+                    <li key={entry.repo ?? ""} className="stat-row">
+                      <span className="stat-name">{entry.repo ?? "No codebase recorded"}</span>
+                      <span className="stat-duration">{formatHumanDuration(entry.agentSeconds)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
               {paystub.shifts.length === 0 ? (
                 <p className="subtle">No shifts in this range.</p>
               ) : (
@@ -1633,6 +1665,10 @@ const RosterTab = ({
                       <li key={shift.id} className="stat-row">
                         <span className="stat-name">
                           {new Date(shift.startedAt).toLocaleString()}
+                          {/* The codebase the shift worked, as a name. The
+                              repo root itself stays on the commit, where only
+                              the owner and workspace admins are sent it. */}
+                          {shift.repo !== null && <span className="shift-repo">{shift.repo}</span>}
                           {shift.model !== null && <span className="metric-hint"> · {shift.model}</span>}
                           {shift.commits.map((commit) => (
                             <span

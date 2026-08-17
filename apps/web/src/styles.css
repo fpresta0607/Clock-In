@@ -9,7 +9,9 @@
    content on some Chrome/GPU stacks. */
 .shader-bg { position: fixed; inset: 0; width: 100%; height: 100%; display: block; z-index: -1; }
 
-.shell { position: relative; z-index: 1; max-width: 960px; margin: 0 auto; padding: 32px 20px 64px; display: grid; gap: 20px; }
+/* Wide enough for a six-column Agent-sessions table and a roster row's facts
+   to sit on one line on a desktop screen; the rows wrap on their own below it. */
+.shell { position: relative; z-index: 1; max-width: 1120px; margin: 0 auto; padding: 32px 20px 64px; display: grid; gap: 20px; }
 .auth-shell { min-height: 100vh; place-content: center; max-width: 420px; }
 
 .masthead { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
@@ -84,10 +86,31 @@ a.primary { display: inline-block; text-decoration: none; }
 .board-agent { color: var(--text-secondary); font-size: .74rem; font-variant-numeric: tabular-nums; }
 
 /* The roster tab: every row carries an inline Rename beside the board choice;
-   naming an anonymous agent is what registers it, so there is no grey state. */
-.roster-list li { display: flex; align-items: center; gap: 8px; }
-.roster-list li .board-choice { flex: 1; min-width: 0; }
+   naming an anonymous agent is what registers it, so there is no grey state.
+   A roster row also carries far more than a rank and a number - runtime,
+   owner, models, codebases, shifts, held rate - so it gets two rows of its
+   own instead of one right-aligned line that clips. The facts wrap between
+   themselves at any width; only the name is allowed to ellipsize. */
+.roster-list li { display: flex; align-items: flex-start; gap: 8px; }
+.roster-list li .board-choice {
+  flex: 1;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  row-gap: 4px;
+}
+.board-facts { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 8px; color: var(--text-secondary); font-size: .78rem; }
+.board-fact { display: inline-block; overflow-wrap: anywhere; }
+.board-fact + .board-fact::before { content: "·"; margin-right: 8px; color: var(--glass-border); }
+/* The codebase is the fact org members came here for, so it reads at full
+   contrast while the rest of the line stays secondary. */
+.board-fact.is-repo { color: var(--mint); }
 .roster-rename { flex: none; }
+
+/* Six columns will not fit a narrow viewport; the table scrolls inside its
+   own box rather than pushing the card sideways. */
+.table-scroll { overflow-x: auto; }
+.shift-repo { margin-left: 8px; color: var(--mint); }
 .manage-rename { display: flex; flex: 1; gap: 8px; align-items: center; }
 .manage-rename input { flex: 1; min-width: 0; }
 
