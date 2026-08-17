@@ -195,8 +195,8 @@ integration("agents operator-and-repo identity upsert", () => {
 
     const kept = await repository.upsertForKey(key);
     await database.client`
-      insert into agent_sessions (organization_id, user_id, source, external_session_id, agent_id, status, started_at, last_event_at, received_at)
-      values (${organizationId}, ${ownerUserId}, 'pi', ${randomUUID()}, ${kept.id}, 'ended', now(), now(), now())
+      insert into agent_sessions (organization_id, user_id, source, external_session_id, agent_id, status, started_at, ended_at, last_event_at, received_at)
+      values (${organizationId}, ${ownerUserId}, 'pi', ${randomUUID()}, ${kept.id}, 'ended', now(), now(), now(), now())
     `;
     await expect(repository.retireIfSessionless(organizationId, kept.id, now)).resolves.toBe(false);
     expect((await repository.findById(subject, kept.id))?.status).toBe("anonymous");
