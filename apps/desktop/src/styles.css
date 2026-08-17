@@ -372,7 +372,9 @@ select:disabled { opacity: .55; }
 }
 .board-facts { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 8px; color: var(--text-secondary); font-size: .72rem; }
 .board-fact { display: inline-block; overflow-wrap: anywhere; }
-.board-fact + .board-fact::before { content: "·"; margin-right: 8px; color: var(--glass-border); }
+/* The separator trails its own fact rather than leading the next one, so a
+   wrapped line never begins with a dangling dot. */
+.board-fact:not(:last-child)::after { content: "·"; margin-left: 8px; color: var(--glass-border); }
 /* The codebase is the fact org members came here for, so it reads at full
    contrast while the rest of the line stays secondary. */
 .board-fact.is-repo { color: var(--mint); }
@@ -545,8 +547,11 @@ select:disabled { opacity: .55; }
 .manage-delete { display: grid; gap: 9px; }
 
 /* The human/agent metric breakdown: labeled rows, not one cramped sentence. */
-.breakdown { display: grid; gap: 0; }
-.group-label { margin: 14px 0 5px; color: var(--text-secondary); font-size: .72rem; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
+/* A single shrinkable track: without minmax(0, ...) the grid sizes to its
+   widest min-content - an owner's long name in the uppercase group label -
+   and drags every metric row past the panel's edge. */
+.breakdown { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
+.group-label { margin: 14px 0 5px; color: var(--text-secondary); font-size: .72rem; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; overflow-wrap: anywhere; }
 .group-label:first-child { margin-top: 0; }
 .metric-row { display: flex; align-items: baseline; gap: 10px; padding: 5px 2px; border-bottom: 1px solid rgba(163, 179, 194, .08); font-size: .85rem; }
 .metric-row:last-child { border-bottom: 0; }
@@ -565,8 +570,12 @@ select:disabled { opacity: .55; }
 
 /* Which models ran, with session count, overlap, and length. */
 .agent-sessions { margin-top: 14px; }
-.agent-sessions table { margin-top: 2px; }
-.agent-sessions .numeric { text-align: right; font-variant-numeric: tabular-nums; }
+/* Six columns have to fit the 520px window the app opens at, so the cells
+   give up their side padding before the table gives up a column; the scroll
+   box behind them only engages if a window is narrower still. */
+.agent-sessions table { margin-top: 2px; font-size: .82rem; }
+.agent-sessions th, .agent-sessions td { padding-left: 5px; padding-right: 5px; }
+.agent-sessions .numeric { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* A model that was never recorded reads muted, not as a bare gap. */
 .agent-sessions .subtle-cell { color: var(--text-secondary); }
 
