@@ -9,9 +9,12 @@
    content on some Chrome/GPU stacks. */
 .shader-bg { position: fixed; inset: 0; width: 100%; height: 100%; display: block; z-index: -1; }
 
-/* Wide enough for a six-column Agent-sessions table and a roster row's facts
-   to sit on one line on a desktop screen; the rows wrap on their own below it. */
-.shell { position: relative; z-index: 1; max-width: 1120px; margin: 0 auto; padding: 32px 20px 64px; display: grid; gap: 20px; }
+/* No width cap: the six-column Agent-sessions table, the leaderboard and the
+   roster rows take whatever width the window has, and the 20px side padding is
+   the only inset. A pixel cap here stops tracking the window at some size and
+   turns the dashboard into an island on a wide screen. `margin: 0 auto` stays:
+   `.auth-shell` below caps itself at 420px and inherits its centring from here. */
+.shell { position: relative; z-index: 1; margin: 0 auto; padding: 32px 20px 64px; display: grid; gap: 20px; }
 .auth-shell { min-height: 100vh; place-content: center; max-width: 420px; }
 
 .masthead { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
@@ -295,7 +298,15 @@ a.download-secondary:hover { color: #ffffff; }
 
 /* SVG charts: the hourly line graph and the weekly trend strip. Colors come
    from the brand.css chart tokens; only layout lives here. */
-.graph { position: relative; margin-top: 14px; }
+/* The charts draw into a fixed viewBox, so width drives height: unbounded, a
+   2482px card renders the hourly graph 737px tall. This is the aspect bound,
+   not a layout preference - 1050px is the width the charts were drawn at, and
+   the tables beside them stay full width. The bound belongs on the container
+   rather than on the svg's height, because `.graph-tooltip` is positioned in
+   percent of `.graph` and would stop landing on its data point if the svg were
+   letterboxed inside a wider box. Lift it by measuring the container and
+   emitting a matching viewBox. */
+.graph { position: relative; max-width: 1050px; margin-top: 14px; }
 .graph svg { display: block; width: 100%; height: auto; }
 .graph text { font-variant-numeric: tabular-nums; }
 .graph-mode { width: fit-content; margin-top: 10px; }
