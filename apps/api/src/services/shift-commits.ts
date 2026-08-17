@@ -1,4 +1,4 @@
-import { agentRuntimeLabel, type ShiftCommitBatchResponse, type ShiftCommitUpload } from "@clock-in/shared";
+import type { ShiftCommitBatchResponse, ShiftCommitUpload } from "@clock-in/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import type {
@@ -8,6 +8,7 @@ import type {
   ShiftCommitRepository,
 } from "../repositories.js";
 import { rosterEligibleSource } from "./agent-sessions.js";
+import { graduateAgentForSession } from "./agent-identity.js";
 
 export interface ShiftCommitServiceDependencies {
   shiftCommits: ShiftCommitRepository;
@@ -79,25 +80,30 @@ export function createShiftCommitService(dependencies: ShiftCommitServiceDepende
           continue;
         }
 
-        let agentId = session.agentId;
-        if (agentId === null) {
-          // A shift that started before the roster existed still takes its
-          // commits: mint (or find) the identity and stamp the session now.
-          if (dependencies.agents === undefined || !rosterEligibleSource(commit.source)) {
+        // The commit's repo root is the evidence that names this shift's
+        // codebase. It late-mints an identity for a shift that has none, and
+        // it graduates or re-homes one whose codebase was still unknown -
+        // which is the designed path for every desktop that cannot probe a
+        // repository at session start.
+        if (dependencies.agents === undefined || !rosterEligibleSource(commit.source)) {
+          if (session.agentId === null) {
             rejected.push({ clientId: commit.clientId, reason: "session has no roster identity" });
             continue;
           }
-          const minted = await dependencies.agents.upsertForKey({
-            organizationId: subject.organizationId,
-            ownerUserId: session.userId,
-            source: commit.source,
-            projectId: session.projectId,
-            name: agentRuntimeLabel(commit.source),
+        } else {
+          await graduateAgentForSession(
+            { agents: dependencies.agents, agentSessions: dependencies.agentSessions },
+            subject,
+            session,
+            commit.source,
+            commit.repoRoot,
             now,
-          });
-          agentId = minted.id;
-          await dependencies.agentSessions.stampAgent(subject, session.id, agentId, now);
-          session.agentId = agentId;
+          );
+        }
+        const agentId = session.agentId;
+        if (agentId === null) {
+          rejected.push({ clientId: commit.clientId, reason: "session has no roster identity" });
+          continue;
         }
 
         const existing = await dependencies.shiftCommits.findByClientId(subject, commit.clientId);

@@ -58,6 +58,7 @@ function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
     status: "anonymous",
     owner: { id: ids.admin, name: "Alex" },
     project: { id: ids.project, name: "Field work" },
+    repoRoot: null,
     createdAt: new Date("2026-08-01T00:00:00.000Z"),
     ...overrides,
   };
@@ -233,6 +234,45 @@ describe("agent routes", () => {
         createdAt: "2026-08-01T00:00:00.000Z",
       }],
     });
+  });
+
+  // Both projections have to parse through the same strict schema, which is
+  // what optional-rather-than-nullable buys: a caller who owns neither agent
+  // reads the codebase's name and simply never receives the path.
+  it("sends the codebase name to every member and the path only to the owner and admins", async () => {
+    const owned = agentRecord({ repoRoot: "C:/dev/clock-in" });
+    const { app } = createTestApp(new MemoryAgents([owned]));
+
+    const asOwner = await app.request("http://api.test/agents", { headers: { authorization: adminHeader } });
+    expect(asOwner.status).toBe(200);
+    await expect(asOwner.json()).resolves.toMatchObject({
+      agents: [{ repoName: "clock-in", repoRoot: "C:/dev/clock-in" }],
+    });
+
+    const asOther = await app.request("http://api.test/agents", { headers: { authorization: memberHeader } });
+    expect(asOther.status).toBe(200);
+    const body = await asOther.json() as { agents: Record<string, unknown>[] };
+    expect(body.agents[0]).toMatchObject({ repoName: "clock-in" });
+    // Absent, not blanked - the roster still reads correctly from the name.
+    expect(body.agents[0]).not.toHaveProperty("repoRoot");
+  });
+
+  it("renames an agent that carries a repo, which re-validates the whole record", async () => {
+    // The trap: `patch` re-validates the merged agent against the strict
+    // schema, so an identity column left out of that literal fails a rename
+    // on a field the request never mentions.
+    const { app } = createTestApp(new MemoryAgents([agentRecord({ repoRoot: "C:/dev/clock-in" })]));
+
+    const response = await app.request(`http://api.test/agents/${ids.agent}`, {
+      method: "PATCH",
+      headers: { authorization: memberHeader, "content-type": "application/json" },
+      body: JSON.stringify({ name: "Reviewer" }),
+    });
+
+    expect(response.status).toBe(200);
+    // The route re-parses what the service projects, so a mismatched
+    // projection would be a 500 on this read path rather than a type error.
+    await expect(response.json()).resolves.toMatchObject({ name: "Reviewer", repoName: "clock-in" });
   });
 
   it("patches a rename, any member allowed, and an anonymous agent registers in the same write", async () => {

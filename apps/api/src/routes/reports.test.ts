@@ -51,6 +51,7 @@ class Reports implements ReportRepository {
       id: "c1c7e513-b094-4d4c-ae55-21790ae019a4",
       user: { id: ids.user, name: "Alex" },
       project: { id: ids.project, name: "Timer" },
+      repoRoot: null,
       description: "=formula",
       status: "stopped",
       startedAt: new Date("2026-08-06T14:00:00.000Z"),
@@ -202,6 +203,7 @@ describe("report routes", () => {
       status: "anonymous",
       owner: { id: ids.user, name: "Alex" },
       project: { id: ids.project, name: "Timer" },
+      repoRoot: null,
       createdAt: new Date("2026-08-01T00:00:00.000Z"),
     };
     const response = await app(reports, new AgentSessions(), new Agents([agentRecord]))

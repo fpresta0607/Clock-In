@@ -59,10 +59,15 @@ export function createAgentUsageService(dependencies: AgentUsageServiceDependenc
             rejected.push({ clientId: entry.clientId, reason: "session has no roster identity" });
             continue;
           }
+          // A usage row carries tokens and a model, never a repository, so
+          // this mints into the operator's unassigned bucket. The shift
+          // graduates onto its codebase when its first commit names one -
+          // the same late-discovery path an un-probed session already takes.
           const minted = await dependencies.agents.upsertForKey({
             organizationId: subject.organizationId,
             ownerUserId: session.userId,
             source: entry.source,
+            repoRoot: null,
             projectId: session.projectId,
             name: agentRuntimeLabel(entry.source),
             now,

@@ -29,6 +29,7 @@ import type {
   OrganizationRecord,
 } from "./auth.js";
 import { AppError } from "./errors.js";
+import { repoLabel } from "./services/attribution.js";
 import {
   PathMappingRepositoryError,
   SessionRepositoryError,
@@ -247,32 +248,14 @@ export class DrizzleProjectRepository implements ProjectRepository {
           .where(and(eq(agentSessions.organizationId, subject.organizationId), eq(agentSessions.projectId, projectId)));
       }
       // agents_organization_project_fk is ON DELETE restrict, so every roster
-      // identity has to leave the project before it can go. Re-point the ones
-      // whose key is free at the destination (a merge-style NOT EXISTS, like
-      // the one merge uses for shift_commits) - a retired row is already
-      // outside the partial identity index and always moves.
-      await tx.execute(sql`
-        update agents set project_id = ${reassignTo}::uuid, updated_at = now()
-        where organization_id = ${subject.organizationId}::uuid
-          and project_id = ${projectId}::uuid
-          and (
-            status = 'retired'
-            or not exists (
-              select 1 from agents as holder
-              where holder.organization_id = agents.organization_id
-                and holder.source = agents.source
-                and holder.project_id is not distinct from ${reassignTo}::uuid
-                and holder.status <> 'retired'
-                and holder.id <> agents.id
-            )
-          )
-      `);
-      // Whatever is left collided with a live identity at the destination.
-      // Retiring it releases its key and lets the project go; its shifts and
-      // commits stay attached to it, and the live identity takes the next one.
+      // identity has to leave the project before it can go. Since v2 the
+      // project is a re-derivable attribute rather than part of the identity
+      // key, so moving two agents onto the same destination cannot collide and
+      // none of them has to be retired to make room - the guard-and-retire
+      // dance this used to need went away with the key it protected.
       await tx
         .update(agents)
-        .set({ projectId: reassignTo, status: "retired", updatedAt: sql`now()` })
+        .set({ projectId: reassignTo, updatedAt: sql`now()` })
         .where(and(eq(agents.organizationId, subject.organizationId), eq(agents.projectId, projectId)));
       await tx
         .delete(projectPathMappings)
@@ -1292,11 +1275,20 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
   }
 }
 
-/** Either half of the partial identity key: assigned agents, or the unassigned one per source. */
+/** Either half of the partial identity key: repo-keyed agents, or one operator's unassigned bucket. */
 function identityKeyConstraint(error: unknown): boolean {
   const constraint = uniqueConstraint(error);
-  return constraint === "agents_organization_source_project_unique"
-    || constraint === "agents_organization_source_unassigned_unique";
+  return constraint === "agents_organization_owner_source_repo_unique"
+    || constraint === "agents_organization_owner_source_unassigned_unique";
+}
+
+/**
+ * The default roster name: the runtime's label beside the codebase's folder
+ * name, or "unassigned" for the operator's repo-less bucket. Only the
+ * basename is ever displayed, so the full path never has to leave the row.
+ */
+export function defaultAgentName(runtimeLabel: string, repoRoot: string | null): string {
+  return `${runtimeLabel} @ ${(repoRoot === null ? null : repoLabel(repoRoot)) ?? "unassigned"}`;
 }
 
 function asAgentRecord(row: { agent: typeof agents.$inferSelect; ownerName: string; projectName: string | null }): AgentRecord {
@@ -1309,6 +1301,7 @@ function asAgentRecord(row: { agent: typeof agents.$inferSelect; ownerName: stri
     owner: { id: row.agent.ownerUserId, name: row.ownerName },
     // The restrict FK keeps the project alive while the agent points at it.
     project: row.agent.projectId === null ? null : { id: row.agent.projectId, name: row.projectName! },
+    repoRoot: row.agent.repoRoot,
     createdAt: row.agent.createdAt,
   };
 }
@@ -1318,33 +1311,96 @@ export class DrizzleAgentRepository implements AgentRepository {
 
   public async upsertForKey(input: UpsertAgentForKey): Promise<{ id: string }> {
     // Both halves of the identity key are partial indexes excluding retired
-    // rows, so the arbiter carries the same predicate; an unassigned sighting
-    // arbitrates on the index that collapses null projects onto one row.
-    const unassigned = input.projectId === null;
+    // rows, so each arbiter must restate its index's predicate exactly:
+    // postgres matches ON CONFLICT to a partial index by that predicate, and a
+    // predicate that does not match fails every insert with "no unique or
+    // exclusion constraint matching the ON CONFLICT specification" - which no
+    // mocked repository can catch. A repo-less sighting arbitrates on the
+    // index that collapses one operator's null repos onto a single row.
+    const unassigned = input.repoRoot === null;
     const rows = await this.db
       .insert(agents)
       .values({
         organizationId: input.organizationId,
         ownerUserId: input.ownerUserId,
         projectId: input.projectId,
+        repoRoot: input.repoRoot,
         source: input.source,
-        // The default name is composed in the insert path so the project's
-        // name lands without another round trip; a null project reads as
-        // "unassigned". A replay only touches updatedAt - the name, owner
-        // and status a member may have set are never overwritten.
-        name: sql`${input.name} || ' @ ' || coalesce((select ${projects.name} from ${projects} where ${projects.organizationId} = ${input.organizationId} and ${projects.id} = ${input.projectId}), 'unassigned')`,
+        // The default name is the runtime label beside the repo's folder
+        // name, composed here because the basename needs no round trip; a
+        // repo-less identity reads as "unassigned". A replay only touches
+        // updatedAt - the name, owner and status a member may have set are
+        // never overwritten.
+        name: defaultAgentName(input.name, input.repoRoot),
       })
       .onConflictDoUpdate({
         target: unassigned
-          ? [agents.organizationId, agents.source]
-          : [agents.organizationId, agents.source, agents.projectId],
+          ? [agents.organizationId, agents.ownerUserId, agents.source]
+          : [agents.organizationId, agents.ownerUserId, agents.source, agents.repoRoot],
         targetWhere: unassigned
-          ? sql`${agents.projectId} is null and ${agents.status} <> 'retired'`
-          : sql`${agents.status} <> 'retired'`,
+          ? sql`${agents.repoRoot} is null and ${agents.status} <> 'retired'`
+          : sql`${agents.repoRoot} is not null and ${agents.status} <> 'retired'`,
         set: { updatedAt: input.now },
       })
       .returning({ id: agents.id });
     return { id: rows[0]!.id };
+  }
+
+  public async claimRepoRoot(organizationId: string, agentId: string, repoRoot: string, now: Date): Promise<boolean> {
+    // First assignment wins, mirroring the agentId and model coalesces: the
+    // row keeps its id, so its hours, shifts, commits and tokens graduate
+    // with it and nothing is re-summed. A conflict on the repo-keyed unique
+    // means another agent already owns this codebase, and the caller re-homes
+    // the session instead.
+    try {
+      const rows = await this.db
+        .update(agents)
+        .set({ repoRoot, updatedAt: now })
+        .where(and(
+          eq(agents.organizationId, organizationId),
+          eq(agents.id, agentId),
+          isNull(agents.repoRoot),
+        ))
+        .returning({ id: agents.id });
+      return rows.length > 0;
+    } catch (error: unknown) {
+      if (identityKeyConstraint(error)) return false;
+      throw error;
+    }
+  }
+
+  public async restampSession(organizationId: string, agentSessionId: string, agentId: string, now: Date): Promise<void> {
+    // The evidence tables key on agent_session_id, which does not move, so
+    // each is one indexed update and neither can collide. Unlike stampAgent
+    // this overwrites: graduation exists precisely to correct a stamp.
+    await this.db.transaction(async (tx) => {
+      await tx
+        .update(agentSessions)
+        .set({ agentId, updatedAt: now })
+        .where(and(eq(agentSessions.organizationId, organizationId), eq(agentSessions.id, agentSessionId)));
+      await tx
+        .update(shiftCommits)
+        .set({ agentId, updatedAt: now })
+        .where(and(eq(shiftCommits.organizationId, organizationId), eq(shiftCommits.agentSessionId, agentSessionId)));
+      await tx
+        .update(agentUsage)
+        .set({ agentId, updatedAt: now })
+        .where(and(eq(agentUsage.organizationId, organizationId), eq(agentUsage.agentSessionId, agentSessionId)));
+    });
+  }
+
+  public async retireIfSessionless(organizationId: string, agentId: string, now: Date): Promise<boolean> {
+    const rows = await this.db
+      .update(agents)
+      .set({ status: "retired", updatedAt: now })
+      .where(and(
+        eq(agents.organizationId, organizationId),
+        eq(agents.id, agentId),
+        isNull(agents.repoRoot),
+        sql`not exists (select 1 from ${agentSessions} where ${agentSessions.organizationId} = ${organizationId} and ${agentSessions.agentId} = ${agentId})`,
+      ))
+      .returning({ id: agents.id });
+    return rows.length > 0;
   }
 
   private selectJoined() {
@@ -1414,6 +1470,15 @@ export class DrizzleAgentRepository implements AgentRepository {
               and winner_commits.sha = ${shiftCommits.sha}
           )`,
         ));
+      // Token rows moved too late: a merge used to strand them on the retired
+      // loser, and nobody noticed because merges were rare. Under v2 a moved
+      // or renamed directory makes merge the ordinary repair, so the usage
+      // follows its agent. Re-pointing cannot collide - the bucket unique is
+      // keyed on agent_session_id, which does not move.
+      await tx
+        .update(agentUsage)
+        .set({ agentId: winnerId, updatedAt: sql`now()` })
+        .where(and(eq(agentUsage.organizationId, subject.organizationId), eq(agentUsage.agentId, loserId)));
       await tx
         .update(agents)
         .set({ status: "retired", updatedAt: sql`now()` })

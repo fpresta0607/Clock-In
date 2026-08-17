@@ -272,8 +272,8 @@ export const activitySegments = pgTable(
   ],
 );
 
-// Durable worker identities on the roster, one per (source, project) per
-// organization. Distinct from the agent-runtime roster in packages/shared:
+// Durable worker identities on the roster, one per (operator, source, repo)
+// per organization. Distinct from the agent-runtime roster in packages/shared:
 // that file declares runtimes, this table records the workers built on them.
 // Rows are minted anonymous on first sight and only ever advance to
 // registered or retired by member action; a merge re-points shifts and
@@ -284,9 +284,15 @@ export const agents = pgTable(
     id: uuid("id").defaultRandom().primaryKey(),
     organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
     ownerUserId: uuid("owner_user_id").notNull(),
-    // Null means the agent works unassigned; the unassigned half of the
-    // identity key below collapses those to a single identity per source.
+    // A re-derivable attribute, not identity: a directory mapped to a project
+    // later moves this column and nothing else. Session rows keep their own
+    // ingest-time project; per-session attribution and per-agent identity are
+    // separate questions.
     projectId: uuid("project_id"),
+    // The codebase this agent works, as the working directory its shifts
+    // reported. Null is the operator's unassigned bucket - a real roster row
+    // that graduates when repo evidence arrives, never a default.
+    repoRoot: text("repo_root"),
     source: text("source").notNull(),
     name: text("name").notNull(),
     status: text("status").$type<"anonymous" | "registered" | "retired">().default("anonymous").notNull(),
@@ -295,19 +301,22 @@ export const agents = pgTable(
   (table) => [
     // Composite-FK target so shift rows stay inside the tenant.
     unique("agents_organization_id_id_unique").on(table.organizationId, table.id),
-    // The identity key, in two partial indexes because a nullable project
-    // needs both halves: one for assigned agents, one collapsing every
-    // unassigned sighting of a source onto a single row (a plain unique
-    // treats NULLs as distinct, which would mint an identity per shift).
-    // Both exclude retired rows, so retiring - by hand or as the loser of a
-    // merge - releases the key and the next shift mints a fresh identity
-    // instead of resurrecting the retired one.
-    uniqueIndex("agents_organization_source_project_unique")
-      .on(table.organizationId, table.source, table.projectId)
-      .where(sql`${table.status} <> 'retired'`),
-    uniqueIndex("agents_organization_source_unassigned_unique")
-      .on(table.organizationId, table.source)
-      .where(sql`${table.projectId} is null and ${table.status} <> 'retired'`),
+    // The identity key - (organization, operator, source, repo) - in two
+    // partial indexes because a nullable repo needs both halves: one for
+    // agents that know their codebase, one collapsing every repo-less
+    // sighting onto a single row per operator (a plain unique treats NULLs as
+    // distinct, which would mint an identity per shift). Both exclude retired
+    // rows, so retiring - by hand or as the loser of a merge - releases the
+    // key and the next shift mints a fresh identity instead of resurrecting
+    // the retired one. `upsertForKey`'s ON CONFLICT targetWhere must restate
+    // these predicates exactly; postgres matches an arbiter to a partial
+    // index by its predicate, and a mismatch fails every insert.
+    uniqueIndex("agents_organization_owner_source_repo_unique")
+      .on(table.organizationId, table.ownerUserId, table.source, table.repoRoot)
+      .where(sql`${table.repoRoot} is not null and ${table.status} <> 'retired'`),
+    uniqueIndex("agents_organization_owner_source_unassigned_unique")
+      .on(table.organizationId, table.ownerUserId, table.source)
+      .where(sql`${table.repoRoot} is null and ${table.status} <> 'retired'`),
     foreignKey({
       columns: [table.organizationId, table.ownerUserId],
       foreignColumns: [users.organizationId, users.id],
@@ -321,6 +330,8 @@ export const agents = pgTable(
     check("agents_status_valid", sql`${table.status} in ('anonymous', 'registered', 'retired')`),
     check("agents_source_valid", sql`${table.source} ~ '^[a-z][a-z0-9_]*$' and char_length(${table.source}) <= 40`),
     check("agents_name_length_valid", sql`char_length(${table.name}) between 1 and 200`),
+    // Written null-or-valid, the same 1..1000 shape shift_commits.repo_root carries.
+    check("agents_repo_root_length_valid", sql`${table.repoRoot} is null or char_length(${table.repoRoot}) between 1 and 1000`),
     index("agents_organization_id_idx").on(table.organizationId),
   ],
 );

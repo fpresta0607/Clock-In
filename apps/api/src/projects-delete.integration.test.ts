@@ -73,6 +73,7 @@ integration("deleting a project that hosts roster agents", () => {
       organizationId,
       ownerUserId,
       source: "claude_code",
+      repoRoot: null,
       projectId: doomed,
       name: "Claude Code",
       now: new Date(),
@@ -93,6 +94,7 @@ integration("deleting a project that hosts roster agents", () => {
       organizationId,
       ownerUserId,
       source: "claude_code",
+      repoRoot: null,
       projectId: doomed,
       name: "Claude Code",
       now: new Date(),
@@ -111,6 +113,7 @@ integration("deleting a project that hosts roster agents", () => {
       organizationId,
       ownerUserId,
       source: "codex",
+      repoRoot: null,
       projectId: doomed,
       name: "Codex",
       now: new Date(),
@@ -121,21 +124,24 @@ integration("deleting a project that hosts roster agents", () => {
     await expect(statusOf(orphaning.id)).resolves.toEqual({ projectId: null, status: "anonymous" });
   });
 
-  it("retires an identity whose key is already held at the destination", async () => {
+  // Before v2 the project was part of the identity key, so moving two agents
+  // onto one destination collided and the loser had to be retired to release
+  // its key. The project is a plain attribute now, so both simply move and
+  // both stay live - the codebase each works is what keeps them distinct.
+  it("moves every identity to the destination project, keeping both live", async () => {
     const doomed = await project("Colliding from");
     const replacement = await project("Colliding to");
     const key = { organizationId, ownerUserId, source: "cursor" as const, name: "Cursor", now: new Date() };
-    const incumbent = await agents.upsertForKey({ ...key, projectId: replacement });
-    const colliding = await agents.upsertForKey({ ...key, projectId: doomed });
-    expect(colliding.id).not.toBe(incumbent.id);
+    const incumbent = await agents.upsertForKey({ ...key, repoRoot: "C:/dev/clock-in", projectId: replacement });
+    const moved = await agents.upsertForKey({ ...key, repoRoot: "C:/dev/pocket-piggies", projectId: doomed });
+    expect(moved.id).not.toBe(incumbent.id);
 
     await projects.deleteForOrganization(subject, doomed, replacement);
 
-    // Retiring is what releases its key, so both rows can sit on the same
-    // project without violating the identity index.
-    await expect(statusOf(colliding.id)).resolves.toEqual({ projectId: replacement, status: "retired" });
+    await expect(statusOf(moved.id)).resolves.toEqual({ projectId: replacement, status: "anonymous" });
     await expect(statusOf(incumbent.id)).resolves.toEqual({ projectId: replacement, status: "anonymous" });
-    // And the live identity is still the one the next shift lands on.
-    await expect(agents.upsertForKey({ ...key, projectId: replacement })).resolves.toEqual({ id: incumbent.id });
+    // Each identity is still the one its own repo's next shift lands on.
+    await expect(agents.upsertForKey({ ...key, repoRoot: "C:/dev/pocket-piggies", projectId: replacement }))
+      .resolves.toEqual({ id: moved.id });
   });
 });

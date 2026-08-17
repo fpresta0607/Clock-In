@@ -17,7 +17,10 @@ const integration = databaseUrl ? describe : describe.skip;
 // The merge re-point is raw SQL with a NOT EXISTS guard against the
 // (org, agent_id, repo_root, sha) unique, so only a real PostgreSQL can prove
 // it neither errors on a collision nor leaves the loser's commits stranded.
-integration("agent merge re-points shift_commits", () => {
+// Token rows move under the same transaction: under v2 a moved or renamed
+// directory makes merge the ordinary repair, and usage stranded on a retired
+// row would silently leave a codebase's effort unattributed.
+integration("agent merge re-points shift_commits and agent_usage", () => {
   let disposable: DisposableTestDatabase | undefined;
   let database = undefined as unknown as DatabaseConnection;
   const organizationId = randomUUID();
@@ -67,6 +70,10 @@ integration("agent merge re-points shift_commits", () => {
         (${randomUUID()}, ${organizationId}, ${ownerUserId}, ${loserId}, ${loserSessionId}, ${randomUUID()}, '/repo', 'main', ${shaB}, 'loser unique commit', ${authoredAt.toISOString()}, 'pending', null),
         (${randomUUID()}, ${organizationId}, ${ownerUserId}, ${loserId}, ${loserSessionId}, ${randomUUID()}, '/repo', 'main', ${shaA}, 'loser colliding commit', ${authoredAt.toISOString()}, 'pending', null)
     `;
+    await database.client`
+      insert into agent_usage (id, organization_id, user_id, agent_id, agent_session_id, client_id, bucket_start_at, model, sidechain, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens)
+      values (${randomUUID()}, ${organizationId}, ${ownerUserId}, ${loserId}, ${loserSessionId}, ${randomUUID()}, ${startedAt}, 'claude-opus-5', false, 12000, 800, 400, 60000)
+    `;
     agents = new DrizzleAgentRepository(database.db);
     shiftCommits = new DrizzleShiftCommitRepository(database.db);
   }, 60_000);
@@ -89,6 +96,17 @@ integration("agent merge re-points shift_commits", () => {
     expect(loser?.status).toBe("retired");
   });
 
+  // The gap v2 closes: the merge moved shifts and commits but never
+  // agent_usage, so a merged agent's tokens stayed on the retired row and its
+  // effort vanished from every report keyed on the winner.
+  it("moves the loser's token rows to the winner too", async () => {
+    const stranded = await database.client`
+      select agent_id from agent_usage where organization_id = ${organizationId}
+    `;
+
+    expect(stranded.map((row) => row.agent_id)).toEqual([winnerId]);
+  });
+
   // The merge above is what makes this case exist: retiring the loser has to
   // release its identity key, or the very next codex shift conflicts back
   // onto the retired row and the merge is undone before anyone sees it.
@@ -97,6 +115,7 @@ integration("agent merge re-points shift_commits", () => {
       organizationId,
       ownerUserId,
       source: "codex",
+      repoRoot: null,
       projectId: null,
       name: "Codex",
       now: new Date(),

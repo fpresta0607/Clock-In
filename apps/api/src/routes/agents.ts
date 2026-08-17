@@ -33,20 +33,22 @@ export function createAgentRoutes(service: AgentService): Hono<ApiEnvironment> {
   const routes = new Hono<ApiEnvironment>();
 
   routes.get("/", async (context) => {
-    const records = await service.list(getAuthenticatedSubject(context));
-    return context.json(agentsListResponseSchema.parse({ agents: records.map(asAgentView) }));
+    const subject = getAuthenticatedSubject(context);
+    const records = await service.list(subject);
+    return context.json(agentsListResponseSchema.parse({ agents: records.map((record) => asAgentView(record, subject)) }));
   });
 
   routes.patch("/:id", async (context) => {
     const id = agentId(context);
     const input = agentPatchRequestSchema.safeParse(await requestBody(context));
     if (!input.success) throw new AppError("validation_error", "Invalid request body.");
-    const updated = await service.patch(getAuthenticatedSubject(context), id, {
+    const subject = getAuthenticatedSubject(context);
+    const updated = await service.patch(subject, id, {
       ...(input.data.name === undefined ? {} : { name: input.data.name }),
       ...(input.data.status === undefined ? {} : { status: input.data.status }),
       ...(input.data.ownerUserId === undefined ? {} : { ownerUserId: input.data.ownerUserId }),
     });
-    return context.json(agentSchema.parse(asAgentView(updated)));
+    return context.json(agentSchema.parse(asAgentView(updated, subject)));
   });
 
   routes.post("/:id/merge", async (context) => {
