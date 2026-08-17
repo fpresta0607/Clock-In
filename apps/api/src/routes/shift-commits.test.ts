@@ -108,7 +108,6 @@ const inertAgents: AgentRepository = {
   async update(): Promise<AgentRecord | null> { throw new Error("not used"); },
   async merge(): Promise<void> { throw new Error("not used"); },
   async listSessionsForAgent(): Promise<AgentShiftRecord[]> { throw new Error("not used"); },
-  async claimRepoRoot(): Promise<boolean> { throw new Error("not used"); },
   async restampSession(): Promise<void> { throw new Error("not used"); },
   async retireIfSessionless(): Promise<boolean> { throw new Error("not used"); },
 };

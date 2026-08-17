@@ -1351,29 +1351,6 @@ export class DrizzleAgentRepository implements AgentRepository {
     return { id: rows[0]!.id };
   }
 
-  public async claimRepoRoot(organizationId: string, agentId: string, repoRoot: string, now: Date): Promise<boolean> {
-    // First assignment wins, mirroring the agentId and model coalesces: the
-    // row keeps its id, so its hours, shifts, commits and tokens graduate
-    // with it and nothing is re-summed. A conflict on the repo-keyed unique
-    // means another agent already owns this codebase, and the caller re-homes
-    // the session instead.
-    try {
-      const rows = await this.db
-        .update(agents)
-        .set({ repoRoot, updatedAt: now })
-        .where(and(
-          eq(agents.organizationId, organizationId),
-          eq(agents.id, agentId),
-          isNull(agents.repoRoot),
-        ))
-        .returning({ id: agents.id });
-      return rows.length > 0;
-    } catch (error: unknown) {
-      if (identityKeyConstraint(error)) return false;
-      throw error;
-    }
-  }
-
   public async restampSession(organizationId: string, agentSessionId: string, agentId: string, now: Date): Promise<void> {
     // The evidence tables key on agent_session_id, which does not move, so
     // each is one indexed update and neither can collide. Unlike stampAgent

@@ -167,7 +167,6 @@ class MemoryAgents implements AgentRepository {
   public async update(): Promise<AgentRecord | null> { throw new Error("not used"); }
   public async merge(): Promise<void> { throw new Error("not used"); }
   public async listSessionsForAgent(): Promise<never> { throw new Error("not used"); }
-  public async claimRepoRoot(): Promise<boolean> { throw new Error("not used"); }
   public async restampSession(): Promise<void> { throw new Error("not used"); }
   public async retireIfSessionless(): Promise<boolean> { throw new Error("not used"); }
 }

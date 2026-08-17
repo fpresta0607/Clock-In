@@ -761,6 +761,12 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       // pending" is pure clutter between the agents the reader came for. It
       // still counts in the headcount, which is what says the retirement
       // happened at all.
+      //
+      // "Nothing to show" has to mean every column, because these reads do not
+      // share a clock: commits are counted by their git author date while
+      // intervals are counted by session overlap, so a rebased commit can land
+      // in a range the shift that recorded it never touched. A row with a
+      // commit tally or a token total is evidence, whatever its hours say.
       const rows = roster
         .map((agent) => ({
           agent: asAgentReportView(agent, subject),
@@ -770,7 +776,11 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
           repos: grouped.get(agent.id)?.repos ?? [],
           ...agentTokenTotals(usageById.get(agent.id)),
         }))
-        .filter((row) => row.agent.status !== "retired" || row.agentSeconds > 0 || row.shiftCount > 0);
+        .filter((row) => row.agent.status !== "retired"
+          || row.agentSeconds > 0
+          || row.shiftCount > 0
+          || row.commitsRecorded > 0
+          || row.tokensReported);
       // A sort ranks heaviest first; ties and non-reporters keep roster order
       // (the sort is stable). Tokens rank agents that reported none last.
       if (filters.sort === "hours") {

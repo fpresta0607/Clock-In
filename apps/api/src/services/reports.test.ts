@@ -1096,6 +1096,27 @@ describe("agents report", () => {
     expect(result.headcount).toMatchObject({ total: 2, retired: 2 });
   });
 
+  // Commits are counted by their git author date and intervals by session
+  // overlap, so a rebased commit lands in a range its shift never touched.
+  // A retired agent must not take its evidence off the roster with it.
+  it("keeps a retired agent whose commits land in the range even with no shift in it", async () => {
+    const reports = new Reports();
+    const roster = new Agents([
+      agentRecord({ id: ids.session, name: "Pi @ unassigned", source: "pi", status: "retired" }),
+      agentRecord({ id: ids.otherAgent, name: "Codex @ Side", source: "codex", status: "retired" }),
+    ]);
+    const shiftCommits = new ShiftCommits([
+      { userId: ids.user, agentId: ids.otherAgent, projectId: ids.project, verification: "merged", authoredAt: new Date("2026-08-06T14:30:00.000Z") },
+    ]);
+    const service = createReportService({ reports, reaper: silentReaper, agents: roster, shiftCommits });
+
+    const result = await service.agentsReport(subject, {});
+
+    // The one with a commit survives with its tally; the all-zero one is gone.
+    expect(result.rows.map((row) => row.agent.id)).toEqual([ids.otherAgent]);
+    expect(result.rows[0]).toMatchObject({ agentSeconds: 0, shiftCount: 0, commitsRecorded: 1, heldRate: 1 });
+  });
+
   it("labels a shift by its commit's repo root over its working directory, the paystub's rule", async () => {
     const reports = new Reports();
     reports.agentIntervals = [

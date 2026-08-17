@@ -336,16 +336,9 @@ export interface AgentRepository {
   /** This agent's shifts overlapping the range, newest first; running shifts overlap up to lastEventAt. */
   listSessionsForAgent(subject: AuthenticatedSubject, agentId: string, query: ReportQuery): Promise<AgentShiftRecord[]>;
   /**
-   * Graduation, rule 1: names the codebase of an agent that has none, first
-   * assignment wins. False when the row already carries one (so the caller
-   * re-homes the session instead) or when the key is already taken by another
-   * agent for this (organization, operator, source, repo).
-   */
-  claimRepoRoot(organizationId: string, agentId: string, repoRoot: string, now: Date): Promise<boolean>;
-  /**
-   * Graduation, rules 2 and 3: moves one shift and the evidence keyed to it
-   * onto another identity. Overwrites the stamp rather than coalescing, which
-   * is what separates it from `stampAgent`.
+   * Graduation: moves one shift and the evidence keyed to it onto another
+   * identity. Overwrites the stamp rather than coalescing, which is what
+   * separates it from `stampAgent`.
    */
   restampSession(organizationId: string, agentSessionId: string, agentId: string, now: Date): Promise<void>;
   /**

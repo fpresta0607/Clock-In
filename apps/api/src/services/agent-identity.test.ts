@@ -63,15 +63,15 @@ function session(overrides: Partial<AgentSessionRecord> = {}): AgentSessionRecor
 
 /**
  * The roster as the graduation rules see it: rows by id, a repo-keyed index
- * that mints on demand, and a claim that refuses when the codebase is taken -
- * exactly the partial-unique behaviour the real repository gets from postgres.
+ * that mints on demand, and a bucket that keeps its row while a shift is still
+ * in it - exactly the behaviour the real repository gets from postgres.
  */
 class MemoryAgents implements AgentRepository {
   public readonly restamped: { agentSessionId: string; agentId: string }[] = [];
   public readonly retired: string[] = [];
   public readonly upserts: UpsertAgentForKey[] = [];
 
-  public constructor(public rows: AgentRecord[] = []) {}
+  public constructor(public rows: AgentRecord[] = [], private readonly sessions: AgentSessionRecord[] = []) {}
 
   public async upsertForKey(input: UpsertAgentForKey): Promise<{ id: string }> {
     this.upserts.push(input);
@@ -93,22 +93,15 @@ class MemoryAgents implements AgentRepository {
     return this.rows.find((row) => row.id === agentId) ?? null;
   }
 
-  public async claimRepoRoot(_organizationId: string, agentId: string, repoRoot: string): Promise<boolean> {
-    const row = this.rows.find((entry) => entry.id === agentId);
-    if (row === undefined || row.repoRoot !== null) return false;
-    const taken = this.rows.some((entry) => entry.status !== "retired"
-      && entry.owner.id === row.owner.id && entry.source === row.source && entry.repoRoot === repoRoot);
-    if (taken) return false;
-    row.repoRoot = repoRoot;
-    return true;
-  }
-
   public async restampSession(_organizationId: string, agentSessionId: string, agentId: string): Promise<void> {
     this.restamped.push({ agentSessionId, agentId });
   }
 
   public async retireIfSessionless(_organizationId: string, agentId: string): Promise<boolean> {
     this.retired.push(agentId);
+    // The real update carries a NOT EXISTS on agent_sessions, so a bucket that
+    // still holds a shift keeps its row.
+    if (this.sessions.some((row) => row.agentId === agentId)) return false;
     const row = this.rows.find((entry) => entry.id === agentId);
     if (row === undefined) return false;
     row.status = "retired";
@@ -144,20 +137,39 @@ function graduate(agents: MemoryAgents, row: AgentSessionRecord, repoRoot: strin
 }
 
 describe("late repo discovery", () => {
-  it("rule 1: names the codebase of a bucket that has none, keeping its id", async () => {
+  // The bucket pools every shift whose directory named no codebase, gate runs
+  // included, so promoting the row would attribute all that unrelated time to
+  // whichever codebase committed first. Only the claiming shift moves.
+  it("re-homes the shift onto the codebase its commit names, leaving the bucket unkeyed", async () => {
     const agents = new MemoryAgents([agentRecord()]);
     const row = session();
 
-    await expect(graduate(agents, row, clockIn).result).resolves.toBe(ids.bucket);
+    const graduated = await graduate(agents, row, clockIn).result;
 
-    // The id never moved, so the hours, shifts, tokens and commits already on
-    // it graduate with it and nothing has to be re-summed.
-    expect(agents.rows[0]!.repoRoot).toBe(clockIn);
-    expect(agents.restamped).toEqual([]);
-    expect(agents.retired).toEqual([]);
+    expect(graduated).not.toBe(ids.bucket);
+    expect(agents.rows[0]!.repoRoot).toBeNull();
+    expect(agents.restamped).toEqual([{ agentSessionId: ids.session, agentId: graduated }]);
+    expect(row.agentId).toBe(graduated);
+    // Emptied by that move, so the bucket is retired; its history is empty by
+    // construction, and the operator's next un-probed shift mints a fresh one.
+    expect(agents.rows[0]!.status).toBe("retired");
   });
 
-  it("rule 2: re-homes the shift when another agent already holds the codebase, and retires the emptied bucket", async () => {
+  it("moves only the shift whose commit named a codebase, leaving the bucket's others where they are", async () => {
+    const first = session({ id: "s1", externalSessionId: "ext-1" });
+    const second = session({ id: "s2", externalSessionId: "ext-2" });
+    const agents = new MemoryAgents([agentRecord()], [first, second]);
+
+    const graduated = await graduate(agents, first, clockIn).result;
+
+    expect(first.agentId).toBe(graduated);
+    // The gate runs and un-probed shifts pooled here never touched clock-in.
+    expect(second.agentId).toBe(ids.bucket);
+    expect(agents.rows[0]!.repoRoot).toBeNull();
+    expect(agents.rows[0]!.status).toBe("anonymous");
+  });
+
+  it("re-homes the shift when another agent already holds the codebase, and retires the emptied bucket", async () => {
     const agents = new MemoryAgents([
       agentRecord(),
       agentRecord({ id: ids.incumbent, repoRoot: clockIn, name: "Claude Code @ clock-in" }),
@@ -173,7 +185,7 @@ describe("late repo discovery", () => {
     expect(row.agentId).toBe(ids.incumbent);
   });
 
-  it("rule 3: re-homes only its own shift when the agent already graduated elsewhere", async () => {
+  it("re-homes only its own shift when the agent already graduated elsewhere", async () => {
     const agents = new MemoryAgents([agentRecord({ repoRoot: piggies, name: "Claude Code @ pocket-piggies" })]);
     const row = session();
 
@@ -210,18 +222,22 @@ describe("late repo discovery", () => {
     expect(row.agentId).toBe(minted);
   });
 
-  it("an operator's shared bucket graduates once, then re-homes each later repo's own shift", async () => {
+  it("graduates each of an operator's pooled shifts onto its own codebase, one commit at a time", async () => {
     // The old-installer path: every shift starts repo-less in one bucket.
-    const agents = new MemoryAgents([agentRecord()]);
     const first = session({ id: "s1", externalSessionId: "ext-1" });
     const second = session({ id: "s2", externalSessionId: "ext-2" });
+    const agents = new MemoryAgents([agentRecord()], [first, second]);
 
-    const bucketGraduated = await graduate(agents, first, clockIn).result;
-    const rehomed = await graduate(agents, second, piggies).result;
+    const firstHome = await graduate(agents, first, clockIn).result;
+    const secondHome = await graduate(agents, second, piggies).result;
 
-    expect(bucketGraduated).toBe(ids.bucket);
-    expect(rehomed).not.toBe(ids.bucket);
-    expect(agents.restamped).toEqual([{ agentSessionId: "s2", agentId: rehomed }]);
+    expect(firstHome).not.toBe(ids.bucket);
+    expect(secondHome).not.toBe(ids.bucket);
+    expect(firstHome).not.toBe(secondHome);
+    expect(agents.restamped).toEqual([
+      { agentSessionId: "s1", agentId: firstHome },
+      { agentSessionId: "s2", agentId: secondHome },
+    ]);
   });
 
   // Evidence naming a per-run worktree must never cost a shift its identity:
