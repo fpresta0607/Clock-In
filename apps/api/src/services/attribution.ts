@@ -18,9 +18,15 @@ export function normalizePath(value: string): string {
  * `<hash>.git/worktrees/<ULID>`, and CI runners use similar shapes - leaves a
  * working directory whose last segment is an opaque id. A ULID (26 Crockford
  * base32 characters), a UUID, or a bare hex hash names no codebase to anyone.
+ *
+ * The ULID branch is uppercase-only, which the other two are not. Crockford is
+ * canonically uppercase and every real gate worktree is
+ * (`01M08C82C40W5Y5Q0X3BFGYNFT`), while lowercase 26-character run-together
+ * words are ordinary codebase names - `backendservermanagementapp` uses none of
+ * Crockford's excluded letters, and a case-insensitive branch swallowed it.
  */
 const OPAQUE_SEGMENT =
-  /^(?:[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{12,})$/i;
+  /^(?:[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{12,})$/;
 
 /**
  * A working directory's codebase label: its last path segment, separators

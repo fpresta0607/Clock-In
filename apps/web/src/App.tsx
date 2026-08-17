@@ -1582,8 +1582,10 @@ const RosterTab = ({
       )}
       {agentsFailed ? (
         <p className="subtle">Could not load the roster.</p>
+      ) : agents.length === 0 ? (
+        <p className="subtle">No agents yet. One is added automatically the first time a coding agent works.</p>
       ) : listed.length === 0 ? (
-        <p className="subtle">No agents on the roster yet. Coding-agent shifts mint them automatically.</p>
+        <p className="subtle">No agent worked in this range.</p>
       ) : (
         byOperatorThenRepo(listed).map((group) => (
           <div className="roster-group" key={group.owner.id}>

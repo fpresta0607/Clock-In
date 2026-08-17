@@ -49,10 +49,12 @@ const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
 
 /**
  * Mirrors `OPAQUE_SEGMENT` in apps/api/src/services/attribution.ts: a ULID, a
- * UUID, or a bare hex hash names no codebase to anyone.
+ * UUID, or a bare hex hash names no codebase to anyone. Keep the two identical
+ * - the ULID branch is uppercase-only there for the same reason it is here, so
+ * a lowercase 26-character codebase name is never folded away.
  */
 const OPAQUE_SEGMENT =
-  /^(?:[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{12,})$/i;
+  /^(?:[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{12,})$/;
 
 const lastSegment = (path) => {
   const segments = path.replace(/\\/g, "/").replace(/\/+$/, "").split("/");

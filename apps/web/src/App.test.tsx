@@ -980,6 +980,42 @@ describe("the roster tab", () => {
     expect(screen.getByTestId("roster-headcount")).toHaveTextContent("Headcount 2 - 1 retired");
   });
 
+  it("tells an empty roster apart from a range nobody worked", async () => {
+    const person = await signIn(clientFor({
+      agents: vi.fn().mockResolvedValue({ agents: [] }),
+      agentsReport: vi.fn().mockResolvedValue({
+        ...agentsReportResponse,
+        headcount: { total: 0, active: 0, retired: 0 },
+        rows: [],
+      }),
+    }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+
+    expect(await screen.findByText("No agents yet. One is added automatically the first time a coding agent works."))
+      .toBeInTheDocument();
+  });
+
+  it("says nobody worked the range rather than claiming there are no agents", async () => {
+    const retired = { ...rosterAgent, id: "a9", status: "retired" };
+    const person = await signIn(clientFor({
+      agents: vi.fn().mockResolvedValue({ agents: [retired] }),
+      agentsReport: vi.fn().mockResolvedValue({
+        ...agentsReportResponse,
+        headcount: { total: 1, active: 0, retired: 1 },
+        rows: [],
+      }),
+    }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+
+    // The headcount says one agent exists; the copy beneath it must not say none.
+    expect(await screen.findByText("No agent worked in this range.")).toBeInTheDocument();
+    expect(screen.getByTestId("roster-headcount")).toHaveTextContent("Headcount 1 - 1 retired");
+  });
+
   it("names the retired share of the headcount once anyone is retired", async () => {
     const agentsReport = vi.fn().mockResolvedValue({
       ...agentsReportResponse,

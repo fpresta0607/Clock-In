@@ -47,6 +47,17 @@ describe("repoLabel", () => {
     expect(repoLabel("/src/v2")).toBe("v2");
   });
 
+  // A run-together lowercase name lands on 26 characters easily, and Crockford
+  // excludes only i, l, o and u - so a case-insensitive ULID rule read this
+  // codebase as a run and folded its agent into the unassigned bucket.
+  it("keeps a 26-character lowercase name, which no ULID is", () => {
+    expect(repoLabel("/src/backendservermanagementapp")).toBe("backendservermanagementapp");
+    expect(identityRepoRoot("/src/backendservermanagementapp")).toBe("/src/backendservermanagementapp");
+    // The uppercase ids that started this are still refused.
+    expect(repoLabel("/tmp/01M084ACAR719XGACT0GQT43HN")).toBeNull();
+    expect(repoLabel("/tmp/01M06FSGP392MH6VJNRX8T364A")).toBeNull();
+  });
+
   describe("identityRepoRoot", () => {
     it("keeps a root that names a codebase", () => {
       expect(identityRepoRoot("C:/dev/clock-in")).toBe("C:/dev/clock-in");
