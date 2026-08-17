@@ -21,6 +21,19 @@ runtime that fell outside the person's presence. A session is still attributed w
 or not at all by `time_sessions.attribution`. The README's "How session tracking works"
 section is the authoritative prose; keep it true when you change the model.
 
+**Agent numbers belong to the agent.** The All-stats/board Humans tab answers for the person -
+their active time and how many agents ran through it - and every measure of what the agents
+themselves did lives on the Agents tab, under the picked roster agent: the runtime split, the
+Agent-sessions table, the hourly chart, the codebases. "While they were there", "ran while away"
+and leverage are measured against **that agent's owner's** presence, not the caller's, which is why
+the paystub carries `ownerActiveSeconds` and `awaySeconds`. Do not move any of it back under a
+person; a per-person fold reads as one worker's shifts when it is several.
+
+A codebase reaches every member as a **label** - the last segment of a repo root or working
+directory (`repoLabel`) - while the path itself stays under the `repoRoot` rule. A shift that
+recorded no directory is `null` and reads "No codebase recorded"; there is no default codebase, just
+as `resolveProjectForCwd` returns null rather than falling back to a project.
+
 Agents are durable identities, not rows per run: one `agents` row per `(organization, source,
 project)` — the harness working a project — and each `agent_sessions` row is one of its shifts.
 A model is an attribute of a shift, never an identity: `agent_sessions.model` says what the runtime
