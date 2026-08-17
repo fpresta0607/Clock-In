@@ -609,6 +609,7 @@ rejected and why.
 - [Phase 2 design](docs/plans/2026-08-07-phase-2-design.md) — evidence, attribution, and the anti-manipulation stance
 - [Phase 3 design](docs/plans/2026-08-09-phase-3-design.md): browser attribution (built), monitor precision, and the grandmother test
 - [Phase 1](docs/plans/2026-08-06-phase-1-implementation.md) · [Phase 2](docs/plans/2026-08-07-phase-2-implementation.md) · [Phase 3](docs/plans/2026-08-09-phase-3-implementation.md) implementation plans
+- [Effort v1 implementation plan](docs/plans/2026-08-15-effort-v1-implementation.md): one worker vocabulary, model coverage, and token capture (shipped)
 - [Agent identity v2 design](docs/plans/2026-08-16-agent-identity-v2-design.md): operator attribution and repo-keyed agent identities (built; the production reset runbook is in [DEPLOY.md](DEPLOY.md))
 
 ## Status and known gaps
