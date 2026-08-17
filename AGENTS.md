@@ -116,9 +116,10 @@ timer once said RECORDING above a card reading "Turn on recording in settings".
   about the work from the machine that did the work, so every surface saying "held"
   labels it that way - the paystub metric and README's roster section. Do not let it
   quietly become an input to pay without revisiting that decision.
-- A repo root is a working directory, so the paystub sends `shiftCommitViewSchema.repoRoot`
-  only to the agent's owner and workspace admins and omits it for everyone else
-  (`services/agents.ts`). The disclosure sentence naming what leaves the machine is
+- A repo root is a working directory, so `shiftCommitViewSchema.repoRoot` and the roster
+  row's `agentSchema.repoRoot` go only to the agent's owner and workspace admins and are
+  omitted - never blanked - for everyone else (`mayReadRepoRoot` in `services/agents.ts`);
+  every member still gets the `repoName` label. The disclosure sentence naming what leaves the machine is
   stated in `apps/web/src/HelpModal.tsx`, `apps/desktop/src/RecordingPanel.tsx`
   and README's "What is never collected"; the three word it differently, but they must
   all describe the same thing that actually leaves the machine, so change what is sent
@@ -136,11 +137,12 @@ timer once said RECORDING above a card reading "Turn on recording in settings".
   the uploader could see, and every agent event vanished silently. The browser host
   and the app share the same rule for `spool::browser_dir()`, so the two cannot
   drift apart the same way.
-- `api.rs`'s `upload_agent_events` serializes `SpoolEvent` **straight into the request
-  body**, and `agentSessionEventSchema` is `.strict()`. So a field added to `SpoolEvent`
-  for the desktop's own use 400s every agent-event batch, and `#[serde(skip_serializing)]`
-  is not the escape hatch because the same impl writes the spool file. Anything local-only
-  needs an explicit upload struct that projects only the contract's fields.
+- `api.rs`'s `upload_agent_events` sends the explicit `AgentEventUpload` projection, never
+  `SpoolEvent` itself: `agentSessionEventSchema` is `.strict()`, so serializing the spool
+  struct would 400 every agent-event batch the moment it grew a local-only field, and
+  `#[serde(skip_serializing)]` is not the escape hatch because the same impl writes the
+  spool file. A new `SpoolEvent` field stays on the machine unless it is added to the
+  projection deliberately; the uploader's exact-wire-bytes test pins the field set.
 - Spool-derived evidence (`shift_commits`, and anything modeled on it) is captured
   from the uploader's `upload_once` pass on every platform - not the
   `#[cfg(windows)]`-gated spool replay - and uploads only after the agent-spool
@@ -203,6 +205,10 @@ Disambiguation: the agent-runtimes.json roster is runtime declarations; the `age
 
 
 # Effort v1 - implementation plan
+
+> Shipped. Where this plan says identity is `(org, source, project)`, agent identity v2 has since
+> re-keyed it on `(organization, owner, source, repo_root)`; the memory sections above are
+> authoritative.
 
 ## Context
 

@@ -465,7 +465,10 @@ mod tests {
         // An unspawnable binary is how a machine without git looks to the
         // probe; the spawn fails and collapses to None rather than failing
         // the hook.
-        assert_eq!(probe_repo_root("clock-in-git-that-is-not-installed", &dir), None);
+        assert_eq!(
+            probe_repo_root("clock-in-git-that-is-not-installed", &dir),
+            None
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
