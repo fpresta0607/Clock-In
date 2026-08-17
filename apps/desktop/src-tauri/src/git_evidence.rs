@@ -102,7 +102,11 @@ pub fn head_sha(cwd: &Path) -> Option<String> {
 /// that invoked it. `git rev-parse --show-toplevel` takes no locks and reads
 /// the directory walk it would have done anyway.
 pub fn repo_root(cwd: &Path) -> Option<PathBuf> {
-    let mut command = std::process::Command::new("git");
+    probe_repo_root("git", cwd)
+}
+
+fn probe_repo_root(git: &str, cwd: &Path) -> Option<PathBuf> {
+    let mut command = std::process::Command::new(git);
     command
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(cwd)
@@ -457,18 +461,11 @@ mod tests {
     #[test]
     fn repo_root_without_git_on_path_is_an_honest_none() {
         let dir = temp_dir("repo-root-no-git");
-        // An empty PATH is how a machine without git looks to the probe; the
-        // spawn fails and collapses to None rather than failing the hook.
-        let original = std::env::var_os("PATH");
-        // SAFETY: single-threaded test, and the variable is restored below.
-        unsafe { std::env::set_var("PATH", "") };
-        let probed = repo_root(&dir);
-        match original {
-            Some(value) => unsafe { std::env::set_var("PATH", value) },
-            None => unsafe { std::env::remove_var("PATH") },
-        }
 
-        assert_eq!(probed, None);
+        // An unspawnable binary is how a machine without git looks to the
+        // probe; the spawn fails and collapses to None rather than failing
+        // the hook.
+        assert_eq!(probe_repo_root("clock-in-git-that-is-not-installed", &dir), None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -142,10 +142,16 @@ async function restamp(tx, session, agentId) {
 
 async function main() {
   const stamped = await stampedOntoV1Rows();
-  // A shift needs moving when its current identity does not already name its
-  // own operator and its own codebase; everything else is already v2-correct.
-  const misattributed = stamped.filter((row) => row.current_owner_id !== row.user_id
-    || (row.evidence_repo_root ?? null) !== (row.current_repo_root ?? null));
+  // A shift needs moving when its current identity does not name its own
+  // operator, or when its commit evidence names a different codebase. A shift
+  // with no commit evidence keeps whatever codebase its identity already
+  // carries - a graduation or a probe set it, and absent evidence is not a
+  // contradiction - so a late or repeat run never demotes it to unassigned.
+  const misattributed = stamped.filter((row) => {
+    if (row.current_owner_id !== row.user_id) return true;
+    const evidence = row.evidence_repo_root ?? null;
+    return evidence !== null && evidence !== (row.current_repo_root ?? null);
+  });
   const unstamped = includeUnstamped ? await unstampedShifts() : [];
 
   const wrongOperator = misattributed.filter((row) => row.current_owner_id !== row.user_id).length;
