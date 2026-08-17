@@ -333,8 +333,13 @@ select:disabled { opacity: .55; }
 .join-form input { letter-spacing: .06em; text-transform: uppercase; }
 .join-form button { flex: none; min-height: 33px; border: 1px solid var(--glass-border); padding: 0 11px; background: rgba(3, 5, 10, 0.5); color: #ffffff; font-size: .76rem; text-transform: uppercase; }
 .join-form button:hover { border-color: var(--glass-border-hover); }
-/* Each row is the control that picks whose breakdown shows underneath. */
-.board-list { display: grid; gap: 4px; margin: 0; padding: 0; max-height: 11rem; overflow-y: auto; list-style: none; }
+/* Each row is the control that picks whose breakdown shows underneath, so the
+   list is bounded to keep that breakdown reachable - but the bound follows the
+   window rather than a fixed 11rem, which cut the human board to four rows and
+   the roster to five on any screen. Short lists size to their content and show
+   no scrollbar at all; only a long one scrolls, and it scrolls with the room
+   the window actually has. */
+.board-list { display: grid; gap: 4px; margin: 0; padding: 0; max-height: 50vh; overflow-y: auto; list-style: none; }
 .board-choice {
   display: grid;
   width: 100%;
@@ -363,7 +368,6 @@ select:disabled { opacity: .55; }
    models, codebases, shifts, held rate - so it gets two rows of its own
    instead of one right-aligned line that clips. The facts wrap between
    themselves at any width; only the name is allowed to ellipsize. */
-.board-list.is-roster { max-height: 16rem; }
 .board-list.is-roster .board-choice {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: baseline;
