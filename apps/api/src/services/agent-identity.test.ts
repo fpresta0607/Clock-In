@@ -99,11 +99,12 @@ class MemoryAgents implements AgentRepository {
 
   public async retireIfSessionless(_organizationId: string, agentId: string): Promise<boolean> {
     this.retired.push(agentId);
-    // The real update carries a NOT EXISTS on agent_sessions, so a bucket that
-    // still holds a shift keeps its row.
+    // The real update carries a NOT EXISTS on agent_sessions and an
+    // 'anonymous' status predicate, so a bucket that still holds a shift keeps
+    // its row and one a member named is never retired at all.
     if (this.sessions.some((row) => row.agentId === agentId)) return false;
     const row = this.rows.find((entry) => entry.id === agentId);
-    if (row === undefined) return false;
+    if (row === undefined || row.status !== "anonymous") return false;
     row.status = "retired";
     return true;
   }
@@ -153,6 +154,19 @@ describe("late repo discovery", () => {
     // Emptied by that move, so the bucket is retired; its history is empty by
     // construction, and the operator's next un-probed shift mints a fresh one.
     expect(agents.rows[0]!.status).toBe("retired");
+  });
+
+  // Naming an agent registers it in the same write, so a registered bucket is
+  // one a member named. Emptying it must not take that name off the roster.
+  it("keeps a bucket a member named when its last shift graduates away", async () => {
+    const agents = new MemoryAgents([agentRecord({ status: "registered", name: "Alex's helper" })]);
+    const row = session();
+
+    const graduated = await graduate(agents, row, clockIn).result;
+
+    expect(graduated).not.toBe(ids.bucket);
+    expect(row.agentId).toBe(graduated);
+    expect(agents.rows[0]).toMatchObject({ id: ids.bucket, name: "Alex's helper", status: "registered" });
   });
 
   it("moves only the shift whose commit named a codebase, leaving the bucket's others where they are", async () => {

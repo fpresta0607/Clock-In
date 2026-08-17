@@ -1379,6 +1379,13 @@ export class DrizzleAgentRepository implements AgentRepository {
         eq(agents.organizationId, organizationId),
         eq(agents.id, agentId),
         isNull(agents.repoRoot),
+        // Only a row nobody named. Naming an agent registers it in the same
+        // write, so 'anonymous' is exactly "machine-minted and still
+        // unclaimed" - the rule scripts/repair-run-named-agents.mjs already
+        // applies when it leaves a renamed agent alone. The predicate lives
+        // here rather than at the call site so no future caller can retire a
+        // name a member chose by forgetting to check.
+        eq(agents.status, "anonymous"),
         sql`not exists (select 1 from ${agentSessions} where ${agentSessions.organizationId} = ${organizationId} and ${agentSessions.agentId} = ${agentId})`,
       ))
       .returning({ id: agents.id });

@@ -52,9 +52,11 @@ export function repoLabel(path: string): string | null {
  * The repo root an agent identity is keyed on. A directory that names no
  * codebase cannot identify one either: keying on it mints a separate agent for
  * every run, which is how one operator's roster filled with a row per
- * no-mistakes gate worktree. Such a shift belongs in that operator's
- * unassigned bucket, and graduates in place if a commit ever names its
- * codebase - the same late-discovery path an un-probed session takes.
+ * no-mistakes gate worktree. Such a shift lands in that operator's unassigned
+ * bucket instead - the same place an un-probed session goes - and stays there
+ * until one of its own commits names a codebase, at which point that shift
+ * alone moves onto that codebase's identity. The bucket itself is never keyed
+ * on a codebase, because the shifts pooled in it worked several or none.
  */
 export function identityRepoRoot(root: string | null): string | null {
   if (root === null) return null;

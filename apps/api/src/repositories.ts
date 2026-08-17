@@ -342,9 +342,11 @@ export interface AgentRepository {
    */
   restampSession(organizationId: string, agentSessionId: string, agentId: string, now: Date): Promise<void>;
   /**
-   * Retires an unassigned agent that no session references any more. Its
-   * history is empty by construction, so nothing is lost. False when it still
-   * has shifts, which is the ordinary case.
+   * Retires an anonymous unassigned agent that no session references any more.
+   * Its history is empty by construction, so nothing is lost. False when it
+   * still has shifts, which is the ordinary case, and false for a row a member
+   * named: naming registers an agent, and a name someone chose is not ours to
+   * retire behind their back.
    */
   retireIfSessionless(organizationId: string, agentId: string, now: Date): Promise<boolean>;
 }

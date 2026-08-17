@@ -211,4 +211,16 @@ integration("agents operator-and-repo identity upsert", () => {
     await expect(repository.retireIfSessionless(organizationId, kept.id, now)).resolves.toBe(false);
     expect((await repository.findById(subject, kept.id))?.status).toBe("anonymous");
   });
+
+  // Naming an agent registers it, so 'anonymous' is what marks a row as still
+  // machine-minted. An emptied bucket someone named keeps its id and its name.
+  it("leaves an emptied unassigned bucket alone once a member has named it", async () => {
+    const now = new Date();
+    const key = { organizationId, ownerUserId, source: "zed", repoRoot: null, projectId: null, name: "Zed", now } as const;
+    const named = await repository.upsertForKey(key);
+    await repository.update(subject, named.id, { name: "Alex's helper", status: "registered", updatedAt: now });
+
+    await expect(repository.retireIfSessionless(organizationId, named.id, now)).resolves.toBe(false);
+    expect(await repository.findById(subject, named.id)).toMatchObject({ name: "Alex's helper", status: "registered" });
+  });
 });
