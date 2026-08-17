@@ -92,6 +92,40 @@ pub fn head_sha(cwd: &Path) -> Option<String> {
         .map(|text| text.trim().to_string())
 }
 
+/// The repository a shift's working directory sits in, or `None` when it is
+/// not inside a git working tree at all - a non-repo cwd names no codebase,
+/// which is honest rather than an error.
+///
+/// Synchronous for the same reason `head_sha` is, and not `discover_repo`
+/// reused: that one is async over `tokio::process::Command` and the hook is a
+/// synchronous binary with no runtime, and it must never block the agent CLI
+/// that invoked it. `git rev-parse --show-toplevel` takes no locks and reads
+/// the directory walk it would have done anyway.
+pub fn repo_root(cwd: &Path) -> Option<PathBuf> {
+    probe_repo_root("git", cwd)
+}
+
+fn probe_repo_root(git: &str, cwd: &Path) -> Option<PathBuf> {
+    let mut command = std::process::Command::new(git);
+    command
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    if root.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(root))
+}
+
 /// One commit authored during a shift, ready to become a `shift_commits` row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitEvidence {
@@ -391,6 +425,52 @@ mod tests {
         std::fs::write(dir.join(file_name), message).expect("scratch file writes");
         run(dir, &["add", "-A"]).await;
         commit_with_message(dir, message, unix_time).await;
+    }
+
+    #[tokio::test]
+    async fn repo_root_names_the_repository_a_working_directory_sits_in() {
+        let dir = temp_dir("repo-root");
+        init_repo(&dir).await;
+        commit_at(&dir, "a.txt", "first", 1_700_000_000).await;
+        let nested = dir.join("apps").join("web");
+        std::fs::create_dir_all(&nested).expect("nested dir creates");
+
+        // A directory deep inside the tree still names the repository, which
+        // is what keeps one codebase from fanning into one agent per folder.
+        let from_root = repo_root(&dir).expect("the repo root resolves");
+        let from_nested = repo_root(&nested).expect("a nested cwd resolves the same root");
+        assert_eq!(
+            std::fs::canonicalize(&from_nested).expect("canonical"),
+            std::fs::canonicalize(&from_root).expect("canonical")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repo_root_of_a_non_repo_is_an_honest_none() {
+        let dir = temp_dir("repo-root-plain");
+
+        // Not an error: a shift outside a repository names no codebase and
+        // lands in its operator's unassigned bucket.
+        assert_eq!(repo_root(&dir), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repo_root_without_git_on_path_is_an_honest_none() {
+        let dir = temp_dir("repo-root-no-git");
+
+        // An unspawnable binary is how a machine without git looks to the
+        // probe; the spawn fails and collapses to None rather than failing
+        // the hook.
+        assert_eq!(
+            probe_repo_root("clock-in-git-that-is-not-installed", &dir),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

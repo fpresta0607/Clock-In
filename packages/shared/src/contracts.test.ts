@@ -508,6 +508,24 @@ describe("agent session contracts", () => {
     expect(() => agentSessionEventSchema.parse(withoutCwd)).toThrow();
   });
 
+  it("takes the repository the hook probed, and reads its absence as absence", () => {
+    const withRepo = { ...event, repoRoot: "C:/dev/Clock-In" };
+    expect(agentSessionEventSchema.parse(withRepo)).toEqual(withRepo);
+    // A desktop from before the probe simply never sends it; its shifts mint
+    // into the operator's unassigned bucket and graduate from their commits.
+    expect(agentSessionEventSchema.parse(event).repoRoot).toBeUndefined();
+    expect(() => agentSessionEventSchema.parse({ ...event, repoRoot: "" })).toThrow();
+    expect(() => agentSessionEventSchema.parse({ ...event, repoRoot: "x".repeat(1_001) })).toThrow();
+  });
+
+  it("rejects a browser span carrying a repoRoot", () => {
+    // A browser span has no working directory, so it has no repository
+    // either; accepting one would hand a repo to a path that never resolves it.
+    const span = { ...event, source: "browser", cwd: undefined, ruleId: ids.session };
+    expect(() => agentSessionEventSchema.parse({ ...span, repoRoot: "C:/dev/Clock-In" })).toThrow();
+    expect(agentSessionEventSchema.parse(span).ruleId).toBe(ids.session);
+  });
+
   it("rejects malformed events and out-of-bounds batches", () => {
     expect(() => agentSessionEventSchema.parse({ ...event, source: "claude-code" })).toThrow();
     expect(() => agentSessionEventSchema.parse({ ...event, source: "Claude Code" })).toThrow();

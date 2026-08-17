@@ -243,10 +243,18 @@ refusals never fail a batch.
 
 ### Roster: agents as identities
 
-An agent's identity is durable across sessions, keyed by **(source, project)** per
-organization — the same Claude Code instance working the same project is one
-roster entry, not a new row per shift. Each `agent_sessions` row is that
-identity's shift. For a shift in a git repo, the desktop app captures the
+An agent's identity is durable across sessions, keyed by **(operator, runtime,
+codebase)** per organization — the same person's Claude Code working the same
+repository is one roster entry, not a new row per shift, and two people running
+the same runtime on the same repository are two workers rather than one. Each
+`agent_sessions` row is that identity's shift. The operator is whoever's desktop
+uploaded the shift, so every runtime gets the distinction the day its hooks are
+wired. A shift whose working directory is not in a repository — or whose desktop
+predates the repo probe — lands in that person's **unassigned** row and moves to
+its codebase when its first commit names one; nothing is stranded and no default
+codebase is invented. The Clock-In project stays on the roster row as a label
+that follows the path mappings, not as part of the identity, so re-mapping a
+directory never splits or merges a worker. For a shift in a git repo, the desktop app captures the
 branch, and the title, commit id and repository path of the commits the shift
 added, once the shift ends. "Added" is bounded three ways: the commits reachable
 from `HEAD` but not from the commit `HEAD` sat on when the shift opened,
@@ -601,7 +609,8 @@ rejected and why.
 - [Phase 2 design](docs/plans/2026-08-07-phase-2-design.md) — evidence, attribution, and the anti-manipulation stance
 - [Phase 3 design](docs/plans/2026-08-09-phase-3-design.md): browser attribution (built), monitor precision, and the grandmother test
 - [Phase 1](docs/plans/2026-08-06-phase-1-implementation.md) · [Phase 2](docs/plans/2026-08-07-phase-2-implementation.md) · [Phase 3](docs/plans/2026-08-09-phase-3-implementation.md) implementation plans
-- [Agent identity v2 design](docs/plans/2026-08-16-agent-identity-v2-design.md): operator attribution and repo-keyed agent identities (planned, not yet built)
+- [Effort v1 implementation plan](docs/plans/2026-08-15-effort-v1-implementation.md): one worker vocabulary, model coverage, and token capture (shipped)
+- [Agent identity v2 design](docs/plans/2026-08-16-agent-identity-v2-design.md): operator attribution and repo-keyed agent identities (built; the production reset runbook is in [DEPLOY.md](DEPLOY.md))
 
 ## Status and known gaps
 

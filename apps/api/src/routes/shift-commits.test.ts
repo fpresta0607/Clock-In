@@ -84,13 +84,33 @@ class MemoryAgentSessions implements AgentSessionRepository {
   public async stampAgent(): Promise<void> { throw new Error("not used"); }
 }
 
+/**
+ * These sessions already carry an identity that already knows its codebase,
+ * so graduation reads the row and finds nothing to do. Everything past that
+ * read stays unreachable, which is what these route tests are about.
+ */
 const inertAgents: AgentRepository = {
   async upsertForKey(): Promise<{ id: string }> { throw new Error("not used"); },
   async listForOrganization(): Promise<AgentRecord[]> { throw new Error("not used"); },
-  async findById(): Promise<AgentRecord | null> { throw new Error("not used"); },
+  async findById(_current, agentId): Promise<AgentRecord | null> {
+    return {
+      id: agentId,
+      organizationId: ids.organization,
+      name: "Claude Code @ clock-in",
+      source: "claude_code",
+      status: "anonymous",
+      owner: { id: ids.user, name: "Alex" },
+      project: null,
+      repoRoot: "C:/dev/clock-in",
+      createdAt: new Date("2026-08-01T00:00:00.000Z"),
+    };
+  },
   async update(): Promise<AgentRecord | null> { throw new Error("not used"); },
   async merge(): Promise<void> { throw new Error("not used"); },
   async listSessionsForAgent(): Promise<AgentShiftRecord[]> { throw new Error("not used"); },
+  async claimRepoRoot(): Promise<boolean> { throw new Error("not used"); },
+  async restampSession(): Promise<void> { throw new Error("not used"); },
+  async retireIfSessionless(): Promise<boolean> { throw new Error("not used"); },
 };
 
 class MemoryShiftCommits implements ShiftCommitRepository {

@@ -45,6 +45,7 @@ import type {
   ShiftRepoRootRecord,
   SiteTotalRecord,
 } from "../repositories.js";
+import { asAgentView } from "./agents.js";
 import { repoLabel } from "./attribution.js";
 import type { AgentSessionReaper } from "./agent-sessions.js";
 
@@ -485,27 +486,19 @@ function asSiteTotal(record: SiteTotalRecord): MeStatsResponse["sites"][number] 
   };
 }
 
-function asAgentReportView(record: AgentRecord): AgentsReportResponse["rows"][number]["agent"] {
-  return {
-    id: record.id,
-    name: record.name,
-    source: record.source,
-    status: record.status,
-    owner: record.owner,
-    project: record.project,
-    createdAt: record.createdAt.toISOString(),
-  };
+/**
+ * The pay-run report is org-wide, so the working-directory disclosure is
+ * decided row by row: the folder name for everyone, the path only for the
+ * agent's own owner and for workspace admins.
+ */
+function asAgentReportView(record: AgentRecord, subject: AuthenticatedSubject): AgentsReportResponse["rows"][number]["agent"] {
+  return asAgentView(record, subject);
 }
 
-function asMeStatsAgentView(record: AgentRecord): MeStatsAgent["agent"] {
-  return {
-    id: record.id,
-    name: record.name,
-    source: record.source,
-    status: record.status,
-    project: record.project,
-    createdAt: record.createdAt.toISOString(),
-  };
+/** The same row scoped to one caller, who is by construction its owner; `owner` is redundant there. */
+function asMeStatsAgentView(record: AgentRecord, subject: AuthenticatedSubject): MeStatsAgent["agent"] {
+  const { owner: _owner, ...view } = asAgentView(record, subject);
+  return view;
 }
 
 /** Hours and shift count from an agent's intervals overlapping the range (reports rounding rule: group, then round once). */
@@ -724,7 +717,7 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
         .map((agentId) => rosterById.get(agentId))
         .filter((agent): agent is AgentRecord => agent !== undefined)
         .map((agent) => ({
-          agent: asMeStatsAgentView(agent),
+          agent: asMeStatsAgentView(agent, subject),
           ...agentHours(grouped.get(agent.id)?.intervals ?? [], range),
           ...agentCommitCounts(countsById.get(agent.id)),
           models: grouped.get(agent.id)?.models ?? [],
@@ -764,7 +757,7 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       // Every roster agent gets a row, activity or not: the roster - not the
       // interval data - decides which agents exist.
       const rows = roster.map((agent) => ({
-        agent: asAgentReportView(agent),
+        agent: asAgentReportView(agent, subject),
         ...agentHours(grouped.get(agent.id)?.intervals ?? [], range),
         ...agentCommitCounts(countsById.get(agent.id)),
         models: grouped.get(agent.id)?.models ?? [],

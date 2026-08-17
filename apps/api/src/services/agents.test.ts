@@ -41,6 +41,7 @@ function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
     status: "anonymous",
     owner: { id: ids.user, name: "Alex" },
     project: { id: ids.project, name: "Field work" },
+    repoRoot: null,
     createdAt: new Date("2026-08-01T00:00:00.000Z"),
     ...overrides,
   };

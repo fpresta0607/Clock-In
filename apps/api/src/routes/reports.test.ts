@@ -51,6 +51,7 @@ class Reports implements ReportRepository {
       id: "c1c7e513-b094-4d4c-ae55-21790ae019a4",
       user: { id: ids.user, name: "Alex" },
       project: { id: ids.project, name: "Timer" },
+      repoRoot: null,
       description: "=formula",
       status: "stopped",
       startedAt: new Date("2026-08-06T14:00:00.000Z"),
@@ -202,6 +203,7 @@ describe("report routes", () => {
       status: "anonymous",
       owner: { id: ids.user, name: "Alex" },
       project: { id: ids.project, name: "Timer" },
+      repoRoot: null,
       createdAt: new Date("2026-08-01T00:00:00.000Z"),
     };
     const response = await app(reports, new AgentSessions(), new Agents([agentRecord]))
@@ -220,6 +222,36 @@ describe("report routes", () => {
         repos: ["clock-in"],
       }],
     });
+  });
+
+  // The pay-run report is org-wide, so the disclosure is decided row by row.
+  // A member reading a teammate's agent gets the codebase's name and no path
+  // at all - absent rather than blanked, which is what lets the owner's and
+  // the stranger's projections parse through the one strict schema.
+  it("withholds another member's repo path from the pay-run report while keeping its name", async () => {
+    const theirs: AgentRecord = {
+      id: "e1c7e513-b094-4d4c-ae55-21790ae019a4",
+      organizationId: ids.organization,
+      name: "Claude Code @ clock-in",
+      source: "claude_code",
+      status: "anonymous",
+      owner: { id: ids.outsideProject, name: "Sam" },
+      project: null,
+      repoRoot: "C:/dev/clock-in",
+      createdAt: new Date("2026-08-01T00:00:00.000Z"),
+    };
+    const mine: AgentRecord = { ...theirs, id: ids.project, owner: { id: ids.user, name: "Alex" } };
+
+    const response = await app(new Reports(), new AgentSessions(), new Agents([theirs, mine]))
+      .request("http://api.test/reports/agents", { headers: { authorization: bearerHeader } });
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as { rows: { agent: Record<string, unknown> }[] };
+    const [theirRow, myRow] = body.rows;
+    expect(theirRow!.agent).toMatchObject({ repoName: "clock-in" });
+    expect(theirRow!.agent).not.toHaveProperty("repoRoot");
+    // The caller's own agent still carries the path.
+    expect(myRow!.agent).toMatchObject({ repoName: "clock-in", repoRoot: "C:/dev/clock-in" });
   });
 
   it("rejects a pay-run scope naming a project outside the workspace", async () => {

@@ -55,7 +55,23 @@ export interface AgentService {
 const weekMs = 7 * 24 * 60 * 60 * 1_000;
 const trendWeeks = 6;
 
-export function asAgentView(record: AgentRecord): AgentPaystubResponse["agent"] {
+/**
+ * Whether this caller may see an agent's working directory. The same rule a
+ * shift commit's `repoRoot` follows: the agent's owner and workspace admins.
+ */
+export function mayReadRepoRoot(subject: AuthenticatedSubject, ownerId: string): boolean {
+  return subject.role === "admin" || ownerId === subject.userId;
+}
+
+/**
+ * One agent as every surface renders it. The codebase's folder name reaches
+ * every member - it is a name, not a path - while the path behind it is
+ * projected only to the owner and workspace admins, and is *omitted* rather
+ * than blanked for everyone else, which is what lets both projections parse
+ * through the same strict schema.
+ */
+export function asAgentView(record: AgentRecord, subject: AuthenticatedSubject): AgentPaystubResponse["agent"] {
+  const name = record.repoRoot === null ? null : repoLabel(record.repoRoot);
   return {
     id: record.id,
     name: record.name,
@@ -63,6 +79,8 @@ export function asAgentView(record: AgentRecord): AgentPaystubResponse["agent"] 
     status: record.status,
     owner: record.owner,
     project: record.project,
+    ...(name === null ? {} : { repoName: name }),
+    ...(record.repoRoot !== null && mayReadRepoRoot(subject, record.owner.id) ? { repoRoot: record.repoRoot } : {}),
     createdAt: record.createdAt.toISOString(),
   };
 }
@@ -172,15 +190,15 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
       const autoRegister = input.name !== undefined && input.status === undefined && existing.status === "anonymous";
       const status = input.status ?? (autoRegister ? "registered" : existing.status);
       // The request schema validates fields in isolation; the merged record is
-      // re-validated whole, the same rule the path-mapping patch follows.
+      // re-validated whole, the same rule the path-mapping patch follows. The
+      // identity columns ride along so the check keeps checking the real
+      // record - a field left out here would be validated as absent, which is
+      // how a rename starts failing on a field the request never mentions.
       const merged = agentSchema.safeParse({
-        id: existing.id,
+        ...asAgentView(existing, subject),
         name: input.name ?? existing.name,
-        source: existing.source,
         status,
         owner: { id: input.ownerUserId ?? existing.owner.id, name: existing.owner.name },
-        project: existing.project,
-        createdAt: existing.createdAt.toISOString(),
       });
       if (!merged.success) throw new AppError("validation_error", "The resulting agent is invalid.");
       if (input.ownerUserId !== undefined) {
@@ -236,7 +254,7 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
         commitsBySession.set(commit.agentSessionId, existing);
       }
 
-      const showRepoRoot = subject.role === "admin" || agent.owner.id === subject.userId;
+      const showRepoRoot = mayReadRepoRoot(subject, agent.owner.id);
       const shiftViews = shifts.map((shift) => {
         const shiftCommits = commitsBySession.get(shift.id) ?? [];
         return {
@@ -337,7 +355,7 @@ export function createAgentService(dependencies: AgentServiceDependencies): Agen
       });
 
       return {
-        agent: asAgentView(agent),
+        agent: asAgentView(agent, subject),
         filters,
         totals: {
           agentSeconds,

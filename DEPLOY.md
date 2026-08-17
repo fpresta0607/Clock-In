@@ -113,6 +113,44 @@ psql "$PROD_DATABASE_URL" -c \
 DATABASE_URL='postgres://…/replica' pnpm --filter @clock-in/database migrate
 ```
 
+### A migration that swaps an ON CONFLICT arbiter's index has a window
+
+`0015_agent_identity_v2` drops the two partial uniques the running API's
+`upsertForKey` names as its arbiters and creates two others in their place.
+Between applying it and deploying the API that names the new ones, every
+`POST /agent-sessions` batch fails. Ordering cannot remove the window -
+deploying the new API first only moves the failure to arbiters whose indexes do
+not exist yet - so keep it to minutes and know what it costs, which is nothing
+durable: the desktop's `upload_agent_spool` returns before `truncate_acked` on
+any upload error, so the spool keeps the events and replays them whole on the
+next pass. No shift is lost; some arrive late.
+
+Its own sequence, back to back in one window:
+
+1. Retire the v1 agent rows through `PATCH /agents/:id`, so the new
+   per-operator unassigned unique cannot collide on two rows that are about to
+   have a null `repo_root`. This works on the currently deployed API.
+2. Apply the migration.
+3. Deploy the API. New shifts mint v2 identities on their own from here.
+4. Run the backfill deliberately, dry run first:
+   `DATABASE_URL=… node scripts/backfill-agent-identity-v2.mjs` prints what
+   would move; `--confirm` performs it, and `--include-unstamped` additionally
+   moves shifts that never got an identity at all. Nothing it does deletes an
+   evidence row.
+5. The retired v1 rows stay as audit trail. Deleting them is possible once the
+   backfill reports zero references (all three FKs are `restrict`, so the
+   database enforces that precondition), but retirement is the end state.
+
+Between steps 3 and 4 the roster shows the retired v1 rows beside fresh v2
+rows. That is expected, not an error state.
+
+The desktop ships last and only through an installer: the hook's `repo_root`
+probe reaches the server as contract data, so an installer sending it must
+never precede the API that accepts it. Old installers keep working
+indefinitely - their shifts mint per-operator unassigned agents and graduate
+when their first commit names a codebase, which is the designed degradation
+path.
+
 ---
 
 ## 1. API on Railway

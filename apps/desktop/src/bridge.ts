@@ -298,6 +298,14 @@ export type AgentsReportRow = {
     status: AgentRosterStatus;
     owner: { id: string; name: string };
     project: { id: string; name: string } | null;
+    /// The codebase this identity works, as a folder name - safe for every
+    /// member. Null on the operator's unassigned bucket, and on an API from
+    /// before identity v2.
+    repoName: string | null;
+    /// The path behind that name, sent only to the owner and to workspace
+    /// admins. One absence for two reasons - an older API, and a path
+    /// deliberately withheld from this caller - read the same either way.
+    repoRoot: string | null;
   };
   agentSeconds: number;
   shiftCount: number;
@@ -895,6 +903,8 @@ const decodeAgentsReportRow = (value: unknown): AgentsReportRow => {
       status: agentRosterStatus(agent.status),
       owner: { id: uuid(owner.id), name: string(owner.name) },
       project: project === null ? null : { id: uuid(project.id), name: string(project.name) },
+      repoName: stringOrNull(agent.repoName ?? null),
+      repoRoot: stringOrNull(agent.repoRoot ?? null),
     },
     agentSeconds: nonnegativeInteger(candidate.agentSeconds),
     shiftCount: nonnegativeInteger(candidate.shiftCount),

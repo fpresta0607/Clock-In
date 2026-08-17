@@ -467,6 +467,12 @@ export const agentSessionEventSchema = z
     event: agentEventKindSchema,
     occurredAt: timestampSchema,
     cwd: z.string().min(1).max(1_000).optional(),
+    /**
+     * The git repository the working directory sits in, when the hook could
+     * probe one. Optional, so a desktop from before the probe shipped simply
+     * never sends it and its shifts graduate late from their commits instead.
+     */
+    repoRoot: z.string().min(1).max(1_000).optional(),
     model: z.string().min(1).max(200).optional(),
     ruleId: idSchema.optional(),
   })
@@ -477,10 +483,14 @@ export const agentSessionEventSchema = z
     // reserved for the `browser` source so a hook payload cannot smuggle a
     // rule past the cwd resolver.
     if (event.source === "browser") {
-      if (event.ruleId === undefined || event.cwd !== undefined) {
+      // A browser span has no working directory, so it has no repository
+      // either; accepting one would hand a repo to a path that never resolves
+      // it. The clause rides here rather than in the object because the field
+      // is legal on every other source.
+      if (event.ruleId === undefined || event.cwd !== undefined || event.repoRoot !== undefined) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: "Browser spans carry a ruleId and no cwd.",
+          message: "Browser spans carry a ruleId and no cwd or repoRoot.",
         });
       }
     } else {
@@ -519,6 +529,13 @@ export const agentSessionEventBatchResponseSchema = z
 export const agentStatusValues = ["anonymous", "registered", "retired"] as const;
 export const agentStatusSchema = z.enum(agentStatusValues);
 
+/**
+ * A codebase label: the last segment of a repo root or working directory, so
+ * the surfaces can say which codebase an agent worked without handing anyone a
+ * path. Paths themselves stay behind the `repoRoot` rule.
+ */
+export const repoLabelSchema = z.string().min(1).max(200);
+
 export const agentSchema = z
   .object({
     id: idSchema,
@@ -527,6 +544,24 @@ export const agentSchema = z
     status: agentStatusSchema,
     owner: z.object({ id: idSchema, name: z.string().min(1) }).strict(),
     project: z.object({ id: idSchema, name: z.string().min(1) }).strict().nullable(),
+    /**
+     * The codebase this agent works, as a folder name. Safe for every member,
+     * exactly as a shift's `repo` label is. Absent on the operator's
+     * unassigned bucket, and on an API from before v2.
+     */
+    repoName: repoLabelSchema.optional(),
+    /**
+     * The full working directory behind that name, projected only to the
+     * agent's owner and workspace admins - the same rule
+     * `shiftCommitViewSchema.repoRoot` follows.
+     *
+     * Both fields are optional rather than nullable on purpose: `PATCH
+     * /agents/:id` re-validates the whole merged record against this schema,
+     * so a required-but-nullable field missing from that literal would fail
+     * every rename on a field the request never mentions, and optionality is
+     * what lets a non-owner's projection omit the path instead of blanking it.
+     */
+    repoRoot: z.string().min(1).max(1_000).optional(),
     createdAt: timestampSchema,
   })
   .strict();
@@ -562,13 +597,6 @@ export const agentPaystubFiltersSchema = z
  */
 export const shiftCommitVerificationValues = ["pending", "merged", "reverted", "orphaned"] as const;
 export const shiftCommitVerificationSchema = z.enum(shiftCommitVerificationValues);
-
-/**
- * A codebase label: the last segment of a repo root or working directory, so
- * the surfaces can say which codebase an agent worked without handing anyone a
- * path. Paths themselves stay behind the `repoRoot` rule.
- */
-export const repoLabelSchema = z.string().min(1).max(200);
 
 export const shiftCommitViewSchema = z
   .object({

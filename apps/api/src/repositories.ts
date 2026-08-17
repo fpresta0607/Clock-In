@@ -283,6 +283,8 @@ export interface AgentRecord {
   status: AgentStatus;
   owner: ReportLookupRecord;
   project: ReportLookupRecord | null;
+  /** The codebase this identity works; null is the operator's unassigned bucket. */
+  repoRoot: string | null;
   createdAt: Date;
 }
 
@@ -290,10 +292,13 @@ export interface UpsertAgentForKey {
   organizationId: string;
   ownerUserId: string;
   source: AgentSource;
+  /** The identity's codebase; null mints (or finds) the operator's unassigned bucket. */
+  repoRoot: string | null;
+  /** A re-derivable attribute written beside the identity, never part of the key. */
   projectId: string | null;
   /**
    * The runtime's display label. The insert path composes the row's default
-   * name from it and the project's name ("<label> @ <project|unassigned>");
+   * name from it and the repo's folder name ("<label> @ <repo|unassigned>");
    * a replay never overwrites the name, owner, or status already stored.
    */
   name: string;
@@ -320,16 +325,35 @@ export interface AgentShiftRecord {
 }
 
 export interface AgentRepository {
-  /** Mints or finds the identity for (org, source, project); replay yields the same id. */
+  /** Mints or finds the identity for (org, operator, source, repo); replay yields the same id. */
   upsertForKey(input: UpsertAgentForKey): Promise<{ id: string }>;
   listForOrganization(subject: AuthenticatedSubject): Promise<AgentRecord[]>;
   findById(subject: AuthenticatedSubject, agentId: string): Promise<AgentRecord | null>;
   /** Applies the patch; null when the agent is not in the caller's organization. */
   update(subject: AuthenticatedSubject, agentId: string, patch: AgentUpdatePatch): Promise<AgentRecord | null>;
-  /** Re-points the loser's shifts at the winner and retires the loser, in one transaction. */
+  /** Re-points the loser's shifts, commits and usage at the winner and retires the loser, in one transaction. */
   merge(subject: AuthenticatedSubject, winnerId: string, loserId: string): Promise<void>;
   /** This agent's shifts overlapping the range, newest first; running shifts overlap up to lastEventAt. */
   listSessionsForAgent(subject: AuthenticatedSubject, agentId: string, query: ReportQuery): Promise<AgentShiftRecord[]>;
+  /**
+   * Graduation, rule 1: names the codebase of an agent that has none, first
+   * assignment wins. False when the row already carries one (so the caller
+   * re-homes the session instead) or when the key is already taken by another
+   * agent for this (organization, operator, source, repo).
+   */
+  claimRepoRoot(organizationId: string, agentId: string, repoRoot: string, now: Date): Promise<boolean>;
+  /**
+   * Graduation, rules 2 and 3: moves one shift and the evidence keyed to it
+   * onto another identity. Overwrites the stamp rather than coalescing, which
+   * is what separates it from `stampAgent`.
+   */
+  restampSession(organizationId: string, agentSessionId: string, agentId: string, now: Date): Promise<void>;
+  /**
+   * Retires an unassigned agent that no session references any more. Its
+   * history is empty by construction, so nothing is lost. False when it still
+   * has shifts, which is the ordinary case.
+   */
+  retireIfSessionless(organizationId: string, agentId: string, now: Date): Promise<boolean>;
 }
 
 export interface AgentSessionRecord {

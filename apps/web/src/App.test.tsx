@@ -56,6 +56,8 @@ const rosterAgent = {
   status: "anonymous" as const,
   owner: { id: "u2", name: "Alex" },
   project: { id: "p1", name: "General" },
+  repoName: "clock-in",
+  repoRoot: "C:/dev/clock-in",
   createdAt: "2026-08-01T00:00:00.000Z",
 };
 
@@ -810,13 +812,51 @@ describe("the roster tab", () => {
     // Every secondary fact is its own span, so the line wraps rather than
     // clipping; the separators are drawn, not written into the text.
     await waitFor(() => expect(within(row!).getByText("clock-in")).toBeInTheDocument());
-    for (const fact of ["Claude Code", "Alex", "claude-fable-5", "clock-in", "2 shifts", "held pending"]) {
+    for (const fact of ["Claude Code", "claude-fable-5", "clock-in", "2 shifts", "held pending"]) {
       expect(within(row!).getByText(fact)).toHaveClass("board-fact");
     }
+    // The operator is the group heading now, not a fact repeated on each row.
+    expect(within(row!).queryByText("Alex")).not.toBeInTheDocument();
+    expect(within(roster.closest(".roster-group")!).getByText("Alex")).toHaveClass("group-label");
     // The pay-run report's hours land on the matching roster row.
     await waitFor(() => expect(row).toHaveTextContent("1h 30m"));
     expect(within(row as HTMLElement).getByRole("button", { name: "Rename" })).toBeInTheDocument();
     expect(within(row as HTMLElement).queryByRole("button", { name: "Register" })).not.toBeInTheDocument();
+  });
+
+  it("groups the roster by operator, then by codebase within one", async () => {
+    const sam = { id: "u1", name: "Sam" };
+    const roster = [
+      rosterAgent,
+      { ...rosterAgent, id: "a2", name: "Claude Code @ pocket-piggies", owner: sam, repoName: "pocket-piggies", repoRoot: undefined },
+      { ...rosterAgent, id: "a3", name: "Claude Code @ unassigned", owner: sam, repoName: undefined, repoRoot: undefined },
+      { ...rosterAgent, id: "a4", name: "Codex @ clock-in", owner: sam, source: "codex", repoName: "clock-in", repoRoot: undefined },
+    ];
+    const person = await signIn(clientFor({ agents: vi.fn().mockResolvedValue({ agents: roster }) }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+
+    const groups = await screen.findAllByTestId("roster-list");
+    // One group per operator, alphabetical, each headed by the owner's name.
+    expect(groups.map((list) => list.closest(".roster-group")!.querySelector(".group-label")!.textContent))
+      .toEqual(["Alex", "Sam"]);
+    // Within an operator, by codebase - and the unassigned bucket last,
+    // because it is where shifts wait for one rather than a codebase itself.
+    expect([...groups[1]!.querySelectorAll(".board-name")].map((name) => name.textContent))
+      .toEqual(["Codex @ clock-in", "Claude Code @ pocket-piggies", "Claude Code @ unassigned"]);
+  });
+
+  it("names the codebase beside the agent on its paystub", async () => {
+    const person = await signIn(clientFor());
+    await screen.findByRole("heading", { name: "SIQstack" });
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+
+    await person.click(await screen.findByRole("button", { name: /Claude Code @ General/ }));
+
+    // Two of one operator's repos must never read as the same paystub.
+    const detail = await screen.findByTestId("agent-paystub");
+    expect(within(detail).getByRole("heading", { level: 3 })).toHaveTextContent("Claude Code @ General · clock-in · Last 30 days");
   });
 
   it("renames an agent inline, and the API registers an anonymous one in the same write", async () => {
@@ -836,7 +876,7 @@ describe("the roster tab", () => {
     await waitFor(() => expect(patchAgent).toHaveBeenCalledWith(rosterAgent.id, { name: "Reviewer" }));
     const row = (await screen.findByText("Reviewer")).closest("li");
     expect(within(row!).getByText("Claude Code")).toHaveClass("board-fact");
-    expect(within(row!).getByText("Alex")).toHaveClass("board-fact");
+    expect(within(row!).getByText("clock-in")).toHaveClass("board-fact");
   });
 
   it("opens an agent's paystub for the range on screen", async () => {

@@ -146,14 +146,14 @@ class MemoryPathMappings implements PathMappingRepository {
   public async remove(): Promise<boolean> { throw new Error("not used"); }
 }
 
-/** Records every roster upsert and answers each (source, project) key with one stable id. */
+/** Records every roster upsert and answers each (source, repo) key with one stable id. */
 class MemoryAgents implements AgentRepository {
   public readonly upserts: UpsertAgentForKey[] = [];
   private readonly idsByKey = new Map<string, string>();
 
   public async upsertForKey(input: UpsertAgentForKey): Promise<{ id: string }> {
     this.upserts.push(input);
-    const key = `${input.source}|${input.projectId ?? ""}`;
+    const key = `${input.source}|${input.repoRoot ?? ""}`;
     let id = this.idsByKey.get(key);
     if (id === undefined) {
       id = crypto.randomUUID();
@@ -166,6 +166,10 @@ class MemoryAgents implements AgentRepository {
   public async findById(): Promise<AgentRecord | null> { throw new Error("not used"); }
   public async update(): Promise<AgentRecord | null> { throw new Error("not used"); }
   public async merge(): Promise<void> { throw new Error("not used"); }
+  public async listSessionsForAgent(): Promise<never> { throw new Error("not used"); }
+  public async claimRepoRoot(): Promise<boolean> { throw new Error("not used"); }
+  public async restampSession(): Promise<void> { throw new Error("not used"); }
+  public async retireIfSessionless(): Promise<boolean> { throw new Error("not used"); }
 }
 
 class MemoryTimers implements Pick<SessionRepository, "findRunning"> {
@@ -197,6 +201,9 @@ function event(overrides: Partial<AgentSessionEventInput> = {}): AgentSessionEve
     event: "started",
     occurredAt: new Date("2026-08-06T13:30:00.000Z"),
     cwd: "C:/dev/clock-in",
+    // A desktop old enough to have no repo probe is the default here, so the
+    // suite keeps exercising the degradation path as well as the v2 one.
+    repoRoot: null,
     ruleId: null,
     ...overrides,
   };
@@ -408,6 +415,7 @@ describe("roster minting", () => {
       organizationId: ids.organization,
       ownerUserId: ids.user,
       source: "claude_code",
+      repoRoot: null,
       projectId: ids.project,
       name: "Claude Code",
       now,
@@ -436,7 +444,7 @@ describe("roster minting", () => {
     expect(agentSessions.records[0]!.agentId).toBeNull();
   });
 
-  it("memoizes one upsert per (source, project) per batch", async () => {
+  it("memoizes one upsert per (source, repo) per batch", async () => {
     const agents = new MemoryAgents();
     const { agentSessions, service } = createService({ agents });
 
@@ -449,6 +457,62 @@ describe("roster minting", () => {
     expect(agents.upserts.map((upsert) => upsert.source)).toEqual(["claude_code", "codex"]);
     expect(agentSessions.records[0]!.agentId).toBe(agentSessions.records[1]!.agentId);
     expect(agentSessions.records[2]!.agentId).not.toBe(agentSessions.records[0]!.agentId);
+  });
+
+  it("keys the identity on the reported repo, so two repos are two agents", async () => {
+    const agents = new MemoryAgents();
+    const { agentSessions, service } = createService({ mappings: [mapped], agents });
+
+    await service.ingest(subject, [
+      event({ externalSessionId: "one", repoRoot: "C:/dev/clock-in" }),
+      event({ externalSessionId: "two", repoRoot: "C:/dev/clock-in" }),
+      event({ externalSessionId: "three", repoRoot: "C:/dev/pocket-piggies" }),
+    ]);
+
+    expect(agents.upserts.map((upsert) => upsert.repoRoot))
+      .toEqual(["C:/dev/clock-in", "C:/dev/pocket-piggies"]);
+    expect(agentSessions.records[1]!.agentId).toBe(agentSessions.records[0]!.agentId);
+    // Two repos inside one project used to collapse onto one identity.
+    expect(agentSessions.records[2]!.agentId).not.toBe(agentSessions.records[0]!.agentId);
+  });
+
+  it("mints the operator's unassigned bucket when the desktop reported no repo", async () => {
+    const agents = new MemoryAgents();
+    const { service } = createService({ agents });
+
+    await service.ingest(subject, [event({ repoRoot: null })]);
+
+    // The designed degradation path for an installer without the probe: a
+    // real roster row that graduates when its first commit names a repo.
+    expect(agents.upserts[0]).toMatchObject({ repoRoot: null, ownerUserId: ids.user });
+  });
+
+  it("names the operator from the uploader, whatever the runtime is", async () => {
+    const agents = new MemoryAgents();
+    const { service } = createService({ agents });
+    const other: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.otherUser, role: "member" };
+
+    await service.ingest(other, [event({ source: "kimi_code", repoRoot: "C:/dev/clock-in" })]);
+
+    // No per-runtime work: the day kimi's hooks are wired, its shifts mint
+    // under the account whose desktop uploaded them.
+    expect(agents.upserts[0]).toMatchObject({ ownerUserId: ids.otherUser, source: "kimi_code" });
+  });
+
+  it("attributes the project from the repo first and the working directory second", async () => {
+    const agents = new MemoryAgents();
+    const { agentSessions, service } = createService({ mappings: [mapped], agents });
+
+    await service.ingest(subject, [
+      // The repo is mapped; a deeper cwd inside it resolves the same project.
+      event({ externalSessionId: "one", repoRoot: "C:/dev/clock-in", cwd: "C:/dev/clock-in/apps/web" }),
+      // No repo reported, so the working directory answers exactly as before.
+      event({ externalSessionId: "two", repoRoot: null, cwd: "C:/dev/clock-in/apps/api" }),
+      // Neither is mapped: null, never a fallback project.
+      event({ externalSessionId: "three", repoRoot: "C:/dev/elsewhere", cwd: "C:/dev/elsewhere" }),
+    ]);
+
+    expect(agentSessions.records.map((row) => row.projectId)).toEqual([ids.project, ids.project, null]);
   });
 
   it("stays safe when the agents dependency is missing", async () => {

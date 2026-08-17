@@ -43,10 +43,16 @@ fn run() -> Result<(), String> {
         },
     };
     if event.event == AgentEventKind::Started {
-        event.start_head = event
-            .cwd
-            .as_deref()
-            .and_then(|cwd| git_evidence::head_sha(Path::new(cwd)));
+        // One probe of the working directory answers both questions: which
+        // commit the shift opened at, and which codebase it is working in.
+        // Each collapses any failure to `None` on its own, so a machine
+        // without git records neither and nothing else changes.
+        let cwd = event.cwd.clone();
+        if let Some(cwd) = cwd.as_deref().map(Path::new) {
+            event.start_head = git_evidence::head_sha(cwd);
+            event.repo_root =
+                git_evidence::repo_root(cwd).map(|root| root.to_string_lossy().into_owned());
+        }
     }
     let path = spool::agent_spool_path();
     spool::append(&path, &event).map_err(|error| format!("could not write the spool: {error}"))

@@ -190,13 +190,17 @@ describe("database schema", () => {
     expect(userTimelineIndex?.config.where).toBeUndefined();
   });
 
-  it("defines roster agents as one durable identity per source and project", () => {
+  it("defines roster agents as one durable identity per operator, runtime and codebase", () => {
     expect(agents.id.primary).toBe(true);
     expect(agents.organizationId.notNull).toBe(true);
     expect(agents.ownerUserId.notNull).toBe(true);
-    // Null means unassigned work; the identity key still holds through it.
+    // The project is a re-derivable attribute now, not part of the key: a
+    // directory re-mapped to another project must move this column alone.
     expect(agents.projectId.notNull).toBe(false);
     expect(agents.projectId.columnType).toBe("PgUUID");
+    // Null repo is the operator's unassigned bucket; the key holds through it.
+    expect(agents.repoRoot.notNull).toBe(false);
+    expect(agents.repoRoot.columnType).toBe("PgText");
     expect(agents.source.notNull).toBe(true);
     expect(agents.source.columnType).toBe("PgText");
     expect(agents.name.notNull).toBe(true);
@@ -214,25 +218,31 @@ describe("database schema", () => {
     // constraint: retiring an agent has to release its key so the next shift
     // mints a fresh identity instead of resurrecting the retired one.
     const identityIndex = config.indexes.find(
-      (index) => index.config.name === "agents_organization_source_project_unique",
+      (index) => index.config.name === "agents_organization_owner_source_repo_unique",
     );
     expect(identityIndex).toBeDefined();
     expect(identityIndex!.config.unique).toBe(true);
     expect(identityIndex!.config.columns.map((column) => (column as { name: string }).name)).toEqual([
       "organization_id",
+      "owner_user_id",
       "source",
-      "project_id",
+      "repo_root",
     ]);
-    expect(new PgDialect().sqlToQuery(identityIndex!.config.where!).sql).toContain("<> 'retired'");
-    // Two null-project sightings are one agent, not one per upsert: a plain
-    // unique treats nulls as distinct, so the unassigned half is its own index.
+    const identityWhere = new PgDialect().sqlToQuery(identityIndex!.config.where!).sql;
+    // The arbiter in upsertForKey has to restate this predicate exactly, so
+    // both halves are pinned here rather than only the retired clause.
+    expect(identityWhere).toContain("is not null");
+    expect(identityWhere).toContain("<> 'retired'");
+    // Two repo-less sightings are one agent per operator, not one per upsert:
+    // a plain unique treats nulls as distinct, so that half is its own index.
     const unassignedIndex = config.indexes.find(
-      (index) => index.config.name === "agents_organization_source_unassigned_unique",
+      (index) => index.config.name === "agents_organization_owner_source_unassigned_unique",
     );
     expect(unassignedIndex).toBeDefined();
     expect(unassignedIndex!.config.unique).toBe(true);
     expect(unassignedIndex!.config.columns.map((column) => (column as { name: string }).name)).toEqual([
       "organization_id",
+      "owner_user_id",
       "source",
     ]);
     const unassignedWhere = new PgDialect().sqlToQuery(unassignedIndex!.config.where!).sql;
@@ -242,7 +252,7 @@ describe("database schema", () => {
       "agents_organization_id_id_unique",
     ]);
     expect(config.checks.map((constraint) => constraint.name)).toEqual(
-      expect.arrayContaining(["agents_status_valid", "agents_source_valid", "agents_name_length_valid"]),
+      expect.arrayContaining(["agents_status_valid", "agents_source_valid", "agents_name_length_valid", "agents_repo_root_length_valid"]),
     );
     // The source shape rule matches agent_sessions': the same id must land in both.
     const sourceCheck = config.checks.find((constraint) => constraint.name === "agents_source_valid");

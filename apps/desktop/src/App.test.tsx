@@ -119,6 +119,8 @@ const agentsReport = {
       status: "anonymous" as const,
       owner: { id: user.id, name: user.name },
       project: { id: project.id, name: project.name },
+      repoName: "clock-in",
+      repoRoot: "C:/dev/clock-in",
     },
     agentSeconds: 5_400,
     shiftCount: 2,
@@ -1353,11 +1355,13 @@ describe("the agents tab", () => {
           {
             agent: {
               id: "00000000-0000-4000-8000-000000000501",
-              name: "Codex @ Field work",
+              name: "Codex @ unassigned",
               source: "codex",
               status: "registered" as const,
               owner: { id: user.id, name: user.name },
               project: { id: project.id, name: project.name },
+              repoName: null,
+              repoRoot: null,
             },
             agentSeconds: 0,
             shiftCount: 0,
@@ -1375,11 +1379,15 @@ describe("the agents tab", () => {
           {
             agent: {
               id: "00000000-0000-4000-8000-000000000502",
-              name: "Claude Code @ Field work",
+              name: "Claude Code @ pocket-piggies",
               source: "claude_code",
               status: "retired" as const,
               owner: { id: user.id, name: user.name },
               project: null,
+              // A member who owns neither agent is sent the name and no path;
+              // the row has to read correctly from the name alone.
+              repoName: "pocket-piggies",
+              repoRoot: null,
             },
             agentSeconds: 3_600,
             shiftCount: 1,
@@ -1405,16 +1413,19 @@ describe("the agents tab", () => {
 
     const roster = await within(panel).findByTestId("agent-roster-list");
     expect(within(roster).queryByRole("button", { name: "Register" })).not.toBeInTheDocument();
-    const zeroRow = within(roster).getByText("Codex @ Field work").closest("li");
+    const zeroRow = within(roster).getByText("Codex @ unassigned").closest("li");
     expect(zeroRow).not.toHaveClass("is-anonymous");
     expect(zeroRow).toHaveTextContent("0s");
     expect(zeroRow).toHaveTextContent("0 shifts");
     expect(zeroRow).toHaveTextContent("held pending");
-    const retiredRow = within(roster).getByText("Claude Code @ Field work").closest("li");
+    // A repo-less bucket names no codebase rather than inventing one.
+    expect(within(zeroRow!).queryByText("pocket-piggies")).not.toBeInTheDocument();
+    const retiredRow = within(roster).getByText("Claude Code @ pocket-piggies").closest("li");
     expect(retiredRow).toHaveTextContent("retired");
     expect(retiredRow).toHaveTextContent("50% held");
-    // The codebase rides the row so a member can see where the hours went.
-    expect(within(retiredRow!).getByText("pocket-piggies")).toBeInTheDocument();
+    // The codebase rides the row even with the path withheld, so a member can
+    // still see where the hours went.
+    expect(within(retiredRow!).getByText("pocket-piggies")).toHaveClass("board-fact");
   });
 });
 

@@ -43,6 +43,7 @@ function row(overrides: Partial<ReportRowRecord> = {}): ReportRowRecord {
     id: ids.session,
     user: { id: ids.user, name: "Alex" },
     project: { id: ids.project, name: "Timer" },
+    repoRoot: null,
     description: "Focused work",
     status: "stopped",
     startedAt: new Date("2026-08-06T14:00:00.000Z"),
@@ -141,6 +142,7 @@ function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
     status: "anonymous",
     owner: { id: ids.user, name: "Alex" },
     project: { id: ids.project, name: "Timer" },
+    repoRoot: null,
     createdAt: new Date("2026-08-01T00:00:00.000Z"),
     ...overrides,
   };

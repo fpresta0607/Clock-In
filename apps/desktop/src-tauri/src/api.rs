@@ -204,6 +204,17 @@ pub struct AgentsReportAgent {
     pub owner: LeaderboardMember,
     #[serde(default)]
     pub project: Option<MeStatsProjectRef>,
+    /// The codebase this identity works, as a folder name - safe for every
+    /// member. Absent on the operator's unassigned bucket, and on an API from
+    /// before identity v2.
+    #[serde(default)]
+    pub repo_name: Option<String>,
+    /// The path behind that name, sent only to the agent's owner and to
+    /// workspace admins. One absence for two different reasons - an API older
+    /// than the field, and an API that deliberately withheld the path from
+    /// this caller - and the webview must read both the same way.
+    #[serde(default)]
+    pub repo_root: Option<String>,
 }
 
 /// One roster agent's row in the pay-run report: hours, shifts, and how its
@@ -427,6 +438,11 @@ pub struct AgentEventUpload<'a> {
     pub occurred_at: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<&'a str>,
+    /// Contract data, unlike `start_head`: it names the codebase this shift's
+    /// identity is keyed on. An older API rejects an unknown field outright,
+    /// which is why the installer ships only after the API accepting it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_root: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -441,6 +457,7 @@ impl<'a> From<&'a SpoolEvent> for AgentEventUpload<'a> {
             event: event.event,
             occurred_at: &event.occurred_at,
             cwd: event.cwd.as_deref(),
+            repo_root: event.repo_root.as_deref(),
             model: event.model.as_deref(),
             rule_id: event.rule_id.as_deref(),
         }
@@ -1636,6 +1653,10 @@ mod tests {
         // Absent token fields decode as absence, never as a measured zero.
         assert_eq!(row.tokens, None);
         assert!(!row.tokens_reported);
+        // The identity-v2 fields the same way: an API from before them is not
+        // an error, it simply names no codebase.
+        assert_eq!(row.agent.repo_name, None);
+        assert_eq!(row.agent.repo_root, None);
         let echoed = serde_json::to_value(&row).expect("row serialize");
         assert_eq!(echoed["tokens"], serde_json::Value::Null);
         assert_eq!(echoed["tokensReported"], false);
@@ -1648,7 +1669,9 @@ mod tests {
                     "source": "claude_code",
                     "status": "registered",
                     "owner": {"id": "u1", "name": "Alex"},
-                    "project": null
+                    "project": null,
+                    "repoName": "clock-in",
+                    "repoRoot": "C:/dev/clock-in"
                 },
                 "agentSeconds": 3600,
                 "shiftCount": 1,
@@ -1669,6 +1692,44 @@ mod tests {
             Some(12_000)
         );
         assert!(reported.tokens_reported);
+        assert_eq!(reported.agent.repo_name.as_deref(), Some("clock-in"));
+        assert_eq!(reported.agent.repo_root.as_deref(), Some("C:/dev/clock-in"));
+    }
+
+    #[test]
+    fn reads_a_withheld_repo_path_the_same_way_as_an_api_that_never_had_one() {
+        // A member who owns neither agent is sent the codebase's name and no
+        // path at all. On this side that absence is indistinguishable from an
+        // API older than the field, and it must be: both read as "no path".
+        let row: AgentsReportRow = serde_json::from_str(
+            r#"{
+                "agent": {
+                    "id": "a1",
+                    "name": "Claude Code @ clock-in",
+                    "source": "claude_code",
+                    "status": "anonymous",
+                    "owner": {"id": "u2", "name": "Sam"},
+                    "project": null,
+                    "repoName": "clock-in"
+                },
+                "agentSeconds": 3600,
+                "shiftCount": 1,
+                "commitsRecorded": 0,
+                "commitsPending": 0,
+                "commitsMerged": 0,
+                "commitsReverted": 0,
+                "commitsOrphaned": 0,
+                "heldRate": null,
+                "models": []
+            }"#,
+        )
+        .expect("a withheld path still parses");
+
+        // The roster still reads correctly, because the name carries it.
+        assert_eq!(row.agent.repo_name.as_deref(), Some("clock-in"));
+        assert_eq!(row.agent.repo_root, None);
+        let echoed = serde_json::to_value(&row).expect("row serialize");
+        assert_eq!(echoed["agent"]["repoRoot"], serde_json::Value::Null);
     }
 
     #[test]

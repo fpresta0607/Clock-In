@@ -32,6 +32,13 @@ export interface AgentSessionEventInput {
   event: "started" | "ended" | "heartbeat";
   occurredAt: Date;
   cwd: string | null;
+  /**
+   * The git repository the working directory sits in, when the hook probed
+   * one. Null from a desktop that predates the probe, or from a directory
+   * that is not a repository at all; either way the shift mints into its
+   * operator's unassigned bucket and graduates when its first commit lands.
+   */
+  repoRoot: string | null;
   /** The matched url-rule mapping id for browser spans; null for agent events. */
   ruleId: string | null;
 }
@@ -93,13 +100,16 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
         return mappings;
       };
 
-      // One roster upsert per (source, project) per batch: five events from
-      // the same agent mint or find its identity once.
+      // One roster upsert per (source, repo) per batch: five events from the
+      // same agent mint or find its identity once. The operator is the
+      // authenticated uploader and so is constant across the batch, which is
+      // what gives every runtime an operator dimension without asking the
+      // runtime for anything.
       const agentIds = new Map<string, Promise<string>>();
-      const resolveAgent = (source: AgentSource, projectId: string | null): Promise<string | null> => {
+      const resolveAgent = (source: AgentSource, repoRoot: string | null, projectId: string | null): Promise<string | null> => {
         const agentsRepository = dependencies.agents;
         if (agentsRepository === undefined || !rosterEligibleSource(source)) return Promise.resolve(null);
-        const key = `${source}|${projectId ?? ""}`;
+        const key = `${source}|${repoRoot ?? ""}`;
         let pending = agentIds.get(key);
         if (pending === undefined) {
           pending = agentsRepository
@@ -107,6 +117,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
               organizationId: subject.organizationId,
               ownerUserId: subject.userId,
               source,
+              repoRoot,
               projectId,
               name: agentRuntimeLabel(source),
               now,
@@ -118,10 +129,17 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
       };
 
       const results: AgentSessionEventBatchResponse["results"] = [];
-      const resolveProject = (event: AgentSessionEventInput, mappings: PathMappingCandidate[]): string | null =>
-        event.source === "browser"
-          ? (event.ruleId === null ? null : resolveProjectForRule(event.ruleId, mappings))
-          : resolveProjectForCwd(event.cwd ?? "", mappings);
+      // The repository is the better evidence of where work happened, so it
+      // is matched first and the working directory is the fallback; the
+      // mechanism is the same longest-prefix match either way.
+      const resolveProject = (event: AgentSessionEventInput, mappings: PathMappingCandidate[]): string | null => {
+        if (event.source === "browser") return event.ruleId === null ? null : resolveProjectForRule(event.ruleId, mappings);
+        if (event.repoRoot !== null) {
+          const fromRepo = resolveProjectForCwd(event.repoRoot, mappings);
+          if (fromRepo !== null) return fromRepo;
+        }
+        return resolveProjectForCwd(event.cwd ?? "", mappings);
+      };
       for (const event of events) {
         const occurredAt = event.occurredAt.getTime();
         if (!Number.isFinite(occurredAt)) {
@@ -149,7 +167,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
             cwd: event.cwd,
             ruleId: event.ruleId,
             projectId,
-            agentId: await resolveAgent(event.source, projectId),
+            agentId: await resolveAgent(event.source, event.repoRoot, projectId),
             linkedSessionId,
             occurredAt: event.occurredAt,
             receivedAt: now,
@@ -168,7 +186,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
               cwd: event.cwd,
               ruleId: event.ruleId,
               projectId,
-              agentId: await resolveAgent(event.source, projectId),
+              agentId: await resolveAgent(event.source, event.repoRoot, projectId),
               occurredAt: event.occurredAt,
               receivedAt: now,
             });
