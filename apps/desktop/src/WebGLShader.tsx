@@ -298,9 +298,9 @@ export function WebGLShader({ className }: WebGLShaderProps) {
       // A hidden or not-yet-laid-out canvas measures zero, and a zero
       // resolution divides by zero in the shader. Keep the last good size.
       if (width === 0 || height === 0) return;
-      // Re-read the ratio every time: dragging the window to a display with
-      // different scaling changes it, and a buffer left at the old ratio is
-      // the one thing that does make the wave look resampled.
+      // Re-read the ratio on every pass: a buffer left at the old ratio is
+      // the one thing that does make the wave look resampled. Getting here
+      // on a ratio-only change is the observer registration's job below.
       refs.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       refs.renderer.setSize(width, height, false);
       const dpr = refs.renderer.getPixelRatio();
@@ -322,9 +322,17 @@ export function WebGLShader({ className }: WebGLShaderProps) {
     window.addEventListener("touchmove", handleTouchMove, { passive: true });
     // Observing the canvas catches every reason its box changed - the window,
     // a scrollbar appearing, a container resizing - where a window `resize`
-    // listener only catches the first.
+    // listener only catches the first. device-pixel-content-box also fires
+    // on a devicePixelRatio-only change (the window dragged to a display
+    // scaled differently), which leaves the CSS box alone; browsers without
+    // it throw on observe and fall back to the default content-box, where a
+    // stale ratio lasts until the next real box change.
     const sizeObserver = new ResizeObserver(handleResize);
-    sizeObserver.observe(canvas);
+    try {
+      sizeObserver.observe(canvas, { box: "device-pixel-content-box" });
+    } catch {
+      sizeObserver.observe(canvas);
+    }
 
     return () => {
       // Flag the loop as dead before cancelling — prevents any in-flight tick from re-queuing
