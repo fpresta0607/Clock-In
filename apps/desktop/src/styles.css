@@ -333,8 +333,13 @@ select:disabled { opacity: .55; }
 .join-form input { letter-spacing: .06em; text-transform: uppercase; }
 .join-form button { flex: none; min-height: 33px; border: 1px solid var(--glass-border); padding: 0 11px; background: rgba(3, 5, 10, 0.5); color: #ffffff; font-size: .76rem; text-transform: uppercase; }
 .join-form button:hover { border-color: var(--glass-border-hover); }
-/* Each row is the control that picks whose breakdown shows underneath. */
-.board-list { display: grid; gap: 4px; margin: 0; padding: 0; max-height: 11rem; overflow-y: auto; list-style: none; }
+/* Each row is the control that picks whose breakdown shows underneath, so the
+   list is bounded to keep that breakdown reachable - but the bound follows the
+   window rather than a fixed 11rem, which cut the human board to four rows and
+   the roster to five on any screen. Short lists size to their content and show
+   no scrollbar at all; only a long one scrolls, and it scrolls with the room
+   the window actually has. */
+.board-list { display: grid; gap: 4px; margin: 0; padding: 0; max-height: 50vh; overflow-y: auto; list-style: none; }
 .board-choice {
   display: grid;
   width: 100%;
@@ -363,7 +368,6 @@ select:disabled { opacity: .55; }
    models, codebases, shifts, held rate - so it gets two rows of its own
    instead of one right-aligned line that clips. The facts wrap between
    themselves at any width; only the name is allowed to ellipsize. */
-.board-list.is-roster { max-height: 16rem; }
 .board-list.is-roster .board-choice {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: baseline;
@@ -389,10 +393,11 @@ select:disabled { opacity: .55; }
    edge to edge otherwise, which is what made settings feel cramped. */
 .modal { width: min(100%, 440px); max-height: calc(100vh - 60px); padding: 22px 24px 24px; overflow-y: auto; text-align: left; }
 /* All stats carries a six-column table and two-line roster rows, so it takes
-   whatever width the window has rather than staying at the settings panel's.
-   In the default 520px window that is still 100%; resize wider and the rows
-   stop wrapping instead of staying cramped. */
-.today-card.modal { width: min(100%, 760px); }
+   the window rather than the settings panel's width - the overlay's own 20px
+   padding is the only inset. Any pixel cap here stops tracking the window at
+   some size and turns the box into an island: 1100px was still 86% of a
+   1280px window but only 43% of a 2560px one. */
+.today-card.modal { width: 100%; }
 .modal-close { min-height: 30px; padding: 3px 10px; font-size: .72rem; text-transform: none; letter-spacing: normal; }
 
 /* Collapsible settings groups: native details/summary, one heading each. The
@@ -570,18 +575,29 @@ select:disabled { opacity: .55; }
 
 /* Which models ran, with session count, overlap, and length. */
 .agent-sessions { margin-top: 14px; }
-/* Six columns have to fit the 520px window the app opens at, so the cells
-   give up their side padding before the table gives up a column; the scroll
-   box behind them only engages if a window is narrower still. */
-.agent-sessions table { margin-top: 2px; font-size: .82rem; }
-.agent-sessions th, .agent-sessions td { padding-left: 5px; padding-right: 5px; }
+/* Six columns at the brand table's own size and rhythm - the same one the
+   Humans tab's rows read at. Squeezing the font and the side padding to make
+   them fit a 520px window is what made every column cramped at every width;
+   the columns keep their room and `.table-scroll` carries a narrow window
+   instead. A heading never wraps: "Max at once" over three lines is what the
+   header row looked like before. */
+.agent-sessions table { margin-top: 2px; }
+.agent-sessions th { white-space: nowrap; }
 .agent-sessions .numeric { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* A model that was never recorded reads muted, not as a bare gap. */
 .agent-sessions .subtle-cell { color: var(--text-secondary); }
 
 /* SVG charts: the hourly line graph and the weekly trend strip. Colors come
    from the brand.css chart tokens; only layout lives here. */
-.graph { position: relative; margin-top: 14px; }
+/* The charts draw into a fixed viewBox, so width drives height: unbounded, a
+   2520px box renders the hourly graph 733px tall. This is the aspect bound,
+   not a layout preference - 1050px is the width the charts were drawn at, and
+   the tables beside them stay full width. The bound belongs on the container
+   rather than on the svg's height, because `.graph-tooltip` is positioned in
+   percent of `.graph` and would stop landing on its data point if the svg were
+   letterboxed inside a wider box. Lift it by measuring the container and
+   emitting a matching viewBox. */
+.graph { position: relative; max-width: 1050px; margin-top: 14px; }
 .graph svg { display: block; width: 100%; height: auto; }
 .graph text { font-variant-numeric: tabular-nums; }
 .graph-mode { width: fit-content; margin-top: 10px; }

@@ -59,6 +59,21 @@ const QUOTA_PENDING_POLL_MS = 3_000;
 const quotaFor = (snapshot: QuotaSnapshot | undefined, source: string): AgentQuota | undefined =>
   snapshot?.providers.find((provider) => provider.sources.includes(source));
 
+/// What a roster row is called. A stored name is always shown as stored; a
+/// name that is blank or only spaces is not a title, so the row falls back to
+/// the runtime it is - a row that says "Claude Code" beats a row that says
+/// nothing at all, which is unpickable and reads as a rendering fault.
+const agentTitle = (agent: { name: string; source: string }): string =>
+  agent.name.trim() === "" ? sourceLabel(agent.source) : agent.name;
+
+/// Whether a runtime bills against a plan at all. Pi is a harness rather than
+/// a billed model, so the roster declares `quotaProvider: null` for it and no
+/// reading will ever arrive - "Quota unknown" would be answering a question
+/// that was never asked. A runtime the roster has not heard of is in the same
+/// position: nothing reads a quota for it either.
+const hasQuotaProvider = (source: string): boolean =>
+  findAgentRuntime(source)?.quotaProvider != null;
+
 const elapsedSeconds = (since: string, now: number): number =>
   Math.max(0, Math.floor((now - Date.parse(since)) / 1_000));
 
@@ -2018,7 +2033,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                           aria-hidden="true"
                           style={{ "--share": `${row.share}%` } as React.CSSProperties}
                         />
-                      ) : (
+                      ) : hasQuotaProvider(row.source) ? (
                         // An agent row answers a different question than a
                         // share of the day: how much of its plan is left.
                         <QuotaDial
@@ -2026,6 +2041,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                           quota={quotaFor(quota, row.source)}
                           pending={quota === undefined || quota.status === "pending"}
                         />
+                      ) : (
+                        // The row is a four-column grid, so the quota cell
+                        // still has to be there for the duration to stay in
+                        // its own column - it just has nothing to say.
+                        <span aria-hidden="true" />
                       )}
                       <span className="meter-duration">
                         {/* "connected", not "working": the row exists because
@@ -2143,7 +2163,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                         onClick={() => setOverlayAgentId(row.agent.id)}
                       >
                         <span className="board-name">
-                          {row.agent.name}
+                          {agentTitle(row.agent)}
                           {row.agent.status === "retired" && <span className="you-tag"> retired</span>}
                         </span>
                         <span className="board-hours">{formatHuman(row.agentSeconds)}</span>
@@ -2172,7 +2192,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
               {selectedAgentRow !== undefined && (
                 <section className="member-stats" aria-labelledby="overlay-agent-title" data-testid="overlay-agent-stats">
                   <div className="member-stats-head">
-                    <h3 id="overlay-agent-title">{selectedAgentRow.agent.name} · {RANGE_LABEL[boardRange]}</h3>
+                    <h3 id="overlay-agent-title">{agentTitle(selectedAgentRow.agent)} · {RANGE_LABEL[boardRange]}</h3>
                   </div>
                   {agentPaystubError !== undefined ? (
                     <p className="form-error" role="alert">{agentPaystubError}</p>

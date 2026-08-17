@@ -37,7 +37,13 @@ jobs:
       TEST_DATABASE_URL: postgres://postgres@localhost:5432/postgres?clock_in_disposable_test_capability=ci-disposable-postgres
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      # Corepack ships with Node and installs the pnpm that the root
+      # package.json pins, so this needs no download from codeload. Taking that
+      # same pin from a third-party action instead put the download in `Set up
+      # job`, ahead of every step, where a codeload outage failed the whole job
+      # before checkout and no retry of ours could reach it. setup-node's pnpm
+      # cache shells out to `pnpm store path`, so the shim comes first.
+      - run: corepack enable pnpm
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -55,7 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - run: corepack enable pnpm
       - uses: actions/setup-node@v4
         with:
           node-version: 22

@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { type MeStatsResponse } from "@clock-in/shared";
+import { agentRuntimeLabel, type MeStatsResponse } from "@clock-in/shared";
 import { App, buildAppRows, rangeQuery } from "./App.js";
 import { ClientError, type Client } from "./client.js";
 import { windowsInstallerUrl } from "./DownloadInstaller.js";
@@ -822,6 +822,21 @@ describe("the roster tab", () => {
     await waitFor(() => expect(row).toHaveTextContent("1h 30m"));
     expect(within(row as HTMLElement).getByRole("button", { name: "Rename" })).toBeInTheDocument();
     expect(within(row as HTMLElement).queryByRole("button", { name: "Register" })).not.toBeInTheDocument();
+  });
+
+  // A row with no title is unpickable and reads as a rendering fault, so a
+  // blank stored name falls back to the runtime the row is.
+  it("titles a roster row with its runtime rather than nothing when the name is blank", async () => {
+    const person = await signIn(clientFor({
+      agents: vi.fn().mockResolvedValue({ agents: [{ ...rosterAgent, name: "   " }] }),
+    }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+
+    const roster = await screen.findByTestId("roster-list");
+    expect(within(roster).getAllByRole("listitem")[0]!.querySelector(".board-name"))
+      .toHaveTextContent(agentRuntimeLabel("claude_code"));
   });
 
   it("groups the roster by operator, then by codebase within one", async () => {

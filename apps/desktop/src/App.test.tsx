@@ -923,6 +923,32 @@ describe("the today panel", () => {
     expect(await within(row!).findByRole("button", { name: /73% remaining on the max plan/i })).toBeInTheDocument();
   });
 
+  // Pi is a harness, not a billed model: the roster declares no quota provider
+  // for it, so nothing will ever read one. "Quota unknown" answered a question
+  // that was never asked, and read as a failure the user could go fix.
+  it("shows no quota element at all for a runtime that bills nothing", async () => {
+    render(<App bridge={bridgeFor({
+      monitorStatus: vi.fn().mockResolvedValue(recording),
+      meStats: vi.fn().mockResolvedValue({
+        ...meStats,
+        apps: [
+          { processName: "pi.exe", durationSeconds: 3_600 },
+          { processName: "claude.exe", durationSeconds: 1_800 },
+        ],
+      }),
+    })} />);
+
+    const rows = within(await screen.findByTestId("session-app-list")).getAllByRole("listitem");
+    const pi = rows.find((candidate) => candidate.textContent?.includes(sourceLabel("pi")));
+    expect(pi).toBeDefined();
+    expect(pi).not.toHaveTextContent(/quota/i);
+    expect(within(pi!).queryByRole("button", { name: /quota/i })).not.toBeInTheDocument();
+    // Claude Code does bill against a plan, so its dial still says so even
+    // when the reading has not landed - that absence is worth reporting.
+    const claude = rows.find((candidate) => candidate.textContent?.includes(sourceLabel("claude_code")));
+    expect(within(claude!).getByRole("button", { name: /quota unknown/i })).toBeInTheDocument();
+  });
+
   it("asks again while the plan reading is still pending", async () => {
     const pending = { status: "pending" as const, checkedAt: null, detail: null, providers: [] };
     const ready = {
@@ -1426,6 +1452,32 @@ describe("the agents tab", () => {
     // The codebase rides the row even with the path withheld, so a member can
     // still see where the hours went.
     expect(within(retiredRow!).getByText("pocket-piggies")).toHaveClass("board-fact");
+  });
+
+  // The Overlord's roster showed one titleless row carrying every Claude
+  // session. A row with no title is unpickable and reads as a rendering
+  // fault, so a blank stored name falls back to the runtime it is.
+  it("titles a roster row with its runtime rather than nothing when the name is blank", async () => {
+    const bridge = bridgeFor({
+      agentsReport: vi.fn().mockResolvedValue({
+        headcount: { total: 1, active: 1, retired: 0 },
+        rows: [{
+          ...agentsReport.rows[0]!,
+          agent: { ...agentsReport.rows[0]!.agent, name: "   " },
+        }],
+      }),
+    });
+    const person = userEvent.setup();
+    render(<App bridge={bridge} />);
+
+    const panel = await openAgentsTab(person);
+    const roster = within(panel).getByTestId("agent-roster-list");
+    const row = within(roster).getAllByRole("listitem")[0]!;
+    expect(row.querySelector(".board-name")).toHaveTextContent(sourceLabel("claude_code"));
+    // The paystub underneath is titled by the same rule, so the two never
+    // disagree about what the picked agent is called.
+    expect(within(panel).getByRole("heading", { level: 3 }))
+      .toHaveTextContent(sourceLabel("claude_code"));
   });
 });
 

@@ -2,8 +2,6 @@ import { useEffect, useRef } from "react";
 import * as THREE from "three";
 
 interface WebGLShaderProps {
-  /** When true, sizes to parent element instead of viewport */
-  contained?: boolean;
   className?: string;
 }
 
@@ -23,7 +21,7 @@ type WaveUniforms = {
  * hero (web-gl-shader.tsx). Green/blue/purple waves with cursor-reactive
  * electric jitter; plain three.js, no react-three-fiber.
  */
-export function WebGLShader({ contained = false, className }: WebGLShaderProps) {
+export function WebGLShader({ className }: WebGLShaderProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const sceneRef = useRef<{
@@ -155,19 +153,26 @@ export function WebGLShader({ contained = false, className }: WebGLShaderProps) 
 
         vec3 color = w1 * green + w2 * blue + w3 * purple;
 
-        gl_FragColor = vec4(color, 1.0);
+        // The wave sums three unbounded 1/distance glows, so every beam core
+        // used to clip to flat white. Against a glass panel - which blurs and
+        // dims whatever is behind it - a clipped core reads as a hard seam at
+        // the panel's edge and as a stray blob under it. Reinhard keeps the
+        // curve and the brand colours and only takes the shoulder off.
+        gl_FragColor = vec4(color / (color + 1.0), 1.0);
       }
     `;
 
     // ── Helpers ───────────────────────────────────────────────────────────
     const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
+    // The canvas' own laid-out box, never `window.innerWidth`: that figure
+    // includes the scrollbars the content column takes away, so a buffer sized
+    // from it is wider than the box it is painted into and the wave renders
+    // squashed. Measuring the element keeps the background's sizing
+    // independent of anything the content does.
     const getDimensions = () => {
-      if (contained && canvas.parentElement) {
-        const rect = canvas.parentElement.getBoundingClientRect();
-        return { width: rect.width, height: rect.height };
-      }
-      return { width: window.innerWidth, height: window.innerHeight };
+      const rect = canvas.getBoundingClientRect();
+      return { width: rect.width, height: rect.height };
     };
 
     // ── Scene init ────────────────────────────────────────────────────────
@@ -179,10 +184,11 @@ export function WebGLShader({ contained = false, className }: WebGLShaderProps) 
 
       refs.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, -1);
 
-      const { width, height } = getDimensions();
-      const dpr = refs.renderer.getPixelRatio();
       refs.uniforms = {
-        resolution: { value: [width * dpr, height * dpr] },
+        // `handleResize` below sets the real one. A canvas that has not been
+        // laid out yet measures zero, and the shader divides by the smaller
+        // axis, so the placeholder is 1×1 rather than 0×0.
+        resolution: { value: [1, 1] },
         time: { value: 0.0 },
         xScale: { value: 1.0 },
         yScale: { value: BASE_Y_SCALE },
@@ -289,6 +295,13 @@ export function WebGLShader({ contained = false, className }: WebGLShaderProps) 
     const handleResize = () => {
       if (!refs.renderer || !refs.uniforms) return;
       const { width, height } = getDimensions();
+      // A hidden or not-yet-laid-out canvas measures zero, and a zero
+      // resolution divides by zero in the shader. Keep the last good size.
+      if (width === 0 || height === 0) return;
+      // Re-read the ratio on every pass: a buffer left at the old ratio is
+      // the one thing that does make the wave look resampled. Getting here
+      // on a ratio-only change is the observer registration's job below.
+      refs.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       refs.renderer.setSize(width, height, false);
       const dpr = refs.renderer.getPixelRatio();
       refs.uniforms.resolution.value = [width * dpr, height * dpr];
@@ -307,7 +320,19 @@ export function WebGLShader({ contained = false, className }: WebGLShaderProps) 
     canvas.addEventListener("mouseenter", handleMouseEnter);
     canvas.addEventListener("mouseleave", handleMouseLeave);
     window.addEventListener("touchmove", handleTouchMove, { passive: true });
-    window.addEventListener("resize", handleResize);
+    // Observing the canvas catches every reason its box changed - the window,
+    // a scrollbar appearing, a container resizing - where a window `resize`
+    // listener only catches the first. device-pixel-content-box also fires
+    // on a devicePixelRatio-only change (the window dragged to a display
+    // scaled differently), which leaves the CSS box alone; browsers without
+    // it throw on observe and fall back to the default content-box, where a
+    // stale ratio lasts until the next real box change.
+    const sizeObserver = new ResizeObserver(handleResize);
+    try {
+      sizeObserver.observe(canvas, { box: "device-pixel-content-box" });
+    } catch {
+      sizeObserver.observe(canvas);
+    }
 
     return () => {
       // Flag the loop as dead before cancelling — prevents any in-flight tick from re-queuing
@@ -319,7 +344,7 @@ export function WebGLShader({ contained = false, className }: WebGLShaderProps) 
       canvas.removeEventListener("mouseenter", handleMouseEnter);
       canvas.removeEventListener("mouseleave", handleMouseLeave);
       window.removeEventListener("touchmove", handleTouchMove);
-      window.removeEventListener("resize", handleResize);
+      sizeObserver.disconnect();
       if (refs.mesh) {
         refs.scene?.remove(refs.mesh);
         refs.mesh.geometry.dispose();
@@ -336,7 +361,7 @@ export function WebGLShader({ contained = false, className }: WebGLShaderProps) 
       refs.scene = null;
       refs.uniforms = null;
     };
-  }, [contained]);
+  }, []);
 
   return <canvas ref={canvasRef} className={className ?? "shader-bg"} />;
 }

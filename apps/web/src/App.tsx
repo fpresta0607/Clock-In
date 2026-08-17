@@ -74,6 +74,13 @@ type AppRowItem = { key: string; label: string; agent: boolean; durationSeconds:
 
 const TOP_APP_ROWS = 8;
 
+/// What a roster row is called. A stored name is always shown as stored; a
+/// name that is blank or only spaces is not a title, so the row falls back to
+/// the runtime it is - a row that says "Claude Code" beats a row that says
+/// nothing at all, which is unpickable and reads as a rendering fault.
+const agentTitle = (agent: { name: string; source: string }): string =>
+  agent.name.trim() === "" ? agentRuntimeLabel(agent.source) : agent.name;
+
 /// One row per agent runtime (so "how much Claude Code" is a single line),
 /// friendly names for everything else, heaviest first, non-agent tail folded.
 export const buildAppRows = (apps: MeStatsResponse["apps"]): AppRowItem[] => {
@@ -1609,7 +1616,7 @@ const RosterTab = ({
                       onClick={() => onSelect(agent.id)}
                     >
                       <span className="board-name">
-                        {agent.name}
+                        {agentTitle(agent)}
                         {agent.status === "retired" && <span className="you-tag"> retired</span>}
                       </span>
                       <span className="board-hours">
@@ -1660,7 +1667,7 @@ const RosterTab = ({
             {/* The header names the codebase beside the agent, so a paystub
                 is never ambiguous between an operator's two repos. */}
             <h3 id="paystub-title">
-              {selected.name}
+              {agentTitle(selected)}
               {selected.repoName !== undefined && <span className="paystub-repo"> · {selected.repoName}</span>}
               {" · "}{rangeLabel}
             </h3>
