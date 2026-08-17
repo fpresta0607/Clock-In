@@ -14,7 +14,8 @@ The design stays inside the shipped product model: agents are durable identities
 - Francesco has 199 `agent_sessions` rows; the 16 with `agent_id` set are all stamped onto Gianluca's 2 agent rows.
   Whoever mints first owns the identity; every other member's shifts accrue to it.
   This is why the roster appears "only under Gianluca".
-- Session capture already carries `cwd` per session (`agent_sessions.cwd`, `packages/database/src/schema.ts:351`) and `shift_commits.repo_root` per commit (`schema.ts:422`); attribution resolves cwd to project with a null fallback (`apps/api/src/services/attribution.ts:30-49`).
+- Session capture already carries `cwd` per session (`agent_sessions.cwd`, `packages/database/src/schema.ts:351`) and `shift_commits.repo_root` per commit (`schema.ts:421`); attribution resolves cwd to project with a **null** fallback, not a General/default one (`apps/api/src/services/attribution.ts:30-49`) - "General" is an ordinary project seeded at organization creation (`drizzle-repositories.ts:692`), so `Claude Code @ General` is a real path-mapping hit rather than a default anyone fell back to.
+  That is why the null bucket below can be treated as honest "not known yet" rather than a silent default.
   Token capture (`agent_usage`) and model heartbeats shipped in effort-v1.
 - Most terminal agentic sessions on the fleet PC (kimi, pi, cfo-spawned goblins) never record at all because only Claude Code's hooks are wired there.
   Hook coverage will expand (snippets exist in `packages/shared/src/agent-runtimes.json`), but identity must not depend on it.
@@ -35,7 +36,7 @@ The design stays inside the shipped product model: agents are durable identities
 `(organization_id, owner_user_id, source, repo_root)`, with `repo_root` nullable.
 
 `owner_user_id` already exists on `agents` (`schema.ts:286`) and is already written at mint (`drizzle-repositories.ts:1314-1343` via `services/agent-sessions.ts:105-113`); v2 simply admits it to the identity.
-`repo_root` is a new nullable text column with the same 1..1000 shape check `shift_commits.repo_root` carries (`schema.ts:465-467`).
+`repo_root` is a new nullable text column with the same 1..1000 shape check `shift_commits.repo_root` carries (`schema.ts:462`), written null-or-valid rather than notNull.
 
 The two existing partial unique indexes (`schema.ts:305-310`) are replaced by:
 
@@ -60,7 +61,10 @@ The composite-FK target `unique(organization_id, id)` (`schema.ts:297`) is untou
   It is a real roster row that accumulates hours, shifts, held rate, and tokens, and it graduates (section 2) when repo evidence arrives.
 - Renaming the agent (the registration ceremony, `services/agents.ts:150-186`) touches `name` and `status` only; identity columns never change on rename.
 - A renamed or moved directory produces a *new* `repo_root`, hence a new agent.
-  The repair is the existing admin merge endpoint (`services/agents.ts:188-199`, `routes/agents.ts:52`), unchanged.
+  The repair is the existing admin merge endpoint (`services/agents.ts:188-199`, `routes/agents.ts:52`) - but it is **not** usable unchanged, and v2 is what makes that matter.
+  `DrizzleAgentRepository.merge` (`drizzle-repositories.ts:1392-1417`) re-points `agent_sessions` and `shift_commits` (with the `(agent, repo_root, sha)` collision guard at `:1404-1410`) and never touches `agent_usage.agent_id`, so today a merge strands the loser's token rows on a retired row.
+  That is a shipped gap nobody hits often because merges are rare; under v2 a moved repo makes merge the ordinary repair, so fix it in the same transaction.
+  Re-pointing cannot collide: the bucket unique (`schema.ts:507-509`) is keyed on `agent_session_id`, which does not move.
   Anchoring identity on `project_path_mappings.repo_url` (`schema.ts:546`) so one repo survives moves and machine differences is a possible later hardening and is deliberately out of scope.
 - The same operator running the same repo on two machines mints one agent per machine path.
   That is accepted: shift evidence is machine-local today (shift commits verify on the machine that ran the shift), and the display name (section 3) keeps the two rows readable.
@@ -81,11 +85,18 @@ One assumption is stated plainly: the operator of a shift is the member whose de
 ### Repo at mint
 
 `agentSessionEventSchema` (`packages/shared/src/contracts.ts:463-494`) gains one optional field, `repoRoot` (string 1..1000).
-The desktop already shells out to git at session start to capture `start_head` (`spool.rs` `SpoolEvent.start_head`, :672-694), so `clock-in-hook` learns the repo root from the same probe and the spool carries it beside `cwd`.
+The desktop already shells out to git at session start to capture `start_head` (`spool.rs` `SpoolEvent.start_head`, :672-694), so `clock-in-hook` learns the repo root from the same probe (`bin/clock-in-hook.rs:45-49`) and the spool carries it beside `cwd`.
+
+**The obvious reuse does not compile, so do not plan on it.** `git_evidence::discover_repo` (`git_evidence.rs:61-67`) runs exactly the wanted `git rev-parse --show-toplevel`, but it is `async` over `tokio::process::Command` (`:13`, `:29-49`) and the hook is a synchronous binary with no runtime.
+`head_sha` states the reason in its own doc comment (`git_evidence.rs:73-75`): synchronous on purpose, because the hook must never block the agent CLI that invoked it.
+So the probe is a sibling `pub fn repo_root(cwd: &Path) -> Option<PathBuf>` beside it (`git_evidence.rs:76-93`) with the same `std::process::Command` shape, the same `Stdio::null()`, the same `#[cfg(windows)] CREATE_NO_WINDOW` (`:19`) so no console flashes, and the same collapse-any-failure-to-`None` rule; `discover_repo` keeps its async form for the uploader's shift capture.
+One more asymmetry to respect: `upload_agent_spool` blanks `start_head` before upload (`uploader.rs:202-208`) because it is sidecar-local. `repo_root` must **not** join that loop - it is contract data.
 The wire-struct trap from effort-v1 applies unchanged: `AgentEventUpload` (`apps/desktop/src-tauri/src/api.rs:417-444`) must project the new field explicitly, the exact-wire-bytes test (`uploader.rs:1153-1174`) is re-pinned, and the installer ships only after the API that accepts the field is deployed (section 6).
 
 `resolveAgent` (`agent-sessions.ts:99-118`) keys the per-batch upsert cache on `(source, operator, repoRoot ?? "")` instead of `(source, project)`.
 `upsertForKey` (`drizzle-repositories.ts:1314-1343`) takes the new key, targets the two new partial indexes, and keeps its replay rule: conflict touches `updated_at` only, never name, owner, or status.
+Its `targetWhere` (`:1336-1338`) has to move with them, to `repo_root is not null and status <> 'retired'` and `repo_root is null and status <> 'retired'` respectively.
+Postgres matches ON CONFLICT to a partial index by that predicate, so a `targetWhere` left at today's bare `status <> 'retired'` fails no test against a mocked repository and then fails every insert in production with "no unique or exclusion constraint matching the ON CONFLICT specification".
 Project attribution at ingest is unchanged in mechanism - `resolveProject` (`agent-sessions.ts:121-124`) - but matches `repoRoot` first when present and falls back to `cwd`; the result is written to both the session row and the agent's `project_id` attribute.
 
 ### Late discovery: graduation, not orphaning
@@ -95,7 +106,7 @@ When a `shift_commits` batch later reveals `repo_root` for that session, `servic
 
 1. If the session's agent has `repo_root` null, set it - first-assignment-wins, mirroring the `agentId` and `model` coalesces (`drizzle-repositories.ts:1174-1176`, `:1227-1261`).
    The agent row keeps its id, so its hours, shifts, tokens, and commits move with it; nothing is re-summed.
-2. If the upsert collides with an existing `(org, operator, source, repo_root)` agent - another shift got there first - the colliding session is re-stamped onto the existing agent, and its `agent_usage` and `shift_commits` rows follow their session (both tables key evidence by `agent_session_id`, `schema.ts:489` and `:419`, so this is one indexed update per table).
+2. If the upsert collides with an existing `(org, operator, source, repo_root)` agent - another shift got there first - the colliding session is re-stamped onto the existing agent, and its `agent_usage` and `shift_commits` rows follow their session (both tables key evidence by `agent_session_id`, `schema.ts:490` and `:419`, so this is one indexed update per table).
    An unassigned agent left with zero sessions is retired automatically; its history is empty by construction, so retiring loses nothing.
 3. If the evidence names a `repo_root` that differs from the session's agent's current `repo_root` - the agent already graduated to a different repo, or was repo-keyed all along - that session is re-stamped onto find-or-create `(org, operator, source, evidence repo_root)` through the same `upsertForKey` path, and its `agent_usage` and `shift_commits` rows follow it exactly as in rule 2.
    This is what keeps the old-installer degradation path (section 6, step 6: every session starts repo-less in the shared per-operator unassigned bucket) correct for an operator working several repos before any commits arrive: the bucket graduates to the first repo reported, and each later report re-homes only its own session.
@@ -160,10 +171,19 @@ Because the report filters and event schemas are `.strict()`, every shape change
 
 1. **`agentSessionEventSchema`** (`contracts.ts:463-494`): additive optional `repoRoot` (string 1..1000).
    Old desktops simply never send it; a new desktop against an old API would 400, which is why section 6 orders API before installer.
-2. **`agentSchema`** (`contracts.ts:522-532`): gains `repoName: string | null` (basename, safe for all members) and optional `repoRoot` (full path, projected only for owner/admin, mirroring `shiftCommitViewSchema.repoRoot`, `contracts.ts:566-581`).
+   Its `superRefine` (`:474-494`) gains the matching clause, because the field is not purely additive: that refinement is what enforces "a `browser` span carries a `ruleId` and no `cwd`, an agent event the reverse", and a browser span has no working directory to have a repo root in.
+   Without the clause the schema accepts a browser payload carrying `repoRoot` and hands it to a code path that never resolves one.
+2. **`agentSchema`** (`contracts.ts:522-532`): gains `repoName` (basename, safe for all members) and optional `repoRoot` (full path, projected only for owner/admin, mirroring `shiftCommitViewSchema.repoRoot`, `contracts.ts:566-581`).
+   **Both must be `.optional()`, not `string | null`,** and that is not a style preference.
+   `patch` re-validates the whole merged record against `agentSchema` (`services/agents.ts:164-172`), building its object literal field by field; a required-but-nullable `repoName` absent from that literal makes every `PATCH /agents/:id` throw "The resulting agent is invalid" - a rename failing on a field the request never mentions.
+   Add both fields to that literal as well, so the check keeps checking the real record.
+   Optional is also what lets the projection omit `repoRoot` for a non-owner instead of blanking it, which is the rule `shiftCommitViewSchema.repoRoot` already follows.
 3. **Inherited, no edits:** `agentsReportRowSchema` and `meStatsAgentSchema` (`contracts.ts:907-910`) embed `agentSchema`; `agentsReportResponseSchema.headcount` (`:692-705`) is unchanged; `agentPaystubResponseSchema` is unchanged beyond the embedded agent; `agentPatchRequestSchema` (`:537-544`) is unchanged (no one patches identity columns).
 4. **Decoders follow the additive rule:** `decodeAgentsReportRow` (`apps/desktop/src/bridge.ts:851-880`) decodes absent `repoName`/`repoRoot` to null, never a crash; the Rust report structs keep `#[serde(default)]` on the new fields (the `api.rs:224-235` pattern).
    `tokenTotalsSchema`, `hourlyBucketSchema`, and the upload/batch contracts are untouched.
+   On the desktop this means one absence decoding for two different reasons - an API older than the field, and an API that deliberately withheld the path from this caller - and both must read the same.
+5. **The routes re-parse what the service projects,** which is where a projection mismatch actually surfaces: `GET /agents` runs `agentsListResponseSchema.parse` (`routes/agents.ts:37`) and `PATCH /agents/:id` runs `agentSchema.parse(asAgentView(updated))` (`routes/agents.ts:49`).
+   Both schemas are `.strict()`, so an `asAgentView` that emits `repoRoot` for a caller the schema does not expect - or omits one it requires - is a 500 on a read path, not a type error at build time. Optional fields on both sides are what keep the owner and non-owner projections parsing through the same schema.
 
 ## 6. Migration sequence and deploy order
 
@@ -174,6 +194,8 @@ Because the report filters and event schemas are `.strict()`, every shape change
 3. **Apply the migration deliberately.** Nothing migrates on deploy; this is a separate, confirmed step.
 4. **Deploy the API (Railway) before or with the web dashboard (Vercel)** - the report filters are `.strict()`, so a newer web bundle against an older API gets bare 400s (DEPLOY.md).
    The API is backward compatible with old desktops throughout: every new field is optional on ingest and additive on responses.
+   Between step 3 and this step there is an unavoidable window where the running API's ON CONFLICT arbiters name indexes the migration has just dropped, so every `POST /agent-sessions` batch fails.
+   Ordering cannot remove it - deploying the new API first only moves the failure to arbiters whose indexes do not exist yet - so keep the window to minutes and know what it costs, which is nothing durable: `upload_agent_spool` (`apps/desktop/src-tauri/src/uploader.rs:193-222`) returns before `truncate_acked` on any upload error, so the spool keeps the events and replays them whole next pass. No shift is lost; some arrive late.
 5. **Old rows during the transition.** Retired v1 rows keep all history and stay readable; sessions stamped to them keep rendering in reports until the backfill re-stamps them; new shifts never touch them.
 6. **Desktop ships last, via installer only.** The hook's `repo_root` probe and the `AgentEventUpload` projection ship in the next installer release; `tauri.conf.json` is bumped once when that release is cut, and never before the API accepting `repoRoot` is live.
    Old installers keep working against the new API indefinitely - their shifts mint per-operator unassigned agents and graduate late through `shift_commits`, which is the designed degradation path, not an error.
@@ -191,4 +213,14 @@ Per implementation step: `pnpm typecheck && pnpm test && pnpm build` from the ro
 After `drizzle-kit generate`, read the emitted SQL and prune drift leftovers.
 Run the integration suites against a disposable Postgres (`TEST_DATABASE_URL=... pnpm test`) when one is available, and say so in the final report when none is.
 
+New tests pin, specifically:
+
+- the v2 upsert arbiter against **a real Postgres**, both halves - the `targetWhere`/index-predicate mismatch in section 2 is invisible to a mocked repository and fails only where a real planner has to pick the index;
+- `PATCH /agents/:id` renaming an agent that carries a repo, which exercises the whole-record re-validation at `services/agents.ts:164-172` and the route's own `agentSchema.parse` (`routes/agents.ts:49`) - the one place the contract shape can break a request that never mentions the new fields;
+- the disclosure projection: a member who owns neither agent reads `GET /agents` and `/reports/agents` and gets `repoRoot` **absent** while `repoName` is present, and the desktop decoder reads that absence as null rather than failing;
+- `agentSessionEventSchema` rejecting a `browser` event that carries a `repoRoot`;
+- `merge` re-pointing `agent_usage.agent_id`, which no test covers today because the behavior does not exist;
+- the graduation rules 1 through 3 including the collision path, and the hook's synchronous repo probe (a repo cwd, a non-repo cwd, and git absent from PATH - each an honest `None`, never an error) plus the upload struct's exact wire bytes with and without the field.
+
 By hand against a staging copy of production data: retire the v1 rows, migrate, backfill, and confirm the roster shows one agent per (operator, runtime, repo), the 45 re-stamped sessions carry their commits and usage with them, a fresh shift from a second member mints its own identity, and a shift with no repo evidence lands in that member's unassigned bucket and graduates when its first commit verifies.
+Then sign in as a member who owns neither agent and confirm no full path is in any response - the roster still reads correctly, because `repoName` carries the folder name.
