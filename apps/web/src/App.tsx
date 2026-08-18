@@ -49,15 +49,23 @@ const rangeDays: Record<Range, number | null> = { today: 1, "7d": 7, "30d": 30, 
 /**
  * Instant bounds on the viewer's local calendar, ending at the next local
  * midnight. Calendar-date params would be read as UTC days, which roll over
- * mid-afternoon west of Greenwich. "All time" sends no bounds.
+ * mid-afternoon west of Greenwich. "All time" carries no bounds.
  */
-export function rangeQuery(range: Range, now = new Date()): string {
+const rangeBounds = (range: Range, now = new Date()): { fromAt: string; toExclusiveAt: string } | undefined => {
   const days = rangeDays[range];
-  if (days === null) return "";
+  if (days === null) return undefined;
   const toExclusive = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
   const from = new Date(toExclusive);
   from.setDate(from.getDate() - days);
-  return `?fromAt=${encodeURIComponent(from.toISOString())}&toExclusiveAt=${encodeURIComponent(toExclusive.toISOString())}`;
+  return { fromAt: from.toISOString(), toExclusiveAt: toExclusive.toISOString() };
+};
+
+/// The range as a query string; "All time" sends no bounds at all, which is
+/// how the server reads "everything".
+export function rangeQuery(range: Range, now = new Date()): string {
+  const bounds = rangeBounds(range, now);
+  if (bounds === undefined) return "";
+  return `?fromAt=${encodeURIComponent(bounds.fromAt)}&toExclusiveAt=${encodeURIComponent(bounds.toExclusiveAt)}`;
 }
 
 /** Appends extra query parameters onto a possibly-empty range query. */
@@ -73,9 +81,14 @@ type AppRowItem = { key: string; label: string; agent: boolean; durationSeconds:
 const TOP_APP_ROWS = 8;
 
 /// The Agents tab's hourly series, folded client-side from the very shifts on
-/// screen so the line and the list can never disagree. Token counters read
-/// null because this series measures time alone.
-const hourlyFromShifts = (shifts: AgentShiftsResponse): readonly ChartHourlyBucket[] => {
+/// screen so the line and the list can never disagree. Per-hour resolution
+/// over an unbounded range is meaningless and the fold would grow with the
+/// workspace's whole history, so an unbounded range - the Humans tab's
+/// server-computed series declines the same way - yields no graph at all.
+/// Token counters read null because this series measures time alone.
+const hourlyFromShifts = (shifts: AgentShiftsResponse, range: Range): readonly ChartHourlyBucket[] => {
+  const bounds = rangeBounds(range);
+  if (bounds === undefined) return [];
   const seconds = new Map<number, number>();
   for (const group of shifts.groups) {
     for (const shift of group.shifts) {
@@ -89,7 +102,9 @@ const hourlyFromShifts = (shifts: AgentShiftsResponse): readonly ChartHourlyBuck
     }
   }
   if (seconds.size === 0) return [];
-  const first = Math.min(...seconds.keys());
+  // A contiguous axis from the range's start onward, zeros included, so quiet
+  // hours read as quiet rather than vanishing.
+  const first = Math.floor(Date.parse(bounds.fromAt) / 3_600_000) * 3_600_000;
   const last = Math.max(...seconds.keys());
   const buckets: ChartHourlyBucket[] = [];
   for (let hour = first; hour <= last; hour += 3_600_000) {
@@ -1073,6 +1088,7 @@ export const App = ({ client }: AppProps) => {
           <ShiftsTab
             shifts={agentShifts}
             shiftsFailed={agentShiftsFailed}
+            range={range}
             rangeLabel={rangeSentence[range]}
           />
         ) : boardFailed ? (
@@ -1253,6 +1269,7 @@ export const App = ({ client }: AppProps) => {
 type ShiftsTabProps = {
   shifts: AgentShiftsResponse | undefined;
   shiftsFailed: boolean;
+  range: Range;
   rangeLabel: string;
 };
 
@@ -1261,7 +1278,7 @@ type ShiftsTabProps = {
 /// its shifts underneath - rather than a leaderboard to filter. Held rates
 /// appear only once a commit is decided; a rate with no decided commits is
 /// not a fact, so the group says nothing instead of "pending".
-const ShiftsTab = ({ shifts, shiftsFailed, rangeLabel }: ShiftsTabProps) => {
+const ShiftsTab = ({ shifts, shiftsFailed, range, rangeLabel }: ShiftsTabProps) => {
   if (shiftsFailed) return <p className="subtle">Could not load the shifts for this range.</p>;
   if (shifts === undefined) return <p className="subtle" role="status">Loading…</p>;
   return (
@@ -1270,7 +1287,7 @@ const ShiftsTab = ({ shifts, shiftsFailed, rangeLabel }: ShiftsTabProps) => {
         <h3 id="agent-shifts-title">Agents · {rangeLabel}</h3>
       </div>
       <p className="member-total"><strong>{formatHumanDuration(shifts.totalAgentSeconds)}</strong> recorded</p>
-      <HourlyGraph buckets={hourlyFromShifts(shifts)} formatDuration={formatHumanDuration} />
+      <HourlyGraph buckets={hourlyFromShifts(shifts, range)} formatDuration={formatHumanDuration} />
       {shifts.groups.length === 0 ? (
         <p className="subtle">No agent worked in this range.</p>
       ) : shifts.groups.map((group) => (

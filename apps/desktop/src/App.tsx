@@ -71,10 +71,14 @@ const shiftClock = (startedAt: string): string => {
 };
 
 /// The Agents tab's hourly series, folded client-side from the very shifts on
-/// screen so the line and the list can never disagree. Token counters read
-/// null because this series measures time alone.
+/// screen so the line and the list can never disagree. Per-hour resolution
+/// over an unbounded range is meaningless and the fold would grow with the
+/// workspace's whole history, so an unbounded range - the Humans tab's
+/// server-computed series declines the same way - yields no graph at all.
+/// Token counters read null because this series measures time alone.
 const hourlyFromShifts = (shifts: AgentShifts, range: StatsRange): readonly ChartHourlyBucket[] => {
   const bounds = rangeBounds(range);
+  if (bounds === undefined) return [];
   const seconds = new Map<number, number>();
   for (const group of shifts.groups) {
     for (const shift of group.shifts) {
@@ -88,9 +92,9 @@ const hourlyFromShifts = (shifts: AgentShifts, range: StatsRange): readonly Char
     }
   }
   if (seconds.size === 0) return [];
-  // A contiguous axis from the range's start (or the first shift) onward,
-  // zeros included, so quiet hours read as quiet rather than vanishing.
-  const first = bounds === undefined ? Math.min(...seconds.keys()) : Math.floor(Date.parse(bounds.fromAt) / 3_600_000) * 3_600_000;
+  // A contiguous axis from the range's start onward, zeros included, so quiet
+  // hours read as quiet rather than vanishing.
+  const first = Math.floor(Date.parse(bounds.fromAt) / 3_600_000) * 3_600_000;
   const last = Math.max(...seconds.keys());
   const buckets: ChartHourlyBucket[] = [];
   for (let hour = first; hour <= last; hour += 3_600_000) {
