@@ -1318,7 +1318,8 @@ describe("agent shifts", () => {
     expect(group.repo).toBe("clock-in");
     // Nothing decided yet: no rate, rather than a "pending" that reads as a state.
     expect(group.heldRate).toBeNull();
-    expect(group.shifts.find((shift) => shift.id === "s1")!.commits).toEqual([{ subject: "fix: the thing", verification: "pending" }]);
+    expect(group.shifts.find((shift) => shift.id === "s1")!.commitCount).toBe(1);
+    expect(group.shifts.find((shift) => shift.id === "s2")!.commitCount).toBe(0);
 
     const decided = new ShiftCommits([
       { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "merged", authoredAt: at(10, 30), agentSessionId: "s1", repoRoot: "C:/dev/clock-in" },

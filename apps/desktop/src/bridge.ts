@@ -296,7 +296,7 @@ export type AgentShiftRow = {
   startedAt: string;
   endedAt: string;
   agentSeconds: number;
-  commits: readonly { subject: string; verification: string }[];
+  commitCount: number;
 };
 
 /// One codebase's group: summed runtime and the shifts that worked it,
@@ -822,10 +822,7 @@ const decodeAgentShiftRow = (value: unknown): AgentShiftRow => {
     startedAt: string(candidate.startedAt),
     endedAt: string(candidate.endedAt),
     agentSeconds: nonnegativeInteger(candidate.agentSeconds),
-    commits: (Array.isArray(candidate.commits) ? candidate.commits : []).map((entry) => {
-      const commit = record(entry);
-      return { subject: string(commit.subject), verification: string(commit.verification) };
-    }),
+    commitCount: nonnegativeInteger(candidate.commitCount ?? 0),
   };
 };
 

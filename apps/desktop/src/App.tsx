@@ -1957,7 +1957,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                               {sourceLabel(shift.source)}
                               {` · ${shift.owner.name}`}
                               {shift.model !== null && ` · ${shift.model}`}
-                              {shift.commits.length > 0 && ` · ${shift.commits.length} commit${shift.commits.length === 1 ? "" : "s"}`}
+                              {shift.commitCount > 0 && ` · ${shift.commitCount} commit${shift.commitCount === 1 ? "" : "s"}`}
                             </span>
                             <span className="shift-duration">{formatHuman(shift.agentSeconds)}</span>
                           </li>

@@ -831,13 +831,8 @@ export const agentShiftsResponseSchema = z
             endedAt: timestampSchema,
             /** Clipped to the range, rounded once per shift. */
             agentSeconds: z.number().int().nonnegative().safe(),
-            /** The commit subjects and how each held up; empty when none were recorded. */
-            commits: z.array(z
-              .object({
-                subject: z.string().max(500),
-                verification: shiftCommitVerificationSchema,
-              })
-              .strict()),
+            /** How many commits the shift recorded; the subjects stay off this wire, because nothing renders them. */
+            commitCount: z.number().int().nonnegative().safe(),
           })
           .strict()),
       })

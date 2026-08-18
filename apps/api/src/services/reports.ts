@@ -848,7 +848,7 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
           startedAt: interval.startedAt.toISOString(),
           endedAt: interval.endedAt.toISOString(),
           agentSeconds: Math.round((clipped.end - clipped.start) / 1_000),
-          commits: shiftCommitList.map((commit) => ({ subject: commit.subject, verification: commit.verification })),
+          commitCount: shiftCommitList.length,
         });
         groups.set(repo, group);
       }

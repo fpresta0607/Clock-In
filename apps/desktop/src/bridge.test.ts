@@ -304,13 +304,13 @@ describe("defaultBridge", () => {
           startedAt: "2026-08-06T15:00:00.000Z",
           endedAt: "2026-08-06T16:00:00.000Z",
           agentSeconds: 5_400,
-          commits: [{ subject: "feat: thing", verification: "merged" }],
+          commitCount: 3,
         }],
       }],
     });
     await expect(defaultBridge.agentShifts("2026-08-01T00:00:00.000Z", "2026-08-08T00:00:00.000Z")).resolves.toMatchObject({
       totalAgentSeconds: 5_400,
-      groups: [{ repo: "clock-in", heldRate: 0.5, shifts: [{ model: "claude-opus-5", commits: [{ verification: "merged" }] }] }],
+      groups: [{ repo: "clock-in", heldRate: 0.5, shifts: [{ model: "claude-opus-5", commitCount: 3 }] }],
     });
 
     // An API older than this build sends no groups at all: an empty map, not

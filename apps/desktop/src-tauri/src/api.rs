@@ -228,16 +228,9 @@ pub struct AgentShiftRow {
     pub ended_at: String,
     #[serde(default)]
     pub agent_seconds: u64,
+    /// How many commits the shift recorded; the subjects stay off this wire.
     #[serde(default)]
-    pub commits: Vec<AgentShiftCommit>,
-}
-
-/// One commit's subject and how it held up; the sha and path stay off this wire.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentShiftCommit {
-    pub subject: String,
-    pub verification: String,
+    pub commit_count: u32,
 }
 
 #[derive(Deserialize)]
@@ -1226,7 +1219,7 @@ mod tests {
                         "startedAt": "2026-08-06T15:00:00.000Z",
                         "endedAt": "2026-08-06T16:00:00.000Z",
                         "agentSeconds": 5400,
-                        "commits": [{"subject": "feat: thing", "verification": "merged"}],
+                        "commitCount": 2,
                         "aFieldFromTheFuture": true
                     }]
                 }]
@@ -1234,7 +1227,7 @@ mod tests {
         )
         .expect("the full shape decodes");
         assert_eq!(shifts.total_agent_seconds, 5400);
-        assert_eq!(shifts.groups[0].shifts[0].commits[0].verification, "merged");
+        assert_eq!(shifts.groups[0].shifts[0].commit_count, 2);
 
         let empty: AgentShifts = serde_json::from_str("{}").expect("absence decodes");
         assert_eq!(empty.total_agent_seconds, 0);
