@@ -34,14 +34,18 @@ describe("repoLabel", () => {
     expect(repoLabel("C:/Users/dev/.no-mistakes/repos/3946e592fa2c.git/worktrees/01M084ACAR719XGACT0GQT43HN")).toBeNull();
     expect(repoLabel("/tmp/01M06FSGP392MH6VJNRX8T364A")).toBeNull();
     expect(repoLabel("/runs/3f2504e0-4f89-11d3-9a0c-0305e82c3301")).toBeNull();
-    expect(repoLabel("/checkouts/3946e592fa2c")).toBeNull();
+    expect(repoLabel(`/checkouts/${`a`.repeat(40)}`)).toBeNull();
+    expect(repoLabel(`/checkouts/${`a`.repeat(64)}`)).toBeNull();
   });
 
   // Refusing ids must not start refusing codebases. These are real repo names
-  // that a careless rule would swallow: hex-looking but too short, digits with
-  // a separator, and a 26-character name that is not base32.
+  // that a careless rule would swallow: hex-looking but shorter than a full
+  // SHA-1 or SHA-256, digits with a separator, and a 26-character name that is
+  // not base32.
   it("keeps names that only resemble one", () => {
     expect(repoLabel("/src/deadbeef")).toBe("deadbeef");
+    expect(repoLabel("/src/deadbeefcafe")).toBe("deadbeefcafe");
+    expect(repoLabel("/src/deadbeefcafedeadbeef")).toBe("deadbeefcafedeadbeef");
     expect(repoLabel("/src/2024-migrations")).toBe("2024-migrations");
     expect(repoLabel("/src/clock-in-desktop-ui")).toBe("clock-in-desktop-ui");
     expect(repoLabel("/src/v2")).toBe("v2");

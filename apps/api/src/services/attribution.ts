@@ -24,9 +24,13 @@ export function normalizePath(value: string): string {
  * (`01M08C82C40W5Y5Q0X3BFGYNFT`), while lowercase 26-character run-together
  * words are ordinary codebase names - `backendservermanagementapp` uses none of
  * Crockford's excluded letters, and a case-insensitive branch swallowed it.
+ * The hex branch cannot be uppercase-only: git SHAs are lowercase, so that
+ * would silently disable it while looking like a fix. Length does the work
+ * there instead - only a full SHA-1 (40) or SHA-256 (64) hex string is
+ * refused, so a shorter all-hex codebase name is never swallowed.
  */
 const OPAQUE_SEGMENT =
-  /^(?:[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{12,})$/;
+  /^(?:[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/;
 
 /**
  * A working directory's codebase label: its last path segment, separators
