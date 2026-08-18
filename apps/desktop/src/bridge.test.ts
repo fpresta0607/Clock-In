@@ -312,6 +312,13 @@ describe("defaultBridge", () => {
       totalAgentSeconds: 5_400,
       groups: [{ repo: "clock-in", heldRate: 0.5, shifts: [{ model: "claude-opus-5", commitCount: 3 }] }],
     });
+    // The command name and argument keys are the seam between this bundle and
+    // the Rust command Tauri registers: a typo on either side compiles fine
+    // and leaves the tab on "Loading…" forever, so it is pinned here.
+    expect(invoke).toHaveBeenLastCalledWith("agent_shifts", {
+      fromAt: "2026-08-01T00:00:00.000Z",
+      toExclusiveAt: "2026-08-08T00:00:00.000Z",
+    });
 
     // An API older than this build sends no groups at all: an empty map, not
     // an error, is what keeps the tab alive across the deploy window.

@@ -230,7 +230,7 @@ export type MeStatsConcurrency = {
 /// One (runtime, model) pair's share of a member's agent time. The session
 /// facts the API also sends stay behind: the desktop reads this split only to
 /// name the models a runtime has driven, and the Agents tab measures shifts
-/// from the paystub instead.
+/// from the shifts-by-codebase map instead.
 export type MeStatsAgentSplit = {
   source: string;
   model: string | null;
@@ -439,7 +439,6 @@ const decodeProject = (value: unknown): TimerProject => {
 
 const uuidOrNull = (value: unknown): string | null => (value === null || value === undefined ? null : uuid(value));
 
-/// A field an older API may not send yet decodes to the empty list, not an error.
 export const decodeAccountSnapshot = (value: unknown): AccountSnapshot => {
   const candidate = record(value);
   if (candidate.kind === "signed-out") return { kind: "signed-out" };

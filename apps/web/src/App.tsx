@@ -595,8 +595,8 @@ export const App = ({ client }: AppProps) => {
   const [projects, setProjects] = useState<readonly ProjectListItem[]>([]);
   const [entries, setEntries] = useState<readonly LeaderboardEntry[]>([]);
   const [boardSort, setBoardSort] = useState<BoardSort>("active");
-  /// People is the existing leaderboard; Agents is the roster of worker
-  /// identities, with a paystub in the detail region below.
+  /// People is the existing leaderboard; Agents is what ran and where, every
+  /// shift grouped by the codebase it worked - no roster to pick from.
   const [boardTab, setBoardTab] = useState<"people" | "agents">("people");
   const [agentShifts, setAgentShifts] = useState<AgentShiftsResponse | undefined>();
   const [agentShiftsFailed, setAgentShiftsFailed] = useState(false);
@@ -1044,8 +1044,9 @@ export const App = ({ client }: AppProps) => {
       <section className="card" aria-labelledby="board-title">
         <div className="card-head">
           <h2 id="board-title" className="visually-hidden">Leaderboard</h2>
-          {/* People is the human board; Agents is the roster. One card, one
-              detail region, whichever workforce is on screen. */}
+          {/* People is the human board; Agents is the map of shifts by
+              codebase. One card, one detail region, whichever workforce is on
+              screen. */}
           <div className="range-toggle" role="group" aria-label="People or agents">
             <button
               type="button"
