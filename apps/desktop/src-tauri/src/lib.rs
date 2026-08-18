@@ -38,8 +38,8 @@ use tauri::{
 use tokio::sync::Mutex;
 
 use api::{
-    AgentPaystub, AgentsReport, ApiClient, ApiResult, BridgeError, ErrorKind, LeaderboardEntry,
-    MeStats, Organization, ProjectUsage, TimerProject, TimerUser, ViewPreferences,
+    AgentShifts, ApiClient, ApiResult, BridgeError, ErrorKind, LeaderboardEntry, MeStats,
+    Organization, ProjectUsage, TimerProject, TimerUser, ViewPreferences,
 };
 use monitor::{MonitorSettings, MonitorStatus, SettingsPatch};
 use recovery::RecoveryState;
@@ -527,43 +527,20 @@ async fn me_stats(
         .await
 }
 
-/// The pay-run report: every roster agent's hours, shifts, and held share for
-/// a range. Bounds arrive together or not at all; both absent asks for all time.
+/// Every shift in the range grouped by the codebase it worked, for the
+/// Agents tab. Bounds arrive together or not at all; both absent asks for all
+/// time.
 #[tauri::command]
-async fn agents_report(
+async fn agent_shifts(
     state: State<'_, AppState>,
     from_at: Option<String>,
     to_exclusive_at: Option<String>,
-    scope: Option<String>,
-) -> ApiResult<AgentsReport> {
+) -> ApiResult<AgentShifts> {
     let access_token = state.access_token().await?;
     state
         .client
-        .agents_report(
+        .agent_shifts(
             &access_token,
-            from_at.as_deref(),
-            to_exclusive_at.as_deref(),
-            scope.as_deref(),
-        )
-        .await
-}
-
-/// One agent's paystub: the totals, mixes, hourly series and weekly trend the
-/// overlay's Agents tab renders. Bounds arrive together or not at all; both
-/// absent asks for all time.
-#[tauri::command]
-async fn agent_paystub(
-    state: State<'_, AppState>,
-    agent_id: String,
-    from_at: Option<String>,
-    to_exclusive_at: Option<String>,
-) -> ApiResult<AgentPaystub> {
-    let access_token = state.access_token().await?;
-    state
-        .client
-        .agent_paystub(
-            &access_token,
-            &agent_id,
             from_at.as_deref(),
             to_exclusive_at.as_deref(),
         )
@@ -965,8 +942,7 @@ pub fn run() {
             settings_get,
             settings_update,
             me_stats,
-            agents_report,
-            agent_paystub,
+            agent_shifts,
             app_icons,
             project_create,
             project_update,

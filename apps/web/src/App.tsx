@@ -6,9 +6,7 @@ import {
   formatHumanDuration,
   friendlyAppName,
   leverage,
-  type Agent,
-  type AgentPaystubResponse,
-  type AgentsReportResponse,
+  type AgentShiftsResponse,
   type LeaderboardEntry,
   type MeStatsAgent,
   type MeStatsResponse,
@@ -74,12 +72,52 @@ type AppRowItem = { key: string; label: string; agent: boolean; durationSeconds:
 
 const TOP_APP_ROWS = 8;
 
-/// What a roster row is called. A stored name is always shown as stored; a
-/// name that is blank or only spaces is not a title, so the row falls back to
-/// the runtime it is - a row that says "Claude Code" beats a row that says
-/// nothing at all, which is unpickable and reads as a rendering fault.
-const agentTitle = (agent: { name: string; source: string }): string =>
-  agent.name.trim() === "" ? agentRuntimeLabel(agent.source) : agent.name;
+/// The Agents tab's hourly series, folded client-side from the very shifts on
+/// screen so the line and the list can never disagree. Token counters read
+/// null because this series measures time alone.
+const hourlyFromShifts = (shifts: AgentShiftsResponse): readonly ChartHourlyBucket[] => {
+  const seconds = new Map<number, number>();
+  for (const group of shifts.groups) {
+    for (const shift of group.shifts) {
+      const start = Date.parse(shift.startedAt);
+      const end = Date.parse(shift.endedAt);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+      for (let hour = Math.floor(start / 3_600_000) * 3_600_000; hour < end; hour += 3_600_000) {
+        const overlap = Math.min(end, hour + 3_600_000) - Math.max(start, hour);
+        if (overlap > 0) seconds.set(hour, (seconds.get(hour) ?? 0) + Math.round(overlap / 1_000));
+      }
+    }
+  }
+  if (seconds.size === 0) return [];
+  const first = Math.min(...seconds.keys());
+  const last = Math.max(...seconds.keys());
+  const buckets: ChartHourlyBucket[] = [];
+  for (let hour = first; hour <= last; hour += 3_600_000) {
+    buckets.push({
+      hourStart: new Date(hour).toISOString(),
+      activeSeconds: 0,
+      agentSeconds: seconds.get(hour) ?? 0,
+      inputTokens: null,
+      outputTokens: null,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+    });
+  }
+  return buckets;
+};
+
+/// A shift's start, short enough for a row: a same-day shift shows only its
+/// time, anything older leads with its date.
+const shiftClock = (startedAt: string): string => {
+  const at = new Date(startedAt);
+  const now = new Date();
+  const sameDay = at.getFullYear() === now.getFullYear()
+    && at.getMonth() === now.getMonth()
+    && at.getDate() === now.getDate();
+  return sameDay
+    ? at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : at.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+};
 
 /// One row per agent runtime (so "how much Claude Code" is a single line),
 /// friendly names for everything else, heaviest first, non-agent tail folded.
@@ -149,100 +187,6 @@ const MemberBreakdown = ({ stats, self }: { stats: MeStatsResponse; self: boolea
           <span className="metric-name">With 3+ agents</span>
           <span className="metric-value">{formatHumanDuration(concurrency.t3PlusSeconds)}</span>
         </div>
-      )}
-    </div>
-  );
-};
-
-/// One agent's runtime, read against the hours its owner was actually at the
-/// computer. Summed, so parallel shifts legitimately exceed those hours -
-/// that is leverage, not an error. The owner numbers are absent on an API
-/// that predates them, and the split is then simply not claimed.
-const AgentBreakdown = ({ paystub, ownerName }: { paystub: AgentPaystubResponse; ownerName: string }) => {
-  const { agentSeconds, ownerActiveSeconds, awaySeconds, shiftCount, commitsRecorded, heldRate } = paystub.totals;
-  const presentSeconds = awaySeconds === undefined ? null : Math.max(0, agentSeconds - awaySeconds);
-  const ratio = ownerActiveSeconds === undefined ? null : leverage({ activeSeconds: ownerActiveSeconds, agentSeconds });
-  return (
-    <div className="breakdown" data-testid="agent-breakdown">
-      <p className="group-label">Agent runtime — summed, may exceed {ownerName}'s hours</p>
-      {presentSeconds !== null && (
-        <div className="metric-row is-subtotal">
-          <span className="metric-name">While {ownerName} was there</span>
-          <span className="metric-value">{formatHumanDuration(presentSeconds)}</span>
-        </div>
-      )}
-      {awaySeconds !== undefined && awaySeconds > 0 && (
-        <div className="metric-row">
-          <span className="metric-swatch swatch-away" aria-hidden="true" />
-          <span className="metric-name">Ran while away <span className="metric-hint">(never their hours)</span></span>
-          <span className="metric-value">{formatHumanDuration(awaySeconds)}</span>
-        </div>
-      )}
-      <div className="metric-row is-subtotal is-headline">
-        <span className="metric-name">Total agent time{ratio !== null && " · leverage"}</span>
-        <span className="metric-value">{formatHumanDuration(agentSeconds)}{ratio !== null && ` · ${ratio}×`}</span>
-      </div>
-      <div className="metric-row">
-        <span className="metric-name">Shifts <span className="metric-hint">(one terminal session each)</span></span>
-        <span className="metric-value">{shiftCount}</span>
-      </div>
-      <div className="metric-row">
-        <span className="metric-name">Commits recorded</span>
-        <span className="metric-value">{commitsRecorded}</span>
-      </div>
-      <div className="metric-row">
-        <span className="metric-name">
-          Held rate
-          <span className="metric-hint"> · self-reported by the machine that ran the shift</span>
-        </span>
-        <span className="metric-value">{heldRate === null ? "pending" : `${Math.round(heldRate * 100)}%`}</span>
-      </div>
-    </div>
-  );
-};
-
-/// Which models this agent's runtime drove, how many shifts that was, how
-/// many overlapped at once, and how long a shift typically lasted. Every row
-/// belongs to the one roster agent on screen, which is what keeps another
-/// worker's shifts out of it.
-const AgentSessionsTable = ({ source, models }: { source: string; models: AgentPaystubResponse["models"] }) => {
-  if (models.length === 0) return null;
-  return (
-    <div className="agent-sessions" data-testid="agent-sessions">
-      <p className="group-label">Agent sessions</p>
-      <div className="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>Runtime</th>
-              <th>Model</th>
-              <th className="numeric">Shifts</th>
-              <th className="numeric">Max at once</th>
-              <th className="numeric">Total</th>
-              <th className="numeric">Median</th>
-            </tr>
-          </thead>
-          <tbody>
-            {models.map((split) => (
-              <tr key={split.model ?? ""}>
-                <td>{agentRuntimeLabel(source)}</td>
-                {/* A null model is a shift whose hook named none - recorded
-                    before model capture, or a runtime that never reports one.
-                    Say so; a bare dash reads as broken. */}
-                <td className={split.model === null ? "subtle-cell" : undefined}>{split.model ?? "not recorded"}</td>
-                <td className="numeric">{split.shiftCount}</td>
-                {/* Undefined means the deployed API predates the field:
-                    absence shown as absence, never a zero nothing measured. */}
-                <td className="numeric">{split.maxConcurrent ?? "-"}</td>
-                <td className="numeric">{formatHumanDuration(split.agentSeconds)}</td>
-                <td className="numeric">{split.medianSeconds === undefined ? "-" : formatHumanDuration(split.medianSeconds)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {models.some((split) => split.model === null) && (
-        <p className="graph-note">Shifts recorded before model capture show not recorded.</p>
       )}
     </div>
   );
@@ -327,11 +271,14 @@ const niceStep = (raw: number): number => {
 /// there rather than dropping to a zero that never happened.
 const HourlyGraph = ({
   buckets,
-  personLabel = "You",
+  personLabel,
   formatDuration,
   tokenBlind = [],
 }: {
   buckets: readonly ChartHourlyBucket[];
+  /// Names the presence line. Absent, no person series draws at all - the
+  /// Agents tab plots runtime alone, where a flat "You" at zero would only
+  /// claim somebody was measured and absent.
   personLabel?: string;
   formatDuration: (seconds: number) => string;
   /// Runtimes that ran in range but reported no tokens, named beneath the plot.
@@ -355,7 +302,9 @@ const HourlyGraph = ({
       ]
     : [
         { id: "agent", label: "Agents", color: "var(--chart-agent)", values: buckets.map((bucket) => bucket.agentSeconds) },
-        { id: "human", label: personLabel, color: "var(--chart-human)", values: buckets.map((bucket) => bucket.activeSeconds) },
+        ...(personLabel === undefined
+          ? []
+          : [{ id: "human", label: personLabel, color: "var(--chart-human)", values: buckets.map((bucket) => bucket.activeSeconds) }]),
       ];
   const formatValue = measure === "tokens" ? formatTokenCount : formatDuration;
 
@@ -589,140 +538,12 @@ const HourlyGraph = ({
           <li key={entry.id}><span className="legend-line" style={{ background: entry.color }} aria-hidden="true" />{entry.label}</li>
         ))}
       </ul>
-      {hasTokens && tokenBlind.length > 0 && (
+      {/* Named only while the token series is on screen: ambient, the note
+          repeated under every graph on the page and read as a standing
+          warning about nothing the viewer was looking at. */}
+      {measure === "tokens" && tokenBlind.length > 0 && (
         <p className="graph-note">No token data from {tokenBlind.join(", ")}.</p>
       )}
-    </div>
-  );
-};
-
-/// The paystub trend as a compact bar strip: one bar per week, hours above
-/// it, the week beneath, and the same hover and keyboard read-out grammar as
-/// the hourly graph. Replaces the old text list; the aria summary keeps the
-/// shift counts and held rate it carried.
-const TrendStrip = ({
-  buckets,
-  formatDuration,
-}: {
-  buckets: readonly ChartTrendBucket[];
-  formatDuration: (seconds: number) => string;
-}) => {
-  const [readout, setReadout] = useState<number | null>(null);
-  const svgRef = useRef<SVGSVGElement | null>(null);
-  if (buckets.length === 0) return null;
-
-  const width = 640;
-  const height = 110;
-  const margin = { left: 4, right: 4, top: 20, bottom: 22 };
-  const plotW = width - margin.left - margin.right;
-  const plotH = height - margin.top - margin.bottom;
-  const yMax = Math.max(3600, Math.ceil(Math.max(...buckets.map((bucket) => bucket.agentSeconds)) / 3600) * 3600);
-  const slot = plotW / buckets.length;
-  const barWidth = Math.min(56, slot * 0.55);
-  const barX = (index: number): number => margin.left + slot * index + (slot - barWidth) / 2;
-  const barHeight = (value: number): number => (value <= 0 ? 0 : Math.max(2, (value / yMax) * plotH));
-  const weekLabel = (index: number): string =>
-    new Date(buckets[index]!.periodStartAt).toLocaleDateString([], { month: "short", day: "numeric" });
-  const summary = (index: number): string => {
-    const bucket = buckets[index]!;
-    const held = bucket.heldRate === null ? "held rate pending" : `${Math.round(bucket.heldRate * 100)}% held`;
-    return `Week of ${weekLabel(index)}: ${formatDuration(bucket.agentSeconds)}, ${bucket.shiftCount} shift${bucket.shiftCount === 1 ? "" : "s"}, ${held}`;
-  };
-
-  const indexFromPointer = (clientX: number): number | null => {
-    const rect = svgRef.current?.getBoundingClientRect();
-    if (rect === undefined || rect.width === 0) return null;
-    const viewX = ((clientX - rect.left) / rect.width) * width;
-    const index = Math.floor((viewX - margin.left) / slot);
-    return index < 0 || index >= buckets.length ? null : index;
-  };
-
-  const moveReadout = (key: string): boolean => {
-    if (key !== "ArrowLeft" && key !== "ArrowRight" && key !== "Home" && key !== "End") return false;
-    setReadout((current) => {
-      if (key === "Home") return 0;
-      if (key === "End") return buckets.length - 1;
-      const base = current ?? (key === "ArrowLeft" ? buckets.length : -1);
-      return Math.max(0, Math.min(buckets.length - 1, base + (key === "ArrowRight" ? 1 : -1)));
-    });
-    return true;
-  };
-
-  const active = readout !== null && readout < buckets.length ? readout : null;
-
-  return (
-    <div className="graph trend-strip" data-testid="paystub-trend">
-      <svg
-        ref={svgRef}
-        viewBox={`0 0 ${width} ${height}`}
-        role="img"
-        aria-label="Weekly agent hours, oldest first"
-        tabIndex={0}
-        onMouseMove={(event) => {
-          const index = indexFromPointer(event.clientX);
-          if (index !== null) setReadout(index);
-        }}
-        onMouseLeave={() => setReadout(null)}
-        onKeyDown={(event) => {
-          if (moveReadout(event.key)) event.preventDefault();
-        }}
-      >
-        <defs>
-          <linearGradient id="trend-strip-fill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stopColor="var(--chart-agent)" stopOpacity="0.9" />
-            <stop offset="1" stopColor="var(--chart-agent)" stopOpacity="0.35" />
-          </linearGradient>
-        </defs>
-        <line x1={margin.left} y1={margin.top + plotH} x2={width - margin.right} y2={margin.top + plotH} stroke="var(--chart-grid)" />
-        {buckets.map((bucket, index) => (
-          <g key={bucket.periodStartAt}>
-            {active === index && (
-              <rect
-                x={margin.left + slot * index + 1}
-                y={margin.top - 4}
-                width={slot - 2}
-                height={plotH + 4}
-                fill="var(--chart-grid-soft)"
-              />
-            )}
-            <rect
-              data-series="week"
-              x={barX(index)}
-              y={margin.top + plotH - barHeight(bucket.agentSeconds)}
-              width={barWidth}
-              height={barHeight(bucket.agentSeconds)}
-              rx={2}
-              fill="url(#trend-strip-fill)"
-            />
-            <text
-              x={barX(index) + barWidth / 2}
-              y={margin.top + plotH - barHeight(bucket.agentSeconds) - 5}
-              fill="var(--chart-axis)"
-              fontSize="9"
-              textAnchor="middle"
-            >
-              {formatDuration(bucket.agentSeconds)}
-            </text>
-            <text x={barX(index) + barWidth / 2} y={height - 6} fill="var(--chart-axis)" fontSize="9" textAnchor="middle">
-              {weekLabel(index)}
-            </text>
-          </g>
-        ))}
-      </svg>
-      {active !== null && (
-        <ChartTooltip
-          left={((margin.left + slot * active + slot / 2) / width) * 100}
-          title={`Week of ${weekLabel(active)}`}
-          rows={[{
-            color: "var(--chart-agent)",
-            label: formatDuration(buckets[active]!.agentSeconds),
-            value: `${buckets[active]!.shiftCount} shift${buckets[active]!.shiftCount === 1 ? "" : "s"}${
-              buckets[active]!.heldRate === null ? "" : ` · ${Math.round(buckets[active]!.heldRate! * 100)}% held`
-            }`,
-          }]}
-        />
-      )}
-      <p className="visually-hidden" role="status">{active === null ? "" : summary(active)}</p>
     </div>
   );
 };
@@ -770,14 +591,8 @@ export const App = ({ client }: AppProps) => {
   /// People is the existing leaderboard; Agents is the roster of worker
   /// identities, with a paystub in the detail region below.
   const [boardTab, setBoardTab] = useState<"people" | "agents">("people");
-  const [agents, setAgents] = useState<readonly Agent[]>([]);
-  const [agentsFailed, setAgentsFailed] = useState(false);
-  const [agentsReport, setAgentsReport] = useState<AgentsReportResponse | undefined>();
-  const [agentsReportFailed, setAgentsReportFailed] = useState(false);
-  const [agentBusyId, setAgentBusyId] = useState<string | undefined>();
-  const [selectedAgentId, setSelectedAgentId] = useState<string | undefined>();
-  const [paystub, setPaystub] = useState<AgentPaystubResponse | undefined>();
-  const [paystubFailed, setPaystubFailed] = useState(false);
+  const [agentShifts, setAgentShifts] = useState<AgentShiftsResponse | undefined>();
+  const [agentShiftsFailed, setAgentShiftsFailed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [dataError, setDataError] = useState<string | undefined>();
   const [boardFailed, setBoardFailed] = useState(false);
@@ -925,15 +740,15 @@ export const App = ({ client }: AppProps) => {
     };
   }, [client, signedIn, preferencesReady, range, viewedId, scopeParams, expireSession]);
 
-  // The roster loads when its tab opens; renames patch the row in place
-  // rather than refetching the list.
+  // The Agents tab's shifts, over the range on screen; loads only while the
+  // tab is open, since nobody is served by fetching it in the background.
   useEffect(() => {
     if (!signedIn || !preferencesReady || boardTab !== "agents") return undefined;
     let cancelled = false;
-    setAgentsFailed(false);
-    client.agents().then(
+    setAgentShiftsFailed(false);
+    client.agentShifts(scopeParams(rangeQuery(range))).then(
       (result) => {
-        if (!cancelled) setAgents(result.agents);
+        if (!cancelled) setAgentShifts(result);
       },
       (error: unknown) => {
         if (cancelled) return;
@@ -941,62 +756,13 @@ export const App = ({ client }: AppProps) => {
           expireSession();
           return;
         }
-        setAgentsFailed(true);
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [client, signedIn, preferencesReady, boardTab, expireSession]);
-
-  // The pay-run report: every roster agent's hours, shifts, and held share
-  // over the range on screen, plus the headcount line above the list.
-  useEffect(() => {
-    if (!signedIn || !preferencesReady || boardTab !== "agents") return undefined;
-    let cancelled = false;
-    setAgentsReportFailed(false);
-    client.agentsReport(scopeParams(rangeQuery(range))).then(
-      (result) => {
-        if (!cancelled) setAgentsReport(result);
-      },
-      (error: unknown) => {
-        if (cancelled) return;
-        if (error instanceof ClientError && error.kind === "auth") {
-          expireSession();
-          return;
-        }
-        setAgentsReportFailed(true);
+        setAgentShiftsFailed(true);
       },
     );
     return () => {
       cancelled = true;
     };
   }, [client, signedIn, preferencesReady, boardTab, range, scopeParams, expireSession]);
-
-  // The paystub: one agent's shifts, hours, and commit record over the range
-  // on screen. Same detail region the member breakdown uses.
-  useEffect(() => {
-    if (!signedIn || !preferencesReady || boardTab !== "agents" || selectedAgentId === undefined) return undefined;
-    let cancelled = false;
-    setPaystub(undefined);
-    setPaystubFailed(false);
-    client.agentPaystub(selectedAgentId, rangeQuery(range)).then(
-      (result) => {
-        if (!cancelled) setPaystub(result);
-      },
-      (error: unknown) => {
-        if (cancelled) return;
-        if (error instanceof ClientError && error.kind === "auth") {
-          expireSession();
-          return;
-        }
-        setPaystubFailed(true);
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [client, signedIn, preferencesReady, boardTab, selectedAgentId, range, expireSession]);
 
   // Recent sessions load only while their tab is open, one page at a time.
   useEffect(() => {
@@ -1086,25 +852,6 @@ export const App = ({ client }: AppProps) => {
       setJoinError(messageFor(error));
     } finally {
       setJoinBusy(false);
-    }
-  };
-
-  /// Naming an agent is the registration ceremony: the rename goes alone and
-  /// the API marks an anonymous agent registered in the same write.
-  const renameAgent = async (agent: Agent, name: string): Promise<void> => {
-    setAgentBusyId(agent.id);
-    try {
-      const updated = await client.patchAgent(agent.id, { name });
-      setAgents((current) => current.map((row) => (row.id === updated.id ? updated : row)));
-      setDataError(undefined);
-    } catch (error: unknown) {
-      if (error instanceof ClientError && error.kind === "auth") {
-        expireSession();
-        return;
-      }
-      setDataError(messageFor(error));
-    } finally {
-      setAgentBusyId(undefined);
     }
   };
 
@@ -1323,18 +1070,10 @@ export const App = ({ client }: AppProps) => {
           )}
         </div>
         {boardTab === "agents" ? (
-          <RosterTab
-            agents={agents}
-            agentsFailed={agentsFailed}
-            agentBusyId={agentBusyId}
-            selectedAgentId={selectedAgentId}
-            onSelect={setSelectedAgentId}
-            onRename={(agent, name) => void renameAgent(agent, name)}
-            paystub={paystub}
-            paystubFailed={paystubFailed}
+          <ShiftsTab
+            shifts={agentShifts}
+            shiftsFailed={agentShiftsFailed}
             rangeLabel={rangeSentence[range]}
-            agentsReport={agentsReport}
-            agentsReportFailed={agentsReportFailed}
           />
         ) : boardFailed ? (
           <p className="subtle">Could not load hours for this range.</p>
@@ -1511,243 +1250,55 @@ export const App = ({ client }: AppProps) => {
   );
 };
 
-type RosterTabProps = {
-  agents: readonly Agent[];
-  agentsFailed: boolean;
-  agentBusyId: string | undefined;
-  selectedAgentId: string | undefined;
-  onSelect: (agentId: string) => void;
-  onRename: (agent: Agent, name: string) => void;
-  paystub: AgentPaystubResponse | undefined;
-  paystubFailed: boolean;
+type ShiftsTabProps = {
+  shifts: AgentShiftsResponse | undefined;
+  shiftsFailed: boolean;
   rangeLabel: string;
-  agentsReport: AgentsReportResponse | undefined;
-  agentsReportFailed: boolean;
 };
 
-/// The roster grouped the way v2 keys identity: by operator first, then by
-/// the codebase each of their agents works. The owner stops being a fact on
-/// the secondary line and becomes the heading a group sits under, which is
-/// what makes "whose agents are these" answerable at a glance.
-const byOperatorThenRepo = (agents: readonly Agent[]): { owner: Agent["owner"]; agents: Agent[] }[] => {
-  const groups = new Map<string, { owner: Agent["owner"]; agents: Agent[] }>();
-  for (const agent of agents) {
-    const group = groups.get(agent.owner.id) ?? { owner: agent.owner, agents: [] };
-    group.agents.push(agent);
-    groups.set(agent.owner.id, group);
-  }
-  for (const group of groups.values()) {
-    // The unassigned bucket sorts last within an operator: it is where shifts
-    // wait for a codebase, not a codebase of its own.
-    group.agents.sort((a, b) => (a.repoName ?? "￿").localeCompare(b.repoName ?? "￿") || a.name.localeCompare(b.name));
-  }
-  return [...groups.values()].sort((a, b) => a.owner.name.localeCompare(b.owner.name));
-};
-
-/// The roster in the board's own grammar, with an agent's paystub in the
-/// detail region below. Hours come from the pay-run report, keyed by agent id.
-const RosterTab = ({
-  agents,
-  agentsFailed,
-  agentBusyId,
-  selectedAgentId,
-  onSelect,
-  onRename,
-  paystub,
-  paystubFailed,
-  rangeLabel,
-  agentsReport,
-  agentsReportFailed,
-}: RosterTabProps) => {
-  const [renamingId, setRenamingId] = useState<string | undefined>();
-  const [renameDraft, setRenameDraft] = useState("");
-  const rowsByAgentId = new Map(agentsReport?.rows.map((row) => [row.agent.id, row]));
-  // The pay-run report already drops a retired agent with nothing to show in
-  // the range, so the roster follows it rather than rendering a row with a
-  // dash for hours and no shifts, held rate, models or repos. Until the report
-  // arrives nothing is dropped - a missing row means "not loaded", not
-  // "nothing to show" - and the headcount above counts the retirement either
-  // way.
-  const listed = agentsReport === undefined || agentsReportFailed
-    ? agents
-    : agents.filter((agent) => agent.status !== "retired" || rowsByAgentId.has(agent.id));
-  // The paystub follows the list it was picked from. An agent the report drops
-  // must not leave its panel open underneath a list that says nothing worked in
-  // this range - the desktop reads its row out of the report for the same
-  // reason, so the two surfaces cannot disagree about what is on screen.
-  const selected = listed.find((agent) => agent.id === selectedAgentId);
+/// The Agents tab: what ran and where. The same shape as a member's
+/// breakdown - the recorded total up top, then one group per codebase with
+/// its shifts underneath - rather than a leaderboard to filter. Held rates
+/// appear only once a commit is decided; a rate with no decided commits is
+/// not a fact, so the group says nothing instead of "pending".
+const ShiftsTab = ({ shifts, shiftsFailed, rangeLabel }: ShiftsTabProps) => {
+  if (shiftsFailed) return <p className="subtle">Could not load the shifts for this range.</p>;
+  if (shifts === undefined) return <p className="subtle" role="status">Loading…</p>;
   return (
-    <>
-      {agentsReport !== undefined && !agentsReportFailed && (
-        <p className="subtle" data-testid="roster-headcount">
-          Headcount {agentsReport.headcount.total}
-          {agentsReport.headcount.retired > 0 && ` - ${agentsReport.headcount.retired} retired`}
-        </p>
-      )}
-      {agentsFailed ? (
-        <p className="subtle">Could not load the roster.</p>
-      ) : agents.length === 0 ? (
-        <p className="subtle">No agents yet. One is added automatically the first time a coding agent works.</p>
-      ) : listed.length === 0 ? (
+    <section className="member-stats" aria-labelledby="agent-shifts-title" data-testid="agent-shifts">
+      <div className="member-stats-head">
+        <h3 id="agent-shifts-title">Agents · {rangeLabel}</h3>
+      </div>
+      <p className="member-total"><strong>{formatHumanDuration(shifts.totalAgentSeconds)}</strong> recorded</p>
+      <HourlyGraph buckets={hourlyFromShifts(shifts)} formatDuration={formatHumanDuration} />
+      {shifts.groups.length === 0 ? (
         <p className="subtle">No agent worked in this range.</p>
-      ) : (
-        byOperatorThenRepo(listed).map((group) => (
-          <div className="roster-group" key={group.owner.id}>
-            <p className="group-label">{group.owner.name}</p>
-            <ol className="board-list roster-list" data-testid="roster-list">
-          {group.agents.map((agent) => {
-            const row = rowsByAgentId.get(agent.id);
-            return (
-              <li
-                key={agent.id}
-                className={agent.id === selectedAgentId ? "is-selected" : undefined}
-              >
-                {renamingId === agent.id ? (
-                  <form
-                    className="manage-rename"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      const trimmed = renameDraft.trim();
-                      if (trimmed === "") return;
-                      setRenamingId(undefined);
-                      onRename(agent, trimmed);
-                    }}
-                  >
-                    <label>
-                      <span className="visually-hidden">New name for {agent.name}</span>
-                      <input value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} maxLength={200} required />
-                    </label>
-                    <button type="submit" disabled={agentBusyId === agent.id}>Save</button>
-                    <button type="button" onClick={() => setRenamingId(undefined)}>Cancel</button>
-                  </form>
-                ) : (
-                  <>
-                    {/* Every secondary fact is its own span, so the line
-                        wraps between them at any width instead of clipping. */}
-                    <button
-                      type="button"
-                      className="board-choice"
-                      aria-pressed={agent.id === selectedAgentId}
-                      onClick={() => onSelect(agent.id)}
-                    >
-                      <span className="board-name">
-                        {agentTitle(agent)}
-                        {agent.status === "retired" && <span className="you-tag"> retired</span>}
-                      </span>
-                      <span className="board-hours">
-                        {row === undefined ? "-" : formatHumanDuration(row.agentSeconds)}
-                      </span>
-                      <span className="board-facts">
-                        <span className="board-fact">{agentRuntimeLabel(agent.source)}</span>
-                        {/* The codebase this identity is keyed on - a name,
-                            never the path, which reaches only its owner and
-                            workspace admins. The owner is the group heading
-                            now, so it leaves this line. */}
-                        {agent.repoName !== undefined && <span className="board-fact is-repo">{agent.repoName}</span>}
-                        {(row?.models ?? []).map((model) => <span key={model} className="board-fact">{model}</span>)}
-                        {/* Codebases its shifts touched beyond its own. */}
-                        {(row?.repos ?? []).filter((repo) => repo !== agent.repoName)
-                          .map((repo) => <span key={repo} className="board-fact is-repo">{repo}</span>)}
-                        {row !== undefined && (
-                          <>
-                            <span className="board-fact">{row.shiftCount} shift{row.shiftCount === 1 ? "" : "s"}</span>
-                            <span className="board-fact">
-                              {row.heldRate === null ? "held pending" : `${Math.round(row.heldRate * 100)}% held`}
-                            </span>
-                          </>
-                        )}
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost roster-rename"
-                      disabled={agentBusyId === agent.id}
-                      onClick={() => { setRenamingId(agent.id); setRenameDraft(agent.name); }}
-                    >
-                      {agentBusyId === agent.id ? "Saving…" : "Rename"}
-                    </button>
-                  </>
-                )}
+      ) : shifts.groups.map((group) => (
+        <div className="shift-group" key={group.repo ?? ""} data-testid="shift-group">
+          <div className="stat-row shift-group-head">
+            <span className="stat-name">
+              {group.repo ?? "No codebase recorded"}
+              {group.heldRate !== null && <span className="held-tag"> · {Math.round(group.heldRate * 100)}% held</span>}
+            </span>
+            <span className="stat-duration">{formatHumanDuration(group.agentSeconds)}</span>
+          </div>
+          <ul className="shift-list">
+            {group.shifts.map((shift) => (
+              <li key={shift.id} className="shift-row">
+                <span className="shift-when">{shiftClock(shift.startedAt)}</span>
+                <span className="shift-facts">
+                  {agentRuntimeLabel(shift.source)}
+                  {` · ${shift.owner.name}`}
+                  {shift.model !== null && ` · ${shift.model}`}
+                  {shift.commits.length > 0 && ` · ${shift.commits.length} commit${shift.commits.length === 1 ? "" : "s"}`}
+                </span>
+                <span className="shift-duration">{formatHumanDuration(shift.agentSeconds)}</span>
               </li>
-            );
-          })}
-            </ol>
-          </div>
-        ))
-      )}
-
-      {selected !== undefined && (
-        <section className="member-stats" aria-labelledby="paystub-title" data-testid="agent-paystub">
-          <div className="member-stats-head">
-            {/* The header names the codebase beside the agent, so a paystub
-                is never ambiguous between an operator's two repos. */}
-            <h3 id="paystub-title">
-              {agentTitle(selected)}
-              {selected.repoName !== undefined && <span className="paystub-repo"> · {selected.repoName}</span>}
-              {" · "}{rangeLabel}
-            </h3>
-          </div>
-          {paystubFailed ? (
-            <p className="subtle">Could not load this agent's paystub.</p>
-          ) : paystub === undefined ? (
-            <p className="subtle" role="status">Loading…</p>
-          ) : (
-            <>
-              <AgentBreakdown paystub={paystub} ownerName={selected.owner.name} />
-              <AgentSessionsTable source={selected.source} models={paystub.models} />
-              <HourlyGraph
-                buckets={paystub.hourly ?? []}
-                personLabel={selected.owner.name}
-                formatDuration={formatHumanDuration}
-                tokenBlind={paystub.totals.tokensReported ? [] : [agentRuntimeLabel(selected.source)]}
-              />
-              {(paystub.codebases ?? []).length > 0 && (
-                <ul className="stat-list" data-testid="paystub-codebases">
-                  {paystub.codebases.map((entry) => (
-                    <li key={entry.repo ?? ""} className="stat-row">
-                      <span className="stat-name">{entry.repo ?? "No codebase recorded"}</span>
-                      <span className="stat-duration">{formatHumanDuration(entry.agentSeconds)}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {paystub.shifts.length === 0 ? (
-                <p className="subtle">No shifts in this range.</p>
-              ) : (
-                <>
-                  <p className="subtle">Each shift below is one terminal session.</p>
-                  <ul className="stat-list" data-testid="paystub-shifts">
-                    {paystub.shifts.map((shift) => (
-                      <li key={shift.id} className="stat-row">
-                        <span className="stat-name">
-                          {new Date(shift.startedAt).toLocaleString()}
-                          {/* The codebase the shift worked, as a name. The
-                              repo root itself stays on the commit, where only
-                              the owner and workspace admins are sent it. */}
-                          {shift.repo != null && <span className="shift-repo">{shift.repo}</span>}
-                          {shift.model !== null && <span className="metric-hint"> · {shift.model}</span>}
-                          {shift.commits.map((commit) => (
-                            <span
-                              key={commit.id}
-                              className={`verify-badge is-${commit.verification}`}
-                              title={`${commit.subject}${commit.verifiedAt === null ? "" : ` · verified ${new Date(commit.verifiedAt).toLocaleString()}`}`}
-                            >
-                              {commit.verification}
-                            </span>
-                          ))}
-                        </span>
-                        <span className="stat-duration">{formatHumanDuration(shift.durationSeconds)}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
-              <TrendStrip buckets={paystub.trend} formatDuration={formatHumanDuration} />
-            </>
-          )}
-        </section>
-      )}
-    </>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </section>
   );
 };
 

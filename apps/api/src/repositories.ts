@@ -501,6 +501,8 @@ export interface ShiftCommitRepository {
   repoRootsByAgent(subject: AuthenticatedSubject, query: ReportQuery): Promise<ShiftRepoRootRecord[]>;
   /** One agent's commits in the range (authoredAt bounds), for the paystub. */
   listForAgent(subject: AuthenticatedSubject, agentId: string, query: ReportQuery): Promise<ShiftCommitRecord[]>;
+  /** Every commit in the range (authoredAt bounds), for the shifts-by-codebase report. */
+  listForOrganization(subject: AuthenticatedSubject, query: ReportQuery): Promise<ShiftCommitRecord[]>;
 }
 
 export interface AgentUsageRecord {

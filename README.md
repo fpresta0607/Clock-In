@@ -153,12 +153,11 @@ beside them at once. An agent still working while the person is away feeds agent
 never the person's hours.
 
 A person's breakdown stops at what is the person's: their active time and those concurrency
-rows. Every measure of what the agents themselves did lives on the **Agents tab**, under the
-picked roster agent: an **agent-sessions table** with one row per model of that agent's shifts
-(how many ran, the peak number at once, the total runtime, the median shift length), beside
-its runtime split, its hourly chart, and the codebases it worked. "While they were there",
-"ran while away", and leverage there are measured against that agent's owner's presence, not
-the viewer's. The concurrency split sums to active time and the agent split sums to agent
+rows. Everything the agents themselves did lives on the **Agents tab**, as a map of shifts
+grouped by the codebase they worked: the recorded total on top, then one group per repo with
+its shifts underneath - each shift naming its runtime, its operator, the model it drove, and
+the commits it recorded. There is no leaderboard to filter and nothing to pick; a group's held
+share appears only once a commit is decided. The concurrency split sums to active time and the agent split sums to agent
 time; one shared module, `packages/shared/src/intervals.ts`, computes all of it so the
 invariants (`active = t0+t1+t2+t3+`, `agent = Σ n·tn + away`) hold everywhere.
 
@@ -435,7 +434,7 @@ organization are derived from verified claims, never from the request body.
 | `POST` | `/activity/segments` | batch upload of activity segments |
 | `POST` | `/agent-sessions` | batch upload of agent lifecycle events |
 | `GET` `POST` `PATCH` `DELETE` | `/path-mappings`, `/path-mappings/:id` | map a path prefix to a project |
-| `GET` | `/reports`, `/reports/leaderboard`, `/reports/agents`, `/reports/export.csv` | organization reporting |
+| `GET` | `/reports`, `/reports/leaderboard`, `/reports/agents`, `/reports/agent-shifts`, `/reports/export.csv` | organization reporting |
 | `GET` | `/me/stats` | the caller's totals per project, per app, and per agent; an optional `?userId=` opens a teammate's |
 | `GET` `PUT` | `/me/preferences` | the web dashboard's scope+range view state |
 | `GET` | `/agents` | the org's roster of agent identities |

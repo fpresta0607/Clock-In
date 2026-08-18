@@ -5,6 +5,8 @@ import {
   measureTime,
   summedSeconds,
   unionSeconds,
+  type AgentShiftsFilters,
+  type AgentShiftsResponse,
   type AgentSplit,
   type AgentsReportFilters,
   type AgentsReportResponse,
@@ -41,13 +43,14 @@ import type {
   ReportSummaryRecord,
   SessionIntervalRecord,
   ShiftCommitCountsRecord,
+  ShiftCommitRecord,
   ShiftCommitRepository,
   ShiftRepoRootRecord,
   SiteTotalRecord,
 } from "../repositories.js";
 import { asAgentView } from "./agents.js";
 import { repoLabel } from "./attribution.js";
-import type { AgentSessionReaper } from "./agent-sessions.js";
+import { rosterEligibleSource, type AgentSessionReaper } from "./agent-sessions.js";
 
 export interface ReportService {
   list(subject: AuthenticatedSubject, filters: ReportFilters): Promise<ReportResponse>;
@@ -55,6 +58,7 @@ export interface ReportService {
   leaderboard(subject: AuthenticatedSubject, filters: LeaderboardFilters): Promise<LeaderboardResponse>;
   meStats(subject: AuthenticatedSubject, filters: MeStatsFilters): Promise<MeStatsResponse>;
   agentsReport(subject: AuthenticatedSubject, filters: AgentsReportFilters): Promise<AgentsReportResponse>;
+  agentShifts(subject: AuthenticatedSubject, filters: AgentShiftsFilters): Promise<AgentShiftsResponse>;
 }
 
 export interface ReportExport {
@@ -799,5 +803,80 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
         rows,
       };
     },
+
+    async agentShifts(subject: AuthenticatedSubject, filters: AgentShiftsFilters): Promise<AgentShiftsResponse> {
+      const query: ReportQuery = { ...normalizedQuery(filters), ...scopeQuery(filters.scope) };
+      await authorizeFilters(dependencies.reports, subject, query);
+      await dependencies.reaper.reapStale(subject);
+      const [intervals, commits] = await Promise.all([
+        dependencies.reports.readAgentIntervals(subject, query),
+        dependencies.shiftCommits === undefined
+          ? Promise.resolve([] as ShiftCommitRecord[])
+          : dependencies.shiftCommits.listForOrganization(subject, query),
+      ]);
+      const range = queryRange(query);
+      const commitsBySession = new Map<string, ShiftCommitRecord[]>();
+      for (const commit of commits) {
+        const list = commitsBySession.get(commit.agentSessionId);
+        if (list === undefined) commitsBySession.set(commit.agentSessionId, [commit]);
+        else list.push(commit);
+      }
+
+      // One group per codebase label, assembled straight from the shifts: no
+      // roster join, so two worktree clones of the same repo read as one
+      // codebase, which is what the tab is for. Each shift labels itself the
+      // paystub's way - its first commit's repo root, else its working
+      // directory - and a shift that recorded neither groups under null.
+      type ShiftView = AgentShiftsResponse["groups"][number]["shifts"][number];
+      const groups = new Map<string | null, { agentSeconds: number; commits: ShiftCommitRecord[]; shifts: ShiftView[] }>();
+      for (const interval of intervals) {
+        // Browser spans are attention, not shifts, the roster's own rule.
+        if (!rosterEligibleSource(interval.source)) continue;
+        const clipped = clipInterval({ start: interval.startedAt.getTime(), end: interval.endedAt.getTime() }, range);
+        if (clipped === null) continue;
+        const shiftCommitList = commitsBySession.get(interval.sessionId) ?? [];
+        const root = shiftCommitList[0]?.repoRoot ?? interval.cwd;
+        const repo = root === null || root === undefined ? null : repoLabel(root);
+        const group = groups.get(repo) ?? { agentSeconds: 0, commits: [], shifts: [] };
+        group.agentSeconds += Math.round((clipped.end - clipped.start) / 1_000);
+        group.commits.push(...shiftCommitList);
+        group.shifts.push({
+          id: interval.sessionId,
+          source: interval.source,
+          owner: { id: interval.user.id, name: interval.user.name },
+          model: interval.model,
+          startedAt: interval.startedAt.toISOString(),
+          endedAt: interval.endedAt.toISOString(),
+          agentSeconds: Math.round((clipped.end - clipped.start) / 1_000),
+          commits: shiftCommitList.map((commit) => ({ subject: commit.subject, verification: commit.verification })),
+        });
+        groups.set(repo, group);
+      }
+
+      const groupViews = [...groups.entries()]
+        .map(([repo, group]) => ({
+          repo,
+          agentSeconds: group.agentSeconds,
+          shiftCount: group.shifts.length,
+          heldRate: heldRateOf(group.commits),
+          shifts: group.shifts.sort((a, b) => b.startedAt.localeCompare(a.startedAt)),
+        }))
+        // Heaviest first; the label-less group reads last whatever its hours,
+        // because "no codebase recorded" is a footnote, not a codebase.
+        .sort((a, b) => Number(a.repo === null) - Number(b.repo === null) || b.agentSeconds - a.agentSeconds);
+
+      return {
+        filters,
+        totalAgentSeconds: groupViews.reduce((sum, group) => sum + group.agentSeconds, 0),
+        groups: groupViews,
+      };
+    },
   };
+}
+
+/** merged / decided; null while nothing has been decided - never a fake zero. */
+function heldRateOf(commits: readonly ShiftCommitRecord[]): number | null {
+  const decided = commits.filter((commit) => commit.verification !== "pending");
+  if (decided.length === 0) return null;
+  return decided.filter((commit) => commit.verification === "merged").length / decided.length;
 }

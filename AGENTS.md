@@ -22,12 +22,15 @@ or not at all by `time_sessions.attribution`. The README's "How session tracking
 section is the authoritative prose; keep it true when you change the model.
 
 **Agent numbers belong to the agent.** The All-stats/board Humans tab answers for the person -
-their active time and how many agents ran through it - and every measure of what the agents
-themselves did lives on the Agents tab, under the picked roster agent: the runtime split, the
-Agent-sessions table, the hourly chart, the codebases. "While they were there", "ran while away"
-and leverage are measured against **that agent's owner's** presence, not the caller's, which is why
-the paystub carries `ownerActiveSeconds` and `awaySeconds`. Do not move any of it back under a
-person; a per-person fold reads as one worker's shifts when it is several.
+their active time and how many agents ran through it - and everything the agents themselves did
+lives on the Agents tab as a map of shifts grouped by codebase (`/reports/agent-shifts`): the
+recorded total on top, then one group per repo label with its shifts underneath, each shift naming
+its runtime, operator, model and commits. There is no roster to pick from and no ranking - the
+leaderboard was retired deliberately - and a group's held share renders only once a commit is
+decided, never as "pending". Do not fold agent time back under a person; a per-person fold reads
+as one worker's shifts when it is several. The roster (`agents` table, `/agents` routes) remains
+the identity model and the deployed desktop builds still read the old report routes, so the API
+keeps serving them; only the surfaces moved.
 
 A codebase reaches every member as a **label** - the last segment of a repo root or working
 directory (`repoLabel`), when that segment names a codebase - while the path itself stays under the

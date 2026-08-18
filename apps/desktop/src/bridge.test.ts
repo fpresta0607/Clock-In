@@ -288,188 +288,44 @@ describe("defaultBridge", () => {
     });
   });
 
-  it("decodes the paystub the Agents tab renders and rejects a payload without a trend", async () => {
+  it("decodes the shifts-by-codebase map, and reads absence as empty rather than a crash", async () => {
     invoke.mockResolvedValueOnce({
-      agent: { id: "a1", name: "Claude Code @ Field work" },
-      totals: {
+      totalAgentSeconds: 5_400,
+      groups: [{
+        repo: "clock-in",
         agentSeconds: 5_400,
-        shiftCount: 2,
-        commitsRecorded: 3,
+        shiftCount: 1,
         heldRate: 0.5,
-        tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
-        tokensReported: true,
-        ownerActiveSeconds: 3_600,
-        awaySeconds: 1_800,
-      },
-      models: [{ model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, maxConcurrent: 2, medianSeconds: 3_600, tokens: null }],
-      codebases: [{ repo: "clock-in", agentSeconds: 5_400, shiftCount: 2 }],
-      // The shift list is the web dashboard's business; serde already drops it.
-      hourly: [],
-      trend: [
-        { periodStartAt: "2026-07-27T00:00:00.000Z", agentSeconds: 3_600, shiftCount: 1, heldRate: null },
-        { periodStartAt: "2026-08-03T00:00:00.000Z", agentSeconds: 1_800, shiftCount: 1, heldRate: 0.5 },
-      ],
-    });
-
-    const fromAt = "2026-08-01T00:00:00.000Z";
-    const toExclusiveAt = "2026-08-08T00:00:00.000Z";
-    await expect(defaultBridge.agentPaystub("a1", fromAt, toExclusiveAt)).resolves.toEqual({
-      totals: {
-        agentSeconds: 5_400,
-        shiftCount: 2,
-        commitsRecorded: 3,
-        heldRate: 0.5,
-        tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
-        tokensReported: true,
-        ownerActiveSeconds: 3_600,
-        awaySeconds: 1_800,
-      },
-      models: [{ model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, maxConcurrent: 2, medianSeconds: 3_600 }],
-      codebases: [{ repo: "clock-in", agentSeconds: 5_400, shiftCount: 2 }],
-      hourly: [],
-      trend: [
-        { periodStartAt: "2026-07-27T00:00:00.000Z", agentSeconds: 3_600, shiftCount: 1, heldRate: null },
-        { periodStartAt: "2026-08-03T00:00:00.000Z", agentSeconds: 1_800, shiftCount: 1, heldRate: 0.5 },
-      ],
-    });
-    expect(invoke).toHaveBeenLastCalledWith("agent_paystub", { agentId: "a1", fromAt, toExclusiveAt });
-
-    // An API from before the Agents tab's fields shows absence as absence: a
-    // dash in the table, never a zero nothing measured.
-    invoke.mockResolvedValueOnce({
-      totals: { agentSeconds: 5_400, shiftCount: 2, commitsRecorded: 0, heldRate: null },
-      models: [{ model: null, agentSeconds: 5_400, shiftCount: 2 }],
-      trend: [],
-    });
-    await expect(defaultBridge.agentPaystub("a1")).resolves.toMatchObject({
-      totals: { ownerActiveSeconds: null, awaySeconds: null, tokens: null, tokensReported: false },
-      models: [{ maxConcurrent: null, medianSeconds: null }],
-      codebases: [],
-      hourly: [],
-    });
-
-    // The trend is required: an API that cannot send it is invalid, not an empty chart.
-    invoke.mockResolvedValueOnce({ agent: { id: "a1" }, totals: { agentSeconds: 0, shiftCount: 0, commitsRecorded: 0, heldRate: null } });
-    await expect(defaultBridge.agentPaystub("a1")).rejects.toMatchObject({ kind: "unknown" });
-  });
-
-  it("decodes the pay-run report, with zero-activity agents and a null held rate", async () => {
-    const report = {
-      headcount: { total: 1, active: 1, retired: 0 },
-      rows: [{
-        agent: {
-          id: ids.project,
-          name: "Claude Code @ Field work",
+        shifts: [{
+          id: "00000000-0000-4000-8000-000000000601",
           source: "claude_code",
-          status: "anonymous",
-          owner: { id: ids.user, name: "Timer User" },
-          project: { id: ids.project, name: "Field work" },
-          repoName: "clock-in",
-          repoRoot: "C:/dev/clock-in",
-        },
-        agentSeconds: 0,
-        shiftCount: 0,
-        commitsRecorded: 0,
-        commitsPending: 0,
-        commitsMerged: 0,
-        commitsReverted: 0,
-        commitsOrphaned: 0,
-        heldRate: null,
-        models: ["claude-fable-5"],
-        repos: ["clock-in"],
-        tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
-        tokensReported: true,
+          owner: { id: "00000000-0000-4000-8000-000000000001", name: "Alex" },
+          model: "claude-opus-5",
+          startedAt: "2026-08-06T15:00:00.000Z",
+          endedAt: "2026-08-06T16:00:00.000Z",
+          agentSeconds: 5_400,
+          commits: [{ subject: "feat: thing", verification: "merged" }],
+        }],
       }],
-    };
-    invoke.mockResolvedValueOnce(report);
-
-    const fromAt = "2026-08-06T05:00:00.000Z";
-    const toExclusiveAt = "2026-08-07T05:00:00.000Z";
-    await expect(defaultBridge.agentsReport(fromAt, toExclusiveAt)).resolves.toEqual(report);
-    expect(invoke).toHaveBeenLastCalledWith("agents_report", { fromAt, toExclusiveAt, scope: undefined });
-
-    // An API from before the models, codebase and token fields shipped decodes
-    // them as empty and absent: nothing named, null totals, nothing reported.
-    invoke.mockResolvedValueOnce({
-      headcount: report.headcount,
-      rows: report.rows.map(({ models: _models, repos: _repos, tokens: _tokens, tokensReported: _tokensReported, ...row }) => row),
     });
-    await expect(defaultBridge.agentsReport(fromAt, toExclusiveAt)).resolves.toMatchObject({
-      rows: [{ models: [], repos: [], tokens: null, tokensReported: false }],
+    await expect(defaultBridge.agentShifts("2026-08-01T00:00:00.000Z", "2026-08-08T00:00:00.000Z")).resolves.toMatchObject({
+      totalAgentSeconds: 5_400,
+      groups: [{ repo: "clock-in", heldRate: 0.5, shifts: [{ model: "claude-opus-5", commits: [{ verification: "merged" }] }] }],
     });
 
-    // A malformed totals object is still a hard failure.
-    invoke.mockResolvedValueOnce({
-      headcount: report.headcount,
-      rows: [{ ...report.rows[0], tokens: { inputTokens: -1 } }],
-    });
-    await expect(defaultBridge.agentsReport(fromAt, toExclusiveAt)).rejects.toMatchObject({ kind: "unknown" });
+    // An API older than this build sends no groups at all: an empty map, not
+    // an error, is what keeps the tab alive across the deploy window.
+    invoke.mockResolvedValueOnce({});
+    await expect(defaultBridge.agentShifts()).resolves.toEqual({ totalAgentSeconds: 0, groups: [] });
+
+    // A group with a label-less repo and no decided commit keeps both nulls.
+    invoke.mockResolvedValueOnce({ groups: [{ repo: null, shifts: [] }] });
+    const bare = await defaultBridge.agentShifts();
+    expect(bare.groups[0]).toMatchObject({ repo: null, heldRate: null, agentSeconds: 0 });
   });
 
-  it("decodes an agent with a null project and a decided held rate, and rejects an out-of-range one", async () => {
-    const row = {
-      agent: {
-        id: ids.project,
-        name: "Codex @ nowhere",
-        source: "codex",
-        status: "registered",
-        owner: { id: ids.user, name: "Timer User" },
-        project: null,
-        repoName: "clock-in",
-        repoRoot: "C:/dev/clock-in",
-      },
-      agentSeconds: 3_600,
-      shiftCount: 1,
-      commitsRecorded: 2,
-      commitsPending: 0,
-      commitsMerged: 1,
-      commitsReverted: 1,
-      commitsOrphaned: 0,
-      heldRate: 0.5,
-    };
-    invoke.mockResolvedValueOnce({ headcount: { total: 1, active: 1, retired: 0 }, rows: [row] });
-    await expect(defaultBridge.agentsReport()).resolves.toMatchObject({ rows: [row] });
-
-    invoke.mockResolvedValueOnce({
-      headcount: { total: 1, active: 1, retired: 0 },
-      rows: [{ ...row, heldRate: 1.5 }],
-    });
-    await expect(defaultBridge.agentsReport()).rejects.toMatchObject({ kind: "unknown" });
-
-    invoke.mockResolvedValueOnce({
-      headcount: { total: 1, active: 1, retired: 0 },
-      rows: [{ ...row, agent: { ...row.agent, status: "fired" } }],
-    });
-    await expect(defaultBridge.agentsReport()).rejects.toMatchObject({ kind: "unknown" });
-  });
-
-  it("reads an older API's anonymous/registered headcount as active", async () => {
-    const row = {
-      agent: {
-        id: ids.project,
-        name: "Claude Code @ Field work",
-        source: "claude_code",
-        status: "anonymous",
-        owner: { id: ids.user, name: "Timer User" },
-        project: { id: ids.project, name: "Field work" },
-        repoName: "clock-in",
-        repoRoot: "C:/dev/clock-in",
-      },
-      agentSeconds: 3_600,
-      shiftCount: 1,
-      commitsRecorded: 0,
-      commitsPending: 0,
-      commitsMerged: 0,
-      commitsReverted: 0,
-      commitsOrphaned: 0,
-      heldRate: null,
-    };
-    invoke.mockResolvedValueOnce({
-      headcount: { total: 3, anonymous: 2, registered: 1, retired: 0 },
-      rows: [row],
-    });
-    await expect(defaultBridge.agentsReport()).resolves.toMatchObject({
-      headcount: { total: 3, active: 3, retired: 0 },
-    });
+  it("rejects a held rate outside [0, 1] rather than rendering a nonsense percent", async () => {
+    invoke.mockResolvedValueOnce({ groups: [{ repo: "x", heldRate: 1.5, shifts: [] }] });
+    await expect(defaultBridge.agentShifts()).rejects.toMatchObject({ kind: "unknown" });
   });
 });

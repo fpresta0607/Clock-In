@@ -1659,6 +1659,19 @@ export class DrizzleShiftCommitRepository implements ShiftCommitRepository {
       .orderBy(asc(shiftCommits.authoredAt), asc(shiftCommits.id));
     return rows.map(asShiftCommitRecord);
   }
+
+  public async listForOrganization(subject: AuthenticatedSubject, query: ReportQuery): Promise<ShiftCommitRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(shiftCommits)
+      .where(and(
+        eq(shiftCommits.organizationId, subject.organizationId),
+        query.from === undefined ? undefined : gte(shiftCommits.authoredAt, query.from),
+        query.toExclusive === undefined ? undefined : lt(shiftCommits.authoredAt, query.toExclusive),
+      ))
+      .orderBy(asc(shiftCommits.authoredAt), asc(shiftCommits.id));
+    return rows.map(asShiftCommitRecord);
+  }
 }
 
 function asAgentUsageRecord(row: typeof agentUsage.$inferSelect): AgentUsageRecord {

@@ -364,29 +364,6 @@ select:disabled { opacity: .55; }
 .board-times { display: grid; justify-items: end; gap: 2px; }
 .board-agent { color: var(--text-secondary); font-size: .72rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
-/* A roster row carries far more than a rank and a number - runtime, owner,
-   models, codebases, shifts, held rate - so it gets two rows of its own
-   instead of one right-aligned line that clips. The facts wrap between
-   themselves at any width; only the name is allowed to ellipsize. */
-.board-list.is-roster .board-choice {
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: baseline;
-  row-gap: 4px;
-  padding: 7px 8px;
-}
-.board-facts { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 8px; color: var(--text-secondary); font-size: .72rem; }
-.board-fact { display: inline-block; overflow-wrap: anywhere; }
-/* The separator trails its own fact rather than leading the next one, so a
-   wrapped line never begins with a dangling dot. */
-.board-fact:not(:last-child)::after { content: "·"; margin-left: 8px; color: var(--glass-border); }
-/* The codebase is the fact org members came here for, so it reads at full
-   contrast while the rest of the line stays secondary. */
-.board-fact.is-repo { color: var(--mint); }
-
-/* Six columns in a 520px-wide window will not fit; the table scrolls inside
-   its own box rather than pushing the panel sideways. */
-.table-scroll { overflow-x: auto; }
-
 /* Settings overlay, same pattern as the web app's help dialog. */
 .modal-overlay { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 20px; background: rgba(3, 5, 10, .72); }
 /* The overlay panels carry more padding than a plain card: their content runs
@@ -573,19 +550,18 @@ select:disabled { opacity: .55; }
 .swatch-agent3 { background: #00a868; }
 .swatch-away { background: var(--accent-blue); }
 
-/* Which models ran, with session count, overlap, and length. */
-.agent-sessions { margin-top: 14px; }
-/* Six columns at the brand table's own size and rhythm - the same one the
-   Humans tab's rows read at. Squeezing the font and the side padding to make
-   them fit a 520px window is what made every column cramped at every width;
-   the columns keep their room and `.table-scroll` carries a narrow window
-   instead. A heading never wraps: "Max at once" over three lines is what the
-   header row looked like before. */
-.agent-sessions table { margin-top: 2px; }
-.agent-sessions th { white-space: nowrap; }
-.agent-sessions .numeric { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-/* A model that was never recorded reads muted, not as a bare gap. */
-.agent-sessions .subtle-cell { color: var(--text-secondary); }
+/* The Agents tab's map: one head row per codebase in the app-list rhythm,
+   its shifts indented beneath. A shift row is when · facts · duration; the
+   facts shrink and ellipsize before the duration ever wraps. */
+.shift-group { margin-top: 10px; }
+.shift-group-head { font-weight: 650; }
+.held-tag { color: var(--mint); font-size: .78rem; font-weight: 400; }
+.shift-list { display: grid; gap: 2px; margin: 2px 0 0; padding: 0 0 0 14px; list-style: none; }
+.shift-row { display: flex; align-items: baseline; gap: 10px; padding: 3px 2px; border-bottom: 1px solid rgba(163, 179, 194, .08); font-size: .8rem; }
+.shift-row:last-child { border-bottom: 0; }
+.shift-when { flex: none; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.shift-facts { flex: 1; min-width: 0; overflow: hidden; color: var(--text-secondary); text-overflow: ellipsis; white-space: nowrap; }
+.shift-duration { flex: none; font-variant-numeric: tabular-nums; }
 
 /* SVG charts: the hourly line graph and the weekly trend strip. Colors come
    from the brand.css chart tokens; only layout lives here. */

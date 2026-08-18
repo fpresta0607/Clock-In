@@ -789,6 +789,62 @@ export const agentsReportResponseSchema = z
   })
   .strict();
 
+export const agentShiftsFiltersSchema = z
+  .object({
+    fromAt: timestampSchema.optional(),
+    toExclusiveAt: timestampSchema.optional(),
+    /** Absent means all projects. */
+    scope: projectScopeSchema.optional(),
+  })
+  .strict();
+
+/**
+ * The Agents tab's whole story: what ran, where, grouped by codebase. One
+ * group per repo label the shifts named, heaviest first, the label-less group
+ * last; each group lists its shifts newest first. No ranking and no roster
+ * facts - the shifts are the record, and an agent's identity shows only as
+ * the runtime and operator on each shift. `heldRate` is null until a commit
+ * is decided, and the client says nothing rather than "pending": a rate with
+ * no decided commits is not a fact.
+ */
+export const agentShiftsResponseSchema = z
+  .object({
+    filters: agentShiftsFiltersSchema,
+    /** Summed across groups, so parallel shifts legitimately exceed wall clock. */
+    totalAgentSeconds: z.number().int().nonnegative().safe(),
+    groups: z.array(z
+      .object({
+        /** A codebase's folder name, never a path; null groups the shifts that recorded neither a commit root nor a working directory. */
+        repo: repoLabelSchema.nullable(),
+        agentSeconds: z.number().int().nonnegative().safe(),
+        shiftCount: z.number().int().nonnegative().safe(),
+        /** merged / decided; null while nothing has been decided. */
+        heldRate: heldRateSchema,
+        shifts: z.array(z
+          .object({
+            id: idSchema,
+            source: agentSourceSchema,
+            owner: z.object({ id: idSchema, name: z.string().min(1) }).strict(),
+            model: z.string().min(1).max(200).nullable(),
+            startedAt: timestampSchema,
+            /** A running shift reads its last event here, never "still open". */
+            endedAt: timestampSchema,
+            /** Clipped to the range, rounded once per shift. */
+            agentSeconds: z.number().int().nonnegative().safe(),
+            /** The commit subjects and how each held up; empty when none were recorded. */
+            commits: z.array(z
+              .object({
+                subject: z.string().max(500),
+                verification: shiftCommitVerificationSchema,
+              })
+              .strict()),
+          })
+          .strict()),
+      })
+      .strict()),
+  })
+  .strict();
+
 /**
  * One commit captured during an agent's shift, uploaded by the desktop app.
  * `clientId` makes replays idempotent, exactly as it does for activity
@@ -1064,6 +1120,8 @@ export type AgentPaystubResponse = z.infer<typeof agentPaystubResponseSchema>;
 export type AgentsReportFilters = z.infer<typeof agentsReportFiltersSchema>;
 export type AgentsReportRow = z.infer<typeof agentsReportRowSchema>;
 export type AgentsReportResponse = z.infer<typeof agentsReportResponseSchema>;
+export type AgentShiftsFilters = z.infer<typeof agentShiftsFiltersSchema>;
+export type AgentShiftsResponse = z.infer<typeof agentShiftsResponseSchema>;
 export type AgentsReportSort = z.infer<typeof agentsReportSortSchema>;
 export type TokenTotals = z.infer<typeof tokenTotalsSchema>;
 export type MeStatsAgent = z.infer<typeof meStatsAgentSchema>;
