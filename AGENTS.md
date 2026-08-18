@@ -30,9 +30,9 @@ the paystub carries `ownerActiveSeconds` and `awaySeconds`. Do not move any of i
 person; a per-person fold reads as one worker's shifts when it is several.
 
 A codebase reaches every member as a **label** - the last segment of a repo root or working
-directory (`repoLabel`) - while the path itself stays under the `repoRoot` rule. A shift that
-recorded no directory is `null` and reads "No codebase recorded"; there is no default codebase, just
-as `resolveProjectForCwd` returns null rather than falling back to a project.
+directory (`repoLabel`), when that segment names a codebase - while the path itself stays under the
+`repoRoot` rule. A shift whose directory names no codebase reads "No codebase recorded"; there is no
+default codebase, just as `resolveProjectForCwd` returns null rather than falling back to a project.
 
 Agents are durable identities, not rows per run: one `agents` row per `(organization, owner, source,
 repo_root)` — one person's harness working one codebase — and each `agent_sessions` row is one of its
