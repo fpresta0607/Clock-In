@@ -166,8 +166,8 @@ type BoardSort = "active" | "agent" | "leverage";
 
 /// A person's active time laid out as labeled rows: the hours up top, then
 /// how many agents were running through them. What those agents added up to
-/// belongs to the agent, not the person, so it lives on the Agents tab -
-/// see `AgentBreakdown`.
+/// belongs to the agent, not the person, so it lives on the Agents tab's
+/// shifts-by-codebase map.
 const MemberBreakdown = ({ stats, self }: { stats: MeStatsResponse; self: boolean }) => {
   const { activeSeconds, concurrency } = stats;
   return (
@@ -227,14 +227,6 @@ type ChartHourlyBucket = {
   outputTokens: number | null;
   cacheCreationInputTokens: number | null;
   cacheReadInputTokens: number | null;
-};
-
-/// One week of an agent's paystub trend, as the API computes it.
-type ChartTrendBucket = {
-  periodStartAt: string;
-  agentSeconds: number;
-  shiftCount: number;
-  heldRate: number | null;
 };
 
 type ChartSeries = {

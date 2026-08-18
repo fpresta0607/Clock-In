@@ -25,14 +25,20 @@
  * member has renamed is left alone - a name someone chose is not ours to
  * revisit, even on a row keyed this way.
  *
- * It also re-homes bucket shifts whose working directory names a codebase.
- * A hook older than the repo probe reported no repo root at all, so every
- * shift minted into its operator's unassigned bucket even when its cwd was a
- * real checkout - a treehouse worktree launches at the worktree root. Each
- * such shift moves onto the codebase its own cwd names: an existing agent of
- * the same (organization, owner, source) whose repo root carries the same
- * label when there is one, else a fresh identity keyed on the shift's cwd.
- * A cwd whose last segment is opaque stays put - it names only a run.
+ * It also re-homes bucket shifts that carry their own commit evidence. A hook
+ * older than the repo probe reported no repo root at all, so every shift
+ * minted into its operator's unassigned bucket even when it ran in a real
+ * checkout. A commit's repo root is proof the directory really was a
+ * repository; a recorded cwd alone is not - a shift launched in any real
+ * non-repo directory is bucketed by design with that cwd stored. Each shift
+ * with a commit moves onto the codebase its first commit names (first by
+ * authored_at then id, the rule the paystub and graduation already follow):
+ * an existing agent of the same (organization, owner, source) whose repo root
+ * carries the same label when there is one, else a fresh identity keyed on
+ * that commit's repo root. A root whose last segment is opaque stays put - a
+ * gate worktree's commit reports the worktree path, which names only a run.
+ * A shift with no commit stays in the bucket, which is self-limiting: no date
+ * cutoff is needed, and a re-run stays safe forever.
  *
  * It also clears the model a runtime never attested. A CLI marks the entries
  * it writes about itself - Claude Code stamps them `<synthetic>` - and a
@@ -97,16 +103,24 @@ async function main() {
     select count(*)::int as count from agent_sessions where model like '<%>'
   `;
 
-  // Bucket shifts a cwd could re-home, counted for the dry run by label.
+  // Bucket shifts whose own commit evidence could re-home them, counted for
+  // the dry run by the first commit's repo root.
   const preview = await sql`
-    select s.cwd
+    select first_commit.repo_root
     from agent_sessions s
     join agents a on a.organization_id = s.organization_id and a.id = s.agent_id
+    cross join lateral (
+      select c.repo_root
+      from shift_commits c
+      where c.organization_id = s.organization_id and c.agent_session_id = s.id
+      order by c.authored_at, c.id
+      limit 1
+    ) first_commit
     where a.repo_root is null and a.status <> 'retired'
-      and s.cwd is not null and s.source <> 'browser'
+      and s.source <> 'browser'
   `;
   const homableCount = preview.filter((shift) => {
-    const label = lastSegment(shift.cwd);
+    const label = lastSegment(shift.repo_root);
     return label !== "" && !OPAQUE_SEGMENT.test(label);
   }).length;
 
@@ -117,7 +131,7 @@ async function main() {
     for (const agent of runNamed) console.log(`  ${agent.name}  (${agent.id})`);
   }
   console.log(`${placeholders.count} shift(s) store a placeholder where a model should be.`);
-  console.log(`${homableCount} bucket shift(s) recorded a cwd that names a codebase.`);
+  console.log(`${homableCount} bucket shift(s) carry a commit that names a codebase.`);
 
   if (runNamed.length === 0 && placeholders.count === 0 && homableCount === 0) {
     console.log("Nothing to repair.");
@@ -199,24 +213,32 @@ async function main() {
     });
   }
 
-  // Pass three: bucket shifts whose own cwd names a codebase. The join is by
-  // label, not path, because worktree clones of one repo sit at different
-  // paths; two clones already read as one codebase everywhere labels render.
+  // Pass three: bucket shifts whose own commit evidence names a codebase.
+  // The match is by label, not path, because worktree clones of one repo sit
+  // at different paths; two clones already read as one codebase everywhere
+  // labels render.
   const bucketShifts = await sql`
-    select s.id, s.organization_id, s.user_id, s.source, s.cwd, s.agent_id
+    select s.id, s.organization_id, s.user_id, s.source, s.agent_id, first_commit.repo_root
     from agent_sessions s
     join agents a on a.organization_id = s.organization_id and a.id = s.agent_id
+    cross join lateral (
+      select c.repo_root
+      from shift_commits c
+      where c.organization_id = s.organization_id and c.agent_session_id = s.id
+      order by c.authored_at, c.id
+      limit 1
+    ) first_commit
     where a.repo_root is null and a.status <> 'retired'
-      and s.cwd is not null and s.source <> 'browser'
+      and s.source <> 'browser'
     order by s.organization_id, s.user_id, s.source, s.started_at
   `;
   const homable = bucketShifts.filter((shift) => {
-    const label = lastSegment(shift.cwd);
+    const label = lastSegment(shift.repo_root);
     return label !== "" && !OPAQUE_SEGMENT.test(label);
   });
   let rehomed = 0;
   for (const shift of homable) {
-    const label = lastSegment(shift.cwd);
+    const label = lastSegment(shift.repo_root);
     await sql.begin(async (tx) => {
       const candidates = await tx`
         select id, repo_root from agents
@@ -234,7 +256,7 @@ async function main() {
         const runtime = runtimeLabels.get(shift.source) ?? shift.source;
         const [minted] = await tx`
           insert into agents (organization_id, owner_user_id, source, repo_root, name)
-          values (${shift.organization_id}, ${shift.user_id}, ${shift.source}, ${shift.cwd}, ${`${runtime} @ ${label}`})
+          values (${shift.organization_id}, ${shift.user_id}, ${shift.source}, ${shift.repo_root}, ${`${runtime} @ ${label}`})
           on conflict (organization_id, owner_user_id, source, repo_root)
             where repo_root is not null and status <> 'retired'
             do update set updated_at = now()
@@ -277,7 +299,7 @@ async function main() {
     console.log(`${heldCommits} commit(s) stayed on a retired row: the bucket already records that sha for the same repository.`);
   }
   console.log(`Cleared the placeholder model on ${repairedModels.length} shift(s).`);
-  console.log(`Re-homed ${rehomed} bucket shift(s) onto the codebase their cwd names.`);
+  console.log(`Re-homed ${rehomed} bucket shift(s) onto the codebase their first commit names.`);
 
   // The verification step, run for you: no anonymous agent may still be keyed
   // on a directory that names only a run. Renamed rows are excluded on

@@ -262,15 +262,8 @@ a.download-secondary:hover { color: #ffffff; }
 .swatch-agent3 { background: #00a868; }
 .swatch-away { background: var(--accent-blue); }
 
-/* Which models ran, with session count, overlap, and length. */
-.agent-sessions { margin-top: 14px; }
-.agent-sessions table { margin-top: 2px; }
-/* A heading never wraps; `.table-scroll` carries a narrow viewport instead. */
-.agent-sessions th { white-space: nowrap; }
-.agent-sessions .numeric { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-
-/* SVG charts: the hourly line graph and the weekly trend strip. Colors come
-   from the brand.css chart tokens; only layout lives here. */
+/* SVG charts: the hourly line graph. Colors come from the brand.css chart
+   tokens; only layout lives here. */
 /* The charts draw into a fixed viewBox, so width drives height: unbounded, a
    2482px card renders the hourly graph 737px tall. This is the aspect bound,
    not a layout preference - 1050px is the width the charts were drawn at, and
