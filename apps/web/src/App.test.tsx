@@ -821,21 +821,26 @@ describe("the agents tab", () => {
   });
 
   it("shows no hourly graph on all time, keeping the groups and total", async () => {
-    const person = await signIn(clientFor());
-    await screen.findByRole("heading", { name: "SIQstack" });
+    vi.setSystemTime(new Date("2026-08-06T20:00:00.000Z"));
+    try {
+      const person = await signIn(clientFor());
+      await screen.findByRole("heading", { name: "SIQstack" });
 
-    await person.click(screen.getByRole("button", { name: "Agents" }));
-    const panel = within(await screen.findByTestId("agent-shifts"));
-    // A bounded range folds an hourly line from the shifts on screen.
-    expect(panel.getByTestId("hourly-graph")).toBeInTheDocument();
+      await person.click(screen.getByRole("button", { name: "Agents" }));
+      const panel = within(await screen.findByTestId("agent-shifts"));
+      // A bounded range folds an hourly line from the shifts on screen.
+      expect(panel.getByTestId("hourly-graph")).toBeInTheDocument();
 
-    await person.click(screen.getByRole("button", { name: "All time" }));
+      await person.click(screen.getByRole("button", { name: "All time" }));
 
-    // Per-hour resolution over an unbounded range is meaningless, so the graph
-    // goes away - but the codebase map and its total stay put.
-    await waitFor(() => expect(panel.queryByTestId("hourly-graph")).not.toBeInTheDocument());
-    expect(panel.getByText("2h 00m")).toBeInTheDocument();
-    expect(panel.getAllByTestId("shift-group")).toHaveLength(2);
+      // Per-hour resolution over an unbounded range is meaningless, so the graph
+      // goes away - but the codebase map and its total stay put.
+      await waitFor(() => expect(panel.queryByTestId("hourly-graph")).not.toBeInTheDocument());
+      expect(panel.getByText("2h 00m")).toBeInTheDocument();
+      expect(panel.getAllByTestId("shift-group")).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("gives each shift its own line: when, who, what model, what commits", async () => {
