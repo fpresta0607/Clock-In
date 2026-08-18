@@ -1561,7 +1561,6 @@ const RosterTab = ({
 }: RosterTabProps) => {
   const [renamingId, setRenamingId] = useState<string | undefined>();
   const [renameDraft, setRenameDraft] = useState("");
-  const selected = agents.find((agent) => agent.id === selectedAgentId);
   const rowsByAgentId = new Map(agentsReport?.rows.map((row) => [row.agent.id, row]));
   // The pay-run report already drops a retired agent with nothing to show in
   // the range, so the roster follows it rather than rendering a row with a
@@ -1572,6 +1571,11 @@ const RosterTab = ({
   const listed = agentsReport === undefined || agentsReportFailed
     ? agents
     : agents.filter((agent) => agent.status !== "retired" || rowsByAgentId.has(agent.id));
+  // The paystub follows the list it was picked from. An agent the report drops
+  // must not leave its panel open underneath a list that says nothing worked in
+  // this range - the desktop reads its row out of the report for the same
+  // reason, so the two surfaces cannot disagree about what is on screen.
+  const selected = listed.find((agent) => agent.id === selectedAgentId);
   return (
     <>
       {agentsReport !== undefined && !agentsReportFailed && (

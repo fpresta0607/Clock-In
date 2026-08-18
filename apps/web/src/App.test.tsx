@@ -980,6 +980,33 @@ describe("the roster tab", () => {
     expect(screen.getByTestId("roster-headcount")).toHaveTextContent("Headcount 2 - 1 retired");
   });
 
+  // Dropping a row must drop its paystub with it: the list said nobody worked
+  // the range while a panel underneath still carried the hidden agent's name.
+  it("closes the paystub of an agent the report stops listing", async () => {
+    const retired = { ...rosterAgent, id: "a9", name: "Claude Code @ retired-one", status: "retired" as const };
+    const listedRow = { ...agentsReportResponse.rows[0]!, agent: retired };
+    const agentsReport = vi.fn()
+      .mockResolvedValueOnce({ ...agentsReportResponse, headcount: { total: 2, active: 1, retired: 1 }, rows: [listedRow] })
+      .mockResolvedValue({ ...agentsReportResponse, headcount: { total: 2, active: 1, retired: 1 }, rows: [] });
+    const person = await signIn(clientFor({
+      agents: vi.fn().mockResolvedValue({ agents: [retired] }),
+      agentsReport,
+      agentPaystub: vi.fn().mockResolvedValue({ ...paystub, agent: retired }),
+    }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+    const roster = await screen.findByTestId("roster-list");
+    await person.click(within(roster).getByText(retired.name));
+    expect(await screen.findByTestId("agent-paystub")).toBeInTheDocument();
+
+    // A range the report has nothing for: the row goes, and so must the panel.
+    await person.click(screen.getByRole("button", { name: "All time" }));
+
+    expect(await screen.findByText("No agent worked in this range.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId("agent-paystub")).not.toBeInTheDocument());
+  });
+
   it("tells an empty roster apart from a range nobody worked", async () => {
     const person = await signIn(clientFor({
       agents: vi.fn().mockResolvedValue({ agents: [] }),

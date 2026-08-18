@@ -291,7 +291,8 @@ export const agents = pgTable(
     projectId: uuid("project_id"),
     // The codebase this agent works, as the working directory its shifts
     // reported. Null is the operator's unassigned bucket - a real roster row
-    // that graduates when repo evidence arrives, never a default.
+    // several shifts share, never a default. The bucket itself never becomes a
+    // codebase: a commit moves its own shift onto one and leaves the rest.
     repoRoot: text("repo_root"),
     source: text("source").notNull(),
     name: text("name").notNull(),

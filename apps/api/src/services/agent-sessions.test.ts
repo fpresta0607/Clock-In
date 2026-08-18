@@ -502,7 +502,8 @@ describe("roster minting", () => {
     await service.ingest(subject, [event({ repoRoot: null })]);
 
     // The designed degradation path for an installer without the probe: a
-    // real roster row that graduates when its first commit names a repo.
+    // real roster row, whose shifts move onto a codebase one at a time as
+    // their own commits name one.
     expect(agents.upserts[0]).toMatchObject({ repoRoot: null, ownerUserId: ids.user });
   });
 

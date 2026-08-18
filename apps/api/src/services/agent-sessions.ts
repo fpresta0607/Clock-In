@@ -51,7 +51,8 @@ export interface AgentSessionEventInput {
    * The git repository the working directory sits in, when the hook probed
    * one. Null from a desktop that predates the probe, or from a directory
    * that is not a repository at all; either way the shift mints into its
-   * operator's unassigned bucket and graduates when its first commit lands.
+   * operator's unassigned bucket, and moves onto a codebase alone when its own
+   * first commit names one.
    */
   repoRoot: string | null;
   /** The matched url-rule mapping id for browser spans; null for agent events. */
