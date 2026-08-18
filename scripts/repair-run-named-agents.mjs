@@ -254,9 +254,13 @@ async function main() {
       let target = candidates.find((agent) => lastSegment(agent.repo_root) === label);
       if (target === undefined) {
         const runtime = runtimeLabels.get(shift.source) ?? shift.source;
+        // `agents_name_length_valid` caps a name at 200 characters, and a
+        // directory name is not bounded by anything: clamp rather than let a
+        // long checkout abort the whole re-homing transaction.
+        const name = `${runtime} @ ${label}`.slice(0, 200);
         const [minted] = await tx`
           insert into agents (organization_id, owner_user_id, source, repo_root, name)
-          values (${shift.organization_id}, ${shift.user_id}, ${shift.source}, ${shift.repo_root}, ${`${runtime} @ ${label}`})
+          values (${shift.organization_id}, ${shift.user_id}, ${shift.source}, ${shift.repo_root}, ${name})
           on conflict (organization_id, owner_user_id, source, repo_root)
             where repo_root is not null and status <> 'retired'
             do update set updated_at = now()

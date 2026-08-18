@@ -100,9 +100,6 @@ a.primary { display: inline-block; text-decoration: none; }
 .shift-facts { flex: 1; min-width: 0; overflow: hidden; color: var(--text-secondary); text-overflow: ellipsis; white-space: nowrap; }
 .shift-duration { flex: none; font-variant-numeric: tabular-nums; }
 
-.manage-rename { display: flex; flex: 1; gap: 8px; align-items: center; }
-.manage-rename input { flex: 1; min-width: 0; }
-
 /* Scope + range: one quiet row of filters between the masthead and the cards. */
 .control-bar { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
 .scope-picker select { min-width: 170px; padding: 7px 10px; font-size: .84rem; }
