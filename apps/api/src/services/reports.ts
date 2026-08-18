@@ -755,15 +755,32 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       const countsById = new Map(commitCounts.map((row) => [row.agentId, row]));
       const usageById = new Map(usageByAgent.map((row) => [row.agentId, row]));
       // Every roster agent gets a row, activity or not: the roster - not the
-      // interval data - decides which agents exist.
-      const rows = roster.map((agent) => ({
-        agent: asAgentReportView(agent, subject),
-        ...agentHours(grouped.get(agent.id)?.intervals ?? [], range),
-        ...agentCommitCounts(countsById.get(agent.id)),
-        models: grouped.get(agent.id)?.models ?? [],
-        repos: grouped.get(agent.id)?.repos ?? [],
-        ...agentTokenTotals(usageById.get(agent.id)),
-      }));
+      // interval data - decides which agents exist. The one exception is a
+      // retired agent with nothing to show in this range: it is neither on the
+      // clock nor evidence of anything, so a row reading "0s · 0 shifts ·
+      // pending" is pure clutter between the agents the reader came for. It
+      // still counts in the headcount, which is what says the retirement
+      // happened at all.
+      //
+      // "Nothing to show" has to mean every column, because these reads do not
+      // share a clock: commits are counted by their git author date while
+      // intervals are counted by session overlap, so a rebased commit can land
+      // in a range the shift that recorded it never touched. A row with a
+      // commit tally or a token total is evidence, whatever its hours say.
+      const rows = roster
+        .map((agent) => ({
+          agent: asAgentReportView(agent, subject),
+          ...agentHours(grouped.get(agent.id)?.intervals ?? [], range),
+          ...agentCommitCounts(countsById.get(agent.id)),
+          models: grouped.get(agent.id)?.models ?? [],
+          repos: grouped.get(agent.id)?.repos ?? [],
+          ...agentTokenTotals(usageById.get(agent.id)),
+        }))
+        .filter((row) => row.agent.status !== "retired"
+          || row.agentSeconds > 0
+          || row.shiftCount > 0
+          || row.commitsRecorded > 0
+          || row.tokensReported);
       // A sort ranks heaviest first; ties and non-reporters keep roster order
       // (the sort is stable). Tokens rank agents that reported none last.
       if (filters.sort === "hours") {

@@ -140,6 +140,13 @@ Its own sequence, back to back in one window:
 5. The retired v1 rows stay as audit trail. Deleting them is possible once the
    backfill reports zero references (all three FKs are `restrict`, so the
    database enforces that precondition), but retirement is the end state.
+6. Repair the agents named after a run rather than a codebase, and the
+   placeholder models stored where a runtime attested none. Run it after the
+   API is deployed, for the same reason as the backfill - the old API keeps
+   minting rows the new rules would refuse. Dry run by default:
+   `DATABASE_URL=… node scripts/repair-run-named-agents.mjs` prints what
+   would move; `--confirm` performs it, and a second run is a no-op. The
+   script's own header is its authoritative description.
 
 Between steps 3 and 4 the roster shows the retired v1 rows beside fresh v2
 rows. That is expected, not an error state.
@@ -147,9 +154,9 @@ rows. That is expected, not an error state.
 The desktop ships last and only through an installer: the hook's `repo_root`
 probe reaches the server as contract data, so an installer sending it must
 never precede the API that accepts it. Old installers keep working
-indefinitely - their shifts mint per-operator unassigned agents and graduate
-when their first commit names a codebase, which is the designed degradation
-path.
+indefinitely - their shifts mint per-operator unassigned agents, and a shift
+moves onto a codebase alone when that shift's own commit names one, which is
+the designed degradation path.
 
 ---
 

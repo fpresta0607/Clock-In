@@ -30,16 +30,20 @@ the paystub carries `ownerActiveSeconds` and `awaySeconds`. Do not move any of i
 person; a per-person fold reads as one worker's shifts when it is several.
 
 A codebase reaches every member as a **label** - the last segment of a repo root or working
-directory (`repoLabel`) - while the path itself stays under the `repoRoot` rule. A shift that
-recorded no directory is `null` and reads "No codebase recorded"; there is no default codebase, just
-as `resolveProjectForCwd` returns null rather than falling back to a project.
+directory (`repoLabel`), when that segment names a codebase - while the path itself stays under the
+`repoRoot` rule. A shift whose directory names no codebase reads "No codebase recorded"; there is no
+default codebase, just as `resolveProjectForCwd` returns null rather than falling back to a project.
 
 Agents are durable identities, not rows per run: one `agents` row per `(organization, owner, source,
 repo_root)` — one person's harness working one codebase — and each `agent_sessions` row is one of its
 shifts. The operator is the authenticated uploader, so the dimension costs each runtime nothing. A
-null `repo_root` is that operator's unassigned bucket, a real roster row that graduates in place when
-a commit names its codebase (`graduateAgentForSession`); `project_id` stays on the row as a
-re-derivable attribute and never as identity. Both partial uniques exclude retired rows, and
+null `repo_root` is that operator's unassigned bucket, a real roster row that several shifts share. A
+bucket never claims a codebase in place: when a commit names one, `graduateAgentForSession` mints that
+codebase's identity and re-stamps only the shift that produced the commit, because the bucket's other
+shifts are not evidence of it. `project_id` stays on the row as a re-derivable attribute and never as
+identity. A working directory named after a run rather than a codebase - a per-run worktree such as
+`<hash>.git/worktrees/<ULID>` - names no codebase and identifies none, so its shifts land in that same
+bucket instead of minting a row each (`repoLabel`, `identityRepoRoot`). Both partial uniques exclude retired rows, and
 `upsertForKey`'s ON CONFLICT `targetWhere` must restate each index's predicate exactly - postgres
 matches an arbiter to a partial index by that predicate, and a mismatch passes every mocked
 repository and then fails every insert.

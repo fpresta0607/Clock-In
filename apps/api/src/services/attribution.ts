@@ -13,16 +13,58 @@ export function normalizePath(value: string): string {
 }
 
 /**
+ * A directory named after a run rather than after a codebase. Tooling that
+ * checks a repo out per run - a no-mistakes gate worktree lives at
+ * `<hash>.git/worktrees/<ULID>`, and CI runners use similar shapes - leaves a
+ * working directory whose last segment is an opaque id. A ULID (26 Crockford
+ * base32 characters), a UUID, or a bare hex hash names no codebase to anyone.
+ *
+ * The ULID branch is uppercase-only, which the other two are not. Crockford is
+ * canonically uppercase and every real gate worktree is
+ * (`01M08C82C40W5Y5Q0X3BFGYNFT`), while lowercase 26-character run-together
+ * words are ordinary codebase names - `backendservermanagementapp` uses none of
+ * Crockford's excluded letters, and a case-insensitive branch swallowed it.
+ * The hex branch cannot be uppercase-only: git SHAs are lowercase, so that
+ * would silently disable it while looking like a fix. Length does the work
+ * there instead - only a full SHA-1 (40) or SHA-256 (64) hex string is
+ * refused, so a shorter all-hex codebase name is never swallowed.
+ */
+const OPAQUE_SEGMENT =
+  /^(?:[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/;
+
+/**
  * A working directory's codebase label: its last path segment, separators
  * unified so a Windows path and a POSIX one read the same. A name, never a
  * path - which is what lets every member of the workspace see which codebase an
  * agent worked while the path itself stays behind the `repoRoot` rule. Null
  * when nothing is left to name.
+ *
+ * An opaque id is *not* a name. A shift worked inside a per-run worktree used
+ * to label itself with that run's id - "Claude Code @ 01M06FSGP392MH6VJNRX8T364A" -
+ * and, because the identity key is the repo root, minted a fresh agent for
+ * every run. Reading absence as absence is the rule the rest of the model
+ * already follows: no codebase name, rather than a wrong one.
  */
 export function repoLabel(path: string): string | null {
   const segments = path.replace(/\\/g, "/").replace(/\/+$/, "").split("/");
   const last = segments[segments.length - 1] ?? "";
-  return last === "" ? null : last.slice(0, 200);
+  if (last === "" || OPAQUE_SEGMENT.test(last)) return null;
+  return last.slice(0, 200);
+}
+
+/**
+ * The repo root an agent identity is keyed on. A directory that names no
+ * codebase cannot identify one either: keying on it mints a separate agent for
+ * every run, which is how one operator's roster filled with a row per
+ * no-mistakes gate worktree. Such a shift lands in that operator's unassigned
+ * bucket instead - the same place an un-probed session goes - and stays there
+ * until one of its own commits names a codebase, at which point that shift
+ * alone moves onto that codebase's identity. The bucket itself is never keyed
+ * on a codebase, because the shifts pooled in it worked several or none.
+ */
+export function identityRepoRoot(root: string | null): string | null {
+  if (root === null) return null;
+  return repoLabel(root) === null ? null : root;
 }
 
 /**

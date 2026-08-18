@@ -297,6 +297,17 @@ struct FileTail {
     learned_model: Option<String>,
 }
 
+/// A transcript entry the CLI wrote about itself rather than one a model
+/// produced. Claude Code stamps such entries `<synthetic>`, and because the
+/// reader keeps the *first* model a transcript names, one of them at the top of
+/// a file became the shift's recorded model - a roster row reading
+/// "Claude Code · <synthetic>". A name in angle brackets is a placeholder, not
+/// a model, so the reader keeps looking; a shift that never names a real one
+/// stays null and reads "not recorded", which is already the honest answer.
+fn is_placeholder_model(model: &str) -> bool {
+    model.starts_with('<') && model.ends_with('>')
+}
+
 /// Reads new complete lines from a transcript, starting at the cursor.
 /// Returns `None` when nothing advanced - a missing file, an unreadable
 /// file, or no new complete lines: all states, not errors.
@@ -406,7 +417,7 @@ fn tail_file(path: &Path, cursor: &FileUsage) -> Option<FileTail> {
             .as_ref()
             .and_then(|message| message.model.as_deref())
             .map(str::trim)
-            .filter(|model| !model.is_empty());
+            .filter(|model| !model.is_empty() && !is_placeholder_model(model));
         if learned_model.is_none() {
             learned_model = model.map(str::to_string);
         }
@@ -1329,6 +1340,86 @@ mod tests {
         assert!(!entry.sidechain);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The roster showed rows reading "Claude Code · <synthetic>": Claude Code
+    /// stamps the entries it writes about itself with that placeholder, and
+    /// one of them sitting above the first real assistant turn became the
+    /// shift's model. The reader keeps looking past it.
+    #[test]
+    fn a_placeholder_model_is_skipped_for_the_first_real_one() {
+        let dir = temp_dir("placeholder-model");
+        let agent_path = dir.join("agent-spool.jsonl");
+        let usage_path = dir.join("agent-usage.json");
+        let transcript = dir.join("session-1.jsonl");
+        write_transcript(
+            &transcript,
+            &[
+                assistant_line("2026-08-06T10:14:00Z", "<synthetic>", false, 0, 0, 0, 0),
+                assistant_line(
+                    "2026-08-06T10:15:00Z",
+                    "claude-opus-4.1",
+                    false,
+                    100,
+                    20,
+                    0,
+                    0,
+                ),
+            ],
+        );
+        spool::append(
+            &agent_path,
+            &started_event(&transcript, "2026-08-06T10:00:00Z", None),
+        )
+        .expect("append succeeds");
+
+        capture_from_spool(&agent_path, &usage_path);
+
+        let pending = spool::read_pending(&agent_path).expect("the spool reads");
+        let heartbeat = pending
+            .events
+            .iter()
+            .find(|event| event.event == AgentEventKind::Heartbeat)
+            .expect("a model heartbeat is appended");
+        assert_eq!(heartbeat.model.as_deref(), Some("claude-opus-4.1"));
+    }
+
+    /// A transcript that names nothing but placeholders records no model at
+    /// all, which reads "not recorded" - never the placeholder itself.
+    #[test]
+    fn a_transcript_of_only_placeholders_names_no_model() {
+        let dir = temp_dir("placeholder-only");
+        let agent_path = dir.join("agent-spool.jsonl");
+        let usage_path = dir.join("agent-usage.json");
+        let transcript = dir.join("session-1.jsonl");
+        write_transcript(
+            &transcript,
+            &[assistant_line(
+                "2026-08-06T10:14:00Z",
+                "<synthetic>",
+                false,
+                10,
+                2,
+                0,
+                0,
+            )],
+        );
+        spool::append(
+            &agent_path,
+            &started_event(&transcript, "2026-08-06T10:00:00Z", None),
+        )
+        .expect("append succeeds");
+
+        capture_from_spool(&agent_path, &usage_path);
+
+        let pending = spool::read_pending(&agent_path).expect("the spool reads");
+        assert!(
+            !pending
+                .events
+                .iter()
+                .any(|event| event.event == AgentEventKind::Heartbeat),
+            "no model heartbeat rides a placeholder"
+        );
     }
 
     #[test]

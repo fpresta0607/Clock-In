@@ -29,7 +29,7 @@ import type {
   OrganizationRecord,
 } from "./auth.js";
 import { AppError } from "./errors.js";
-import { repoLabel } from "./services/attribution.js";
+import { identityRepoRoot, repoLabel } from "./services/attribution.js";
 import {
   PathMappingRepositoryError,
   SessionRepositoryError,
@@ -1317,21 +1317,26 @@ export class DrizzleAgentRepository implements AgentRepository {
     // exclusion constraint matching the ON CONFLICT specification" - which no
     // mocked repository can catch. A repo-less sighting arbitrates on the
     // index that collapses one operator's null repos onto a single row.
-    const unassigned = input.repoRoot === null;
+    // A working directory that names no codebase - a per-run worktree named
+    // after its run id - identifies none either, so it lands in the operator's
+    // unassigned bucket instead of minting one agent per run. Normalized here,
+    // at the one door every caller goes through.
+    const repoRoot = identityRepoRoot(input.repoRoot);
+    const unassigned = repoRoot === null;
     const rows = await this.db
       .insert(agents)
       .values({
         organizationId: input.organizationId,
         ownerUserId: input.ownerUserId,
         projectId: input.projectId,
-        repoRoot: input.repoRoot,
+        repoRoot,
         source: input.source,
         // The default name is the runtime label beside the repo's folder
         // name, composed here because the basename needs no round trip; a
         // repo-less identity reads as "unassigned". A replay only touches
         // updatedAt - the name, owner and status a member may have set are
         // never overwritten.
-        name: defaultAgentName(input.name, input.repoRoot),
+        name: defaultAgentName(input.name, repoRoot),
       })
       .onConflictDoUpdate({
         target: unassigned
@@ -1344,29 +1349,6 @@ export class DrizzleAgentRepository implements AgentRepository {
       })
       .returning({ id: agents.id });
     return { id: rows[0]!.id };
-  }
-
-  public async claimRepoRoot(organizationId: string, agentId: string, repoRoot: string, now: Date): Promise<boolean> {
-    // First assignment wins, mirroring the agentId and model coalesces: the
-    // row keeps its id, so its hours, shifts, commits and tokens graduate
-    // with it and nothing is re-summed. A conflict on the repo-keyed unique
-    // means another agent already owns this codebase, and the caller re-homes
-    // the session instead.
-    try {
-      const rows = await this.db
-        .update(agents)
-        .set({ repoRoot, updatedAt: now })
-        .where(and(
-          eq(agents.organizationId, organizationId),
-          eq(agents.id, agentId),
-          isNull(agents.repoRoot),
-        ))
-        .returning({ id: agents.id });
-      return rows.length > 0;
-    } catch (error: unknown) {
-      if (identityKeyConstraint(error)) return false;
-      throw error;
-    }
   }
 
   public async restampSession(organizationId: string, agentSessionId: string, agentId: string, now: Date): Promise<void> {
@@ -1397,6 +1379,13 @@ export class DrizzleAgentRepository implements AgentRepository {
         eq(agents.organizationId, organizationId),
         eq(agents.id, agentId),
         isNull(agents.repoRoot),
+        // Only a row nobody named. Naming an agent registers it in the same
+        // write, so 'anonymous' is exactly "machine-minted and still
+        // unclaimed" - the rule scripts/repair-run-named-agents.mjs already
+        // applies when it leaves a renamed agent alone. The predicate lives
+        // here rather than at the call site so no future caller can retire a
+        // name a member chose by forgetting to check.
+        eq(agents.status, "anonymous"),
         sql`not exists (select 1 from ${agentSessions} where ${agentSessions.organizationId} = ${organizationId} and ${agentSessions.agentId} = ${agentId})`,
       ))
       .returning({ id: agents.id });

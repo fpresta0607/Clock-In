@@ -167,7 +167,6 @@ class MemoryAgents implements AgentRepository {
   public async update(): Promise<AgentRecord | null> { throw new Error("not used"); }
   public async merge(): Promise<void> { throw new Error("not used"); }
   public async listSessionsForAgent(): Promise<never> { throw new Error("not used"); }
-  public async claimRepoRoot(): Promise<boolean> { throw new Error("not used"); }
   public async restampSession(): Promise<void> { throw new Error("not used"); }
   public async retireIfSessionless(): Promise<boolean> { throw new Error("not used"); }
 }
@@ -327,6 +326,26 @@ describe("agent-session service", () => {
     expect(agentSessions.records[0]).toMatchObject({ model: "claude-opus-4-8" });
   });
 
+  // The roster read "Claude Code · <synthetic>": a CLI marks the entries it
+  // writes about itself, and a desktop old enough to read one out of a
+  // transcript still reports it. A placeholder is not a model.
+  it("records no model when the runtime sends a placeholder rather than one", async () => {
+    const { agentSessions, service } = createService();
+
+    await service.ingest(subject, [event({ model: "<synthetic>" })]);
+    await service.ingest(subject, [
+      event({ event: "heartbeat", model: "<synthetic>", occurredAt: new Date("2026-08-06T13:40:00.000Z") }),
+    ]);
+
+    expect(agentSessions.records[0]).toMatchObject({ model: null });
+
+    // A real model still lands afterwards - the placeholder never took the slot.
+    await service.ingest(subject, [
+      event({ event: "heartbeat", model: "claude-opus-4-8", occurredAt: new Date("2026-08-06T13:45:00.000Z") }),
+    ]);
+    expect(agentSessions.records[0]).toMatchObject({ model: "claude-opus-4-8" });
+  });
+
   it("fills a still-null model from a heartbeat that arrives after the session ended", async () => {
     const { agentSessions, service } = createService();
     await service.ingest(subject, [event()]);
@@ -483,7 +502,8 @@ describe("roster minting", () => {
     await service.ingest(subject, [event({ repoRoot: null })]);
 
     // The designed degradation path for an installer without the probe: a
-    // real roster row that graduates when its first commit names a repo.
+    // real roster row, whose shifts move onto a codebase one at a time as
+    // their own commits name one.
     expect(agents.upserts[0]).toMatchObject({ repoRoot: null, ownerUserId: ids.user });
   });
 

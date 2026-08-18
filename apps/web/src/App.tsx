@@ -1561,8 +1561,21 @@ const RosterTab = ({
 }: RosterTabProps) => {
   const [renamingId, setRenamingId] = useState<string | undefined>();
   const [renameDraft, setRenameDraft] = useState("");
-  const selected = agents.find((agent) => agent.id === selectedAgentId);
   const rowsByAgentId = new Map(agentsReport?.rows.map((row) => [row.agent.id, row]));
+  // The pay-run report already drops a retired agent with nothing to show in
+  // the range, so the roster follows it rather than rendering a row with a
+  // dash for hours and no shifts, held rate, models or repos. Until the report
+  // arrives nothing is dropped - a missing row means "not loaded", not
+  // "nothing to show" - and the headcount above counts the retirement either
+  // way.
+  const listed = agentsReport === undefined || agentsReportFailed
+    ? agents
+    : agents.filter((agent) => agent.status !== "retired" || rowsByAgentId.has(agent.id));
+  // The paystub follows the list it was picked from. An agent the report drops
+  // must not leave its panel open underneath a list that says nothing worked in
+  // this range - the desktop reads its row out of the report for the same
+  // reason, so the two surfaces cannot disagree about what is on screen.
+  const selected = listed.find((agent) => agent.id === selectedAgentId);
   return (
     <>
       {agentsReport !== undefined && !agentsReportFailed && (
@@ -1574,9 +1587,11 @@ const RosterTab = ({
       {agentsFailed ? (
         <p className="subtle">Could not load the roster.</p>
       ) : agents.length === 0 ? (
-        <p className="subtle">No agents on the roster yet. Coding-agent shifts mint them automatically.</p>
+        <p className="subtle">No agents yet. One is added automatically the first time a coding agent works.</p>
+      ) : listed.length === 0 ? (
+        <p className="subtle">No agent worked in this range.</p>
       ) : (
-        byOperatorThenRepo(agents).map((group) => (
+        byOperatorThenRepo(listed).map((group) => (
           <div className="roster-group" key={group.owner.id}>
             <p className="group-label">{group.owner.name}</p>
             <ol className="board-list roster-list" data-testid="roster-list">

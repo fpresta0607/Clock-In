@@ -957,6 +957,92 @@ describe("the roster tab", () => {
     expect(row).toHaveTextContent("1h 30m");
   });
 
+  // The pay-run report already drops these; the web roster used to render them
+  // anyway, from its own agents list, as a row reading "-" for hours with no
+  // shifts, held rate, models or repos.
+  it("drops a retired agent the report has nothing for, and keeps it in the headcount", async () => {
+    const retired = { ...rosterAgent, id: "a9", name: "Claude Code @ 01M06FSGP392MH6VJNRX8T364A", status: "retired" };
+    const person = await signIn(clientFor({
+      agents: vi.fn().mockResolvedValue({ agents: [rosterAgent, retired] }),
+      agentsReport: vi.fn().mockResolvedValue({
+        ...agentsReportResponse,
+        headcount: { total: 2, active: 1, retired: 1 },
+      }),
+    }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+
+    const roster = await screen.findByTestId("roster-list");
+    await waitFor(() => expect(within(roster).getAllByRole("listitem")).toHaveLength(1));
+    expect(within(roster).queryByText(retired.name)).not.toBeInTheDocument();
+    // Hiding an empty row is not un-retiring anyone.
+    expect(screen.getByTestId("roster-headcount")).toHaveTextContent("Headcount 2 - 1 retired");
+  });
+
+  // Dropping a row must drop its paystub with it: the list said nobody worked
+  // the range while a panel underneath still carried the hidden agent's name.
+  it("closes the paystub of an agent the report stops listing", async () => {
+    const retired = { ...rosterAgent, id: "a9", name: "Claude Code @ retired-one", status: "retired" as const };
+    const listedRow = { ...agentsReportResponse.rows[0]!, agent: retired };
+    const agentsReport = vi.fn()
+      .mockResolvedValueOnce({ ...agentsReportResponse, headcount: { total: 2, active: 1, retired: 1 }, rows: [listedRow] })
+      .mockResolvedValue({ ...agentsReportResponse, headcount: { total: 2, active: 1, retired: 1 }, rows: [] });
+    const person = await signIn(clientFor({
+      agents: vi.fn().mockResolvedValue({ agents: [retired] }),
+      agentsReport,
+      agentPaystub: vi.fn().mockResolvedValue({ ...paystub, agent: retired }),
+    }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+    const roster = await screen.findByTestId("roster-list");
+    await person.click(within(roster).getByText(retired.name));
+    expect(await screen.findByTestId("agent-paystub")).toBeInTheDocument();
+
+    // A range the report has nothing for: the row goes, and so must the panel.
+    await person.click(screen.getByRole("button", { name: "All time" }));
+
+    expect(await screen.findByText("No agent worked in this range.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId("agent-paystub")).not.toBeInTheDocument());
+  });
+
+  it("tells an empty roster apart from a range nobody worked", async () => {
+    const person = await signIn(clientFor({
+      agents: vi.fn().mockResolvedValue({ agents: [] }),
+      agentsReport: vi.fn().mockResolvedValue({
+        ...agentsReportResponse,
+        headcount: { total: 0, active: 0, retired: 0 },
+        rows: [],
+      }),
+    }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+
+    expect(await screen.findByText("No agents yet. One is added automatically the first time a coding agent works."))
+      .toBeInTheDocument();
+  });
+
+  it("says nobody worked the range rather than claiming there are no agents", async () => {
+    const retired = { ...rosterAgent, id: "a9", status: "retired" };
+    const person = await signIn(clientFor({
+      agents: vi.fn().mockResolvedValue({ agents: [retired] }),
+      agentsReport: vi.fn().mockResolvedValue({
+        ...agentsReportResponse,
+        headcount: { total: 1, active: 0, retired: 1 },
+        rows: [],
+      }),
+    }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+
+    // The headcount says one agent exists; the copy beneath it must not say none.
+    expect(await screen.findByText("No agent worked in this range.")).toBeInTheDocument();
+    expect(screen.getByTestId("roster-headcount")).toHaveTextContent("Headcount 1 - 1 retired");
+  });
+
   it("names the retired share of the headcount once anyone is retired", async () => {
     const agentsReport = vi.fn().mockResolvedValue({
       ...agentsReportResponse,

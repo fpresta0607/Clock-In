@@ -2147,7 +2147,11 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
               {agentsReport === undefined ? (
                 !agentsReportError && <p className="subtle">Loading…</p>
               ) : agentsReport.rows.length === 0 ? (
-                <p className="subtle">No agents on the roster yet. Coding-agent shifts mint them automatically.</p>
+                <p className="subtle">
+                  {agentsReport.headcount.total === 0
+                    ? "No agents yet. One is added automatically the first time a coding agent works."
+                    : "No agent worked in this range."}
+                </p>
               ) : (
                 <ol className="board-list is-roster" data-testid="agent-roster-list">
                   {/* The roster is the selector, like the Humans board: the

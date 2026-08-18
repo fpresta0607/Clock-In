@@ -77,6 +77,25 @@ integration("agents operator-and-repo identity upsert", () => {
     expect(record?.status).toBe("anonymous");
   });
 
+  // The roster filled with a row per gate run: tooling that checks a repo out
+  // per run leaves a working directory named after the run, and identity keys
+  // on that directory. A run names no codebase, so it identifies none.
+  it("collapses two per-run worktrees onto the one unassigned identity", async () => {
+    const now = new Date();
+    const base = { organizationId, ownerUserId, source: "amp", projectId: null, name: "Amp", now } as const;
+    const worktrees = "C:/Users/alex/.no-mistakes/repos/3245fe18a7c8.git/worktrees";
+    const firstRun = await repository.upsertForKey({ ...base, repoRoot: `${worktrees}/01M06FSGP392MH6VJNRX8T364A` });
+    const secondRun = await repository.upsertForKey({ ...base, repoRoot: `${worktrees}/01M08C82C40W5Y5Q0X3BFGYNFT` });
+
+    expect(secondRun.id).toBe(firstRun.id);
+    const record = await repository.findById(subject, firstRun.id);
+    // Keyed on nothing and named after nothing: the row a run reaches is the
+    // operator's bucket, which is also where a repo-less sighting lands.
+    expect(record?.repoRoot).toBeNull();
+    expect(record?.name).toBe("Amp @ unassigned");
+    await expect(repository.upsertForKey({ ...base, repoRoot: null })).resolves.toEqual({ id: firstRun.id });
+  });
+
   it("mints a separate identity per repo and names it from the repo's folder", async () => {
     const now = new Date();
     const base = { organizationId, ownerUserId, source: "claude_code", projectId, name: "Claude Code", now } as const;
@@ -158,31 +177,22 @@ integration("agents operator-and-repo identity upsert", () => {
     expect((await repository.findById(subject, retired.id))?.status).toBe("retired");
   });
 
-  it("graduates a repo-less identity in place, keeping its id and its history", async () => {
+  // A bucket never graduates in place, so the codebase a shift's commit names
+  // is reached the same way every other identity is: find-or-create. The
+  // bucket keeps its own row for the shifts still pooled in it.
+  it("answers a graduating shift with the codebase's own identity, never the bucket's", async () => {
     const now = new Date();
-    const key = { organizationId, ownerUserId, source: "grok", repoRoot: null, projectId: null, name: "Grok", now } as const;
-    const bucket = await repository.upsertForKey(key);
+    const base = { organizationId, ownerUserId, source: "grok", projectId: null, name: "Grok", now } as const;
+    const bucket = await repository.upsertForKey({ ...base, repoRoot: null });
 
-    await expect(repository.claimRepoRoot(organizationId, bucket.id, piggies, now)).resolves.toBe(true);
+    const graduated = await repository.upsertForKey({ ...base, repoRoot: piggies });
 
-    const record = await repository.findById(subject, bucket.id);
-    expect(record?.repoRoot).toBe(piggies);
-    // The id never moved, so nothing has to be re-summed - and the bucket is
-    // free again for the operator's next repo-less shift.
-    const nextBucket = await repository.upsertForKey(key);
-    expect(nextBucket.id).not.toBe(bucket.id);
-  });
-
-  it("refuses to graduate onto a codebase another identity already holds", async () => {
-    const now = new Date();
-    const taken = "C:/dev/retire-91";
-    await repository.upsertForKey({ organizationId, ownerUserId, source: "muse", repoRoot: taken, projectId: null, name: "Muse", now });
-    const bucket = await repository.upsertForKey({ organizationId, ownerUserId, source: "muse", repoRoot: null, projectId: null, name: "Muse", now });
-
-    // The caller re-homes the session onto the existing agent instead; a
-    // duplicate identity is never created.
-    await expect(repository.claimRepoRoot(organizationId, bucket.id, taken, now)).resolves.toBe(false);
+    expect(graduated.id).not.toBe(bucket.id);
     expect((await repository.findById(subject, bucket.id))?.repoRoot).toBeNull();
+    expect((await repository.findById(subject, graduated.id))?.repoRoot).toBe(piggies);
+    // A second shift naming the same codebase reaches that identity, not a
+    // duplicate of it.
+    await expect(repository.upsertForKey({ ...base, repoRoot: piggies })).resolves.toEqual({ id: graduated.id });
   });
 
   it("retires an emptied unassigned bucket, and leaves one that still has shifts", async () => {
@@ -200,5 +210,17 @@ integration("agents operator-and-repo identity upsert", () => {
     `;
     await expect(repository.retireIfSessionless(organizationId, kept.id, now)).resolves.toBe(false);
     expect((await repository.findById(subject, kept.id))?.status).toBe("anonymous");
+  });
+
+  // Naming an agent registers it, so 'anonymous' is what marks a row as still
+  // machine-minted. An emptied bucket someone named keeps its id and its name.
+  it("leaves an emptied unassigned bucket alone once a member has named it", async () => {
+    const now = new Date();
+    const key = { organizationId, ownerUserId, source: "zed", repoRoot: null, projectId: null, name: "Zed", now } as const;
+    const named = await repository.upsertForKey(key);
+    await repository.update(subject, named.id, { name: "Alex's helper", status: "registered", updatedAt: now });
+
+    await expect(repository.retireIfSessionless(organizationId, named.id, now)).resolves.toBe(false);
+    expect(await repository.findById(subject, named.id)).toMatchObject({ name: "Alex's helper", status: "registered" });
   });
 });

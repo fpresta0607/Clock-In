@@ -249,10 +249,13 @@ repository is one roster entry, not a new row per shift, and two people running
 the same runtime on the same repository are two workers rather than one. Each
 `agent_sessions` row is that identity's shift. The operator is whoever's desktop
 uploaded the shift, so every runtime gets the distinction the day its hooks are
-wired. A shift whose working directory is not in a repository — or whose desktop
-predates the repo probe — lands in that person's **unassigned** row and moves to
-its codebase when its first commit names one; nothing is stranded and no default
-codebase is invented. The Clock-In project stays on the roster row as a label
+wired. A shift whose working directory names no codebase — it is not in a
+repository, the desktop predates the repo probe, or the directory is a per-run
+worktree named after a run id — lands in that person's **unassigned** bucket, a
+real roster row several shifts share. The bucket itself never becomes a codebase:
+when a shift's own commit names one, that shift alone moves onto that codebase's
+identity and leaves the rest of the bucket behind; nothing is stranded and no
+default codebase is invented. The Clock-In project stays on the roster row as a label
 that follows the path mappings, not as part of the identity, so re-mapping a
 directory never splits or merges a worker. For a shift in a git repo, the desktop app captures the
 branch, and the title, commit id and repository path of the commits the shift
