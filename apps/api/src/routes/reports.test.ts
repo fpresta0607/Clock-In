@@ -270,4 +270,59 @@ describe("report routes", () => {
     expect(bogus.status).toBe(400);
     await expect(bogus.json()).resolves.toEqual({ error: { code: "validation_error", message: "Invalid agents report filters." } });
   });
+
+  // The Agents tab calls this and nothing else, and the response leaves the
+  // route through a strict schema: a field the service composes wrong is a 500
+  // here, not a typecheck failure, so the shape is asserted over the wire.
+  it("returns the shifts map grouped by codebase, through the strict response schema", async () => {
+    const reports = new Reports();
+    reports.agentIntervals = [{
+      sessionId: "11c7e513-b094-4d4c-ae55-21790ae019a4",
+      user: { id: ids.user, name: "Alex" },
+      source: "claude_code",
+      model: "claude-opus-5",
+      cwd: "C:\\dev\\clock-in",
+      projectId: ids.project,
+      agentId: "e1c7e513-b094-4d4c-ae55-21790ae019a4",
+      startedAt: new Date("2026-08-06T14:00:00.000Z"),
+      endedAt: new Date("2026-08-06T15:00:00.000Z"),
+    }];
+
+    const response = await app(reports).request("http://api.test/reports/agent-shifts", { headers: { authorization: bearerHeader } });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      totalAgentSeconds: 3_600,
+      groups: [{
+        // The codebase reaches every member as a name, never as the path.
+        repo: "clock-in",
+        agentSeconds: 3_600,
+        shiftCount: 1,
+        // Nothing decided, so no rate at all rather than a fake zero.
+        heldRate: null,
+        shifts: [{
+          id: "11c7e513-b094-4d4c-ae55-21790ae019a4",
+          source: "claude_code",
+          owner: { id: ids.user, name: "Alex" },
+          model: "claude-opus-5",
+          agentSeconds: 3_600,
+          commitCount: 0,
+        }],
+      }],
+    });
+  });
+
+  // The filter schema is strict, so a parameter the dashboard invents and this
+  // build has never heard of has to be a stated 400, never a 500.
+  it("rejects a query parameter the agent-shifts filter has never heard of", async () => {
+    const response = await app().request("http://api.test/reports/agent-shifts?sort=hours", { headers: { authorization: bearerHeader } });
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: { code: "validation_error", message: "Invalid agent shifts filters." } });
+  });
+
+  it("rejects an agent-shifts scope naming a project outside the workspace", async () => {
+    const response = await app().request(`http://api.test/reports/agent-shifts?scope=${ids.outsideProject}`, { headers: { authorization: bearerHeader } });
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual({ error: { code: "not_found", message: "Project not found." } });
+  });
 });

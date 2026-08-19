@@ -109,62 +109,54 @@ const mapping = {
   projectId: project.id,
 };
 
-const agentsReport = {
-  headcount: { total: 1, active: 1, retired: 0 },
-  rows: [{
-    agent: {
-      id: "00000000-0000-4000-8000-000000000500",
-      name: "Claude Code @ Field work",
-      source: "claude_code",
-      status: "anonymous" as const,
-      owner: { id: user.id, name: user.name },
-      project: { id: project.id, name: project.name },
-      repoName: "clock-in",
-      repoRoot: "C:/dev/clock-in",
+/// The Agents tab's map: two codebases, three shifts, one decided commit.
+const agentShifts = {
+  totalAgentSeconds: 7_200,
+  groups: [
+    {
+      repo: "clock-in",
+      agentSeconds: 5_400,
+      shiftCount: 2,
+      heldRate: 0.5,
+      shifts: [
+        {
+          id: "00000000-0000-4000-8000-000000000601",
+          source: "claude_code",
+          owner: { id: user.id, name: user.name },
+          model: "claude-opus-5",
+          startedAt: "2026-08-06T15:00:00.000Z",
+          endedAt: "2026-08-06T16:00:00.000Z",
+          agentSeconds: 3_600,
+          commitCount: 2,
+        },
+        {
+          id: "00000000-0000-4000-8000-000000000602",
+          source: "claude_code",
+          owner: { id: user.id, name: user.name },
+          model: null,
+          startedAt: "2026-08-06T13:00:00.000Z",
+          endedAt: "2026-08-06T13:30:00.000Z",
+          agentSeconds: 1_800,
+          commitCount: 0,
+        },
+      ],
     },
-    agentSeconds: 5_400,
-    shiftCount: 2,
-    commitsRecorded: 0,
-    commitsPending: 0,
-    commitsMerged: 0,
-    commitsReverted: 0,
-    commitsOrphaned: 0,
-    heldRate: null,
-    models: ["claude-fable-5"],
-    repos: ["clock-in"],
-    tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
-    tokensReported: true,
-  }],
-};
-
-/// The paystub the Agents tab renders for the picked roster agent.
-const agentPaystub = {
-  totals: {
-    agentSeconds: 5_400,
-    shiftCount: 2,
-    commitsRecorded: 3,
-    heldRate: 0.5,
-    tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
-    tokensReported: true,
-    ownerActiveSeconds: 3_600,
-    awaySeconds: 1_800,
-  },
-  models: [
-    { model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, maxConcurrent: 2, medianSeconds: 3_600 },
-    { model: null, agentSeconds: 1_800, shiftCount: 1, maxConcurrent: 1, medianSeconds: 1_800 },
-  ],
-  codebases: [
-    { repo: "clock-in", agentSeconds: 3_600, shiftCount: 1 },
-    { repo: null, agentSeconds: 1_800, shiftCount: 1 },
-  ],
-  hourly: [],
-  trend: [
-    { periodStartAt: "2026-07-06T00:00:00.000Z", agentSeconds: 0, shiftCount: 0, heldRate: null },
-    { periodStartAt: "2026-07-13T00:00:00.000Z", agentSeconds: 1_800, shiftCount: 1, heldRate: null },
-    { periodStartAt: "2026-07-20T00:00:00.000Z", agentSeconds: 3_600, shiftCount: 2, heldRate: 0.5 },
-    { periodStartAt: "2026-07-27T00:00:00.000Z", agentSeconds: 900, shiftCount: 1, heldRate: 1 },
-    { periodStartAt: "2026-08-03T00:00:00.000Z", agentSeconds: 5_400, shiftCount: 3, heldRate: null },
-    { periodStartAt: "2026-08-10T00:00:00.000Z", agentSeconds: 2_700, shiftCount: 2, heldRate: null },
+    {
+      repo: null,
+      agentSeconds: 1_800,
+      shiftCount: 1,
+      heldRate: null,
+      shifts: [{
+        id: "00000000-0000-4000-8000-000000000603",
+        source: "pi",
+        owner: { id: user.id, name: user.name },
+        model: "deepseek-v4-pro",
+        startedAt: "2026-08-06T12:00:00.000Z",
+        endedAt: "2026-08-06T12:30:00.000Z",
+        agentSeconds: 1_800,
+        commitCount: 1,
+      }],
+    },
   ],
 };
 
@@ -198,8 +190,7 @@ const bridgeFor = (overrides: Partial<TimerBridge> = {}): TimerBridge => ({
   settingsGet: vi.fn().mockResolvedValue(settings),
   settingsUpdate: vi.fn().mockResolvedValue(settings),
   meStats: vi.fn().mockResolvedValue(meStats),
-  agentsReport: vi.fn().mockResolvedValue(agentsReport),
-  agentPaystub: vi.fn().mockResolvedValue(agentPaystub),
+  agentShifts: vi.fn().mockResolvedValue(agentShifts),
   projectCreate: vi.fn().mockResolvedValue(newProject),
   projectUpdate: vi.fn().mockResolvedValue(project),
   projectUsage: vi.fn().mockResolvedValue({ sessionCount: 0, durationSeconds: 0, agentSessionCount: 0 }),
@@ -222,7 +213,7 @@ const openAllStats = async (person: ReturnType<typeof userEvent.setup>): Promise
 const openAgentsTab = async (person: ReturnType<typeof userEvent.setup>): Promise<HTMLElement> => {
   const panel = await openAllStats(person);
   await person.click(within(panel).getByRole("button", { name: "Agents" }));
-  await within(panel).findByTestId("agent-roster-list");
+  await within(panel).findByTestId("agent-shifts");
   return panel;
 };
 
@@ -806,10 +797,14 @@ describe("the today panel", () => {
     })} />);
 
     const graph = await screen.findByTestId("hourly-graph");
-    // The runtime ran shifts but reported no tokens, and the plot says so.
-    expect(graph).toHaveTextContent(`No token data from ${sourceLabel("codex")}.`);
+    // The time view says nothing about tokens: repeated under every graph,
+    // the blind-runtime note read as a standing warning about nothing on
+    // screen. It belongs to the token series alone.
+    expect(graph).not.toHaveTextContent(/No token data/);
     const measure = within(graph).getByRole("group", { name: "Chart measure" });
     await userEvent.click(within(measure).getByRole("button", { name: "Tokens" }));
+    // Now the runtime that ran shifts but reported none is named.
+    expect(graph).toHaveTextContent(`No token data from ${sourceLabel("codex")}.`);
 
     const tokensIn = graph.querySelector('path[data-series="tokens-in"]');
     const tokensOut = graph.querySelector('path[data-series="tokens-out"]');
@@ -1250,237 +1245,79 @@ describe("the team board", () => {
 });
 
 describe("the agents tab", () => {
-  it("switches from the human board to a read-only agent roster and back", async () => {
-    const bridge = bridgeFor();
-    const person = userEvent.setup();
-    render(<App bridge={bridge} />);
-
-    const panel = await openAllStats(person);
-    // Humans is the default: the board and the member breakdown are on screen.
-    expect(within(panel).getByTestId("board-list")).toBeInTheDocument();
-    expect(within(panel).getByTestId("member-stats")).toBeInTheDocument();
-    expect(within(panel).queryByTestId("agent-roster-list")).not.toBeInTheDocument();
-
-    await person.click(within(panel).getByRole("button", { name: "Agents" }));
-
-    const roster = await within(panel).findByTestId("agent-roster-list");
-    expect(within(roster).getByText("Claude Code @ Field work")).toBeInTheDocument();
-    expect(within(roster).getByText(/1h 30m/)).toBeInTheDocument();
-    const row = within(roster).getByText("Claude Code @ Field work").closest("li");
-    // The roster is the selector: the first row opens selected, and its
-    // paystub trend renders underneath as a measured bar per weekly bucket.
-    // Every secondary fact is its own span, so the line wraps rather than
-    // clipping; the separators are drawn, not written into the text.
-    expect(row).toHaveClass("is-selected");
-    for (const fact of ["Claude Code", "Timer User", "claude-fable-5", "clock-in", "2 shifts", "held pending"]) {
-      expect(within(row!).getByText(fact)).toHaveClass("board-fact");
-    }
-    await waitFor(() => expect(bridge.agentPaystub).toHaveBeenCalled());
-    expect(vi.mocked(bridge.agentPaystub).mock.calls.at(-1)?.[0]).toBe(agentsReport.rows[0]!.agent.id);
-    const trend = await within(panel).findByTestId("paystub-trend");
-    const bars = trend.querySelectorAll('rect[data-series="week"]');
-    expect(bars).toHaveLength(6);
-    expect(Number(bars[4]!.getAttribute("height"))).toBeGreaterThan(Number(bars[3]!.getAttribute("height")));
-    // The keyboard read-out says what the week holds.
-    trend.querySelector("svg")!.focus();
-    await person.keyboard("{End}");
-    expect(within(trend).getByRole("status")).toHaveTextContent("2 shifts");
-    // The human board and its breakdown step aside while Agents is open.
-    expect(within(panel).queryByTestId("board-list")).not.toBeInTheDocument();
-    expect(within(panel).queryByTestId("member-stats")).not.toBeInTheDocument();
-    await waitFor(() => expect(bridge.agentsReport).toHaveBeenCalled());
-
-    await person.click(within(panel).getByRole("button", { name: "Humans" }));
-    expect(within(panel).getByTestId("board-list")).toBeInTheDocument();
-    expect(within(panel).queryByTestId("agent-roster-list")).not.toBeInTheDocument();
-  });
-
-  it("charts the member's hourly series on the Humans tab", async () => {
-    const bridge = bridgeFor({
-      meStats: vi.fn().mockResolvedValue({
-        ...meStats,
-        hourly: [
-          { hourStart: "2026-08-15T09:00:00.000Z", activeSeconds: 600, agentSeconds: 300, inputTokens: null, outputTokens: null, cacheCreationInputTokens: null, cacheReadInputTokens: null },
-          { hourStart: "2026-08-15T10:00:00.000Z", activeSeconds: 1_800, agentSeconds: 900, inputTokens: null, outputTokens: null, cacheCreationInputTokens: null, cacheReadInputTokens: null },
-        ],
-      }),
-    });
-    const person = userEvent.setup();
-    render(<App bridge={bridge} />);
-
-    const panel = await openAllStats(person);
-    const member = await within(panel).findByTestId("member-stats");
-    const graph = await within(member).findByTestId("hourly-graph");
-    expect(graph.querySelector('path[data-series="agent"]')).not.toBeNull();
-    expect(graph.querySelector('path[data-series="human"]')).not.toBeNull();
-  });
-
-  it("puts the agent's runtime split, sessions table and codebases under the picked agent", async () => {
+  it("maps every shift under its codebase, with the total recorded on top", async () => {
     const person = userEvent.setup();
     render(<App bridge={bridgeFor()} />);
 
     const panel = await openAgentsTab(person);
-    const stats = await within(panel).findByTestId("overlay-agent-stats");
 
-    // The runtime block reads against its owner's hours, by name, and the
-    // ratio divides by those hours rather than the caller's.
-    const breakdown = await within(stats).findByTestId("agent-breakdown");
-    expect(breakdown).toHaveTextContent("Agent runtime — summed, may exceed Timer User's hours");
-    expect(breakdown).toHaveTextContent("While Timer User was there");
-    expect(breakdown).toHaveTextContent("1h 00m");
-    expect(breakdown).toHaveTextContent("Ran while away");
-    expect(breakdown).toHaveTextContent("Total agent time · leverage");
-    expect(breakdown).toHaveTextContent("1h 30m · 1.5×");
-    expect(breakdown).toHaveTextContent("50%");
-
-    // The sessions table is this agent's shifts, folded per model - the
-    // runtime column is its one runtime, never another worker's.
-    const sessions = within(stats).getByTestId("agent-sessions");
-    const cells = [...sessions.querySelectorAll("tbody td")].map((cell) => cell.textContent);
-    expect(cells).toEqual([
-      "Claude Code", "claude-fable-5", "1", "2", "1h 00m", "1h 00m",
-      "Claude Code", "not recorded", "1", "1", "30m", "30m",
-    ]);
-
-    const codebases = within(stats).getByTestId("agent-codebase-list");
-    expect(codebases).toHaveTextContent("clock-in");
-    expect(codebases).toHaveTextContent("No codebase recorded");
+    // The header mirrors the Humans tab: who the numbers are for, the range,
+    // and the recorded total - then the codebases, heaviest first.
+    expect(within(panel).getByRole("heading", { level: 3, name: /Agents · Today/ })).toBeInTheDocument();
+    expect(within(panel).getByText("2h 00m")).toBeInTheDocument();
+    const groups = within(panel).getAllByTestId("shift-group");
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toHaveTextContent("clock-in");
+    expect(groups[0]).toHaveTextContent("1h 30m");
+    // Held appears once a commit is decided, and only then: the label-less
+    // group's commits are all pending, so it says nothing rather than
+    // "pending".
+    expect(groups[0]).toHaveTextContent("50% held");
+    expect(groups[1]).toHaveTextContent("No codebase recorded");
+    expect(groups[1]!.textContent).not.toMatch(/held|pending/);
+    // There is no leaderboard here: nothing ranks, nothing is clickable.
+    expect(within(panel).queryByTestId("agent-roster-list")).not.toBeInTheDocument();
   });
 
-  it("shows a dash rather than a zero when the API predates the session facts", async () => {
+  it("shows no hourly graph on all time, keeping the groups and total", async () => {
+    // Pinned to the afternoon the fixture's shifts ran, so "Today" really does
+    // bound them and the folded line has something to draw.
+    vi.setSystemTime(new Date("2026-08-06T20:00:00.000Z"));
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor()} />);
+
+    const panel = await openAgentsTab(person);
+    const shifts = within(panel).getByTestId("agent-shifts");
+    // A bounded range folds an hourly line from the shifts on screen.
+    expect(within(shifts).getByTestId("hourly-graph")).toBeInTheDocument();
+
+    await person.click(within(panel).getByRole("button", { name: "All time" }));
+
+    // Per-hour resolution over an unbounded range is meaningless, so the graph
+    // goes away - but the codebase map and its total stay put.
+    await waitFor(() => expect(within(shifts).queryByTestId("hourly-graph")).not.toBeInTheDocument());
+    expect(within(shifts).getByText("2h 00m")).toBeInTheDocument();
+    expect(within(shifts).getAllByTestId("shift-group")).toHaveLength(2);
+  });
+
+  it("gives each shift its own line: when, who, what model, what commits", async () => {
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor()} />);
+
+    const panel = await openAgentsTab(person);
+
+    const rows = within(within(panel).getAllByTestId("shift-group")[0]!).getAllByRole("listitem");
+    // Newest first, as the API orders them.
+    expect(rows[0]).toHaveTextContent("Claude Code");
+    expect(rows[0]).toHaveTextContent("Timer User");
+    expect(rows[0]).toHaveTextContent("claude-opus-5");
+    expect(rows[0]).toHaveTextContent("2 commits");
+    expect(rows[0]).toHaveTextContent("1h 00m");
+    // A shift that named no model says nothing - absence is absence.
+    expect(rows[1]!.textContent).not.toMatch(/not recorded/);
+  });
+
+  it("says nobody worked rather than rendering an empty map", async () => {
     const person = userEvent.setup();
     render(<App bridge={bridgeFor({
-      agentPaystub: vi.fn().mockResolvedValue({
-        ...agentPaystub,
-        totals: { ...agentPaystub.totals, ownerActiveSeconds: null, awaySeconds: null },
-        models: [{ model: null, agentSeconds: 5_400, shiftCount: 2, maxConcurrent: null, medianSeconds: null }],
-        codebases: [],
-      }),
+      agentShifts: vi.fn().mockResolvedValue({ totalAgentSeconds: 0, groups: [] }),
     })} />);
 
     const panel = await openAgentsTab(person);
-    const stats = await within(panel).findByTestId("overlay-agent-stats");
 
-    const cells = [...within(stats).getByTestId("agent-sessions").querySelectorAll("tbody td")]
-      .map((cell) => cell.textContent);
-    // A null model is a shift whose hook named none - said out loud, never a
-    // bare dash; max at once and median are dashes, never fake zeros.
-    expect(cells).toEqual(["Claude Code", "not recorded", "2", "-", "1h 30m", "-"]);
-    // Nothing claims a split the API never sent.
-    const breakdown = within(stats).getByTestId("agent-breakdown");
-    expect(breakdown).not.toHaveTextContent("While Timer User was there");
-    expect(breakdown).not.toHaveTextContent("leverage");
-    expect(within(stats).queryByTestId("agent-codebase-list")).not.toBeInTheDocument();
-  });
-
-  it("reports every roster agent, zero-activity ones included, with no register control", async () => {
-    const bridge = bridgeFor({
-      agentsReport: vi.fn().mockResolvedValue({
-        headcount: { total: 2, active: 1, retired: 1 },
-        rows: [
-          {
-            agent: {
-              id: "00000000-0000-4000-8000-000000000501",
-              name: "Codex @ unassigned",
-              source: "codex",
-              status: "registered" as const,
-              owner: { id: user.id, name: user.name },
-              project: { id: project.id, name: project.name },
-              repoName: null,
-              repoRoot: null,
-            },
-            agentSeconds: 0,
-            shiftCount: 0,
-            commitsRecorded: 0,
-            commitsPending: 0,
-            commitsMerged: 0,
-            commitsReverted: 0,
-            commitsOrphaned: 0,
-            heldRate: null,
-            models: [],
-            repos: [],
-            tokens: null,
-            tokensReported: false,
-          },
-          {
-            agent: {
-              id: "00000000-0000-4000-8000-000000000502",
-              name: "Claude Code @ pocket-piggies",
-              source: "claude_code",
-              status: "retired" as const,
-              owner: { id: user.id, name: user.name },
-              project: null,
-              // A member who owns neither agent is sent the name and no path;
-              // the row has to read correctly from the name alone.
-              repoName: "pocket-piggies",
-              repoRoot: null,
-            },
-            agentSeconds: 3_600,
-            shiftCount: 1,
-            commitsRecorded: 2,
-            commitsPending: 0,
-            commitsMerged: 1,
-            commitsReverted: 1,
-            commitsOrphaned: 0,
-            heldRate: 0.5,
-            models: ["claude-fable-5"],
-            repos: ["pocket-piggies"],
-            tokens: { inputTokens: 8_000, outputTokens: 600, cacheCreationInputTokens: 200, cacheReadInputTokens: 40_000 },
-            tokensReported: true,
-          },
-        ],
-      }),
-    });
-    const person = userEvent.setup();
-    render(<App bridge={bridge} />);
-
-    const panel = await openAllStats(person);
-    await person.click(within(panel).getByRole("button", { name: "Agents" }));
-
-    const roster = await within(panel).findByTestId("agent-roster-list");
-    expect(within(roster).queryByRole("button", { name: "Register" })).not.toBeInTheDocument();
-    const zeroRow = within(roster).getByText("Codex @ unassigned").closest("li");
-    expect(zeroRow).not.toHaveClass("is-anonymous");
-    expect(zeroRow).toHaveTextContent("0s");
-    expect(zeroRow).toHaveTextContent("0 shifts");
-    expect(zeroRow).toHaveTextContent("held pending");
-    // A repo-less bucket names no codebase rather than inventing one.
-    expect(within(zeroRow!).queryByText("pocket-piggies")).not.toBeInTheDocument();
-    const retiredRow = within(roster).getByText("Claude Code @ pocket-piggies").closest("li");
-    expect(retiredRow).toHaveTextContent("retired");
-    expect(retiredRow).toHaveTextContent("50% held");
-    // The codebase rides the row even with the path withheld, so a member can
-    // still see where the hours went.
-    expect(within(retiredRow!).getByText("pocket-piggies")).toHaveClass("board-fact");
-  });
-
-  // The Overlord's roster showed one titleless row carrying every Claude
-  // session. A row with no title is unpickable and reads as a rendering
-  // fault, so a blank stored name falls back to the runtime it is.
-  it("titles a roster row with its runtime rather than nothing when the name is blank", async () => {
-    const bridge = bridgeFor({
-      agentsReport: vi.fn().mockResolvedValue({
-        headcount: { total: 1, active: 1, retired: 0 },
-        rows: [{
-          ...agentsReport.rows[0]!,
-          agent: { ...agentsReport.rows[0]!.agent, name: "   " },
-        }],
-      }),
-    });
-    const person = userEvent.setup();
-    render(<App bridge={bridge} />);
-
-    const panel = await openAgentsTab(person);
-    const roster = within(panel).getByTestId("agent-roster-list");
-    const row = within(roster).getAllByRole("listitem")[0]!;
-    expect(row.querySelector(".board-name")).toHaveTextContent(sourceLabel("claude_code"));
-    // The paystub underneath is titled by the same rule, so the two never
-    // disagree about what the picked agent is called.
-    expect(within(panel).getByRole("heading", { level: 3 }))
-      .toHaveTextContent(sourceLabel("claude_code"));
+    expect(within(panel).getByText("No agent worked in this range.")).toBeInTheDocument();
   });
 });
-
 describe("the update banner", () => {
   it("announces a downloading update and the restart that follows", async () => {
     let announce: ((version: string) => void) | undefined;

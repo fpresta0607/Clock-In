@@ -31,7 +31,6 @@
 
 .rank { width: 34px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .description { color: var(--text-secondary); max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.subtle-cell { color: var(--text-secondary); }
 
 a.ghost { border-radius: 9999px; font-size: .84rem; font-weight: 650; letter-spacing: .06em; text-decoration: none; }
 a.link { display: inline-block; width: auto; margin-top: 0; }
@@ -88,47 +87,18 @@ a.primary { display: inline-block; text-decoration: none; }
 .board-times { display: grid; justify-items: end; gap: 1px; }
 .board-agent { color: var(--text-secondary); font-size: .74rem; font-variant-numeric: tabular-nums; }
 
-/* The roster tab: every row carries an inline Rename beside the board choice;
-   naming an anonymous agent is what registers it, so there is no grey state.
-   A roster row also carries far more than a rank and a number - runtime,
-   owner, models, codebases, shifts, held rate - so it gets two rows of its
-   own instead of one right-aligned line that clips. The facts wrap between
-   themselves at any width; only the name is allowed to ellipsize. */
-/* Operator groups: the owner is a heading now, not a fact on every row. */
-.roster-group + .roster-group { margin-top: 12px; }
-.roster-group .group-label { margin: 0 0 4px; }
-.roster-list li { display: flex; align-items: flex-start; gap: 8px; }
-.roster-list li .board-choice {
-  flex: 1;
-  min-width: 0;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: baseline;
-  row-gap: 4px;
-}
-.board-facts { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 8px; color: var(--text-secondary); font-size: .78rem; }
-.board-fact { display: inline-block; overflow-wrap: anywhere; }
-/* The separator trails its own fact rather than leading the next one, so a
-   wrapped line never begins with a dangling dot. */
-.board-fact:not(:last-child)::after { content: "·"; margin-left: 8px; color: var(--glass-border); }
-/* The codebase is the fact org members came here for, so it reads at full
-   contrast while the rest of the line stays secondary. */
-.board-fact.is-repo { color: var(--mint); }
-.roster-rename { flex: none; }
-
-/* Six columns will not fit a narrow viewport; the table scrolls inside its
-   own box rather than pushing the card sideways. */
-.table-scroll { overflow-x: auto; }
-.shift-repo { margin-left: 8px; color: var(--mint); }
-.paystub-repo { color: var(--mint); }
-.manage-rename { display: flex; flex: 1; gap: 8px; align-items: center; }
-.manage-rename input { flex: 1; min-width: 0; }
-
-/* Commit verification badges on the paystub. */
-.verify-badge { margin-left: 8px; border-radius: 999px; padding: 1px 8px; font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; }
-.verify-badge.is-pending { background: rgba(163, 179, 194, .16); color: var(--text-secondary); }
-.verify-badge.is-merged { background: rgba(0, 229, 155, .16); color: var(--accent-green); }
-.verify-badge.is-reverted { background: rgba(221, 93, 79, .16); color: var(--red); }
-.verify-badge.is-orphaned { background: rgba(168, 85, 247, .16); color: var(--accent-purple); }
+/* The Agents tab's map: one head row per codebase in the stat-list rhythm,
+   its shifts indented beneath. A shift row is when · facts · duration; the
+   facts shrink and ellipsize before the duration ever wraps. */
+.shift-group { margin-top: 10px; }
+.shift-group-head { font-weight: 650; }
+.held-tag { color: var(--mint); font-size: .78rem; font-weight: 400; }
+.shift-list { display: grid; gap: 2px; margin: 2px 0 0; padding: 0 0 0 14px; list-style: none; }
+.shift-row { display: flex; align-items: baseline; gap: 10px; padding: 3px 2px; border-bottom: 1px solid rgba(163, 179, 194, .08); font-size: .82rem; }
+.shift-row:last-child { border-bottom: 0; }
+.shift-when { flex: none; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.shift-facts { flex: 1; min-width: 0; overflow: hidden; color: var(--text-secondary); text-overflow: ellipsis; white-space: nowrap; }
+.shift-duration { flex: none; font-variant-numeric: tabular-nums; }
 
 /* Scope + range: one quiet row of filters between the masthead and the cards. */
 .control-bar { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
@@ -289,15 +259,8 @@ a.download-secondary:hover { color: #ffffff; }
 .swatch-agent3 { background: #00a868; }
 .swatch-away { background: var(--accent-blue); }
 
-/* Which models ran, with session count, overlap, and length. */
-.agent-sessions { margin-top: 14px; }
-.agent-sessions table { margin-top: 2px; }
-/* A heading never wraps; `.table-scroll` carries a narrow viewport instead. */
-.agent-sessions th { white-space: nowrap; }
-.agent-sessions .numeric { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-
-/* SVG charts: the hourly line graph and the weekly trend strip. Colors come
-   from the brand.css chart tokens; only layout lives here. */
+/* SVG charts: the hourly line graph. Colors come from the brand.css chart
+   tokens; only layout lives here. */
 /* The charts draw into a fixed viewBox, so width drives height: unbounded, a
    2482px card renders the hourly graph 737px tall. This is the aspect bound,
    not a layout preference - 1050px is the width the charts were drawn at, and

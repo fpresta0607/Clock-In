@@ -1,9 +1,5 @@
 import type {
-  Agent,
-  AgentPatchRequest,
-  AgentPaystubResponse,
-  AgentsListResponse,
-  AgentsReportResponse,
+  AgentShiftsResponse,
   LeaderboardResponse,
   MeResponse,
   MeStatsResponse,
@@ -257,28 +253,8 @@ export function createClient(config: ClientConfig) {
       });
     },
 
-    /** The roster: every agent identity this workspace has seen. */
-    agents: () => json<AgentsListResponse>("/agents"),
-    async patchAgent(id: string, patch: AgentPatchRequest): Promise<Agent> {
-      const response = await apiRequest(`/agents/${id}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(patch),
-      });
-      return response.json() as Promise<Agent>;
-    },
-    /** Admin-only: the winner absorbs the loser's shifts; the loser retires. */
-    async mergeAgents(winnerId: string, loserId: string): Promise<void> {
-      await apiRequest(`/agents/${winnerId}/merge`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ loserId }),
-      });
-    },
-    agentPaystub: (id: string, query = "") => json<AgentPaystubResponse>(`/agents/${id}/paystub${query}`),
-
-    /** The pay-run report: every roster agent's hours, shifts, and held share. */
-    agentsReport: (query = "") => json<AgentsReportResponse>(`/reports/agents${query}`),
+    /** Every shift in the range grouped by the codebase it worked. */
+    agentShifts: (query = "") => json<AgentShiftsResponse>(`/reports/agent-shifts${query}`),
 
     leaderboard: (query = "") => json<LeaderboardResponse>(`/reports/leaderboard${query}`),
     report: (query = "") => json<ReportResponse>(`/reports${query}`),

@@ -1,4 +1,4 @@
-import { agentsReportFiltersSchema, agentsReportResponseSchema, leaderboardFiltersSchema, leaderboardResponseSchema, reportFiltersSchema, reportResponseSchema } from "@clock-in/shared";
+import { agentShiftsFiltersSchema, agentShiftsResponseSchema, agentsReportFiltersSchema, agentsReportResponseSchema, leaderboardFiltersSchema, leaderboardResponseSchema, reportFiltersSchema, reportResponseSchema } from "@clock-in/shared";
 import { Hono } from "hono";
 import { streamText } from "hono/streaming";
 
@@ -30,6 +30,13 @@ export function createReportRoutes(service: ReportService): Hono<ApiEnvironment>
     if (!parsed.success) throw new AppError("validation_error", "Invalid agents report filters.");
     return context.json(agentsReportResponseSchema.parse(
       await service.agentsReport(getAuthenticatedSubject(context), parsed.data),
+    ));
+  });
+  routes.get("/agent-shifts", async (context) => {
+    const parsed = agentShiftsFiltersSchema.safeParse(context.req.query());
+    if (!parsed.success) throw new AppError("validation_error", "Invalid agent shifts filters.");
+    return context.json(agentShiftsResponseSchema.parse(
+      await service.agentShifts(getAuthenticatedSubject(context), parsed.data),
     ));
   });
   routes.get("/export.csv", async (context) => {

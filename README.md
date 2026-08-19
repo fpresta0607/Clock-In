@@ -153,14 +153,13 @@ beside them at once. An agent still working while the person is away feeds agent
 never the person's hours.
 
 A person's breakdown stops at what is the person's: their active time and those concurrency
-rows. Every measure of what the agents themselves did lives on the **Agents tab**, under the
-picked roster agent: an **agent-sessions table** with one row per model of that agent's shifts
-(how many ran, the peak number at once, the total runtime, the median shift length), beside
-its runtime split, its hourly chart, and the codebases it worked. "While they were there",
-"ran while away", and leverage there are measured against that agent's owner's presence, not
-the viewer's. The concurrency split sums to active time and the agent split sums to agent
-time; one shared module, `packages/shared/src/intervals.ts`, computes all of it so the
-invariants (`active = t0+t1+t2+t3+`, `agent = Σ n·tn + away`) hold everywhere.
+rows. Everything the agents themselves did lives on the **Agents tab**, as a map of shifts
+grouped by the codebase they worked: the recorded total on top, then one group per repo with
+its shifts underneath - each shift naming its runtime, its operator, the model it drove, and
+the commits it recorded. There is no leaderboard to filter and nothing to pick; a group's held
+share appears only once a commit is decided. The concurrency split sums to active time and the
+agent split sums to agent time; one shared module, `packages/shared/src/intervals.ts`, computes
+all of it so the invariants (`active = t0+t1+t2+t3+`, `agent = Σ n·tn + away`) hold everywhere.
 
 Both surfaces also chart each hour as lightweight SVG with no chart library, with a
 **Time | Tokens** switch shown only when the range holds token data: active and agent time on
@@ -168,9 +167,11 @@ the time side — agents in green, the person in gray — and tokens in (blue) a
 the token side. An hour with no token data breaks the token line rather than drawing a zero
 that never happened. Hours are bucketed to the viewer's local midnight-to-midnight calendar,
 never UTC. The web dashboard reuses its existing today/7d/30d/90d range filter for the graph;
-**All time** is unbounded and has no graph — its full history lives in the CSV export. The
-desktop app charts the course of the day on its main screen, and its All-stats overlay charts
-both tabs.
+**All time** is unbounded and has no graph, on either tab in either app — its full history
+lives in the CSV export. The desktop app charts the course of the day on its main screen, and
+its All-stats overlay charts both tabs. The Agents tab's line is folded from the very shifts
+on screen, so the line and the list can never disagree, and it plots agent runtime alone with
+no person line beside it.
 
 The board lists every member of the workspace, not just the people with recorded time: a
 teammate whose range has no evidence reads as `0s`, never as missing.
@@ -200,8 +201,9 @@ the `attribution = 'default'` bucket is the unattributed one.
 ### The project scope
 
 The web dashboard's project scope — **All Projects** or one project — filters
-the leaderboard, member stats, the session list, and the CSV export at the query layer. The
-**Unassigned** scope is retired from the picker, so a stored one reads as **All Projects**.
+the leaderboard, member stats, the Agents tab's shifts, the session list, and the CSV export
+at the query layer. The **Unassigned** scope is retired from the picker, so a stored one reads
+as **All Projects**.
 The scope and the time range live per member in `user_view_preferences`, read and written
 through `GET/PUT /me/preferences` by the web dashboard alone; the desktop All stats overlay
 is always unscoped, and the main screen's per-project stat list carries the project detail a
@@ -435,7 +437,7 @@ organization are derived from verified claims, never from the request body.
 | `POST` | `/activity/segments` | batch upload of activity segments |
 | `POST` | `/agent-sessions` | batch upload of agent lifecycle events |
 | `GET` `POST` `PATCH` `DELETE` | `/path-mappings`, `/path-mappings/:id` | map a path prefix to a project |
-| `GET` | `/reports`, `/reports/leaderboard`, `/reports/agents`, `/reports/export.csv` | organization reporting |
+| `GET` | `/reports`, `/reports/leaderboard`, `/reports/agents`, `/reports/agent-shifts`, `/reports/export.csv` | organization reporting |
 | `GET` | `/me/stats` | the caller's totals per project, per app, and per agent; an optional `?userId=` opens a teammate's |
 | `GET` `PUT` | `/me/preferences` | the web dashboard's scope+range view state |
 | `GET` | `/agents` | the org's roster of agent identities |

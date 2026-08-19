@@ -230,7 +230,7 @@ export type MeStatsConcurrency = {
 /// One (runtime, model) pair's share of a member's agent time. The session
 /// facts the API also sends stay behind: the desktop reads this split only to
 /// name the models a runtime has driven, and the Agents tab measures shifts
-/// from the paystub instead.
+/// from the shifts-by-codebase map instead.
 export type MeStatsAgentSplit = {
   source: string;
   model: string | null;
@@ -285,102 +285,38 @@ export type MeStatsProject = {
   sessionCount: number;
 };
 
-/// A roster agent's standing: everything starts anonymous, a member naming
-/// it registers it, and retired is where merge losers and decommissioned
-/// workers go.
-export type AgentRosterStatus = "anonymous" | "registered" | "retired";
-
-export type AgentsReportRow = {
-  agent: {
-    id: string;
-    name: string;
-    source: string;
-    status: AgentRosterStatus;
-    owner: { id: string; name: string };
-    project: { id: string; name: string } | null;
-    /// The codebase this identity works, as a folder name - safe for every
-    /// member. Null on the operator's unassigned bucket, and on an API from
-    /// before identity v2.
-    repoName: string | null;
-    /// The path behind that name, sent only to the owner and to workspace
-    /// admins. One absence for two reasons - an older API, and a path
-    /// deliberately withheld from this caller - read the same either way.
-    repoRoot: string | null;
-  };
-  agentSeconds: number;
-  shiftCount: number;
-  commitsRecorded: number;
-  commitsPending: number;
-  commitsMerged: number;
-  commitsReverted: number;
-  commitsOrphaned: number;
-  /// merged / decided; null while nothing has been decided yet.
-  heldRate: number | null;
-  /// Distinct models this agent's shifts named in range; empty when none did.
-  models: readonly string[];
-  /// Distinct codebases this agent worked in range - names, never paths;
-  /// empty when no shift recorded a working directory.
-  repos: readonly string[];
-  /// Token totals over the range; null when the API predates token reporting.
-  tokens: TokenTotals | null;
-  /// Whether any usage rows exist for this agent in range - rows, not nonzero sums.
-  tokensReported: boolean;
-};
-
-export type AgentsReport = {
-  headcount: { total: number; active: number; retired: number };
-  rows: readonly AgentsReportRow[];
-};
-
-/// One week of an agent's paystub trend: hours, shifts, and how the week's
-/// commits held up (null while nothing has been decided).
-export type AgentPaystubTrendBucket = {
-  periodStartAt: string;
-  agentSeconds: number;
-  shiftCount: number;
-  heldRate: number | null;
-};
-
-/// One model's slice of an agent's paystub, as the Agent-sessions table reads
-/// it. The session facts are null when the API predates them: absence shown
-/// as absence, never a zero nothing measured.
-export type AgentPaystubModel = {
+/// One shift as the Agents tab reads it: a terminal session with the facts
+/// it attested itself. `endedAt` is the last event while the shift still
+/// runs, never "still open".
+export type AgentShiftRow = {
+  id: string;
+  source: string;
+  owner: { id: string; name: string };
   model: string | null;
+  startedAt: string;
+  endedAt: string;
   agentSeconds: number;
-  shiftCount: number;
-  maxConcurrent: number | null;
-  medianSeconds: number | null;
+  commitCount: number;
 };
 
-/// One codebase's slice of an agent's paystub; `repo` is null for shifts that
-/// recorded no working directory.
-export type AgentPaystubCodebase = {
+/// One codebase's group: summed runtime and the shifts that worked it,
+/// newest first. `repo` is a folder name, never a path; null groups the
+/// shifts that recorded neither a commit root nor a working directory.
+/// `heldRate` stays null until a commit is decided - no rate is a fact
+/// before then, and the tab says nothing rather than "pending".
+export type AgentShiftsGroup = {
   repo: string | null;
   agentSeconds: number;
   shiftCount: number;
+  heldRate: number | null;
+  shifts: readonly AgentShiftRow[];
 };
 
-/// The slice of the paystub the desktop's Agents tab renders. The shift list
-/// it also carries is the web dashboard's business.
-export type AgentPaystub = {
-  totals: {
-    agentSeconds: number;
-    shiftCount: number;
-    commitsRecorded: number;
-    heldRate: number | null;
-    tokens: TokenTotals | null;
-    tokensReported: boolean;
-    /// The owner's active time in range - leverage's denominator; null when
-    /// the API predates the field.
-    ownerActiveSeconds: number | null;
-    /// Runtime outside the owner's presence; null when the API predates it.
-    awaySeconds: number | null;
-  };
-  models: readonly AgentPaystubModel[];
-  codebases: readonly AgentPaystubCodebase[];
-  hourly: readonly MeStatsHourlyBucket[];
-  trend: readonly AgentPaystubTrendBucket[];
+export type AgentShifts = {
+  totalAgentSeconds: number;
+  groups: readonly AgentShiftsGroup[];
 };
+
 
 export type ProjectCreateInput = {
   name: string;
@@ -416,12 +352,9 @@ export interface TimerBridge {
   /// `userId` names a teammate, which is how the leaderboard opens one
   /// member's breakdown; absent means the caller.
   meStats(fromAt?: string, toExclusiveAt?: string, userId?: string, scope?: string): Promise<MeStats>;
-  /// The pay-run report: every roster agent's hours, shifts, and held share
-  /// for a range. Both bounds absent asks for all time.
-  agentsReport(fromAt?: string, toExclusiveAt?: string, scope?: string): Promise<AgentsReport>;
-  /// One agent's paystub: totals, model and codebase mixes, hourly series and
-  /// six weekly trend buckets, for the overlay's Agents tab.
-  agentPaystub(agentId: string, fromAt?: string, toExclusiveAt?: string): Promise<AgentPaystub>;
+  /// Every shift in the range grouped by the codebase it worked, for the
+  /// Agents tab. Both bounds absent asks for all time.
+  agentShifts(fromAt?: string, toExclusiveAt?: string): Promise<AgentShifts>;
   projectCreate(input: ProjectCreateInput): Promise<TimerProject>;
   projectUpdate(id: string, input: { name?: string; isArchived?: boolean }): Promise<TimerProject>;
   projectUsage(id: string): Promise<ProjectUsage>;
@@ -493,12 +426,6 @@ const unitRateOrNull = (value: unknown): number | null => {
   return value as number;
 };
 
-const agentRosterStatus = (value: unknown): AgentRosterStatus => {
-  const result = string(value);
-  if (result !== "anonymous" && result !== "registered" && result !== "retired") invalidResponse();
-  return result as AgentRosterStatus;
-};
-
 const decodeUser = (value: unknown): TimerUser => {
   const candidate = record(value);
   return { id: uuid(candidate.id), email: string(candidate.email), name: string(candidate.name) };
@@ -511,13 +438,6 @@ const decodeProject = (value: unknown): TimerProject => {
 };
 
 const uuidOrNull = (value: unknown): string | null => (value === null || value === undefined ? null : uuid(value));
-
-/// A field an older API may not send yet decodes to the empty list, not an error.
-const stringArrayOrEmpty = (value: unknown): readonly string[] => {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) invalidResponse();
-  return (value as unknown[]).map(string);
-};
 
 export const decodeAccountSnapshot = (value: unknown): AccountSnapshot => {
   const candidate = record(value);
@@ -890,118 +810,38 @@ const decodeTokenTotalsOrNull = (value: unknown): TokenTotals | null => {
   };
 };
 
-const decodeAgentsReportRow = (value: unknown): AgentsReportRow => {
+const decodeAgentShiftRow = (value: unknown): AgentShiftRow => {
   const candidate = record(value);
-  const agent = record(candidate.agent);
-  const owner = record(agent.owner);
-  const project = agent.project === null || agent.project === undefined ? null : record(agent.project);
+  const owner = record(candidate.owner);
   return {
-    agent: {
-      id: uuid(agent.id),
-      name: string(agent.name),
-      source: string(agent.source),
-      status: agentRosterStatus(agent.status),
-      owner: { id: uuid(owner.id), name: string(owner.name) },
-      project: project === null ? null : { id: uuid(project.id), name: string(project.name) },
-      repoName: stringOrNull(agent.repoName ?? null),
-      repoRoot: stringOrNull(agent.repoRoot ?? null),
-    },
+    id: uuid(candidate.id),
+    source: string(candidate.source),
+    owner: { id: uuid(owner.id), name: string(owner.name) },
+    model: stringOrNull(candidate.model),
+    startedAt: string(candidate.startedAt),
+    endedAt: string(candidate.endedAt),
     agentSeconds: nonnegativeInteger(candidate.agentSeconds),
-    shiftCount: nonnegativeInteger(candidate.shiftCount),
-    commitsRecorded: nonnegativeInteger(candidate.commitsRecorded),
-    commitsPending: nonnegativeInteger(candidate.commitsPending),
-    commitsMerged: nonnegativeInteger(candidate.commitsMerged),
-    commitsReverted: nonnegativeInteger(candidate.commitsReverted),
-    commitsOrphaned: nonnegativeInteger(candidate.commitsOrphaned),
-    heldRate: unitRateOrNull(candidate.heldRate),
-    // An API from before the field shipped reads as no models named, never an error.
-    models: stringArrayOrEmpty(candidate.models),
-    repos: stringArrayOrEmpty(candidate.repos),
-    tokens: decodeTokenTotalsOrNull(candidate.tokens),
-    tokensReported: candidate.tokensReported === undefined || candidate.tokensReported === null
-      ? false
-      : boolean(candidate.tokensReported),
+    commitCount: nonnegativeInteger(candidate.commitCount ?? 0),
   };
 };
 
-export const decodeAgentsReport = (value: unknown): AgentsReport => {
-  const candidate = record(value);
-  const headcount = record(candidate.headcount);
-  const rows = candidate.rows;
-  if (!Array.isArray(rows)) invalidResponse();
-  // An API deployed before the total/active/retired rename sends
-  // anonymous/registered instead; active === anonymous + registered there.
-  const active = headcount.active === undefined
-    ? nonnegativeInteger(headcount.anonymous) + nonnegativeInteger(headcount.registered)
-    : nonnegativeInteger(headcount.active);
-  return {
-    headcount: {
-      total: nonnegativeInteger(headcount.total),
-      active,
-      retired: nonnegativeInteger(headcount.retired),
-    },
-    rows: (rows as unknown[]).map(decodeAgentsReportRow),
-  };
-};
-
-const decodeAgentPaystubTrendBucket = (value: unknown): AgentPaystubTrendBucket => {
+/// An absent group list decodes to none, never a crash: the deployed API can
+/// be older than this build, and an Agents tab with nothing to say beats one
+/// that dies decoding.
+export const decodeAgentShifts = (value: unknown): AgentShifts => {
   const candidate = record(value);
   return {
-    periodStartAt: string(candidate.periodStartAt),
-    agentSeconds: nonnegativeInteger(candidate.agentSeconds),
-    shiftCount: nonnegativeInteger(candidate.shiftCount),
-    heldRate: unitRateOrNull(candidate.heldRate),
-  };
-};
-
-const decodeAgentPaystubModel = (value: unknown): AgentPaystubModel => {
-  const candidate = record(value);
-  return {
-    model: stringOrNull(candidate.model ?? null),
-    agentSeconds: nonnegativeInteger(candidate.agentSeconds),
-    shiftCount: nonnegativeInteger(candidate.shiftCount),
-    // Null means the API predates the field; the table shows a dash there,
-    // never a zero nothing measured.
-    maxConcurrent: nonnegativeIntegerOrNull(candidate.maxConcurrent),
-    medianSeconds: nonnegativeIntegerOrNull(candidate.medianSeconds),
-  };
-};
-
-const decodeAgentPaystubCodebase = (value: unknown): AgentPaystubCodebase => {
-  const candidate = record(value);
-  return {
-    repo: stringOrNull(candidate.repo ?? null),
-    agentSeconds: nonnegativeInteger(candidate.agentSeconds),
-    shiftCount: nonnegativeInteger(candidate.shiftCount),
-  };
-};
-
-/// The paystub arrives whole; the desktop keeps what its Agents tab renders.
-/// The totals and the trend are required - an API that cannot send them is an
-/// invalid response, not an empty panel - and everything added since decodes
-/// as absence when a deployed API is older than this build.
-export const decodeAgentPaystub = (value: unknown): AgentPaystub => {
-  const candidate = record(value);
-  const totals = record(candidate.totals);
-  const trend = candidate.trend;
-  if (!Array.isArray(trend)) invalidResponse();
-  return {
-    totals: {
-      agentSeconds: nonnegativeInteger(totals.agentSeconds),
-      shiftCount: nonnegativeInteger(totals.shiftCount),
-      commitsRecorded: nonnegativeInteger(totals.commitsRecorded),
-      heldRate: unitRateOrNull(totals.heldRate),
-      tokens: decodeTokenTotalsOrNull(totals.tokens),
-      tokensReported: totals.tokensReported === undefined || totals.tokensReported === null
-        ? false
-        : boolean(totals.tokensReported),
-      ownerActiveSeconds: nonnegativeIntegerOrNull(totals.ownerActiveSeconds),
-      awaySeconds: nonnegativeIntegerOrNull(totals.awaySeconds),
-    },
-    models: (Array.isArray(candidate.models) ? candidate.models : []).map(decodeAgentPaystubModel),
-    codebases: (Array.isArray(candidate.codebases) ? candidate.codebases : []).map(decodeAgentPaystubCodebase),
-    hourly: (Array.isArray(candidate.hourly) ? candidate.hourly : []).map(decodeHourlyBucket),
-    trend: (trend as unknown[]).map(decodeAgentPaystubTrendBucket),
+    totalAgentSeconds: nonnegativeInteger(candidate.totalAgentSeconds ?? 0),
+    groups: (Array.isArray(candidate.groups) ? candidate.groups : []).map((entry) => {
+      const group = record(entry);
+      return {
+        repo: stringOrNull(group.repo),
+        agentSeconds: nonnegativeInteger(group.agentSeconds ?? 0),
+        shiftCount: nonnegativeInteger(group.shiftCount ?? 0),
+        heldRate: unitRateOrNull(group.heldRate),
+        shifts: (Array.isArray(group.shifts) ? group.shifts : []).map(decodeAgentShiftRow),
+      };
+    }),
   };
 };
 
@@ -1053,8 +893,7 @@ export const defaultBridge: TimerBridge = {
   settingsGet: () => invokeDecoded("settings_get", decodeMonitorSettings),
   settingsUpdate: (input) => invokeDecoded("settings_update", decodeMonitorSettings, { input }),
   meStats: (fromAt, toExclusiveAt, userId, scope) => invokeDecoded("me_stats", decodeMeStats, { fromAt, toExclusiveAt, userId, scope }),
-  agentsReport: (fromAt, toExclusiveAt, scope) => invokeDecoded("agents_report", decodeAgentsReport, { fromAt, toExclusiveAt, scope }),
-  agentPaystub: (agentId, fromAt, toExclusiveAt) => invokeDecoded("agent_paystub", decodeAgentPaystub, { agentId, fromAt, toExclusiveAt }),
+  agentShifts: (fromAt, toExclusiveAt) => invokeDecoded("agent_shifts", decodeAgentShifts, { fromAt, toExclusiveAt }),
   projectCreate: (input) => invokeDecoded("project_create", decodeProject, { input }),
   projectUpdate: (id, input) => invokeDecoded("project_update", decodeProject, { id, input }),
   projectUsage: (id) => invokeDecoded("project_usage", decodeProjectUsage, { id }),

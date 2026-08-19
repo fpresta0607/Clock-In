@@ -183,139 +183,54 @@ struct LeaderboardResponse {
     entries: Vec<LeaderboardEntry>,
 }
 
-/// A roster agent's standing: everything starts anonymous, a member naming
-/// it registers it, and retired is where merge losers and decommissioned
-/// workers go.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentStatus {
-    Anonymous,
-    Registered,
-    Retired,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentsReportAgent {
-    pub id: String,
-    pub name: String,
-    pub source: AgentSource,
-    pub status: AgentStatus,
-    pub owner: LeaderboardMember,
-    #[serde(default)]
-    pub project: Option<MeStatsProjectRef>,
-    /// The codebase this identity works, as a folder name - safe for every
-    /// member. Absent on the operator's unassigned bucket, and on an API from
-    /// before identity v2.
-    #[serde(default)]
-    pub repo_name: Option<String>,
-    /// The path behind that name, sent only to the agent's owner and to
-    /// workspace admins. One absence for two different reasons - an API older
-    /// than the field, and an API that deliberately withheld the path from
-    /// this caller - and the webview must read both the same way.
-    #[serde(default)]
-    pub repo_root: Option<String>,
-}
-
-/// One roster agent's row in the pay-run report: hours, shifts, and how its
-/// commits held up. Agents with no activity in range still get a row, at
-/// zero and a null held rate rather than absence.
+/// The Agents tab's whole story: what ran, where, grouped by codebase. Every
+/// field is tolerant the way every response here is - the API deploys before
+/// any installer can, so absence decodes as empty rather than as an error.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentsReportRow {
-    pub agent: AgentsReportAgent,
+pub struct AgentShifts {
+    #[serde(default)]
+    pub total_agent_seconds: u64,
+    #[serde(default)]
+    pub groups: Vec<AgentShiftsGroup>,
+}
+
+/// One codebase's group: its summed runtime and the shifts that worked it,
+/// newest first. `repo` is a folder name, never a path; `None` is the group
+/// of shifts that recorded neither a commit root nor a working directory.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentShiftsGroup {
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
     pub agent_seconds: u64,
+    #[serde(default)]
     pub shift_count: u32,
-    pub commits_recorded: u32,
-    pub commits_pending: u32,
-    pub commits_merged: u32,
-    pub commits_reverted: u32,
-    pub commits_orphaned: u32,
-    /// merged / decided; null while nothing has been decided yet.
+    /// merged / decided; `None` while nothing has been decided yet.
     #[serde(default)]
     pub held_rate: Option<f64>,
-    /// Distinct models this agent's shifts named in range; empty when none did.
     #[serde(default)]
-    pub models: Vec<String>,
-    /// Distinct codebases this agent's shifts worked in range - names, never
-    /// paths; empty when no shift recorded a working directory.
-    #[serde(default)]
-    pub repos: Vec<String>,
-    /// Token totals over the range; absent on an API that predates token
-    /// reporting, which the webview shows as absence rather than zeros.
-    #[serde(default)]
-    pub tokens: Option<AgentTokenTotals>,
-    /// Whether any usage rows exist for this agent in range - rows, not nonzero sums.
-    #[serde(default)]
-    pub tokens_reported: bool,
+    pub shifts: Vec<AgentShiftRow>,
 }
 
-/// The four token counters a runtime's own session logs report, summed over a
-/// scope. Every counter is optional-with-default: the API deploys before any
-/// installer can, so a counter added after this build must never break decode.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentTokenTotals {
-    #[serde(default)]
-    pub input_tokens: u64,
-    #[serde(default)]
-    pub output_tokens: u64,
-    #[serde(default)]
-    pub cache_creation_input_tokens: u64,
-    #[serde(default)]
-    pub cache_read_input_tokens: u64,
-}
-
-/// The roster's headcount. The API deploys before any installer can, and the
-/// standing split was renamed after 0.1.7 shipped (`active` replaced
-/// `anonymous` + `registered`), so an installer can meet either spelling.
-/// Decoding accepts both and normalizes to `active`; a required field here is
-/// how an installer generation once lost its Agents tab to a decode error.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", from = "AgentsReportHeadcountWire")]
-pub struct AgentsReportHeadcount {
-    pub total: u32,
-    /// Everyone still on the clock: anonymous and registered alike.
-    pub active: u32,
-    pub retired: u32,
-}
-
-/// The headcount as a deployed API may actually send it: `active` today,
-/// `anonymous` + `registered` before the rename. Additive fields are
-/// optional-with-default; unknown future fields serde ignores on its own.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentsReportHeadcountWire {
-    total: u32,
-    #[serde(default)]
-    active: Option<u32>,
-    #[serde(default)]
-    retired: u32,
-    #[serde(default)]
-    anonymous: Option<u32>,
-    #[serde(default)]
-    registered: Option<u32>,
-}
-
-impl From<AgentsReportHeadcountWire> for AgentsReportHeadcount {
-    fn from(wire: AgentsReportHeadcountWire) -> Self {
-        Self {
-            total: wire.total,
-            // The pre-rename API splits the active count in two; the rename
-            // is a sum away.
-            active: wire
-                .active
-                .unwrap_or(wire.anonymous.unwrap_or(0) + wire.registered.unwrap_or(0)),
-            retired: wire.retired,
-        }
-    }
-}
-
+/// One shift: a terminal session, with the facts it attested itself.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentsReport {
-    pub headcount: AgentsReportHeadcount,
-    pub rows: Vec<AgentsReportRow>,
+pub struct AgentShiftRow {
+    pub id: String,
+    pub source: AgentSource,
+    pub owner: LeaderboardMember,
+    #[serde(default)]
+    pub model: Option<String>,
+    pub started_at: String,
+    /// A running shift reads its last event here, never "still open".
+    pub ended_at: String,
+    #[serde(default)]
+    pub agent_seconds: u64,
+    /// How many commits the shift recorded; the subjects stay off this wire.
+    #[serde(default)]
+    pub commit_count: u32,
 }
 
 #[derive(Deserialize)]
@@ -646,83 +561,6 @@ pub struct MeStatsAgentActivityRef {
     pub source: AgentSource,
 }
 
-/// One week of an agent's paystub trend: hours, shifts, and how the week's
-/// commits held up (`None` while nothing has been decided).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentPaystubTrendBucket {
-    pub period_start_at: String,
-    pub agent_seconds: u64,
-    pub shift_count: u32,
-    #[serde(default)]
-    pub held_rate: Option<f64>,
-}
-
-/// One model's slice of an agent's paystub. The session facts are optional:
-/// an API from before they shipped sends neither, and the webview shows that
-/// absence as a dash rather than a zero nothing measured.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentPaystubModel {
-    #[serde(default)]
-    pub model: Option<String>,
-    pub agent_seconds: u64,
-    pub shift_count: u32,
-    #[serde(default)]
-    pub max_concurrent: Option<u32>,
-    #[serde(default)]
-    pub median_seconds: Option<u64>,
-}
-
-/// One codebase's slice of an agent's paystub; `repo` is null for shifts that
-/// recorded no working directory.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentPaystubCodebase {
-    #[serde(default)]
-    pub repo: Option<String>,
-    pub agent_seconds: u64,
-    pub shift_count: u32,
-}
-
-/// An agent's totals for the range. The paystub has always sent this block,
-/// so it is required; every field added to it since is optional-with-default,
-/// because the API deploys before any installer can.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentPaystubTotals {
-    pub agent_seconds: u64,
-    pub shift_count: u32,
-    pub commits_recorded: u32,
-    #[serde(default)]
-    pub held_rate: Option<f64>,
-    #[serde(default)]
-    pub tokens: Option<AgentTokenTotals>,
-    #[serde(default)]
-    pub tokens_reported: bool,
-    /// The owner's active time in range - leverage's denominator.
-    #[serde(default)]
-    pub owner_active_seconds: Option<u64>,
-    /// Runtime that fell outside the owner's presence entirely.
-    #[serde(default)]
-    pub away_seconds: Option<u64>,
-}
-
-/// The slice of the paystub the desktop's Agents tab renders. The shift list
-/// is the web dashboard's business, so serde drops it here.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentPaystub {
-    pub totals: AgentPaystubTotals,
-    #[serde(default)]
-    pub models: Vec<AgentPaystubModel>,
-    #[serde(default)]
-    pub codebases: Vec<AgentPaystubCodebase>,
-    #[serde(default)]
-    pub hourly: Vec<MeStatsHourlyBucket>,
-    pub trend: Vec<AgentPaystubTrendBucket>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeStatsApp {
@@ -981,46 +819,21 @@ impl ApiClient {
         Ok(body.entries)
     }
 
-    /// The pay-run report: every roster agent's hours, shifts, and held share
-    /// for a range. Bounds arrive together or not at all; none means all time.
-    pub async fn agents_report(
+    /// Every shift in the range grouped by the codebase it worked, for the
+    /// Agents tab. Bounds arrive together or not at all; none means all time.
+    pub async fn agent_shifts(
         &self,
         access_token: &str,
         from_at: Option<&str>,
         to_exclusive_at: Option<&str>,
-        scope: Option<&str>,
-    ) -> ApiResult<AgentsReport> {
-        let mut query = match (from_at, to_exclusive_at) {
-            (Some(from_at), Some(to_exclusive_at)) => {
-                format!("?fromAt={from_at}&toExclusiveAt={to_exclusive_at}")
-            }
-            _ => String::new(),
-        };
-        if let Some(scope) = scope.filter(|scope| *scope != "all") {
-            query.push(if query.is_empty() { '?' } else { '&' });
-            query.push_str(&format!("scope={scope}"));
-        }
-        self.get_json(access_token, &format!("/reports/agents{query}"))
-            .await
-    }
-
-    /// One agent's paystub: its totals, model and codebase mixes, hourly
-    /// series and six weekly trend buckets, for the overlay's Agents tab.
-    /// Bounds arrive together or not at all; both absent asks for all time.
-    pub async fn agent_paystub(
-        &self,
-        access_token: &str,
-        agent_id: &str,
-        from_at: Option<&str>,
-        to_exclusive_at: Option<&str>,
-    ) -> ApiResult<AgentPaystub> {
+    ) -> ApiResult<AgentShifts> {
         let query = match (from_at, to_exclusive_at) {
             (Some(from_at), Some(to_exclusive_at)) => {
                 format!("?fromAt={from_at}&toExclusiveAt={to_exclusive_at}")
             }
             _ => String::new(),
         };
-        self.get_json(access_token, &format!("/agents/{agent_id}/paystub{query}"))
+        self.get_json(access_token, &format!("/reports/agent-shifts{query}"))
             .await
     }
 
@@ -1386,6 +1199,46 @@ impl ApiClient {
 mod tests {
     use super::*;
 
+    /// The shifts map decodes tolerantly: an API older than this build sends
+    /// no groups at all, and that is an empty tab, never a decode error.
+    #[test]
+    fn reads_the_shifts_map_and_an_older_apis_absence_as_empty() {
+        let shifts: AgentShifts = serde_json::from_str(
+            r#"{
+                "totalAgentSeconds": 5400,
+                "groups": [{
+                    "repo": "clock-in",
+                    "agentSeconds": 5400,
+                    "shiftCount": 1,
+                    "heldRate": 0.5,
+                    "shifts": [{
+                        "id": "s1",
+                        "source": "claude_code",
+                        "owner": {"id": "u1", "name": "Alex"},
+                        "model": "claude-opus-5",
+                        "startedAt": "2026-08-06T15:00:00.000Z",
+                        "endedAt": "2026-08-06T16:00:00.000Z",
+                        "agentSeconds": 5400,
+                        "commitCount": 2,
+                        "aFieldFromTheFuture": true
+                    }]
+                }]
+            }"#,
+        )
+        .expect("the full shape decodes");
+        assert_eq!(shifts.total_agent_seconds, 5400);
+        assert_eq!(shifts.groups[0].shifts[0].commit_count, 2);
+
+        let empty: AgentShifts = serde_json::from_str("{}").expect("absence decodes");
+        assert_eq!(empty.total_agent_seconds, 0);
+        assert!(empty.groups.is_empty());
+
+        let bare: AgentShifts =
+            serde_json::from_str(r#"{"groups": [{"repo": null}]}"#).expect("a bare group decodes");
+        assert_eq!(bare.groups[0].held_rate, None);
+        assert!(bare.groups[0].shifts.is_empty());
+    }
+
     #[test]
     fn maps_status_codes_onto_the_kinds_the_ui_branches_on() {
         assert_eq!(classify(401).kind, ErrorKind::Auth);
@@ -1626,178 +1479,6 @@ mod tests {
     }
 
     #[test]
-    fn reads_agents_report_rows_from_an_api_that_predates_token_fields() {
-        let row: AgentsReportRow = serde_json::from_str(
-            r#"{
-                "agent": {
-                    "id": "a1",
-                    "name": "Claude Code @ Field work",
-                    "source": "claude_code",
-                    "status": "anonymous",
-                    "owner": {"id": "u1", "name": "Alex"},
-                    "project": {"id": "p1", "name": "Field work"}
-                },
-                "agentSeconds": 3600,
-                "shiftCount": 1,
-                "commitsRecorded": 0,
-                "commitsPending": 0,
-                "commitsMerged": 0,
-                "commitsReverted": 0,
-                "commitsOrphaned": 0,
-                "heldRate": null,
-                "models": []
-            }"#,
-        )
-        .expect("row parse");
-
-        // Absent token fields decode as absence, never as a measured zero.
-        assert_eq!(row.tokens, None);
-        assert!(!row.tokens_reported);
-        // The identity-v2 fields the same way: an API from before them is not
-        // an error, it simply names no codebase.
-        assert_eq!(row.agent.repo_name, None);
-        assert_eq!(row.agent.repo_root, None);
-        let echoed = serde_json::to_value(&row).expect("row serialize");
-        assert_eq!(echoed["tokens"], serde_json::Value::Null);
-        assert_eq!(echoed["tokensReported"], false);
-
-        let reported: AgentsReportRow = serde_json::from_str(
-            r#"{
-                "agent": {
-                    "id": "a1",
-                    "name": "Claude Code @ Field work",
-                    "source": "claude_code",
-                    "status": "registered",
-                    "owner": {"id": "u1", "name": "Alex"},
-                    "project": null,
-                    "repoName": "clock-in",
-                    "repoRoot": "C:/dev/clock-in"
-                },
-                "agentSeconds": 3600,
-                "shiftCount": 1,
-                "commitsRecorded": 0,
-                "commitsPending": 0,
-                "commitsMerged": 0,
-                "commitsReverted": 0,
-                "commitsOrphaned": 0,
-                "heldRate": null,
-                "models": ["claude-fable-5"],
-                "tokens": {"inputTokens": 12000, "outputTokens": 800, "cacheCreationInputTokens": 400, "cacheReadInputTokens": 60000},
-                "tokensReported": true
-            }"#,
-        )
-        .expect("row with tokens parses");
-        assert_eq!(
-            reported.tokens.map(|tokens| tokens.input_tokens),
-            Some(12_000)
-        );
-        assert!(reported.tokens_reported);
-        assert_eq!(reported.agent.repo_name.as_deref(), Some("clock-in"));
-        assert_eq!(reported.agent.repo_root.as_deref(), Some("C:/dev/clock-in"));
-    }
-
-    #[test]
-    fn reads_a_withheld_repo_path_the_same_way_as_an_api_that_never_had_one() {
-        // A member who owns neither agent is sent the codebase's name and no
-        // path at all. On this side that absence is indistinguishable from an
-        // API older than the field, and it must be: both read as "no path".
-        let row: AgentsReportRow = serde_json::from_str(
-            r#"{
-                "agent": {
-                    "id": "a1",
-                    "name": "Claude Code @ clock-in",
-                    "source": "claude_code",
-                    "status": "anonymous",
-                    "owner": {"id": "u2", "name": "Sam"},
-                    "project": null,
-                    "repoName": "clock-in"
-                },
-                "agentSeconds": 3600,
-                "shiftCount": 1,
-                "commitsRecorded": 0,
-                "commitsPending": 0,
-                "commitsMerged": 0,
-                "commitsReverted": 0,
-                "commitsOrphaned": 0,
-                "heldRate": null,
-                "models": []
-            }"#,
-        )
-        .expect("a withheld path still parses");
-
-        // The roster still reads correctly, because the name carries it.
-        assert_eq!(row.agent.repo_name.as_deref(), Some("clock-in"));
-        assert_eq!(row.agent.repo_root, None);
-        let echoed = serde_json::to_value(&row).expect("row serialize");
-        assert_eq!(echoed["agent"]["repoRoot"], serde_json::Value::Null);
-    }
-
-    #[test]
-    fn reads_the_agents_report_as_the_previous_release_sent_it() {
-        // The 0.1.7-era API spelled the headcount anonymous/registered and
-        // sent no models or token fields. A required `active` here is what
-        // dead-ended the Agents tab for every older installer.
-        let report: AgentsReport = serde_json::from_str(
-            r#"{
-                "headcount": {"total": 3, "anonymous": 2, "registered": 1, "retired": 0},
-                "rows": [
-                    {
-                        "agent": {
-                            "id": "a1",
-                            "name": "Claude Code @ Field work",
-                            "source": "claude_code",
-                            "status": "anonymous",
-                            "owner": {"id": "u1", "name": "Alex"}
-                        },
-                        "agentSeconds": 3600,
-                        "shiftCount": 1,
-                        "commitsRecorded": 0,
-                        "commitsPending": 0,
-                        "commitsMerged": 0,
-                        "commitsReverted": 0,
-                        "commitsOrphaned": 0,
-                        "heldRate": null
-                    }
-                ]
-            }"#,
-        )
-        .expect("previous-release report parses");
-
-        // The pre-rename split normalizes to the active count it always was.
-        assert_eq!(report.headcount.active, 3);
-        assert_eq!(report.headcount.total, 3);
-        assert_eq!(report.headcount.retired, 0);
-        assert_eq!(report.rows[0].models, Vec::<String>::new());
-        assert_eq!(report.rows[0].tokens, None);
-        assert!(!report.rows[0].tokens_reported);
-        // And re-serializes in the current spelling the webview decodes.
-        let echoed = serde_json::to_value(&report).expect("report serialize");
-        assert_eq!(echoed["headcount"]["active"], 3);
-        assert!(echoed["headcount"].get("anonymous").is_none());
-
-        // The current spelling decodes too, and wins when both are present.
-        let current: AgentsReportHeadcount = serde_json::from_str(
-            r#"{"total": 3, "active": 2, "retired": 1, "anonymous": 9, "registered": 9}"#,
-        )
-        .expect("current headcount parses");
-        assert_eq!(current.active, 2);
-        assert_eq!(current.retired, 1);
-    }
-
-    #[test]
-    fn reads_token_totals_with_a_counter_the_build_predates() {
-        // Counters are optional-with-default inside the totals object: a
-        // counter the API has not grown yet decodes to zero rather than
-        // failing the whole row.
-        let totals: AgentTokenTotals = serde_json::from_str(
-            r#"{"inputTokens": 12000, "outputTokens": 800, "cacheCreationInputTokens": 400}"#,
-        )
-        .expect("partial totals parse");
-        assert_eq!(totals.input_tokens, 12_000);
-        assert_eq!(totals.cache_read_input_tokens, 0);
-    }
-
-    #[test]
     fn reads_leaderboard_entries_from_before_the_active_agent_split() {
         let body: LeaderboardResponse = serde_json::from_str(
             r#"{
@@ -1816,80 +1497,6 @@ mod tests {
         assert_eq!(body.entries[0].duration_seconds, 7_200);
         assert_eq!(body.entries[0].active_seconds, 0);
         assert_eq!(body.entries[0].agent_seconds, 0);
-    }
-
-    #[test]
-    fn reads_the_agents_tab_slice_out_of_a_full_paystub_response() {
-        let paystub: AgentPaystub = serde_json::from_str(
-            r#"{
-                "agent": {"id": "a1", "name": "Claude Code @ Field work"},
-                "filters": {},
-                "totals": {
-                    "agentSeconds": 5400,
-                    "shiftCount": 2,
-                    "commitsRecorded": 3,
-                    "heldRate": 0.5,
-                    "tokens": {"inputTokens": 12000, "outputTokens": 800, "cacheCreationInputTokens": 0, "cacheReadInputTokens": 0},
-                    "tokensReported": true,
-                    "ownerActiveSeconds": 3600,
-                    "awaySeconds": 1800
-                },
-                "models": [
-                    {"model": "claude-fable-5", "agentSeconds": 3600, "shiftCount": 1, "maxConcurrent": 2, "medianSeconds": 3600, "tokens": null}
-                ],
-                "codebases": [{"repo": "clock-in", "agentSeconds": 5400, "shiftCount": 2}],
-                "shifts": [{"id": "s1", "startedAt": "2026-08-06T10:00:00.000Z"}],
-                "hourly": [
-                    {"hourStart": "2026-08-06T10:00:00.000Z", "activeSeconds": 1800, "agentSeconds": 3600, "inputTokens": null, "outputTokens": null, "cacheCreationInputTokens": null, "cacheReadInputTokens": null}
-                ],
-                "trend": [
-                    {"periodStartAt": "2026-07-27T00:00:00.000Z", "agentSeconds": 3600, "shiftCount": 1, "heldRate": null},
-                    {"periodStartAt": "2026-08-03T00:00:00.000Z", "agentSeconds": 1800, "shiftCount": 1, "heldRate": 0.5}
-                ]
-            }"#,
-        )
-        .expect("paystub parses");
-
-        // The shift list is the web dashboard's business; everything the
-        // Agents tab renders rides through to the webview.
-        assert_eq!(paystub.totals.owner_active_seconds, Some(3_600));
-        assert_eq!(paystub.totals.away_seconds, Some(1_800));
-        assert_eq!(paystub.models[0].max_concurrent, Some(2));
-        assert_eq!(paystub.models[0].median_seconds, Some(3_600));
-        assert_eq!(paystub.codebases[0].repo.as_deref(), Some("clock-in"));
-        assert_eq!(paystub.hourly[0].agent_seconds, 3_600);
-        assert_eq!(paystub.trend.len(), 2);
-        assert_eq!(paystub.trend[0].held_rate, None);
-        assert_eq!(paystub.trend[1].held_rate, Some(0.5));
-        let echoed = serde_json::to_value(&paystub).expect("paystub serialize");
-        assert_eq!(
-            echoed["trend"][1]["periodStartAt"],
-            "2026-08-03T00:00:00.000Z"
-        );
-        assert_eq!(echoed["trend"][0]["heldRate"], serde_json::Value::Null);
-        assert_eq!(echoed["models"][0]["maxConcurrent"], 2);
-    }
-
-    #[test]
-    fn reads_a_paystub_from_before_the_agents_tab_fields_shipped() {
-        // The API deploys before any installer can, so the reverse is also
-        // true: an installer built after these fields can meet an API from
-        // before them. Absence stays absence - never a zero nothing measured.
-        let paystub: AgentPaystub = serde_json::from_str(
-            r#"{
-                "totals": {"agentSeconds": 5400, "shiftCount": 2, "commitsRecorded": 0, "heldRate": null},
-                "models": [{"model": null, "agentSeconds": 5400, "shiftCount": 2}],
-                "trend": []
-            }"#,
-        )
-        .expect("previous-release paystub parses");
-
-        assert_eq!(paystub.totals.owner_active_seconds, None);
-        assert_eq!(paystub.totals.away_seconds, None);
-        assert_eq!(paystub.models[0].max_concurrent, None);
-        assert_eq!(paystub.models[0].median_seconds, None);
-        assert!(paystub.codebases.is_empty());
-        assert!(paystub.hourly.is_empty());
     }
 
     #[test]

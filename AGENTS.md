@@ -22,12 +22,15 @@ or not at all by `time_sessions.attribution`. The README's "How session tracking
 section is the authoritative prose; keep it true when you change the model.
 
 **Agent numbers belong to the agent.** The All-stats/board Humans tab answers for the person -
-their active time and how many agents ran through it - and every measure of what the agents
-themselves did lives on the Agents tab, under the picked roster agent: the runtime split, the
-Agent-sessions table, the hourly chart, the codebases. "While they were there", "ran while away"
-and leverage are measured against **that agent's owner's** presence, not the caller's, which is why
-the paystub carries `ownerActiveSeconds` and `awaySeconds`. Do not move any of it back under a
-person; a per-person fold reads as one worker's shifts when it is several.
+their active time and how many agents ran through it - and everything the agents themselves did
+lives on the Agents tab as a map of shifts grouped by codebase (`/reports/agent-shifts`): the
+recorded total on top, then one group per repo label with its shifts underneath, each shift naming
+its runtime, operator, model and commits. There is no roster to pick from and no ranking - the
+leaderboard was retired deliberately - and a group's held share renders only once a commit is
+decided, never as "pending". Do not fold agent time back under a person; a per-person fold reads
+as one worker's shifts when it is several. The roster (`agents` table, `/agents` routes) remains
+the identity model and the deployed desktop builds still read the old report routes, so the API
+keeps serving them; only the surfaces moved.
 
 A codebase reaches every member as a **label** - the last segment of a repo root or working
 directory (`repoLabel`), when that segment names a codebase - while the path itself stays under the
@@ -118,8 +121,8 @@ timer once said RECORDING above a card reading "Turn on recording in settings".
   app's `verification` and `verified_at` as given and nothing corroborates them
   server-side (GitHub App/webhook corroboration was considered and rejected as a dead
   model). It is evidence about the work from the machine that did the work, so every surface saying "held"
-  labels it that way - the paystub metric and README's roster section. Do not let it
-  quietly become an input to pay without revisiting that decision.
+  labels it that way - the Agents tab's per-codebase held share and README's roster section. Do
+  not let it quietly become an input to pay without revisiting that decision.
 - A repo root is a working directory, so `shiftCommitViewSchema.repoRoot` and the roster
   row's `agentSchema.repoRoot` go only to the agent's owner and workspace admins and are
   omitted - never blanked - for everyone else (`mayReadRepoRoot` in `services/agents.ts`);
@@ -161,13 +164,14 @@ timer once said RECORDING above a card reading "Turn on recording in settings".
   poll must never blip the UI.
 - The API deploys before any installer can, so the desktop's response structs in
   `api.rs` never get a new required field: additive fields are always
-  `#[serde(default)]`, and a renamed field decodes through a wire struct that
-  accepts both spellings (`AgentsReportHeadcount` still reads the 0.1.7
-  `anonymous`/`registered` headcount - a required `active` there is what
-  dead-ended the Agents tab with "The server response could not be read." for
-  every older installer when the rename deployed). The `bridge.ts` decoders hold
-  the same line on the webview side: an absent field decodes to `null`/`[]`,
-  never a crash.
+  `#[serde(default)]` (`AgentShifts` and its group and row structs are the
+  current shape of the rule), and a renamed field must keep decoding the old
+  spelling too. One required field an older API does not send dead-ends the
+  whole surface with "The server response could not be read." for every
+  installed build - which is exactly what a required `active` in the agents
+  report's headcount did to the Agents tab when that rename deployed. The
+  `bridge.ts` decoders hold the same line on the webview side: an absent field
+  decodes to `null`/`[]`, never a crash.
 - Claude Code's SessionStart/SessionEnd hook payloads carry no model key (verified
   live against Claude Code 2.1.233 on 2026-08-15: the payloads carry `session_id`,
   `transcript_path`, `cwd`, `hook_event_name`, and `source`/`reason` only; `model`

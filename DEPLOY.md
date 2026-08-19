@@ -140,8 +140,9 @@ Its own sequence, back to back in one window:
 5. The retired v1 rows stay as audit trail. Deleting them is possible once the
    backfill reports zero references (all three FKs are `restrict`, so the
    database enforces that precondition), but retirement is the end state.
-6. Repair the agents named after a run rather than a codebase, and the
-   placeholder models stored where a runtime attested none. Run it after the
+6. Repair the agents named after a run rather than a codebase, the placeholder
+   models stored where a runtime attested none, and the bucket shifts whose own
+   commit evidence names a codebase they can move onto. Run it after the
    API is deployed, for the same reason as the backfill - the old API keeps
    minting rows the new rules would refuse. Dry run by default:
    `DATABASE_URL=… node scripts/repair-run-named-agents.mjs` prints what

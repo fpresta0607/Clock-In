@@ -61,59 +61,56 @@ const rosterAgent = {
   createdAt: "2026-08-01T00:00:00.000Z",
 };
 
-const paystub = {
-  agent: rosterAgent,
+/// The Agents tab's map: two codebases, three shifts, one decided commit.
+const agentShiftsResponse = {
   filters: {},
-  totals: {
-    agentSeconds: 5_400,
-    shiftCount: 2,
-    commitsRecorded: 0,
-    commitsPending: 0,
-    commitsMerged: 0,
-    commitsReverted: 0,
-    commitsOrphaned: 0,
-    heldRate: null,
-    tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
-    tokensReported: true,
-    ownerActiveSeconds: 3_600,
-    awaySeconds: 1_800,
-  },
-  models: [
-    { model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, maxConcurrent: 2, medianSeconds: 3_600, tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 } },
-    { model: null, agentSeconds: 1_800, shiftCount: 1, maxConcurrent: 1, medianSeconds: 1_800, tokens: null },
+  totalAgentSeconds: 7_200,
+  groups: [
+    {
+      repo: "clock-in",
+      agentSeconds: 5_400,
+      shiftCount: 2,
+      heldRate: 0.5,
+      shifts: [
+        {
+          id: "00000000-0000-4000-8000-000000000601",
+          source: "claude_code",
+          owner: { id: "u2", name: "Alex" },
+          model: "claude-opus-5",
+          startedAt: "2026-08-06T15:00:00.000Z",
+          endedAt: "2026-08-06T16:00:00.000Z",
+          agentSeconds: 3_600,
+          commitCount: 2,
+        },
+        {
+          id: "00000000-0000-4000-8000-000000000602",
+          source: "claude_code",
+          owner: { id: "u2", name: "Alex" },
+          model: null,
+          startedAt: "2026-08-06T13:00:00.000Z",
+          endedAt: "2026-08-06T13:30:00.000Z",
+          agentSeconds: 1_800,
+          commitCount: 0,
+        },
+      ],
+    },
+    {
+      repo: null,
+      agentSeconds: 1_800,
+      shiftCount: 1,
+      heldRate: null,
+      shifts: [{
+        id: "00000000-0000-4000-8000-000000000603",
+        source: "pi",
+        owner: { id: "u2", name: "Alex" },
+        model: "deepseek-v4-pro",
+        startedAt: "2026-08-06T12:00:00.000Z",
+        endedAt: "2026-08-06T12:30:00.000Z",
+        agentSeconds: 1_800,
+        commitCount: 1,
+      }],
+    },
   ],
-  codebases: [{ repo: "clock-in", agentSeconds: 5_400, shiftCount: 2 }],
-  hourly: [],
-  shifts: [{
-    id: "00000000-0000-4000-8000-0000000000s1",
-    startedAt: "2026-08-06T10:00:00.000Z",
-    endedAt: "2026-08-06T11:00:00.000Z",
-    model: "claude-fable-5",
-    durationSeconds: 3_600,
-    repo: "clock-in",
-    commits: [],
-  }],
-  trend: [{ periodStartAt: "2026-07-30T00:00:00.000Z", agentSeconds: 5_400, shiftCount: 2, heldRate: null }],
-};
-
-const agentsReportResponse = {
-  filters: {},
-  headcount: { total: 1, active: 1, retired: 0 },
-  rows: [{
-    agent: rosterAgent,
-    agentSeconds: 5_400,
-    shiftCount: 2,
-    commitsRecorded: 0,
-    commitsPending: 0,
-    commitsMerged: 0,
-    commitsReverted: 0,
-    commitsOrphaned: 0,
-    heldRate: null,
-    models: ["claude-fable-5"],
-    repos: ["clock-in"],
-    tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
-    tokensReported: true,
-  }],
 };
 
 function clientFor(overrides: Partial<Client> = {}): Client {
@@ -133,11 +130,7 @@ function clientFor(overrides: Partial<Client> = {}): Client {
     report: vi.fn().mockResolvedValue({ rows: [], totalDurationSeconds: 0, filters: {}, pagination: { page: 1, pageSize: 25, totalRows: 0, totalPages: 0 } }),
     joinOrganization: vi.fn().mockResolvedValue(undefined),
     restoreSession: vi.fn().mockResolvedValue(false),
-    agents: vi.fn().mockResolvedValue({ agents: [rosterAgent] }),
-    patchAgent: vi.fn().mockResolvedValue({ ...rosterAgent, status: "registered" }),
-    mergeAgents: vi.fn().mockResolvedValue(undefined),
-    agentPaystub: vi.fn().mockResolvedValue(paystub),
-    agentsReport: vi.fn().mockResolvedValue(agentsReportResponse),
+    agentShifts: vi.fn().mockResolvedValue(agentShiftsResponse),
     ...overrides,
   } as unknown as Client;
 }
@@ -543,10 +536,12 @@ describe("dashboard", () => {
 
     const stats = within(await screen.findByRole("region", { name: /Alex · Last 30 days/ }));
     const graph = stats.getByTestId("hourly-graph");
-    // The agent ran shifts but reported no tokens, and the plot says so.
-    expect(graph).toHaveTextContent("No token data from Claude Code.");
+    // The time view says nothing about tokens; the note belongs to the token
+    // series alone, where it names the runtime that reported none.
+    expect(graph).not.toHaveTextContent(/No token data/);
     const measure = within(graph).getByRole("group", { name: "Chart measure" });
     await userEvent.click(within(measure).getByRole("button", { name: "Tokens" }));
+    expect(graph).toHaveTextContent("No token data from Claude Code.");
 
     const tokensIn = graph.querySelector('path[data-series="tokens-in"]');
     const tokensOut = graph.querySelector('path[data-series="tokens-out"]');
@@ -800,303 +795,75 @@ describe("project management", () => {
   });
 });
 
-describe("the roster tab", () => {
-  it("lists the roster under the Agents toggle with an inline Rename on every row", async () => {
+describe("the agents tab", () => {
+  it("maps every shift under its codebase, with the total recorded on top", async () => {
     const person = await signIn(clientFor());
     await screen.findByRole("heading", { name: "SIQstack" });
 
     await person.click(screen.getByRole("button", { name: "Agents" }));
 
-    const roster = await screen.findByTestId("roster-list");
-    const row = within(roster).getByText("Claude Code @ General").closest("li");
-    // Every secondary fact is its own span, so the line wraps rather than
-    // clipping; the separators are drawn, not written into the text.
-    await waitFor(() => expect(within(row!).getByText("clock-in")).toBeInTheDocument());
-    for (const fact of ["Claude Code", "claude-fable-5", "clock-in", "2 shifts", "held pending"]) {
-      expect(within(row!).getByText(fact)).toHaveClass("board-fact");
+    const panel = within(await screen.findByTestId("agent-shifts"));
+    // The header mirrors a member's breakdown: the range and the recorded
+    // total, then the codebases, heaviest first - no leaderboard to filter.
+    expect(panel.getByRole("heading", { level: 3, name: /Agents ·/ })).toBeInTheDocument();
+    expect(panel.getByText("2h 00m")).toBeInTheDocument();
+    const groups = panel.getAllByTestId("shift-group");
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toHaveTextContent("clock-in");
+    expect(groups[0]).toHaveTextContent("50% held");
+    // The label-less group's commits are all pending: it says nothing rather
+    // than "pending", because a rate with no decided commits is not a fact.
+    expect(groups[1]).toHaveTextContent("No codebase recorded");
+    expect(groups[1]!.textContent).not.toMatch(/held|pending/);
+  });
+
+  it("shows no hourly graph on all time, keeping the groups and total", async () => {
+    vi.setSystemTime(new Date("2026-08-06T20:00:00.000Z"));
+    try {
+      const person = await signIn(clientFor());
+      await screen.findByRole("heading", { name: "SIQstack" });
+
+      await person.click(screen.getByRole("button", { name: "Agents" }));
+      const panel = within(await screen.findByTestId("agent-shifts"));
+      // A bounded range folds an hourly line from the shifts on screen.
+      expect(panel.getByTestId("hourly-graph")).toBeInTheDocument();
+
+      await person.click(screen.getByRole("button", { name: "All time" }));
+
+      // Per-hour resolution over an unbounded range is meaningless, so the graph
+      // goes away - but the codebase map and its total stay put.
+      await waitFor(() => expect(panel.queryByTestId("hourly-graph")).not.toBeInTheDocument());
+      expect(panel.getByText("2h 00m")).toBeInTheDocument();
+      expect(panel.getAllByTestId("shift-group")).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
     }
-    // The operator is the group heading now, not a fact repeated on each row.
-    expect(within(row!).queryByText("Alex")).not.toBeInTheDocument();
-    expect(within(roster.closest(".roster-group")!).getByText("Alex")).toHaveClass("group-label");
-    // The pay-run report's hours land on the matching roster row.
-    await waitFor(() => expect(row).toHaveTextContent("1h 30m"));
-    expect(within(row as HTMLElement).getByRole("button", { name: "Rename" })).toBeInTheDocument();
-    expect(within(row as HTMLElement).queryByRole("button", { name: "Register" })).not.toBeInTheDocument();
   });
 
-  // A row with no title is unpickable and reads as a rendering fault, so a
-  // blank stored name falls back to the runtime the row is.
-  it("titles a roster row with its runtime rather than nothing when the name is blank", async () => {
-    const person = await signIn(clientFor({
-      agents: vi.fn().mockResolvedValue({ agents: [{ ...rosterAgent, name: "   " }] }),
-    }));
-    await screen.findByRole("heading", { name: "SIQstack" });
-
-    await person.click(screen.getByRole("button", { name: "Agents" }));
-
-    const roster = await screen.findByTestId("roster-list");
-    expect(within(roster).getAllByRole("listitem")[0]!.querySelector(".board-name"))
-      .toHaveTextContent(agentRuntimeLabel("claude_code"));
-  });
-
-  it("groups the roster by operator, then by codebase within one", async () => {
-    const sam = { id: "u1", name: "Sam" };
-    const roster = [
-      rosterAgent,
-      { ...rosterAgent, id: "a2", name: "Claude Code @ pocket-piggies", owner: sam, repoName: "pocket-piggies", repoRoot: undefined },
-      { ...rosterAgent, id: "a3", name: "Claude Code @ unassigned", owner: sam, repoName: undefined, repoRoot: undefined },
-      { ...rosterAgent, id: "a4", name: "Codex @ clock-in", owner: sam, source: "codex", repoName: "clock-in", repoRoot: undefined },
-    ];
-    const person = await signIn(clientFor({ agents: vi.fn().mockResolvedValue({ agents: roster }) }));
-    await screen.findByRole("heading", { name: "SIQstack" });
-
-    await person.click(screen.getByRole("button", { name: "Agents" }));
-
-    const groups = await screen.findAllByTestId("roster-list");
-    // One group per operator, alphabetical, each headed by the owner's name.
-    expect(groups.map((list) => list.closest(".roster-group")!.querySelector(".group-label")!.textContent))
-      .toEqual(["Alex", "Sam"]);
-    // Within an operator, by codebase - and the unassigned bucket last,
-    // because it is where shifts wait for one rather than a codebase itself.
-    expect([...groups[1]!.querySelectorAll(".board-name")].map((name) => name.textContent))
-      .toEqual(["Codex @ clock-in", "Claude Code @ pocket-piggies", "Claude Code @ unassigned"]);
-  });
-
-  it("names the codebase beside the agent on its paystub", async () => {
+  it("gives each shift its own line: when, who, what model, what commits", async () => {
     const person = await signIn(clientFor());
     await screen.findByRole("heading", { name: "SIQstack" });
+
     await person.click(screen.getByRole("button", { name: "Agents" }));
 
-    await person.click(await screen.findByRole("button", { name: /Claude Code @ General/ }));
-
-    // Two of one operator's repos must never read as the same paystub.
-    const detail = await screen.findByTestId("agent-paystub");
-    expect(within(detail).getByRole("heading", { level: 3 })).toHaveTextContent("Claude Code @ General · clock-in · Last 30 days");
+    const panel = within(await screen.findByTestId("agent-shifts"));
+    const rows = within(panel.getAllByTestId("shift-group")[0]!).getAllByRole("listitem");
+    expect(rows[0]).toHaveTextContent("Claude Code");
+    expect(rows[0]).toHaveTextContent("Alex");
+    expect(rows[0]).toHaveTextContent("claude-opus-5");
+    expect(rows[0]).toHaveTextContent("2 commits");
+    // A shift that named no model says nothing - absence is absence.
+    expect(rows[1]!.textContent).not.toMatch(/not recorded/);
   });
 
-  it("renames an agent inline, and the API registers an anonymous one in the same write", async () => {
-    const patchAgent = vi.fn().mockResolvedValue({ ...rosterAgent, name: "Reviewer", status: "registered" });
-    const person = await signIn(clientFor({ patchAgent }));
-    await screen.findByRole("heading", { name: "SIQstack" });
-    await person.click(screen.getByRole("button", { name: "Agents" }));
-
-    await person.click(await screen.findByRole("button", { name: "Rename" }));
-    const input = await screen.findByLabelText("New name for Claude Code @ General");
-    await person.clear(input);
-    await person.type(input, "Reviewer");
-    await person.click(screen.getByRole("button", { name: "Save" }));
-
-    // The rename goes alone - never a status - because the service marks an
-    // anonymous agent registered when a member names it.
-    await waitFor(() => expect(patchAgent).toHaveBeenCalledWith(rosterAgent.id, { name: "Reviewer" }));
-    const row = (await screen.findByText("Reviewer")).closest("li");
-    expect(within(row!).getByText("Claude Code")).toHaveClass("board-fact");
-    expect(within(row!).getByText("clock-in")).toHaveClass("board-fact");
-  });
-
-  it("opens an agent's paystub for the range on screen", async () => {
-    const agentPaystub = vi.fn().mockResolvedValue(paystub);
-    const person = await signIn(clientFor({ agentPaystub }));
-    await screen.findByRole("heading", { name: "SIQstack" });
-    await person.click(screen.getByRole("button", { name: "Agents" }));
-
-    await person.click(await screen.findByRole("button", { name: /Claude Code @ General/ }));
-
-    await waitFor(() => expect(agentPaystub).toHaveBeenCalled());
-    const [calledId, calledQuery] = agentPaystub.mock.calls.at(-1) as [string, string];
-    expect(calledId).toBe(rosterAgent.id);
-    // The default range is 30d, sent as instant bounds like every report.
-    const query = new URLSearchParams(calledQuery.replace(/^\?/, ""));
-    expect(query.get("fromAt")).not.toBeNull();
-    expect(query.get("toExclusiveAt")).not.toBeNull();
-
-    const detail = await screen.findByTestId("agent-paystub");
-    // The runtime block reads against its owner's hours, by name, and the
-    // ratio divides by those hours rather than the caller's.
-    const breakdown = within(detail).getByTestId("agent-breakdown");
-    expect(breakdown).toHaveTextContent("Agent runtime — summed, may exceed Alex's hours");
-    expect(breakdown).toHaveTextContent("While Alex was there");
-    expect(breakdown).toHaveTextContent("Total agent time · leverage");
-    expect(breakdown).toHaveTextContent("1h 30m · 1.5×");
-    expect(breakdown).toHaveTextContent("Shifts");
-    // The sessions table is this agent's shifts folded per model; its Runtime
-    // column is the agent's one runtime, never another worker's.
-    const cells = [...within(detail).getByTestId("agent-sessions").querySelectorAll("tbody td")]
-      .map((cell) => cell.textContent);
-    expect(cells).toEqual([
-      "Claude Code", "claude-fable-5", "1", "2", "1h 00m", "1h 00m",
-      "Claude Code", "not recorded", "1", "1", "30m", "30m",
-    ]);
-    expect(within(detail).getByTestId("paystub-codebases")).toHaveTextContent("clock-in");
-    const shifts = within(detail).getByTestId("paystub-shifts");
-    expect(shifts).toHaveTextContent("claude-fable-5");
-    // The codebase rides each shift as a name, never as a working directory.
-    expect(within(shifts).getByText("clock-in")).toBeInTheDocument();
-    // The trend is a bar strip now: one measured bar per weekly bucket.
-    const trend = within(detail).getByTestId("paystub-trend");
-    const bars = trend.querySelectorAll('rect[data-series="week"]');
-    expect(bars).toHaveLength(1);
-    expect(Number(bars[0]!.getAttribute("height"))).toBeGreaterThan(0);
-    // The keyboard read-out still says what the old text list said.
-    trend.querySelector("svg")!.focus();
-    await person.keyboard("{ArrowLeft}");
-    expect(within(trend).getByRole("status")).toHaveTextContent("2 shifts");
-    // Nothing decided yet reads as pending, not 0%.
-    expect(detail).toHaveTextContent("pending");
-  });
-
-  it("shows the roster's hours from the pay-run report and a headcount line", async () => {
-    const agentsReport = vi.fn().mockResolvedValue(agentsReportResponse);
-    await signIn(clientFor({ agentsReport }));
-    await screen.findByRole("heading", { name: "SIQstack" });
-    await userEvent.setup().click(screen.getByRole("button", { name: "Agents" }));
-
-    await waitFor(() => expect(agentsReport).toHaveBeenCalled());
-    expect(await screen.findByTestId("roster-headcount")).toHaveTextContent("Headcount 1");
-    const row = screen.getByText("Claude Code @ General").closest("li");
-    expect(row).toHaveTextContent("1h 30m");
-  });
-
-  // The pay-run report already drops these; the web roster used to render them
-  // anyway, from its own agents list, as a row reading "-" for hours with no
-  // shifts, held rate, models or repos.
-  it("drops a retired agent the report has nothing for, and keeps it in the headcount", async () => {
-    const retired = { ...rosterAgent, id: "a9", name: "Claude Code @ 01M06FSGP392MH6VJNRX8T364A", status: "retired" };
+  it("says nobody worked rather than rendering an empty map", async () => {
     const person = await signIn(clientFor({
-      agents: vi.fn().mockResolvedValue({ agents: [rosterAgent, retired] }),
-      agentsReport: vi.fn().mockResolvedValue({
-        ...agentsReportResponse,
-        headcount: { total: 2, active: 1, retired: 1 },
-      }),
+      agentShifts: vi.fn().mockResolvedValue({ filters: {}, totalAgentSeconds: 0, groups: [] }),
     }));
     await screen.findByRole("heading", { name: "SIQstack" });
 
     await person.click(screen.getByRole("button", { name: "Agents" }));
-
-    const roster = await screen.findByTestId("roster-list");
-    await waitFor(() => expect(within(roster).getAllByRole("listitem")).toHaveLength(1));
-    expect(within(roster).queryByText(retired.name)).not.toBeInTheDocument();
-    // Hiding an empty row is not un-retiring anyone.
-    expect(screen.getByTestId("roster-headcount")).toHaveTextContent("Headcount 2 - 1 retired");
-  });
-
-  // Dropping a row must drop its paystub with it: the list said nobody worked
-  // the range while a panel underneath still carried the hidden agent's name.
-  it("closes the paystub of an agent the report stops listing", async () => {
-    const retired = { ...rosterAgent, id: "a9", name: "Claude Code @ retired-one", status: "retired" as const };
-    const listedRow = { ...agentsReportResponse.rows[0]!, agent: retired };
-    const agentsReport = vi.fn()
-      .mockResolvedValueOnce({ ...agentsReportResponse, headcount: { total: 2, active: 1, retired: 1 }, rows: [listedRow] })
-      .mockResolvedValue({ ...agentsReportResponse, headcount: { total: 2, active: 1, retired: 1 }, rows: [] });
-    const person = await signIn(clientFor({
-      agents: vi.fn().mockResolvedValue({ agents: [retired] }),
-      agentsReport,
-      agentPaystub: vi.fn().mockResolvedValue({ ...paystub, agent: retired }),
-    }));
-    await screen.findByRole("heading", { name: "SIQstack" });
-
-    await person.click(screen.getByRole("button", { name: "Agents" }));
-    const roster = await screen.findByTestId("roster-list");
-    await person.click(within(roster).getByText(retired.name));
-    expect(await screen.findByTestId("agent-paystub")).toBeInTheDocument();
-
-    // A range the report has nothing for: the row goes, and so must the panel.
-    await person.click(screen.getByRole("button", { name: "All time" }));
 
     expect(await screen.findByText("No agent worked in this range.")).toBeInTheDocument();
-    await waitFor(() => expect(screen.queryByTestId("agent-paystub")).not.toBeInTheDocument());
-  });
-
-  it("tells an empty roster apart from a range nobody worked", async () => {
-    const person = await signIn(clientFor({
-      agents: vi.fn().mockResolvedValue({ agents: [] }),
-      agentsReport: vi.fn().mockResolvedValue({
-        ...agentsReportResponse,
-        headcount: { total: 0, active: 0, retired: 0 },
-        rows: [],
-      }),
-    }));
-    await screen.findByRole("heading", { name: "SIQstack" });
-
-    await person.click(screen.getByRole("button", { name: "Agents" }));
-
-    expect(await screen.findByText("No agents yet. One is added automatically the first time a coding agent works."))
-      .toBeInTheDocument();
-  });
-
-  it("says nobody worked the range rather than claiming there are no agents", async () => {
-    const retired = { ...rosterAgent, id: "a9", status: "retired" };
-    const person = await signIn(clientFor({
-      agents: vi.fn().mockResolvedValue({ agents: [retired] }),
-      agentsReport: vi.fn().mockResolvedValue({
-        ...agentsReportResponse,
-        headcount: { total: 1, active: 0, retired: 1 },
-        rows: [],
-      }),
-    }));
-    await screen.findByRole("heading", { name: "SIQstack" });
-
-    await person.click(screen.getByRole("button", { name: "Agents" }));
-
-    // The headcount says one agent exists; the copy beneath it must not say none.
-    expect(await screen.findByText("No agent worked in this range.")).toBeInTheDocument();
-    expect(screen.getByTestId("roster-headcount")).toHaveTextContent("Headcount 1 - 1 retired");
-  });
-
-  it("names the retired share of the headcount once anyone is retired", async () => {
-    const agentsReport = vi.fn().mockResolvedValue({
-      ...agentsReportResponse,
-      headcount: { total: 1, active: 0, retired: 1 },
-    });
-    await signIn(clientFor({ agentsReport }));
-    await screen.findByRole("heading", { name: "SIQstack" });
-    await userEvent.setup().click(screen.getByRole("button", { name: "Agents" }));
-
-    const headcount = await screen.findByTestId("roster-headcount");
-    expect(headcount).toHaveTextContent("Headcount 1 - 1 retired");
-  });
-
-  it("renders a verification badge per commit and a held share once some are decided", async () => {
-    const decidedPaystub = {
-      ...paystub,
-      totals: { ...paystub.totals, heldRate: 0.5 },
-      shifts: [{
-        ...paystub.shifts[0],
-        commits: [
-          {
-            id: "00000000-0000-4000-8000-0000000000c1",
-            repoRoot: "C:/dev/clock-in",
-            branch: "main",
-            sha: "a".repeat(40),
-            subject: "shipped the roster tab",
-            authoredAt: "2026-08-06T10:30:00.000Z",
-            verification: "merged",
-            verifiedAt: "2026-08-07T09:00:00.000Z",
-          },
-          {
-            id: "00000000-0000-4000-8000-0000000000c2",
-            repoRoot: "C:/dev/clock-in",
-            branch: "main",
-            sha: "b".repeat(40),
-            subject: "reverted commit",
-            authoredAt: "2026-08-06T10:45:00.000Z",
-            verification: "reverted",
-            verifiedAt: "2026-08-07T09:05:00.000Z",
-          },
-        ],
-      }],
-    };
-    const agentPaystub = vi.fn().mockResolvedValue(decidedPaystub);
-    const person = await signIn(clientFor({ agentPaystub }));
-    await screen.findByRole("heading", { name: "SIQstack" });
-    await person.click(screen.getByRole("button", { name: "Agents" }));
-    await person.click(await screen.findByRole("button", { name: /Claude Code @ General/ }));
-
-    const detail = await screen.findByTestId("agent-paystub");
-    const shifts = within(detail).getByTestId("paystub-shifts");
-    expect(shifts.querySelector(".verify-badge.is-merged")).toHaveTextContent("merged");
-    expect(shifts.querySelector(".verify-badge.is-reverted")).toHaveTextContent("reverted");
-    // Half of two decided commits held, so the paystub reports 50%, not "pending".
-    expect(detail).toHaveTextContent("50%");
   });
 });

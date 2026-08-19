@@ -181,6 +181,7 @@ type CommitSeed = {
   authoredAt: Date;
   agentSessionId?: string;
   repoRoot?: string;
+  subject?: string;
 };
 
 class ShiftCommits implements ShiftCommitRepository {
@@ -241,6 +242,28 @@ class ShiftCommits implements ShiftCommitRepository {
   }
   public async listForAgent(): ReturnType<ShiftCommitRepository["listForAgent"]> {
     throw new Error("not used");
+  }
+  public async listForOrganization(_subject: AuthenticatedSubject, query: ReportQuery): ReturnType<ShiftCommitRepository["listForOrganization"]> {
+    let serial = 0;
+    return this.commits
+      .filter((commit) =>
+        (query.from === undefined || commit.authoredAt >= query.from)
+        && (query.toExclusive === undefined || commit.authoredAt < query.toExclusive))
+      .map((commit) => ({
+        id: `commit-${serial += 1}`,
+        organizationId: "org",
+        userId: commit.userId,
+        agentId: commit.agentId,
+        agentSessionId: commit.agentSessionId ?? "session-unset",
+        clientId: `client-${serial}`,
+        repoRoot: commit.repoRoot ?? "C:/dev/somewhere",
+        branch: null,
+        sha: "a".repeat(40),
+        subject: commit.subject ?? "a commit",
+        authoredAt: commit.authoredAt,
+        verification: commit.verification,
+        verifiedAt: null,
+      }));
   }
 }
 
@@ -1241,5 +1264,84 @@ describe("agents report", () => {
     });
     const reranked = await flipped.agentsReport(subject, { sort: "tokens" });
     expect(reranked.rows.map((row) => row.agent.id)).toEqual([ids.otherAgent, ids.session, ids.otherProject]);
+  });
+});
+
+describe("agent shifts", () => {
+  const at = (hour: number, minute = 0) => new Date(Date.UTC(2026, 7, 6, hour, minute));
+
+  it("groups shifts by codebase, so two worktree clones of one repo read as one group", async () => {
+    const reports = new Reports();
+    reports.agentIntervals = [
+      // Two clones of the same codebase in different treehouse worktrees.
+      { sessionId: "s1", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: "claude-opus-5", cwd: "C:/Users/a/.treehouse/clock-in-0cd188/1/clock-in", projectId: ids.project, agentId: ids.session, startedAt: at(10), endedAt: at(11) },
+      { sessionId: "s2", user: { id: ids.user, name: "Alex" }, source: "pi", model: "deepseek-v4-pro", cwd: "C:/Users/a/.treehouse/clock-in-8f31a2/1/clock-in", projectId: ids.project, agentId: ids.otherAgent, startedAt: at(12), endedAt: at(12, 30) },
+      // A different codebase, and a shift that recorded nothing.
+      { sessionId: "s3", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "/home/a/src/quartermaster", projectId: ids.project, agentId: ids.session, startedAt: at(13), endedAt: at(13, 10) },
+      { sessionId: "s4", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: null, projectId: ids.project, agentId: ids.session, startedAt: at(14), endedAt: at(15) },
+      // Browser spans are attention, never shifts.
+      { sessionId: "s5", user: { id: ids.user, name: "Alex" }, source: "browser", model: null, cwd: null, projectId: ids.project, agentId: null, startedAt: at(10), endedAt: at(16) },
+    ];
+    const service = createReportService({ reports, reaper: silentReaper });
+
+    const result = await service.agentShifts(subject, {});
+
+    // Heaviest first, the label-less group last despite out-summing quartermaster.
+    expect(result.groups.map((group) => [group.repo, group.agentSeconds, group.shiftCount])).toEqual([
+      ["clock-in", 5_400, 2],
+      ["quartermaster", 600, 1],
+      [null, 3_600, 1],
+    ]);
+    expect(result.totalAgentSeconds).toBe(9_600);
+    // Shifts read newest first and carry their own facts.
+    const clockIn = result.groups[0]!;
+    expect(clockIn.shifts.map((shift) => shift.id)).toEqual(["s2", "s1"]);
+    expect(clockIn.shifts[1]).toMatchObject({ source: "claude_code", model: "claude-opus-5", owner: { name: "Alex" }, agentSeconds: 3_600 });
+  });
+
+  it("labels a shift by its commit's repo root over its cwd, and holds the rate back until a commit is decided", async () => {
+    const reports = new Reports();
+    reports.agentIntervals = [
+      // Run from a subdirectory: the cwd alone would read "web".
+      { sessionId: "s1", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/clock-in/apps/web", projectId: ids.project, agentId: ids.session, startedAt: at(10), endedAt: at(11) },
+      { sessionId: "s2", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/clock-in", projectId: ids.project, agentId: ids.session, startedAt: at(12), endedAt: at(13) },
+    ];
+    const pendingOnly = new ShiftCommits([
+      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "pending", authoredAt: at(10, 30), agentSessionId: "s1", repoRoot: "C:/dev/clock-in", subject: "fix: the thing" },
+    ]);
+    const service = createReportService({ reports, reaper: silentReaper, shiftCommits: pendingOnly });
+
+    const result = await service.agentShifts(subject, {});
+
+    expect(result.groups).toHaveLength(1);
+    const group = result.groups[0]!;
+    expect(group.repo).toBe("clock-in");
+    // Nothing decided yet: no rate, rather than a "pending" that reads as a state.
+    expect(group.heldRate).toBeNull();
+    expect(group.shifts.find((shift) => shift.id === "s1")!.commitCount).toBe(1);
+    expect(group.shifts.find((shift) => shift.id === "s2")!.commitCount).toBe(0);
+
+    const decided = new ShiftCommits([
+      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "merged", authoredAt: at(10, 30), agentSessionId: "s1", repoRoot: "C:/dev/clock-in" },
+      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "reverted", authoredAt: at(12, 30), agentSessionId: "s2", repoRoot: "C:/dev/clock-in" },
+    ]);
+    const decidedService = createReportService({ reports, reaper: silentReaper, shiftCommits: decided });
+    const decidedResult = await decidedService.agentShifts(subject, {});
+    expect(decidedResult.groups[0]!.heldRate).toBe(0.5);
+  });
+
+  it("clips shifts to the range and drops the ones outside it", async () => {
+    const reports = new Reports();
+    reports.agentIntervals = [
+      { sessionId: "s1", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/clock-in", projectId: ids.project, agentId: ids.session, startedAt: at(9), endedAt: at(11) },
+      { sessionId: "s2", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/clock-in", projectId: ids.project, agentId: ids.session, startedAt: at(5), endedAt: at(6) },
+    ];
+    const service = createReportService({ reports, reaper: silentReaper });
+
+    const result = await service.agentShifts(subject, { fromAt: at(10).toISOString(), toExclusiveAt: at(12).toISOString() });
+
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0]!.shifts.map((shift) => shift.id)).toEqual(["s1"]);
+    expect(result.groups[0]!.agentSeconds).toBe(3_600);
   });
 });
