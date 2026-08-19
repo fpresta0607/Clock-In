@@ -1269,6 +1269,27 @@ describe("the agents tab", () => {
     expect(within(panel).queryByTestId("agent-roster-list")).not.toBeInTheDocument();
   });
 
+  it("shows no hourly graph on all time, keeping the groups and total", async () => {
+    // Pinned to the afternoon the fixture's shifts ran, so "Today" really does
+    // bound them and the folded line has something to draw.
+    vi.setSystemTime(new Date("2026-08-06T20:00:00.000Z"));
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor()} />);
+
+    const panel = await openAgentsTab(person);
+    const shifts = within(panel).getByTestId("agent-shifts");
+    // A bounded range folds an hourly line from the shifts on screen.
+    expect(within(shifts).getByTestId("hourly-graph")).toBeInTheDocument();
+
+    await person.click(within(panel).getByRole("button", { name: "All time" }));
+
+    // Per-hour resolution over an unbounded range is meaningless, so the graph
+    // goes away - but the codebase map and its total stay put.
+    await waitFor(() => expect(within(shifts).queryByTestId("hourly-graph")).not.toBeInTheDocument());
+    expect(within(shifts).getByText("2h 00m")).toBeInTheDocument();
+    expect(within(shifts).getAllByTestId("shift-group")).toHaveLength(2);
+  });
+
   it("gives each shift its own line: when, who, what model, what commits", async () => {
     const person = userEvent.setup();
     render(<App bridge={bridgeFor()} />);

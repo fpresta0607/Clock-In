@@ -172,8 +172,8 @@ const buildAppRows = (apps: readonly MeStatsApp[]): AppRow[] => {
 
 /// A person's active time laid out as labeled rows: the hours up top, then
 /// how many agents were running through them. What those agents added up to
-/// belongs to the agent, not the person, so it lives on the Agents tab -
-/// see `AgentBreakdown`.
+/// belongs to the agent, not the person, so it lives on the Agents tab's
+/// shifts-by-codebase map.
 const MemberBreakdown = ({ stats, self }: { stats: MeStats; self: boolean }) => {
   const { activeSeconds, concurrency } = stats;
   return (
