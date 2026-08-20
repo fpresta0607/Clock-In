@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { expect, test, type Page } from "@playwright/test";
@@ -121,15 +122,27 @@ test.describe("the WebGL background", () => {
   test("ships one shader to both apps", () => {
     // The wave used to be byte-identical hand-synced copies in each app, and a
     // background fix landed in one and not the other twice. There is one file
-    // now (`@clock-in/shared/webgl-shader`) and both apps import it, so this
-    // holds the line against a copy coming back.
-    const source = (path: string): string =>
-      readFileSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), "utf8");
+    // now and both apps reach it through `@clock-in/shared/webgl-shader`, so
+    // this holds the line against a copy coming back.
+    //
+    // Resolving the specifier the way each app's bundler does - through that
+    // app's own installed `@clock-in/shared` and the subpath its exports map
+    // declares - and landing on one physical file is the claim. The package is
+    // ESM-only, so `require.resolve` cannot walk it: the exports map is read as
+    // the declaration it is and the resolved path is realpath'd through pnpm's
+    // workspace link. This suite's own server builds the shared package before
+    // the first test, so the module it points at is on disk.
+    const resolveShader = (app: string): string => {
+      const packageDir = realpathSync(fileURLToPath(new URL(`../../apps/${app}/node_modules/@clock-in/shared`, import.meta.url)));
+      const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8")) as {
+        exports: Record<string, { import: string }>;
+      };
+      return realpathSync(join(packageDir, manifest.exports["./webgl-shader"]!.import));
+    };
 
-    expect(source("packages/shared/src/webgl-shader.tsx")).toContain("export function WebGLShader");
+    expect(resolveShader("desktop")).toBe(resolveShader("web"));
     for (const app of ["desktop", "web"]) {
       expect(existsSync(fileURLToPath(new URL(`../../apps/${app}/src/WebGLShader.tsx`, import.meta.url)))).toBe(false);
-      expect(source(`apps/${app}/src/App.tsx`)).toContain('from "@clock-in/shared/webgl-shader"');
     }
   });
 });

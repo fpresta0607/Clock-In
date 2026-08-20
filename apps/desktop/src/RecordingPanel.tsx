@@ -50,8 +50,10 @@ const KEPT = [
   "Whether you were using this computer, away from it, or had the screen locked.",
   "The name of the app in front of you, like “chrome” or “code”. The name only.",
   // The remote is part of what is recorded: identity is keyed on the repository,
-  // and the repository is named by its remote. README's "What is collected"
-  // states the same rule in the same words - one rule told once.
+  // and the repository is named by its remote. This wording is deliberately the
+  // wording README's "What is collected" will carry - one rule told once - and
+  // is ahead of it here: README's matching update lands with the
+  // agent-identity-by-remote work that made the remote part of identity.
   "When an AI coding tool starts and finishes, which folder it worked in, and - when that folder is in a git repository - that repository's root and its origin remote URL, which is what names the repository it worked in.",
   "For AI coding shifts in a git repo: the branch name, and the title, commit id, and repository folder of each commit made during the shift, checked later on this machine, read-only. The repository folder is shown only to you and your workspace's admins.",
   "For AI coding shifts that keep a session log: the number of tokens used and which model the tool ran, read from that log on this computer. The numbers and the model name only.",

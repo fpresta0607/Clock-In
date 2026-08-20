@@ -7,6 +7,22 @@ const repoFile = (path: string): string =>
   readFileSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), "utf8");
 
 /**
+ * A stylesheet's leading `@import` block, removed.
+ *
+ * Both stylesheets keep every `@import` at the top, one statement per line, so
+ * the block ends at the first line that is not one. Cutting to the next `;`
+ * instead would end inside the Google Fonts URL, whose `wght@300;400;...` axis
+ * list is semicolons: the tail would survive as a rule prelude and CSS error
+ * recovery would swallow the first real rule after it.
+ */
+const withoutImports = (css: string): string => {
+  const lines = css.split("\n");
+  let first = 0;
+  while (lines[first]?.trimStart().startsWith("@import")) first++;
+  return lines.slice(first).join("\n");
+};
+
+/**
  * An app's real stylesheet, with its `@import`s resolved by hand.
  *
  * The pages below are served through `setContent`, which has no module
@@ -16,8 +32,25 @@ const repoFile = (path: string): string =>
  * rules under test are the ones the app actually ships.
  */
 const stylesheet = (app: "desktop" | "web"): string =>
-  [repoFile("packages/shared/styles/brand.css"), repoFile(`apps/${app}/src/styles.css`).replace(/@import[^;]+;/g, "")]
-    .join("\n");
+  [repoFile("packages/shared/styles/brand.css"), withoutImports(repoFile(`apps/${app}/src/styles.css`))].join("\n");
+
+/**
+ * Inject an app's stylesheet, and prove the container it lays the rows out in
+ * is the one the app renders.
+ *
+ * A sheet mangled on its way in still parses: CSS error recovery reads the
+ * wreckage as a prelude and drops the rule after it. Every assertion below is
+ * relative - an ordering, a width that grew - so a container left at its
+ * default layout passes them all quietly. Each of these containers is laid out
+ * by the app's own rule for it, so `display: grid` is that rule arriving.
+ */
+async function applyStylesheet(page: Page, app: "desktop" | "web", container: string): Promise<void> {
+  await page.addStyleTag({ content: stylesheet(app) });
+  const display = await page.locator(container).evaluate((element) => getComputedStyle(element).display);
+  if (display !== "grid") {
+    throw new Error(`${container} is not laid out by the ${app} stylesheet: display is "${display}", not "grid"`);
+  }
+}
 
 /**
  * The third cell of a `.meter-row`: a share bar, or - on an agent's row - the
@@ -73,7 +106,7 @@ export async function openTodayCard(page: Page): Promise<void> {
         </section>
       </div>
     </main>`);
-  await page.addStyleTag({ content: stylesheet("desktop") });
+  await applyStylesheet(page, "desktop", ".screen");
 }
 
 /**
@@ -124,5 +157,5 @@ export async function openAgentsGroup(page: Page, app: "desktop" | "web"): Promi
           </div>
         </section>
     ${close}`);
-  await page.addStyleTag({ content: stylesheet(app) });
+  await applyStylesheet(page, app, app === "desktop" ? ".modal-overlay" : ".shell");
 }
