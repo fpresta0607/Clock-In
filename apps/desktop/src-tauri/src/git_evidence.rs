@@ -6,6 +6,7 @@
 //! or writes — a shift's evidence must never depend on network access, and a
 //! read-only tool must never mutate the repo it is reporting on.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -151,7 +152,7 @@ fn probe_repo_root(git: &str, cwd: &Path) -> Option<PathBuf> {
 /// worktree of one repository still reports the same origin. Synchronous and
 /// non-blocking for the same reasons `repo_root` is.
 pub fn repo_remote(cwd: &Path) -> Option<String> {
-    probe_repo_remote("git", cwd)
+    probe_repo_remote("git", cwd, &[])
 }
 
 /// A remote URL with its `userinfo@` component removed, and every other
@@ -189,11 +190,12 @@ fn without_embedded_credentials(remote: &str) -> String {
     }
 }
 
-fn probe_repo_remote(git: &str, cwd: &Path) -> Option<String> {
+fn probe_repo_remote(git: &str, cwd: &Path, env: &[(&str, &OsStr)]) -> Option<String> {
     let mut command = std::process::Command::new(git);
     command
         .args(["config", "--local", "--get", "remote.origin.url"])
         .current_dir(cwd)
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -624,7 +626,9 @@ mod tests {
     ///
     /// `GIT_CONFIG_GLOBAL` makes that hazard the test's own condition rather
     /// than a property of whoever runs it: the fixture below sets exactly the
-    /// key the probe reads, so dropping `--local` fails here every time.
+    /// key the probe reads, so dropping `--local` fails here every time. It is
+    /// handed to the probe's own child process rather than set on this one,
+    /// which every other test in this module shares while shelling out to git.
     #[test]
     fn repo_remote_of_a_non_repo_directory_is_an_honest_none() {
         let dir = temp_dir("repo-remote-plain");
@@ -634,14 +638,15 @@ mod tests {
             "[remote \"origin\"]\n\turl = https://github.com/someone/unrelated.git\n",
         )
         .expect("global config writes");
-        std::env::set_var("GIT_CONFIG_GLOBAL", &global);
 
-        assert_eq!(repo_remote(&dir), None);
+        assert_eq!(
+            probe_repo_remote("git", &dir, &[("GIT_CONFIG_GLOBAL", global.as_os_str())]),
+            None
+        );
         // The root probe already got this right, and the two have to agree:
         // a shift with no root must not arrive carrying a remote.
         assert_eq!(repo_root(&dir), None);
 
-        std::env::remove_var("GIT_CONFIG_GLOBAL");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -650,7 +655,7 @@ mod tests {
         let dir = temp_dir("repo-remote-no-git");
 
         assert_eq!(
-            probe_repo_remote("clock-in-git-that-is-not-installed", &dir),
+            probe_repo_remote("clock-in-git-that-is-not-installed", &dir, &[]),
             None
         );
 

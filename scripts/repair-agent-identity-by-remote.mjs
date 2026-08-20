@@ -144,7 +144,7 @@ export function remoteProbeFailure(error) {
  * would re-key a checkout git had merely refused to read, and say nothing
  * about it in the report.
  */
-export function resolveKey(agent) {
+export function resolveKey(agent, env = process.env) {
   const pathKey = `path:${agent.repo_root}`;
   let present = false;
   try {
@@ -158,6 +158,7 @@ export function resolveKey(agent) {
   try {
     remote = execFileSync("git", ["-C", agent.repo_root, "config", "--local", "--get", "remote.origin.url"], {
       encoding: "utf8",
+      env,
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 10_000,
     }).trim();

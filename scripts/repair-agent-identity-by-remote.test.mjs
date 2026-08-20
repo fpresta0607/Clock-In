@@ -276,35 +276,33 @@ test("resolveKey separates a non-repository, a remote-less repository and a remo
   const scratch = mkdtempSync(join(tmpdir(), "clock-in-resolve-key-"));
   const globalConfig = join(scratch, "gitconfig-global");
   // The hazard made deterministic: exactly the key the probe reads, set where
-  // a bare `config --get` would fall through to.
+  // a bare `config --get` would fall through to. Handed to the probe's child
+  // process rather than set on this one.
   writeFileSync(globalConfig, '[remote "origin"]\n\turl = https://github.com/someone/unrelated.git\n');
-  const previous = process.env.GIT_CONFIG_GLOBAL;
-  process.env.GIT_CONFIG_GLOBAL = globalConfig;
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: globalConfig };
   const git = (cwd, args) => execFileSync("git", ["-C", cwd, ...args], { stdio: ["ignore", "ignore", "ignore"] });
   try {
     const plain = join(scratch, "not-a-repo");
     mkdirSync(plain);
-    assert.equal(resolveKey({ repo_root: plain }).status, "unreadable");
+    assert.equal(resolveKey({ repo_root: plain }, env).status, "unreadable");
 
     const bare = join(scratch, "no-origin");
     mkdirSync(bare);
     git(bare, ["init", "--quiet"]);
-    assert.equal(resolveKey({ repo_root: bare }).status, "local-only");
+    assert.equal(resolveKey({ repo_root: bare }, env).status, "local-only");
 
     const pushed = join(scratch, "with-origin");
     mkdirSync(pushed);
     git(pushed, ["init", "--quiet"]);
     git(pushed, ["remote", "add", "origin", "git@github.com:acme/api.git"]);
     assert.deepEqual(
-      { key: resolveKey({ repo_root: pushed }).key, status: resolveKey({ repo_root: pushed }).status },
+      { key: resolveKey({ repo_root: pushed }, env).key, status: resolveKey({ repo_root: pushed }, env).status },
       { key: "github.com/acme/api", status: "remote" },
     );
 
     const absent = join(scratch, "never-existed");
-    assert.equal(resolveKey({ repo_root: absent }).status, "unreadable");
+    assert.equal(resolveKey({ repo_root: absent }, env).status, "unreadable");
   } finally {
-    if (previous === undefined) delete process.env.GIT_CONFIG_GLOBAL;
-    else process.env.GIT_CONFIG_GLOBAL = previous;
     rmSync(scratch, { recursive: true, force: true });
   }
 });

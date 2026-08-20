@@ -245,24 +245,14 @@ refusals never fail a batch.
 
 ### Roster: agents as identities
 
-An agent's identity is durable across sessions, keyed by **(operator, runtime,
-repository)** per organization — the same person's Claude Code working the same
-repository is one roster entry, not a new row per shift, and two people running
-the same runtime on the same repository are two workers rather than one. The
-repository is named by its git remote, normalized (`github.com/owner/repo`), and
-never by the directory it happens to sit in: a worktree, a second worktree, and a
-second checkout under a different folder name are all one repository and so one
-roster entry, on this machine and on the next one. A repository with no remote is
-identified by its own directory, which keeps local-only work from pooling into a
-single row. Each `agent_sessions` row is that identity's shift. The operator is
-whoever's desktop uploaded the shift, so every runtime gets the distinction the
-day its hooks are wired. A shift with no repository at all - it is not in one, or
-the desktop predates the probe and its directory names no codebase either - lands
-in that person's **unassigned** bucket, a real roster row several shifts share.
-The bucket itself never becomes a codebase:
-when a shift's own commit names one, that shift alone moves onto that codebase's
-identity and leaves the rest of the bucket behind; nothing is stranded and no
-default codebase is invented. The Clock-In project stays on the roster row as a label
+An agent's identity is durable across sessions, keyed by **(operator, runtime, repository)** per organization - the same person's Claude Code working the same repository is one roster entry, not a new row per shift, and two people running the same runtime on the same repository are two workers rather than one.
+The repository is named by its git remote, normalized (`github.com/owner/repo`), and never by the directory it happens to sit in: a worktree, a second worktree, and a second checkout under a different folder name are all one repository and so one roster entry, on this machine and on the next one.
+A repository with no remote is identified by its own directory, which keeps local-only work from pooling into a single row.
+Each `agent_sessions` row is that identity's shift.
+The operator is whoever's desktop uploaded the shift, so every runtime gets the distinction the day its hooks are wired.
+A shift with no repository at all - it is not in one, or the desktop predates the probe and its directory names no codebase either - lands in that person's **unassigned** bucket, a real roster row several shifts share.
+The bucket itself never becomes a codebase: when a shift's own commit names one, that shift alone moves onto that codebase's identity and leaves the rest of the bucket behind; nothing is stranded and no default codebase is invented.
+The Clock-In project stays on the roster row as a label
 that follows the path mappings, not as part of the identity, so re-mapping a
 directory never splits or merges a worker. For a shift in a git repo, the desktop app captures the
 branch, and the title, commit id and repository path of the commits the shift
