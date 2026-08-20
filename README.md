@@ -403,7 +403,7 @@ Run from the repository root.
 | Command | What it does |
 |---|---|
 | `pnpm typecheck` | `tsc --noEmit` across every package, and the layout suite |
-| `pnpm test` | the full Vitest suite (services, routes, contracts, React), then the layout suite |
+| `pnpm test` | the full Vitest suite (services, routes, contracts, React), the `scripts/` suites under `node --test`, then the layout suite |
 | `pnpm test:browser` | the layout suite alone; needs `pnpm exec playwright install chromium` once |
 | `pnpm build` | production build of every package |
 | `DATABASE_URL=… pnpm --filter @clock-in/database migrate` | apply migrations |
