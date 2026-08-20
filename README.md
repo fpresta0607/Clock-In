@@ -337,8 +337,8 @@ Not by policy, but because the code never reads it:
 
 What *is* collected: coarse activity segments with timestamps, the foreground process name, agent
 session boundaries with their working directory and - when that directory is in a git repository -
-that repository's root and its `origin` remote URL, which is what names the repository an agent
-works, browser spans naming which URL rule matched and
+that repository's root and its `origin` remote URL with any embedded credentials removed, which is
+what names the repository an agent works, browser spans naming which URL rule matched and
 for how long, the start and end of each session the monitor observed, and — for an AI coding shift
 in a git repo — the branch name, and the title, commit id and repository path of each commit
 captured once the shift ends (see *Roster: agents as identities*). When an AI coding tool keeps a

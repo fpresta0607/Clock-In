@@ -361,6 +361,8 @@ pub struct AgentEventUpload<'a> {
     /// The identity key the server actually uses, and contract data on the
     /// same terms as `repo_root`: an older API rejects an unknown field
     /// outright, so the installer ships only after the API accepting it.
+    /// Carries no credential: the probe strips any `userinfo@` component
+    /// before the value is spooled, so nothing token-shaped is ever uploaded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_remote: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]

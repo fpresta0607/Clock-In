@@ -133,10 +133,11 @@ fn probe_repo_root(git: &str, cwd: &Path) -> Option<PathBuf> {
 /// This is what makes the agent roster one row per repository rather than one
 /// per directory: every worktree is its own path and every second checkout is
 /// another, but they all report the same remote, on this machine and on the
-/// next one. Sent verbatim; the server normalizes the spellings
-/// (`normalizeRemote` in apps/api/src/services/attribution.ts), because the
-/// same repository is `git@github.com:owner/repo.git` here and
-/// `https://github.com/owner/repo` on a teammate's machine.
+/// next one. Sent with any embedded credentials removed and otherwise
+/// unchanged; the server normalizes the spellings (`normalizeRemote` in
+/// apps/api/src/services/attribution.ts), because the same repository is
+/// `git@github.com:owner/repo.git` here and `https://github.com/owner/repo` on
+/// a teammate's machine.
 ///
 /// `config --get` rather than `remote get-url`: the configured value, with no
 /// `insteadOf` rewriting applied, is the same string in both checkouts of one
@@ -144,6 +145,41 @@ fn probe_repo_root(git: &str, cwd: &Path) -> Option<PathBuf> {
 /// reasons `repo_root` is.
 pub fn repo_remote(cwd: &Path) -> Option<String> {
     probe_repo_remote("git", cwd)
+}
+
+/// A remote URL with its `userinfo@` component removed, and every other
+/// spelling left exactly as configured.
+///
+/// A token-authenticated clone stores its credential in the remote -
+/// `https://x-access-token:TOKEN@github.com/owner/repo.git` is what CI and
+/// container tooling write - so sending the configured value verbatim would
+/// put a live token on the wire on every agent session start. The server
+/// discards `userinfo` anyway, but a secret discarded after transmission was
+/// still transmitted, so it never leaves the machine that owns it.
+///
+/// Identity does not move: `normalizeRemote` strips the same component, so two
+/// checkouts of one repository still key on the same value whether or not
+/// either had a token embedded. The scp-style form `git@host:owner/repo` is
+/// deliberately untouched - that `git` is a transport user name rather than a
+/// credential, and it is what makes the form parseable at all.
+fn without_embedded_credentials(remote: &str) -> String {
+    let Some(scheme) = remote.find("://") else {
+        return remote.to_string();
+    };
+    let authority_start = scheme + 3;
+    let authority_end = remote[authority_start..]
+        .find('/')
+        .map_or(remote.len(), |offset| authority_start + offset);
+    let authority = &remote[authority_start..authority_end];
+    match authority.rfind('@') {
+        None => remote.to_string(),
+        Some(at) => format!(
+            "{}{}{}",
+            &remote[..authority_start],
+            &authority[at + 1..],
+            &remote[authority_end..]
+        ),
+    }
 }
 
 fn probe_repo_remote(git: &str, cwd: &Path) -> Option<String> {
@@ -160,7 +196,8 @@ fn probe_repo_remote(git: &str, cwd: &Path) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let remote = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    let configured = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    let remote = without_embedded_credentials(&configured);
     // The contract caps it at 1000 characters and rejects an empty string, so
     // an absurd value is dropped here rather than 400ing the whole batch.
     if remote.is_empty() || remote.chars().count() > 1_000 {
@@ -579,6 +616,66 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A token-authenticated clone keeps its credential in the remote, and the
+    /// remote now leaves this machine on every agent session start. The server
+    /// discards `userinfo` when it normalizes, but a secret discarded after
+    /// transmission was still transmitted, so it never goes on the wire.
+    #[tokio::test]
+    async fn repo_remote_strips_embedded_credentials() {
+        // Obviously fake, so nobody mistakes the fixture for a live token.
+        let fake_token = "ghp_000000000000000000000000000000000000";
+        let dir = temp_dir("repo-remote-credentialed");
+        init_repo(&dir).await;
+        commit_at(&dir, "a.txt", "first", 1_700_000_000).await;
+        run(
+            &dir,
+            &[
+                "remote",
+                "add",
+                "origin",
+                &format!("https://x-access-token:{fake_token}@github.com/acme/clock-in.git"),
+            ],
+        )
+        .await;
+
+        let remote = repo_remote(&dir).expect("a remote");
+
+        assert_eq!(remote, "https://github.com/acme/clock-in.git");
+        assert!(!remote.contains(fake_token));
+        assert!(!remote.contains("x-access-token"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn credential_stripping_keeps_every_other_spelling_intact() {
+        // Host, port and path survive; only the credential goes.
+        assert_eq!(
+            without_embedded_credentials("https://user:pat@dev.azure.test:8443/org/proj/_git/repo"),
+            "https://dev.azure.test:8443/org/proj/_git/repo"
+        );
+        assert_eq!(
+            without_embedded_credentials("ssh://git@github.com/acme/api.git"),
+            "ssh://github.com/acme/api.git"
+        );
+        assert_eq!(
+            without_embedded_credentials("https://github.com/acme/api.git"),
+            "https://github.com/acme/api.git"
+        );
+        // The scp-style form carries a transport user name, not a credential,
+        // and dropping it would leave a string git never wrote.
+        assert_eq!(
+            without_embedded_credentials("git@github.com:acme/api.git"),
+            "git@github.com:acme/api.git"
+        );
+        // An `@` in the path is not userinfo, so the authority is where the
+        // search stops.
+        assert_eq!(
+            without_embedded_credentials("https://github.com/acme/api@2.git"),
+            "https://github.com/acme/api@2.git"
+        );
     }
 
     #[tokio::test]

@@ -88,6 +88,34 @@ let sql;
 const runtimeLabels = new Map(registry.runtimes.map((runtime) => [runtime.id, runtime.label]));
 
 /**
+ * What a failed `git config --get remote.origin.url` actually means.
+ *
+ * Only exit 1 is git config's documented "the key is not set", and only that
+ * honestly says this checkout has no origin. Every other outcome is unknown,
+ * and unknown has to stay inert: git missing from PATH, the ten-second timeout
+ * firing, and above all exit 128, which is what
+ * `fatal: detected dubious ownership in repository` returns whenever a
+ * checkout's owner does not match the running user - the ordinary case on a
+ * shared or admin-created directory, which is precisely the setup this script
+ * is run under. Collapsing those onto `local-only` would report a probe that
+ * never worked as "nothing to repair".
+ */
+export function remoteProbeFailure(error) {
+  const firstLine = typeof error?.stderr === "string" ? error.stderr.trim().split(/\r?\n/)[0]?.trim() ?? "" : "";
+  const said = firstLine === "" ? "" : `: ${firstLine}`;
+  if (error?.code === "ENOENT") {
+    return { status: "unreadable", detail: "git is not on PATH here, so no remote could be read" };
+  }
+  if (error?.signal !== null && error?.signal !== undefined) {
+    return { status: "unreadable", detail: `git did not finish (${error.signal}), so no remote could be read` };
+  }
+  if (error?.status === 1) {
+    return { status: "local-only", detail: "the checkout is here and has no origin remote" };
+  }
+  return { status: "unreadable", detail: `git refused to read this checkout (exit ${error?.status ?? "unknown"})${said}` };
+}
+
+/**
  * The key an agent should carry, and how sure we are of it.
  *
  * - `remote`: the checkout is here and `origin` names a repository, so the key
@@ -99,6 +127,12 @@ const runtimeLabels = new Map(registry.runtimes.map((runtime) => [runtime.id, ru
  *   repository, or git could not be run. We cannot say, so nothing changes and
  *   the row is reported. This is what keeps another operator's rows out of a
  *   repair run by whoever happens to hold the database URL.
+ *
+ * The difference between the last two is decided by `remoteProbeFailure`, not
+ * assumed: a `local-only` row does take part in the grouping and does get
+ * written, so reading every git failure as "this repository has no remote"
+ * would re-key a checkout git had merely refused to read, and say nothing
+ * about it in the report.
  */
 function resolveKey(agent) {
   const pathKey = `path:${agent.repo_root}`;
@@ -114,14 +148,11 @@ function resolveKey(agent) {
   try {
     remote = execFileSync("git", ["-C", agent.repo_root, "config", "--get", "remote.origin.url"], {
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
+      stdio: ["ignore", "pipe", "pipe"],
       timeout: 10_000,
     }).trim();
-  } catch {
-    // `config --get` exits non-zero when the key is unset, which is also how a
-    // directory that is no longer a repository looks. Both mean "no origin
-    // here", and both leave the row alone.
-    return { key: pathKey, status: "local-only", detail: "the checkout is here and has no origin remote" };
+  } catch (error) {
+    return { key: pathKey, ...remoteProbeFailure(error) };
   }
   if (remote === "") return { key: pathKey, status: "local-only", detail: "the checkout is here and has no origin remote" };
   const normalized = normalizeRemote(remote);
@@ -370,7 +401,7 @@ async function main() {
       console.log(`      ${refusal.agent.repo_root}`);
       console.log(`      ${refusal.detail}`);
     }
-    console.log("    Run this from a machine that holds those checkouts to fold them too.\n");
+    console.log("    Run this from a machine that holds those checkouts, and where git can read them, to fold them too.\n");
   }
 
   const movedShifts = merges.reduce((total, merge) => total + merge.losers.reduce((sum, loser) => sum + loser.shifts, 0), 0);

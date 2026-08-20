@@ -693,7 +693,10 @@ pub struct SpoolEvent {
     /// The repository's `origin` remote, probed beside `repo_root`. Contract
     /// data too, and the one the server keys the agent identity on: two
     /// worktrees report two roots and one remote, so keying on the remote is
-    /// what makes them one agent instead of one per path.
+    /// what makes them one agent instead of one per path. Any embedded
+    /// credential is stripped before it reaches here, deliberately and at the
+    /// probe (`without_embedded_credentials` in git_evidence.rs), so a
+    /// token-authenticated clone never puts its token on the spool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_remote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

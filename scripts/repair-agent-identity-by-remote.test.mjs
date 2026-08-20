@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { planRepair } from "./repair-agent-identity-by-remote.mjs";
+import { planRepair, remoteProbeFailure } from "./repair-agent-identity-by-remote.mjs";
 
 const organization = "8d1c2f7e-0000-4000-8000-000000000001";
 const owner = "8d1c2f7e-0000-4000-8000-000000000002";
@@ -228,4 +228,34 @@ test("a group with two names a member chose is refused rather than merged", () =
   assert.deepEqual(plan.merges, []);
   assert.deepEqual(plan.rekeys, []);
   assert.equal(plan.ambiguous.length, 1);
+});
+
+// Reading every git failure as "this repository has no remote" turns "we
+// cannot say" into a claim, and a local-only row does take part in the
+// grouping and does get written. It also empties the refusals section, which
+// is the script's only way of saying "run this from the machine that holds
+// these checkouts" - so a probe that never worked reads as nothing to repair.
+test("only git's key-not-set exit means the checkout has no origin", () => {
+  assert.equal(remoteProbeFailure({ status: 1 }).status, "local-only");
+});
+
+test("a checkout git refused to read stays unreadable, and says why", () => {
+  // Exit 128 is `fatal: detected dubious ownership in repository`, git's
+  // ordinary refusal when a checkout's owner is not the running user.
+  const refused = remoteProbeFailure({
+    status: 128,
+    stderr: "fatal: detected dubious ownership in repository at 'C:/dev/api'\nowner is someone else\n",
+  });
+
+  assert.equal(refused.status, "unreadable");
+  assert.match(refused.detail, /128/);
+  assert.match(refused.detail, /dubious ownership/);
+  assert.doesNotMatch(refused.detail, /owner is someone else/);
+});
+
+test("git missing from PATH and a timed-out probe are both unreadable", () => {
+  assert.equal(remoteProbeFailure({ code: "ENOENT" }).status, "unreadable");
+  assert.equal(remoteProbeFailure({ status: null, signal: "SIGTERM" }).status, "unreadable");
+  assert.match(remoteProbeFailure({ code: "ENOENT" }).detail, /PATH/);
+  assert.match(remoteProbeFailure({ status: null, signal: "SIGTERM" }).detail, /SIGTERM/);
 });
