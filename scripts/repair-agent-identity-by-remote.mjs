@@ -1,0 +1,466 @@
+#!/usr/bin/env node
+/**
+ * Folds an operator's duplicate agents - one per worktree, one per checkout -
+ * onto the single identity their git remote names, and re-keys the survivor on
+ * that remote. Dry run by default: prints exactly what it would merge into
+ * what, and exits. Pass --confirm to perform it.
+ *
+ *   DATABASE_URL=postgres://... node scripts/repair-agent-identity-by-remote.mjs [--confirm]
+ *
+ * Identity used to be (organization, owner, source, repo_root), and a repo
+ * root is a *path*. Every treehouse worktree is its own path, so every worktree
+ * minted its own agent; because the display name is composed from the last
+ * segment, five different identities all rendered "Claude Code @ precisiondocs".
+ * Keyed by path, displayed by basename. Two checkouts of one GitHub repository
+ * under different directory names - `C:\dev\PrecisionDocs-AI` and
+ * `C:\dev\code-goblins\projects\precisiondocs` - are the same defect with no
+ * basename to compare at all.
+ *
+ * `0016_agent_identity_by_remote` moved the key onto `agents.repo_key` and
+ * carried every existing row across as `path:<root>`, which preserves exactly
+ * the identity it already had. This upgrades those keys to remotes and merges
+ * whatever collapses together.
+ *
+ * **The remote is not in the database.** Nothing has ever uploaded it, so it
+ * can only be read from a machine that holds the checkouts - which is why this
+ * runs locally against the shared database rather than as a migration. A row
+ * whose `repo_root` is not a directory on this machine is left exactly as it
+ * is and reported; that is what keeps another operator's rows out of a repair
+ * run by whoever happens to have the database URL.
+ *
+ * Rules, none of them negotiable:
+ *
+ * - **Merge, never delete.** Shifts, `shift_commits` and `agent_usage` all
+ *   follow their agent onto the survivor, and the emptied row is retired, not
+ *   removed. A repair that loses a shift is worse than the duplicates.
+ * - **Idempotent.** A second run finds every group already collapsed and every
+ *   key already correct, and does nothing.
+ * - **A name a member chose is not ours to revisit.** A `registered` row wins
+ *   its group; a group holding two of them is refused whole rather than
+ *   picking one.
+ *
+ * It also reports the unassigned bucket without touching it: how much of that
+ * time was genuinely unattributable and how much is a resolution failure.
+ * Re-homing those shifts is `repair-run-named-agents.mjs`'s job, and it should
+ * be run first.
+ */
+import { execFileSync } from "node:child_process";
+import { statSync } from "node:fs";
+import process from "node:process";
+
+import postgres from "postgres";
+
+import registry from "../packages/shared/src/agent-runtimes.json" with { type: "json" };
+
+/**
+ * The one implementation, imported rather than mirrored. The precedent script
+ * keeps its own copy of `OPAQUE_SEGMENT` and a comment asking the two to stay
+ * identical; a normalizer that drifts here does not just mislabel a row, it
+ * decides which agents get merged, so this reads the module the API itself
+ * reads. Node strips the types (22.18+, 23.6+, 24+).
+ */
+let normalizeRemote;
+let repoLabel;
+try {
+  ({ normalizeRemote, repoLabel } = await import("../apps/api/src/services/attribution.ts"));
+} catch (error) {
+  console.error("Could not load apps/api/src/services/attribution.ts.");
+  console.error("This script reads the API's own normalizer rather than copying it, which needs a Node that strips types (22.18+, 23.6+ or 24+).");
+  console.error(String(error));
+  process.exit(2);
+}
+
+const confirm = process.argv.includes("--confirm");
+const databaseUrl = process.env.DATABASE_URL;
+if (databaseUrl === undefined || databaseUrl === "") {
+  console.error("DATABASE_URL is required.");
+  process.exit(2);
+}
+
+const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+
+/** The declared runtimes' display names, from the one roster both sides read. */
+const runtimeLabels = new Map(registry.runtimes.map((runtime) => [runtime.id, runtime.label]));
+
+/**
+ * The key an agent should carry, and how sure we are of it.
+ *
+ * - `remote`: the checkout is here and `origin` names a repository, so the key
+ *   is that repository and every other checkout of it folds onto the same row.
+ * - `local-only`: the checkout is here and has no remote to name. Not a
+ *   failure - a repository nobody pushed anywhere is legitimate, and its own
+ *   directory is the right identity for it, which is what it already had.
+ * - `unreadable`: the directory is not on this machine, is no longer a
+ *   repository, or git could not be run. We cannot say, so nothing changes and
+ *   the row is reported. This is what keeps another operator's rows out of a
+ *   repair run by whoever happens to hold the database URL.
+ */
+function resolveKey(agent) {
+  const pathKey = `path:${agent.repo_root}`;
+  let present = false;
+  try {
+    present = statSync(agent.repo_root).isDirectory();
+  } catch {
+    present = false;
+  }
+  if (!present) return { key: pathKey, status: "unreadable", detail: "no such directory on this machine" };
+
+  let remote;
+  try {
+    remote = execFileSync("git", ["-C", agent.repo_root, "config", "--get", "remote.origin.url"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 10_000,
+    }).trim();
+  } catch {
+    // `config --get` exits non-zero when the key is unset, which is also how a
+    // directory that is no longer a repository looks. Both mean "no origin
+    // here", and both leave the row alone.
+    return { key: pathKey, status: "local-only", detail: "the checkout is here and has no origin remote" };
+  }
+  if (remote === "") return { key: pathKey, status: "local-only", detail: "the checkout is here and has no origin remote" };
+  const normalized = normalizeRemote(remote);
+  if (normalized === null) {
+    return { key: pathKey, status: "local-only", detail: `origin names a directory rather than a host (${remote})` };
+  }
+  return { key: normalized, status: "remote", detail: remote };
+}
+
+/**
+ * The name the API would compose for this row, so a repaired roster reads
+ * exactly like a freshly minted one: `defaultAgentName` in
+ * apps/api/src/drizzle-repositories.ts prefers the directory's own name and
+ * falls back to the key's - which is what stops a survivor whose root is a
+ * worktree slug from reading "@ unassigned" about work whose repository is
+ * known. `agents_name_length_valid` caps it at 200; a directory name is
+ * bounded by nothing.
+ */
+function defaultName(source, repoRoot, key) {
+  const runtime = runtimeLabels.get(source) ?? source;
+  const fromKey = key.startsWith("path:") ? repoLabel(key.slice("path:".length)) : key.split("/").pop();
+  const label = (repoRoot === null ? null : repoLabel(repoRoot)) ?? fromKey;
+  return `${runtime} @ ${label ?? "unassigned"}`.slice(0, 200);
+}
+
+/** Registered beats anonymous - a member named it - then oldest, then id. */
+function pickWinner(group) {
+  return [...group].sort((left, right) => {
+    if ((left.status === "registered") !== (right.status === "registered")) {
+      return left.status === "registered" ? -1 : 1;
+    }
+    const byAge = left.created_at.getTime() - right.created_at.getTime();
+    return byAge !== 0 ? byAge : left.id.localeCompare(right.id);
+  })[0];
+}
+
+/**
+ * Refuses a database that is not Clock-In's, before anything else runs.
+ *
+ * `DATABASE_URL` is an ambient environment variable shared with whatever else
+ * the shell was doing, and a stale one points at a stranger's database. This
+ * script merges and retires rows: pointed at the wrong database with
+ * `--confirm`, it would be operating on someone else's data before the first
+ * error surfaced. So the very first statement asks whether `agents` exists and
+ * carries the column this repair is about, and a database that answers no is
+ * refused rather than probed further.
+ */
+async function requireClockInSchema() {
+  const [found] = await sql`
+    select
+      to_regclass('public.agents') is not null as has_agents,
+      exists (
+        select 1 from information_schema.columns
+        where table_schema = 'public' and table_name = 'agents' and column_name = 'repo_key'
+      ) as has_repo_key
+  `;
+  if (!found.has_agents) {
+    console.error("This database has no `agents` table, so it is not Clock-In's. Refusing to touch it.");
+    console.error("Check DATABASE_URL - it is an ambient variable and a stale one points somewhere else entirely.");
+    await sql.end();
+    process.exit(2);
+  }
+  if (!found.has_repo_key) {
+    console.error("`agents` has no `repo_key` column: this database has not had migration 0016_agent_identity_by_remote applied.");
+    console.error("Apply it first; this repair upgrades the keys that migration creates.");
+    await sql.end();
+    process.exit(2);
+  }
+}
+
+async function main() {
+  await requireClockInSchema();
+  const agents = await sql`
+    select a.id, a.organization_id, a.owner_user_id, a.source, a.repo_root, a.repo_key,
+           a.name, a.status, a.created_at, u.name as owner_name,
+           (select count(*)::int from agent_sessions s where s.organization_id = a.organization_id and s.agent_id = a.id) as shifts,
+           (select count(*)::int from shift_commits c where c.organization_id = a.organization_id and c.agent_id = a.id) as commits,
+           (select count(*)::int from agent_usage g where g.organization_id = a.organization_id and g.agent_id = a.id) as usage_rows
+    from agents a
+    join users u on u.organization_id = a.organization_id and u.id = a.owner_user_id
+    where a.repo_root is not null and a.status <> 'retired'
+    order by a.organization_id, u.name, a.source, a.created_at, a.id
+  `;
+
+  console.log(`Clock-In agent identity repair, keyed on the git remote. ${confirm ? "Applying." : "Dry run."}`);
+  console.log(`${agents.length} live repo-keyed agent(s) to consider.\n`);
+
+  const refusals = [];
+  const localOnly = [];
+  const groups = new Map();
+  for (const agent of agents) {
+    const { key, status, detail } = resolveKey(agent);
+    if (status === "unreadable") refusals.push({ agent, detail });
+    if (status === "local-only") localOnly.push({ agent, detail });
+    const groupKey = `${agent.organization_id}|${agent.owner_user_id}|${agent.source}|${key}`;
+    const existing = groups.get(groupKey);
+    if (existing === undefined) groups.set(groupKey, { key, members: [agent] });
+    else existing.members.push(agent);
+  }
+
+  const merges = [];
+  const rekeys = [];
+  const ambiguous = [];
+  for (const group of groups.values()) {
+    const named = group.members.filter((agent) => agent.status === "registered");
+    if (named.length > 1) {
+      // Two names a member chose, one repository. Which name survives is a
+      // decision about someone's roster, not a mechanical merge.
+      ambiguous.push(group);
+      continue;
+    }
+    if (group.members.length > 1) {
+      const winner = pickWinner(group.members);
+      merges.push({ key: group.key, winner, losers: group.members.filter((agent) => agent.id !== winner.id) });
+      continue;
+    }
+    const only = group.members[0];
+    if (only.repo_key !== group.key) rekeys.push({ key: group.key, agent: only });
+  }
+
+  const describe = (agent) =>
+    `${agent.name} (${agent.id.slice(0, 8)}) ${agent.shifts} shift(s), ${agent.commits} commit(s), ${agent.usage_rows} usage row(s)`;
+
+  if (merges.length === 0) {
+    console.log("No two agents share a repository. Nothing to merge.");
+  } else {
+    console.log(`${merges.length} repository/repositories hold more than one agent:\n`);
+    for (const merge of merges) {
+      console.log(`  ${merge.key}  [${merge.winner.owner_name} / ${merge.winner.source}]`);
+      console.log(`    keep   ${describe(merge.winner)}`);
+      for (const loser of merge.losers) console.log(`    merge  ${describe(loser)}`);
+      console.log(`    root   ${merge.winner.repo_root}`);
+      console.log("");
+    }
+  }
+
+  if (rekeys.length > 0) {
+    console.log(`${rekeys.length} agent(s) already alone on their repository, re-keyed onto its remote:`);
+    for (const rekey of rekeys) console.log(`    ${rekey.agent.name} (${rekey.agent.id.slice(0, 8)})  ${rekey.agent.repo_key} -> ${rekey.key}`);
+    console.log("");
+  }
+
+  if (ambiguous.length > 0) {
+    console.log(`${ambiguous.length} group(s) refused: more than one agent there carries a name a member chose.`);
+    for (const group of ambiguous) {
+      console.log(`    ${group.key}`);
+      for (const agent of group.members) console.log(`      ${agent.status.padEnd(10)} ${describe(agent)}`);
+    }
+    console.log("    Rename or merge these by hand; a name someone chose is not this script's to drop.\n");
+  }
+
+  if (localOnly.length > 0) {
+    console.log(`${localOnly.length} agent(s) keyed on their own directory, which is the right answer for them:`);
+    for (const entry of localOnly) {
+      console.log(`    ${entry.agent.owner_name.padEnd(18)} ${entry.agent.name} (${entry.agent.id.slice(0, 8)})  ${entry.detail}`);
+      console.log(`      ${entry.agent.repo_root}`);
+    }
+    console.log("    A repository with no remote is legitimate and keeps its own identity, rather than pooling with every other one.\n");
+  }
+
+  if (refusals.length > 0) {
+    console.log(`${refusals.length} agent(s) refused - their remote cannot be read from this machine, so nothing about them changes:`);
+    for (const refusal of refusals) {
+      console.log(`    ${refusal.agent.owner_name.padEnd(18)} ${refusal.agent.name} (${refusal.agent.id.slice(0, 8)})`);
+      console.log(`      ${refusal.agent.repo_root}`);
+      console.log(`      ${refusal.detail}`);
+    }
+    console.log("    Run this from a machine that holds those checkouts to fold them too.\n");
+  }
+
+  const movedShifts = merges.reduce((total, merge) => total + merge.losers.reduce((sum, loser) => sum + loser.shifts, 0), 0);
+  const movedCommits = merges.reduce((total, merge) => total + merge.losers.reduce((sum, loser) => sum + loser.commits, 0), 0);
+  const movedUsage = merges.reduce((total, merge) => total + merge.losers.reduce((sum, loser) => sum + loser.usage_rows, 0), 0);
+  const retiring = merges.reduce((total, merge) => total + merge.losers.length, 0);
+
+  console.log("Counts");
+  console.log(`  agents before          ${agents.length}`);
+  console.log(`  agents after           ${agents.length - retiring}`);
+  console.log(`  shifts moved           ${movedShifts}`);
+  console.log(`  commits to move        ${movedCommits}`);
+  console.log(`  usage rows to move     ${movedUsage}`);
+  console.log(`  re-keyed in place      ${rekeys.length}`);
+  console.log(`  keyed on a directory   ${localOnly.length}`);
+  console.log(`  refused                ${refusals.length + ambiguous.reduce((total, group) => total + group.members.length, 0)}`);
+
+  await reportUnassignedBucket();
+
+  if (!confirm) {
+    console.log("\nDry run: nothing was written. Pass --confirm to perform the merges and re-keys above.");
+    await sql.end();
+    return;
+  }
+
+  let mergedAgents = 0;
+  let heldCommits = 0;
+  let actuallyMovedShifts = 0;
+  let actuallyMovedCommits = 0;
+  for (const merge of merges) {
+    await sql.begin(async (tx) => {
+      for (const loser of merge.losers) {
+        const shifts = await tx`
+          update agent_sessions set agent_id = ${merge.winner.id}, updated_at = now()
+          where organization_id = ${loser.organization_id} and agent_id = ${loser.id}
+          returning id
+        `;
+        actuallyMovedShifts += shifts.length;
+        // `shift_commits` and `agent_usage` carry their own `agent_id`, so the
+        // evidence does not follow its shift on its own: re-pointing only the
+        // shift would strand every commit tally and token total on the row
+        // being retired. The commit move is guarded the way
+        // DrizzleAgentRepository.merge guards its own - two worktrees of one
+        // repository can both have recorded the same sha, and
+        // (organization, agent, repo_root, sha) is unique - so a duplicate
+        // sighting stays where it is rather than aborting the merge. It is
+        // still counted, never dropped.
+        const commits = await tx`
+          update shift_commits as loser_commits set agent_id = ${merge.winner.id}, updated_at = now()
+          where loser_commits.organization_id = ${loser.organization_id}
+            and loser_commits.agent_id = ${loser.id}
+            and not exists (
+              select 1 from shift_commits as winner_commits
+              where winner_commits.organization_id = loser_commits.organization_id
+                and winner_commits.agent_id = ${merge.winner.id}
+                and winner_commits.repo_root = loser_commits.repo_root
+                and winner_commits.sha = loser_commits.sha
+            )
+          returning loser_commits.id
+        `;
+        actuallyMovedCommits += commits.length;
+        const held = await tx`
+          select id from shift_commits
+          where organization_id = ${loser.organization_id} and agent_id = ${loser.id}
+        `;
+        heldCommits += held.length;
+        // `agent_usage` needs no guard: its bucket unique is keyed on
+        // agent_session_id, which does not move, so re-pointing cannot collide.
+        await tx`
+          update agent_usage set agent_id = ${merge.winner.id}, updated_at = now()
+          where organization_id = ${loser.organization_id} and agent_id = ${loser.id}
+        `;
+        // Retired before the winner takes the key: the partial unique excludes
+        // retired rows, so releasing the losers' keys first is what lets the
+        // winner claim the one they all resolve to.
+        await tx`
+          update agents set status = 'retired', updated_at = now()
+          where organization_id = ${loser.organization_id} and id = ${loser.id}
+        `;
+        mergedAgents += 1;
+      }
+      await tx`
+        update agents
+        set repo_key = ${merge.key},
+            name = case when status = 'registered' then name else ${defaultName(merge.winner.source, merge.winner.repo_root, merge.key)} end,
+            updated_at = now()
+        where organization_id = ${merge.winner.organization_id} and id = ${merge.winner.id}
+      `;
+    });
+  }
+
+  for (const rekey of rekeys) {
+    await sql`
+      update agents
+      set repo_key = ${rekey.key},
+          name = case when status = 'registered' then name else ${defaultName(rekey.agent.source, rekey.agent.repo_root, rekey.key)} end,
+          updated_at = now()
+      where organization_id = ${rekey.agent.organization_id} and id = ${rekey.agent.id}
+    `;
+  }
+
+  const [after] = await sql`select count(*)::int as count from agents where repo_root is not null and status <> 'retired'`;
+  console.log(`\nMerged ${mergedAgents} agent(s) in, carrying ${actuallyMovedShifts} shift(s) and ${actuallyMovedCommits} commit(s). No evidence row was deleted.`);
+  if (heldCommits > 0) {
+    console.log(`${heldCommits} commit(s) stayed on a retired row: the surviving agent already records that sha for the same repository.`);
+  }
+  console.log(`Re-keyed ${rekeys.length} agent(s) already alone on their repository.`);
+  console.log(`Live repo-keyed agents now: ${after.count}.`);
+  await sql.end();
+}
+
+/**
+ * The unassigned bucket, read and never written. The roster shows one row
+ * holding far more time than any codebase's, which says the resolution was
+ * failing rather than that the work was really unattributable - so the
+ * question "how much of each?" deserves a number rather than a shrug.
+ *
+ * Four answers, in order of how much they let us say:
+ *
+ * - a shift whose own commit names a codebase is a resolution failure with
+ *   proof, and `repair-run-named-agents.mjs` re-homes exactly these;
+ * - a shift whose working directory names a codebase probably is one too - a
+ *   hook older than the repo probe reported no root at all - but a directory
+ *   is not proof that it was a repository;
+ * - a shift whose directory names only a run belongs in the bucket;
+ * - a shift with no directory at all is genuinely unattributable.
+ */
+async function reportUnassignedBucket() {
+  const shifts = await sql`
+    select s.id, s.cwd, u.name as owner_name,
+           extract(epoch from (coalesce(s.ended_at, s.last_event_at) - s.started_at))::int as seconds,
+           (select c.repo_root from shift_commits c
+             where c.organization_id = s.organization_id and c.agent_session_id = s.id
+             order by c.authored_at, c.id limit 1) as commit_root
+    from agent_sessions s
+    join agents a on a.organization_id = s.organization_id and a.id = s.agent_id
+    join users u on u.organization_id = s.organization_id and u.id = s.user_id
+    where a.repo_key is null and a.status <> 'retired' and s.source <> 'browser'
+  `;
+  const buckets = {
+    "resolution failure, its own commit names the codebase": [],
+    "probably a resolution failure, its directory names a codebase": [],
+    "honestly unassigned, its directory names only a run": [],
+    "honestly unassigned, no working directory recorded": [],
+  };
+  for (const shift of shifts) {
+    if (shift.commit_root !== null && repoLabel(shift.commit_root) !== null) {
+      buckets["resolution failure, its own commit names the codebase"].push(shift);
+    } else if (shift.cwd === null) {
+      buckets["honestly unassigned, no working directory recorded"].push(shift);
+    } else if (repoLabel(shift.cwd) !== null) {
+      buckets["probably a resolution failure, its directory names a codebase"].push(shift);
+    } else {
+      buckets["honestly unassigned, its directory names only a run"].push(shift);
+    }
+  }
+  const hours = (rows) => (rows.reduce((total, row) => total + Math.max(row.seconds ?? 0, 0), 0) / 3_600).toFixed(1);
+
+  console.log(`\nThe unassigned bucket: ${shifts.length} shift(s), ${hours(shifts)}h, untouched by this script.`);
+  for (const [reason, rows] of Object.entries(buckets)) {
+    console.log(`  ${String(rows.length).padStart(5)} shift(s)  ${hours(rows).padStart(7)}h  ${reason}`);
+  }
+  const labels = new Map();
+  for (const shift of shifts) {
+    const label = shift.commit_root === null ? (shift.cwd === null ? null : repoLabel(shift.cwd)) : repoLabel(shift.commit_root);
+    labels.set(label ?? "(no codebase)", (labels.get(label ?? "(no codebase)") ?? 0) + 1);
+  }
+  const top = [...labels.entries()].sort((left, right) => right[1] - left[1]).slice(0, 12);
+  if (top.length > 0) {
+    console.log("  The labels the Agents tab renders for it, by shift count:");
+    for (const [label, count] of top) console.log(`    ${String(count).padStart(5)}  ${label}`);
+  }
+}
+
+main().catch(async (error) => {
+  console.error(error);
+  await sql.end({ timeout: 5 });
+  process.exit(1);
+});
