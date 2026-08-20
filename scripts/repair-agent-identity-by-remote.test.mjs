@@ -25,7 +25,7 @@ function agent(overrides) {
   };
   // Every live row carries a key by the time this runs: 0016's backfill gave
   // the ones that predate it `path:<root>`, which is the identity they had.
-  return row.repo_key === null ? { ...row, repo_key: `path:${row.repo_root}` } : row;
+  return row.repo_key === null && row.repo_root !== null ? { ...row, repo_key: `path:${row.repo_root}` } : row;
 }
 
 /** A machine that holds only the checkouts named here; anything else is not on it. */
@@ -123,11 +123,12 @@ test("two worktrees of one remote fold onto the older row, and a lone row is re-
 });
 
 // The hole that making unreadable rows inert opened: the row we refuse still
-// holds its key, and the partial unique is on live rows, so re-keying another
-// row onto it raises a unique violation - after earlier merges have already
-// committed, which is the half-applied repair the script exists to prevent.
-// Two rows proven to be one repository is a merge, not a collision.
-test("a re-key that would collide with a live row becomes a merge instead", () => {
+// holds its key, and the partial unique covers exactly the live rows, so any
+// write of that key raises a unique violation - after earlier merges have
+// already committed, which is the half-applied repair the script exists to
+// prevent. The row is inert in both directions: not re-keyed past, and not
+// merged into either, because receiving another row's shifts is not inert.
+test("a single row is not re-keyed onto a key a live row it cannot read holds", () => {
   const key = "github.com/acme/api";
   const holder = agent({
     id: "8d1c2f7e-0000-4000-8000-00000000000b",
@@ -144,24 +145,63 @@ test("a re-key that would collide with a live row becomes a merge instead", () =
   const plan = planRepair([holder, here], machine({ "C:/dev/api": remote(key) }));
 
   assert.deepEqual(plan.rekeys, []);
-  assert.equal(plan.merges.length, 1);
-  assert.equal(plan.merges[0].key, key);
-  assert.equal(plan.merges[0].winner.id, holder.id);
-  assert.deepEqual(plan.merges[0].losers.map((loser) => loser.id), [here.id]);
-  // The row drawn into that merge is no longer reported as untouched.
-  assert.deepEqual(plan.refusals, []);
+  assert.deepEqual(plan.merges, []);
+  assert.equal(plan.contended.length, 1);
+  assert.equal(plan.contended[0].key, key);
+  assert.deepEqual(plan.contended[0].members.map((member) => member.id), [here.id]);
+  assert.equal(plan.contended[0].holder.id, holder.id);
 });
 
-test("a collision between two names a member chose is refused, not merged", () => {
+// The branch the guard missed: a merge re-keys its winner with the very same
+// statement, so a group of two present worktrees walks into the same unique
+// violation - and this is the dominant shape in the reported data, five
+// worktrees of one repository.
+test("a merge is not queued when a live row it cannot read holds the group's key", () => {
   const key = "github.com/acme/api";
-  const holder = agent({ id: "8d1c2f7e-0000-4000-8000-00000000000b", repo_root: "D:/gone/api", repo_key: key, status: "registered", name: "Reviewer" });
-  const here = agent({ id: "8d1c2f7e-0000-4000-8000-00000000000c", status: "registered", name: "Alex's helper" });
+  const holder = agent({ id: "8d1c2f7e-0000-4000-8000-00000000000b", repo_root: "D:/gone/api", repo_key: key });
+  const first = agent({ id: "8d1c2f7e-0000-4000-8000-00000000000c", repo_root: "C:/w/api-1" });
+  const second = agent({ id: "8d1c2f7e-0000-4000-8000-00000000000d", repo_root: "C:/w/api-2" });
 
-  const plan = planRepair([holder, here], machine({ "C:/dev/api": remote(key) }));
+  const plan = planRepair([holder, first, second], machine({
+    "C:/w/api-1": remote(key),
+    "C:/w/api-2": remote(key),
+  }));
 
   assert.deepEqual(plan.merges, []);
   assert.deepEqual(plan.rekeys, []);
-  assert.equal(plan.ambiguous.length, 1);
+  assert.equal(plan.contended.length, 1);
+  assert.deepEqual(plan.contended[0].members.map((member) => member.id).sort(), [first.id, second.id].sort());
+  assert.equal(plan.contended[0].holder.id, holder.id);
+});
+
+// A holder need not have a repo root at all: a remote can identify a row when
+// no directory was reported, and such a row never becomes a candidate, so it
+// has to be read for the key it holds rather than skipped outright.
+test("a rootless row still holds its key against the group that resolves to it", () => {
+  const key = "github.com/acme/api";
+  const rootless = agent({ id: "8d1c2f7e-0000-4000-8000-00000000000b", repo_root: null, repo_key: key });
+  const here = agent({ id: "8d1c2f7e-0000-4000-8000-00000000000c", repo_root: "C:/dev/api" });
+
+  const plan = planRepair([rootless, here], machine({ "C:/dev/api": remote(key) }));
+
+  assert.deepEqual(plan.rekeys, []);
+  assert.deepEqual(plan.merges, []);
+  assert.deepEqual(plan.refusals, []);
+  assert.equal(plan.contended.length, 1);
+  assert.equal(plan.contended[0].holder.id, rootless.id);
+});
+
+// The operator's unassigned bucket has no root to probe and no key to hold, so
+// it is neither a candidate nor a refusal - it simply is not this run's work.
+test("the unassigned bucket is not a candidate and not reported as refused", () => {
+  const bucket = agent({ id: "8d1c2f7e-0000-4000-8000-00000000000b", repo_root: null, repo_key: null });
+
+  const plan = planRepair([bucket], machine({}));
+
+  assert.deepEqual(plan.merges, []);
+  assert.deepEqual(plan.rekeys, []);
+  assert.deepEqual(plan.refusals, []);
+  assert.deepEqual(plan.contended, []);
 });
 
 // A second run sees keys that are already right and has nothing left to do.

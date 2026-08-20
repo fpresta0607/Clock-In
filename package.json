@@ -11,7 +11,7 @@
     "test": "pnpm --recursive --workspace-concurrency=1 test && pnpm test:scripts && pnpm test:browser",
     "test:browser": "playwright test --config tests/browser/playwright.config.ts",
     "typecheck": "pnpm --recursive --workspace-concurrency=1 typecheck && tsc --noEmit --project tests/browser/tsconfig.json",
-    "test:scripts": "node --test scripts/release-tauri-config.test.mjs scripts/updater-manifest.test.mjs scripts/release-signing-state.test.mjs scripts/repair-agent-identity-by-remote.test.mjs"
+    "test:scripts": "node --test scripts/release-tauri-config.test.mjs scripts/updater-manifest.test.mjs scripts/release-signing-state.test.mjs scripts/repair-agent-identity-by-remote.test.mjs scripts/repair-run-named-agents.test.mjs"
   },
   "dependencies": {
     "postgres": "^3.4.7"

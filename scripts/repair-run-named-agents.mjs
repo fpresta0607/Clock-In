@@ -80,13 +80,9 @@ try {
 }
 
 const confirm = process.argv.includes("--confirm");
-const databaseUrl = process.env.DATABASE_URL;
-if (databaseUrl === undefined || databaseUrl === "") {
-  console.error("DATABASE_URL is required.");
-  process.exit(2);
-}
 
-const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+/** Opened by the entrypoint at the foot of this file, so an import connects to nothing. */
+let sql;
 
 /** The declared runtimes' display names, from the one roster both sides read. */
 const runtimeLabels = new Map(registry.runtimes.map((runtime) => [runtime.id, runtime.label]));
@@ -107,6 +103,33 @@ const namesOnlyARun = (repoRoot) => repoRoot !== null && repoLabel(repoRoot) ===
  */
 const keyedOnARepository = (agent) => agent.repo_key !== null && !agent.repo_key.startsWith("path:");
 
+/**
+ * The row that already carries this codebase, or undefined.
+ *
+ * Oldest matching label wins, deterministically; the label is what every
+ * surface renders, so which clone's row carries the shift does not change what
+ * anyone reads. A remote-keyed row is matched on the repository its key names,
+ * which is the whole point of the key: a commit authored in one worktree
+ * reaches the repository's own row.
+ *
+ * The comparison folds case and nothing else does. `repoLabel` keeps a
+ * directory's own capitalisation (`Clock-In`, `PrecisionDocs-AI`) while
+ * `normalizeRemote` lowercases a remote deliberately, because GitHub treats
+ * `Owner/Repo` and `owner/repo` as one repository - so a capitalised checkout
+ * would never match its own remote-keyed row, and this would mint a second row
+ * for it. Duplicating a row inside the script that repairs duplicated rows.
+ * Only the match folds: what is stored and displayed is untouched.
+ */
+export function findCodebaseRow(candidates, label) {
+  const wanted = label.toLowerCase();
+  return candidates.find((agent) => agentCodebaseLabel(agent.repo_root, agent.repo_key)?.toLowerCase() === wanted);
+}
+
+/** A row the fold pass may retire into its operator's unassigned bucket. */
+export function foldsIntoBucket(agent) {
+  return agent.status === "anonymous" && !keyedOnARepository(agent) && namesOnlyARun(agent.repo_root);
+}
+
 async function main() {
   // Only anonymous rows. Naming an agent registers it in the same write, so
   // `registered` means a member chose that name - not ours to revisit, even on
@@ -117,7 +140,7 @@ async function main() {
     where repo_root is not null and status = 'anonymous'
     order by organization_id, owner_user_id, source, id
   `;
-  const runNamed = candidates.filter((agent) => !keyedOnARepository(agent) && namesOnlyARun(agent.repo_root));
+  const runNamed = candidates.filter(foldsIntoBucket);
   // A name in angle brackets is a placeholder, never a model: `like '<%>'`
   // mirrors `attestedModel` in apps/api/src/services/agent-sessions.ts exactly.
   const [placeholders] = await sql`
@@ -273,12 +296,7 @@ async function main() {
           and repo_key is not null and status <> 'retired'
         order by created_at, id
       `;
-      // Oldest matching label wins, deterministically; the label is what
-      // every surface renders, so which clone's row carries the shift does
-      // not change what anyone reads. A remote-keyed row is matched on the
-      // repository its key names, which is the whole point of the key: a
-      // commit authored in one worktree reaches the repository's own row.
-      let target = candidates.find((agent) => agentCodebaseLabel(agent.repo_root, agent.repo_key) === label);
+      let target = findCodebaseRow(candidates, label);
       if (target === undefined) {
         const runtime = runtimeLabels.get(shift.source) ?? shift.source;
         // `agents_name_length_valid` caps a name at 200 characters, and a
@@ -367,8 +385,16 @@ async function main() {
   await sql.end();
 }
 
-main().catch(async (error) => {
-  console.error(error);
-  await sql.end({ timeout: 5 });
-  process.exit(1);
-});
+if (process.argv[1] !== undefined && process.argv[1].endsWith("repair-run-named-agents.mjs")) {
+  const databaseUrl = process.env.DATABASE_URL;
+  if (databaseUrl === undefined || databaseUrl === "") {
+    console.error("DATABASE_URL is required.");
+    process.exit(2);
+  }
+  sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+  main().catch(async (error) => {
+    console.error(error);
+    await sql.end({ timeout: 5 });
+    process.exit(1);
+  });
+}

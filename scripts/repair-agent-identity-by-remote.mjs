@@ -38,6 +38,12 @@
  * - **A name a member chose is not ours to revisit.** A `registered` row wins
  *   its group; a group holding two of them is refused whole rather than
  *   picking one.
+ * - **Everything is decided before anything is written.** `planRepair` settles
+ *   every group, every winner and every target key against the rows as they
+ *   are now, and validates each target against the live rows that hold keys;
+ *   the writer only executes what the dry run printed. A group whose key is
+ *   held by a row outside it is refused there, not discovered by a unique
+ *   violation two transactions into the run.
  *
  * It also reports the unassigned bucket without touching it: how much of that
  * time was genuinely unattributable and how much is a resolution failure.
@@ -201,24 +207,34 @@ async function requireClockInSchema() {
  * removed after it had been keyed on that remote - demoting it would be the
  * same split by another route, so it is refused too.
  *
+ * Inert cuts both ways, which is what `contended` is for. A row this run
+ * cannot read still holds its key, and the unique index covers exactly the
+ * live rows, so a group resolving to a key such a row holds is refused whole
+ * rather than merged into it or re-keyed past it. A later run from the machine
+ * that holds that checkout resolves the pair properly.
+ *
  * `resolve` is injected so this can be exercised without checkouts on disk.
  */
 export function planRepair(agents, resolve = resolveKey) {
   const refusals = [];
   const localOnly = [];
+  const contended = [];
   const groups = new Map();
-  // Every live row by the key it already holds, refused rows included. The
-  // unique index is partial on non-retired rows, so re-keying onto a key one
-  // of them still holds raises a unique violation - and it would raise it
-  // after earlier merges had already committed, which is the half-applied
-  // repair this script exists to avoid. Only a row kept out of the grouping
-  // can be that holder, since anything grouped under this key is in the group.
+  // Every live row by the key it already holds, whether or not this run can
+  // read its checkout - and rows with no repo root at all, which can hold a
+  // remote key without ever being a candidate. The partial unique covers
+  // exactly these rows, so a key one of them holds is a key no write in this
+  // plan may target.
+  const scopedKey = (agent, key) => `${agent.organization_id}|${agent.owner_user_id}|${agent.source}|${key}`;
   const liveByKey = new Map();
   for (const agent of agents) {
     if (agent.repo_key === null) continue;
-    liveByKey.set(`${agent.organization_id}|${agent.owner_user_id}|${agent.source}|${agent.repo_key}`, agent);
+    liveByKey.set(scopedKey(agent, agent.repo_key), agent);
   }
   for (const agent of agents) {
+    // Nothing to probe and nothing to re-key: the operator's unassigned
+    // bucket, or a row a remote identified without naming a directory.
+    if (agent.repo_root === null) continue;
     const { key, status, detail } = resolve(agent);
     if (status === "unreadable") {
       refusals.push({ agent, detail });
@@ -242,6 +258,19 @@ export function planRepair(agents, resolve = resolveKey) {
   const rekeys = [];
   const ambiguous = [];
   for (const group of groups.values()) {
+    // Both write paths end in the same statement - `set repo_key = <the
+    // group's key>` on whichever row survives - so both need the same question
+    // asked first, and it has to be asked here rather than at either writer. A
+    // row outside this group already holding that key is typically one this
+    // run refused to read, keyed from a machine that could read it. Refuse the
+    // group: merging into that row would have it receive another row's shifts,
+    // which is not what "a row we cannot read is inert" means, and re-keying
+    // past it aborts the run after earlier merges have already committed.
+    const holder = liveByKey.get(scopedKey(group.members[0], group.key));
+    if (holder !== undefined && !group.members.some((agent) => agent.id === holder.id)) {
+      contended.push({ key: group.key, members: group.members, holder });
+      continue;
+    }
     const named = group.members.filter((agent) => agent.status === "registered");
     if (named.length > 1) {
       // Two names a member chose, one repository. Which name survives is a
@@ -255,27 +284,9 @@ export function planRepair(agents, resolve = resolveKey) {
       continue;
     }
     const only = group.members[0];
-    if (only.repo_key === group.key) continue;
-    const holder = liveByKey.get(`${only.organization_id}|${only.owner_user_id}|${only.source}|${group.key}`);
-    if (holder === undefined || holder.id === only.id) {
-      rekeys.push({ key: group.key, agent: only });
-      continue;
-    }
-    // Two rows, one repository, proven twice over: this one resolves to that
-    // key from its checkout and the other already carries it. Folding them is
-    // the whole job, so the collision becomes a merge rather than a write that
-    // would abort mid-run.
-    if (only.status === "registered" && holder.status === "registered") {
-      ambiguous.push({ key: group.key, members: [only, holder] });
-      continue;
-    }
-    const winner = pickWinner([only, holder]);
-    merges.push({ key: group.key, winner, losers: [winner.id === only.id ? holder : only] });
+    if (only.repo_key !== group.key) rekeys.push({ key: group.key, agent: only });
   }
-  // A row drawn into a merge by that collision is no longer refused, and
-  // reporting it as untouched would be a lie about a row this run does write.
-  const merging = new Set(merges.flatMap((merge) => [merge.winner.id, ...merge.losers.map((loser) => loser.id)]));
-  return { merges, rekeys, ambiguous, localOnly, refusals: refusals.filter((refusal) => !merging.has(refusal.agent.id)) };
+  return { merges, rekeys, ambiguous, contended, localOnly, refusals };
 }
 
 async function main() {
@@ -288,14 +299,17 @@ async function main() {
            (select count(*)::int from agent_usage g where g.organization_id = a.organization_id and g.agent_id = a.id) as usage_rows
     from agents a
     join users u on u.organization_id = a.organization_id and u.id = a.owner_user_id
-    where a.repo_root is not null and a.status <> 'retired'
+    where a.status <> 'retired'
     order by a.organization_id, u.name, a.source, a.created_at, a.id
   `;
+  // Rows with no repo root are read only for the keys they hold: there is
+  // nothing to probe and nothing to re-key on them.
+  const considered = agents.filter((agent) => agent.repo_root !== null);
 
   console.log(`Clock-In agent identity repair, keyed on the git remote. ${confirm ? "Applying." : "Dry run."}`);
-  console.log(`${agents.length} live repo-keyed agent(s) to consider.\n`);
+  console.log(`${considered.length} live repo-keyed agent(s) to consider.\n`);
 
-  const { merges, rekeys, ambiguous, localOnly, refusals } = planRepair(agents);
+  const { merges, rekeys, ambiguous, contended, localOnly, refusals } = planRepair(agents);
 
   const describe = (agent) =>
     `${agent.name} (${agent.id.slice(0, 8)}) ${agent.shifts} shift(s), ${agent.commits} commit(s), ${agent.usage_rows} usage row(s)`;
@@ -328,6 +342,18 @@ async function main() {
     console.log("    Rename or merge these by hand; a name someone chose is not this script's to drop.\n");
   }
 
+  if (contended.length > 0) {
+    console.log(`${contended.length} group(s) refused: another live agent already holds the key they resolve to.`);
+    for (const clash of contended) {
+      console.log(`    ${clash.key}`);
+      for (const agent of clash.members) console.log(`      resolves  ${agent.id} ${describe(agent)}`);
+      console.log(`      holds     ${clash.holder.id} ${describe(clash.holder)}`);
+      console.log(`      root      ${clash.holder.repo_root ?? "(none recorded)"}`);
+      console.log("      That row is not one this run can read, so it is not one this run may merge into or re-key past.");
+    }
+    console.log("    Run this from the machine holding the other row's checkout, or resolve the two by hand.\n");
+  }
+
   if (localOnly.length > 0) {
     console.log(`${localOnly.length} agent(s) keyed on their own directory, which is the right answer for them:`);
     for (const entry of localOnly) {
@@ -353,14 +379,17 @@ async function main() {
   const retiring = merges.reduce((total, merge) => total + merge.losers.length, 0);
 
   console.log("Counts");
-  console.log(`  agents before          ${agents.length}`);
-  console.log(`  agents after           ${agents.length - retiring}`);
+  console.log(`  agents before          ${considered.length}`);
+  console.log(`  agents after           ${considered.length - retiring}`);
   console.log(`  shifts moved           ${movedShifts}`);
   console.log(`  commits to move        ${movedCommits}`);
   console.log(`  usage rows to move     ${movedUsage}`);
   console.log(`  re-keyed in place      ${rekeys.length}`);
   console.log(`  keyed on a directory   ${localOnly.length}`);
-  console.log(`  refused                ${refusals.length + ambiguous.reduce((total, group) => total + group.members.length, 0)}`);
+  const refusedRows = refusals.length
+    + ambiguous.reduce((total, group) => total + group.members.length, 0)
+    + contended.reduce((total, clash) => total + clash.members.length, 0);
+  console.log(`  refused                ${refusedRows}`);
 
   await reportUnassignedBucket();
 
