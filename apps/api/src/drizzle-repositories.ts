@@ -29,7 +29,7 @@ import type {
   OrganizationRecord,
 } from "./auth.js";
 import { AppError } from "./errors.js";
-import { identityRepoRoot, repoLabel } from "./services/attribution.js";
+import { identityRepoKey, repoKeyLabel, repoLabel } from "./services/attribution.js";
 import {
   PathMappingRepositoryError,
   SessionRepositoryError,
@@ -1278,7 +1278,7 @@ export class DrizzleAgentSessionRepository implements AgentSessionRepository {
 /** Either half of the partial identity key: repo-keyed agents, or one operator's unassigned bucket. */
 function identityKeyConstraint(error: unknown): boolean {
   const constraint = uniqueConstraint(error);
-  return constraint === "agents_organization_owner_source_repo_unique"
+  return constraint === "agents_organization_owner_source_repo_key_unique"
     || constraint === "agents_organization_owner_source_unassigned_unique";
 }
 
@@ -1286,9 +1286,18 @@ function identityKeyConstraint(error: unknown): boolean {
  * The default roster name: the runtime's label beside the codebase's folder
  * name, or "unassigned" for the operator's repo-less bucket. Only the
  * basename is ever displayed, so the full path never has to leave the row.
+ *
+ * The identity key answers when the directory cannot: a worktree checked out
+ * per run names no codebase, but the remote that identified it does, so the
+ * row reads "Claude Code @ precisiondocs" rather than "@ unassigned" about
+ * work whose repository is known. Clamped to the 200 characters
+ * `agents_name_length_valid` allows, because a directory name is bounded by
+ * nothing and a rejected insert would drop the shift, not just the name.
  */
-export function defaultAgentName(runtimeLabel: string, repoRoot: string | null): string {
-  return `${runtimeLabel} @ ${(repoRoot === null ? null : repoLabel(repoRoot)) ?? "unassigned"}`;
+export function defaultAgentName(runtimeLabel: string, repoRoot: string | null, repoKey: string | null): string {
+  const label = (repoRoot === null ? null : repoLabel(repoRoot))
+    ?? (repoKey === null ? null : repoKeyLabel(repoKey));
+  return `${runtimeLabel} @ ${label ?? "unassigned"}`.slice(0, 200);
 }
 
 function asAgentRecord(row: { agent: typeof agents.$inferSelect; ownerName: string; projectName: string | null }): AgentRecord {
@@ -1302,6 +1311,7 @@ function asAgentRecord(row: { agent: typeof agents.$inferSelect; ownerName: stri
     // The restrict FK keeps the project alive while the agent points at it.
     project: row.agent.projectId === null ? null : { id: row.agent.projectId, name: row.projectName! },
     repoRoot: row.agent.repoRoot,
+    repoKey: row.agent.repoKey,
     createdAt: row.agent.createdAt,
   };
 }
@@ -1316,35 +1326,42 @@ export class DrizzleAgentRepository implements AgentRepository {
     // predicate that does not match fails every insert with "no unique or
     // exclusion constraint matching the ON CONFLICT specification" - which no
     // mocked repository can catch. A repo-less sighting arbitrates on the
-    // index that collapses one operator's null repos onto a single row.
-    // A working directory that names no codebase - a per-run worktree named
-    // after its run id - identifies none either, so it lands in the operator's
-    // unassigned bucket instead of minting one agent per run. Normalized here,
-    // at the one door every caller goes through.
-    const repoRoot = identityRepoRoot(input.repoRoot);
-    const unassigned = repoRoot === null;
+    // index that collapses one operator's null repositories onto a single row.
+    //
+    // The key is the repository, not the directory: the normalized remote when
+    // the runtime read one - which is what makes every worktree and every
+    // second checkout of that repository one identity - else the root itself,
+    // and nothing at all when the directory names no codebase either, so a
+    // per-run worktree lands in the operator's unassigned bucket instead of
+    // minting one agent per run. Composed at the one door every caller goes
+    // through. The root rides along as evidence of where the work happened,
+    // stored only when something was identified so a bucket never claims a
+    // directory the shifts pooled in it did not share.
+    const repoKey = identityRepoKey(input.repoRoot, input.repoRemote);
+    const unassigned = repoKey === null;
     const rows = await this.db
       .insert(agents)
       .values({
         organizationId: input.organizationId,
         ownerUserId: input.ownerUserId,
         projectId: input.projectId,
-        repoRoot,
+        repoRoot: unassigned ? null : input.repoRoot,
+        repoKey,
         source: input.source,
         // The default name is the runtime label beside the repo's folder
         // name, composed here because the basename needs no round trip; a
         // repo-less identity reads as "unassigned". A replay only touches
         // updatedAt - the name, owner and status a member may have set are
         // never overwritten.
-        name: defaultAgentName(input.name, repoRoot),
+        name: defaultAgentName(input.name, unassigned ? null : input.repoRoot, repoKey),
       })
       .onConflictDoUpdate({
         target: unassigned
           ? [agents.organizationId, agents.ownerUserId, agents.source]
-          : [agents.organizationId, agents.ownerUserId, agents.source, agents.repoRoot],
+          : [agents.organizationId, agents.ownerUserId, agents.source, agents.repoKey],
         targetWhere: unassigned
-          ? sql`${agents.repoRoot} is null and ${agents.status} <> 'retired'`
-          : sql`${agents.repoRoot} is not null and ${agents.status} <> 'retired'`,
+          ? sql`${agents.repoKey} is null and ${agents.status} <> 'retired'`
+          : sql`${agents.repoKey} is not null and ${agents.status} <> 'retired'`,
         set: { updatedAt: input.now },
       })
       .returning({ id: agents.id });
@@ -1378,7 +1395,7 @@ export class DrizzleAgentRepository implements AgentRepository {
       .where(and(
         eq(agents.organizationId, organizationId),
         eq(agents.id, agentId),
-        isNull(agents.repoRoot),
+        isNull(agents.repoKey),
         // Only a row nobody named. Naming an agent registers it in the same
         // write, so 'anonymous' is exactly "machine-minted and still
         // unclaimed" - the rule scripts/repair-run-named-agents.mjs already

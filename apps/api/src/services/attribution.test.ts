@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { identityRepoRoot, normalizePath, repoLabel, resolveProjectForCwd, resolveProjectForRule, type PathMappingCandidate } from "./attribution.js";
+import {
+  identityRepoKey,
+  identityRepoRoot,
+  normalizePath,
+  normalizeRemote,
+  repoKeyLabel,
+  repoLabel,
+  resolveProjectForCwd,
+  resolveProjectForRule,
+  type PathMappingCandidate,
+} from "./attribution.js";
 
 const projectA = "a1c7e513-b094-4d4c-ae55-21790ae019a4";
 const projectB = "b1c7e513-b094-4d4c-ae55-21790ae019a4";
@@ -77,6 +87,131 @@ describe("repoLabel", () => {
 
   it("caps a pathological segment at the contract's length", () => {
     expect(repoLabel(`/src/${"n".repeat(500)}`)).toHaveLength(200);
+  });
+});
+
+// The treehouse worktree slug is the shape that made a directory nobody named
+// look like ten codebases: `<slug>-<6hex>`. It is the narrowest of the four
+// opaque shapes on purpose, because it is the only one a real repository could
+// wear, so the suffix has to carry a digit.
+describe("repoLabel and the worktree slug", () => {
+  it("refuses a slug carrying a random hex suffix", () => {
+    expect(repoLabel("C:/w/ai-automation-agency-redesign-c65da8")).toBeNull();
+    expect(repoLabel("C:/w/dazzling-lamarr-0aacbd")).toBeNull();
+    expect(repoLabel("C:/w/goofy-haslett-4b3191")).toBeNull();
+    expect(repoLabel("C:/w/rebase-merge-open-prs-fe9680")).toBeNull();
+    expect(repoLabel("C:/w/billing-legacy-50-accounting-4578f4")).toBeNull();
+    expect(repoLabel("C:/w/simon-cre-wrap-command-cf9c1e")).toBeNull();
+    expect(repoLabel("C:/w/upwork-workflow-improvements-560a70")).toBeNull();
+  });
+
+  // Six letters that happen to spell hex are ordinary English, and folding a
+  // real repository into the unassigned bucket loses its attribution, which is
+  // worse than letting the odd all-letter suffix through - identity comes from
+  // the remote, and only the label ever reads this.
+  it("keeps a name whose tail is hex-shaped but carries no digit", () => {
+    expect(repoLabel("/src/wine-facade")).toBe("wine-facade");
+    expect(repoLabel("/src/my-app-decade")).toBe("my-app-decade");
+    expect(repoLabel("/src/project-deadbeef")).toBe("project-deadbeef");
+  });
+
+  it("keeps a short numeric suffix, which no worktree wears", () => {
+    expect(repoLabel("/src/log4j-2")).toBe("log4j-2");
+    expect(repoLabel("/src/base-64")).toBe("base-64");
+    expect(repoLabel("/src/es2015")).toBe("es2015");
+  });
+});
+
+describe("normalizeRemote", () => {
+  // One repository, six spellings, one identity. This is the whole fix: the
+  // remote is the only identifier that is the same in every worktree, in a
+  // second checkout under a different directory name, and on another machine.
+  it("reduces every spelling of one remote to the same value", () => {
+    const expected = "github.com/fpresta0607/precisiondocs";
+    expect(normalizeRemote("git@github.com:fpresta0607/precisiondocs.git")).toBe(expected);
+    expect(normalizeRemote("https://github.com/fpresta0607/precisiondocs.git")).toBe(expected);
+    expect(normalizeRemote("https://github.com/fpresta0607/precisiondocs")).toBe(expected);
+    expect(normalizeRemote("ssh://git@github.com/fpresta0607/precisiondocs.git")).toBe(expected);
+    expect(normalizeRemote("git://github.com/fpresta0607/precisiondocs.git")).toBe(expected);
+    expect(normalizeRemote("https://GitHub.COM/FPresta0607/PrecisionDocs.GIT")).toBe(expected);
+    expect(normalizeRemote("  https://github.com/fpresta0607/precisiondocs/  ")).toBe(expected);
+  });
+
+  it("drops credentials and transport, which name no repository", () => {
+    expect(normalizeRemote("https://alex:ghp_secret@github.com/acme/api.git")).toBe("github.com/acme/api");
+    expect(normalizeRemote("ssh://git@github.com:2222/acme/api.git")).toBe("github.com/acme/api");
+    expect(normalizeRemote("https://github.com:443/acme/api")).toBe("github.com/acme/api");
+  });
+
+  it("keeps a self-hosted host and its full path", () => {
+    expect(normalizeRemote("git@gitlab.example.test:team/group/service.git")).toBe("gitlab.example.test/team/group/service");
+  });
+
+  // A directory is a checkout, not a repository: two clones from one local bare
+  // repo are still two checkouts, so these fall through to the path lane rather
+  // than pretending to be a shared identity.
+  it("refuses a remote that names a directory rather than a host", () => {
+    expect(normalizeRemote("C:/dev/mirror.git")).toBeNull();
+    expect(normalizeRemote("C:\\dev\\mirror.git")).toBeNull();
+    expect(normalizeRemote("/srv/git/mirror.git")).toBeNull();
+    expect(normalizeRemote("../sibling")).toBeNull();
+    expect(normalizeRemote("file:///srv/git/mirror.git")).toBeNull();
+    expect(normalizeRemote("")).toBeNull();
+    expect(normalizeRemote("   ")).toBeNull();
+    expect(normalizeRemote("https://github.com")).toBeNull();
+    expect(normalizeRemote("https://github.com/")).toBeNull();
+  });
+});
+
+describe("identityRepoKey", () => {
+  // The defect, stated as a test: two worktrees, two paths, one repository.
+  it("gives two worktrees of one remote the same key", () => {
+    const remote = "git@github.com:fpresta0607/precisiondocs.git";
+    const first = identityRepoKey("C:/Users/fpres/.treehouse/precisiondocs-fdd5f2/1/precisiondocs", remote);
+    const second = identityRepoKey("C:/Users/fpres/.treehouse/precisiondocs-fdd5f2/2/precisiondocs", remote);
+    expect(first).toBe("github.com/fpresta0607/precisiondocs");
+    expect(second).toBe(first);
+  });
+
+  // Two checkouts of one GitHub repository under different directory names -
+  // `C:/dev/PrecisionDocs-AI` and `C:/dev/code-goblins/projects/precisiondocs`.
+  // No basename comparison could ever collapse these; only the remote can.
+  it("gives two checkouts under different names the same key", () => {
+    const ai = identityRepoKey("C:/dev/PrecisionDocs-AI", "https://github.com/fpresta0607/precisiondocs.git");
+    const goblins = identityRepoKey("C:/dev/code-goblins/projects/precisiondocs", "git@github.com:fpresta0607/precisiondocs.git");
+    expect(ai).toBe(goblins);
+  });
+
+  // A worktree names no codebase, but the repository it holds is still known.
+  it("keys a run-named worktree on its remote rather than on nothing", () => {
+    expect(identityRepoKey("C:/w/dazzling-lamarr-0aacbd", "git@github.com:acme/api.git")).toBe("github.com/acme/api");
+  });
+
+  // A local-only repository is legitimate and must not collapse into one
+  // bucket with every other one, so its own directory identifies it - verbatim,
+  // because 0016's backfill and this lane have to compose the same string.
+  it("falls back to the repo root when there is no remote", () => {
+    expect(identityRepoKey("C:/dev/scratchpad", null)).toBe("path:C:/dev/scratchpad");
+    expect(identityRepoKey("C:/dev/scratchpad", "/srv/git/mirror.git")).toBe("path:C:/dev/scratchpad");
+  });
+
+  // Outside any repository at all: the honest unassigned case, one bucket per
+  // operator rather than a row per run.
+  it("keys nothing when neither a remote nor a codebase name is left", () => {
+    expect(identityRepoKey(null, null)).toBeNull();
+    expect(identityRepoKey("C:/w/dazzling-lamarr-0aacbd", null)).toBeNull();
+    expect(identityRepoKey("C:/Users/fpres/AppData/Local/Temp", null)).toBe("path:C:/Users/fpres/AppData/Local/Temp");
+  });
+});
+
+describe("repoKeyLabel", () => {
+  it("names the repository from a remote key and the directory from a path key", () => {
+    expect(repoKeyLabel("github.com/fpresta0607/precisiondocs")).toBe("precisiondocs");
+    expect(repoKeyLabel("path:C:/dev/Clock-In")).toBe("Clock-In");
+  });
+
+  it("has nothing to say about a path key that names only a run", () => {
+    expect(repoKeyLabel("path:C:/w/dazzling-lamarr-0aacbd")).toBeNull();
   });
 });
 

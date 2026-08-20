@@ -73,7 +73,7 @@ integration("deleting a project that hosts roster agents", () => {
       organizationId,
       ownerUserId,
       source: "claude_code",
-      repoRoot: "C:/dev/counted",
+      repoRoot: "C:/dev/counted", repoRemote: null,
       projectId: doomed,
       name: "Claude Code",
       now: new Date(),
@@ -94,7 +94,7 @@ integration("deleting a project that hosts roster agents", () => {
       organizationId,
       ownerUserId,
       source: "claude_code",
-      repoRoot: "C:/dev/moved",
+      repoRoot: "C:/dev/moved", repoRemote: null,
       projectId: doomed,
       name: "Claude Code",
       now: new Date(),
@@ -113,7 +113,7 @@ integration("deleting a project that hosts roster agents", () => {
       organizationId,
       ownerUserId,
       source: "codex",
-      repoRoot: "C:/dev/orphaned",
+      repoRoot: "C:/dev/orphaned", repoRemote: null,
       projectId: doomed,
       name: "Codex",
       now: new Date(),
@@ -132,8 +132,8 @@ integration("deleting a project that hosts roster agents", () => {
     const doomed = await project("Colliding from");
     const replacement = await project("Colliding to");
     const key = { organizationId, ownerUserId, source: "cursor" as const, name: "Cursor", now: new Date() };
-    const incumbent = await agents.upsertForKey({ ...key, repoRoot: "C:/dev/clock-in", projectId: replacement });
-    const moved = await agents.upsertForKey({ ...key, repoRoot: "C:/dev/pocket-piggies", projectId: doomed });
+    const incumbent = await agents.upsertForKey({ ...key, repoRoot: "C:/dev/clock-in", repoRemote: null, projectId: replacement });
+    const moved = await agents.upsertForKey({ ...key, repoRoot: "C:/dev/pocket-piggies", repoRemote: null, projectId: doomed });
     expect(moved.id).not.toBe(incumbent.id);
 
     await projects.deleteForOrganization(subject, doomed, replacement);
@@ -141,7 +141,7 @@ integration("deleting a project that hosts roster agents", () => {
     await expect(statusOf(moved.id)).resolves.toEqual({ projectId: replacement, status: "anonymous" });
     await expect(statusOf(incumbent.id)).resolves.toEqual({ projectId: replacement, status: "anonymous" });
     // Each identity is still the one its own repo's next shift lands on.
-    await expect(agents.upsertForKey({ ...key, repoRoot: "C:/dev/pocket-piggies", projectId: replacement }))
+    await expect(agents.upsertForKey({ ...key, repoRoot: "C:/dev/pocket-piggies", repoRemote: null, projectId: replacement }))
       .resolves.toEqual({ id: moved.id });
   });
 });

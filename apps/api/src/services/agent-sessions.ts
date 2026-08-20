@@ -7,7 +7,7 @@ import type {
   PathMappingRepository,
   SessionRepository,
 } from "../repositories.js";
-import { resolveProjectForCwd, resolveProjectForRule, type PathMappingCandidate } from "./attribution.js";
+import { identityRepoKey, resolveProjectForCwd, resolveProjectForRule, type PathMappingCandidate } from "./attribution.js";
 
 const futureEventToleranceMs = 30_000;
 const defaultStaleThresholdMs = 6 * 60 * 60 * 1_000;
@@ -55,6 +55,14 @@ export interface AgentSessionEventInput {
    * first commit names one.
    */
   repoRoot: string | null;
+  /**
+   * The repository's `origin` remote, when the hook read one. The identity key
+   * - the only identifier that survives a second worktree, a second checkout
+   * under a different directory name, and a second machine. Null from a
+   * desktop that predates the probe or from a repository with no remote; the
+   * repo root keys the identity instead, exactly as it did before.
+   */
+  repoRemote: string | null;
   /** The matched url-rule mapping id for browser spans; null for agent events. */
   ruleId: string | null;
 }
@@ -122,10 +130,15 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
       // what gives every runtime an operator dimension without asking the
       // runtime for anything.
       const agentIds = new Map<string, Promise<string>>();
-      const resolveAgent = (source: AgentSource, repoRoot: string | null, projectId: string | null): Promise<string | null> => {
+      const resolveAgent = (event: AgentSessionEventInput, projectId: string | null): Promise<string | null> => {
         const agentsRepository = dependencies.agents;
+        const { source, repoRoot, repoRemote } = event;
         if (agentsRepository === undefined || !rosterEligibleSource(source)) return Promise.resolve(null);
-        const key = `${source}|${repoRoot ?? ""}`;
+        // The cache key is the identity itself, not the fields it was composed
+        // from: two events from two worktrees of one repository are two roots
+        // and one identity, so they share the single upsert rather than
+        // issuing one apiece for the row they both resolve to.
+        const key = `${source}|${identityRepoKey(repoRoot, repoRemote) ?? ""}`;
         let pending = agentIds.get(key);
         if (pending === undefined) {
           pending = agentsRepository
@@ -134,6 +147,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
               ownerUserId: subject.userId,
               source,
               repoRoot,
+              repoRemote,
               projectId,
               name: agentRuntimeLabel(source),
               now,
@@ -183,7 +197,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
             cwd: event.cwd,
             ruleId: event.ruleId,
             projectId,
-            agentId: await resolveAgent(event.source, event.repoRoot, projectId),
+            agentId: await resolveAgent(event, projectId),
             linkedSessionId,
             occurredAt: event.occurredAt,
             receivedAt: now,
@@ -202,7 +216,7 @@ export function createAgentSessionService(dependencies: AgentSessionServiceDepen
               cwd: event.cwd,
               ruleId: event.ruleId,
               projectId,
-              agentId: await resolveAgent(event.source, event.repoRoot, projectId),
+              agentId: await resolveAgent(event, projectId),
               occurredAt: event.occurredAt,
               receivedAt: now,
             });

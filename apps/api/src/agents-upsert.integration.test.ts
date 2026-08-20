@@ -66,7 +66,7 @@ integration("agents operator-and-repo identity upsert", () => {
 
   it("answers a replayed repo-less key with the same identity", async () => {
     const now = new Date();
-    const key = { organizationId, ownerUserId, source: "claude_code", repoRoot: null, projectId: null, name: "Claude Code", now } as const;
+    const key = { organizationId, ownerUserId, source: "claude_code", repoRoot: null, repoRemote: null, projectId: null, name: "Claude Code", now } as const;
     const first = await repository.upsertForKey(key);
     const replay = await repository.upsertForKey(key);
 
@@ -82,7 +82,7 @@ integration("agents operator-and-repo identity upsert", () => {
   // on that directory. A run names no codebase, so it identifies none.
   it("collapses two per-run worktrees onto the one unassigned identity", async () => {
     const now = new Date();
-    const base = { organizationId, ownerUserId, source: "amp", projectId: null, name: "Amp", now } as const;
+    const base = { organizationId, ownerUserId, source: "amp", repoRemote: null, projectId: null, name: "Amp", now } as const;
     const worktrees = "C:/Users/alex/.no-mistakes/repos/3245fe18a7c8.git/worktrees";
     const firstRun = await repository.upsertForKey({ ...base, repoRoot: `${worktrees}/01M06FSGP392MH6VJNRX8T364A` });
     const secondRun = await repository.upsertForKey({ ...base, repoRoot: `${worktrees}/01M08C82C40W5Y5Q0X3BFGYNFT` });
@@ -98,8 +98,8 @@ integration("agents operator-and-repo identity upsert", () => {
 
   it("mints a separate identity per repo and names it from the repo's folder", async () => {
     const now = new Date();
-    const base = { organizationId, ownerUserId, source: "claude_code", projectId, name: "Claude Code", now } as const;
-    const unassigned = await repository.upsertForKey({ ...base, repoRoot: null, projectId: null });
+    const base = { organizationId, ownerUserId, source: "claude_code", repoRemote: null, projectId, name: "Claude Code", now } as const;
+    const unassigned = await repository.upsertForKey({ ...base, repoRoot: null, repoRemote: null, projectId: null });
     const scoped = await repository.upsertForKey({ ...base, repoRoot: clockIn });
     const sibling = await repository.upsertForKey({ ...base, repoRoot: piggies });
 
@@ -114,7 +114,7 @@ integration("agents operator-and-repo identity upsert", () => {
 
   it("gives each operator their own identity for the same runtime and repo", async () => {
     const now = new Date();
-    const base = { organizationId, source: "codex", repoRoot: clockIn, projectId: null, name: "Codex", now } as const;
+    const base = { organizationId, source: "codex", repoRoot: clockIn, repoRemote: null, projectId: null, name: "Codex", now } as const;
     const mine = await repository.upsertForKey({ ...base, ownerUserId });
     const theirs = await repository.upsertForKey({ ...base, ownerUserId: otherUserId });
 
@@ -126,7 +126,7 @@ integration("agents operator-and-repo identity upsert", () => {
 
   it("gives each operator their own unassigned bucket", async () => {
     const now = new Date();
-    const base = { organizationId, source: "kimi_code", repoRoot: null, projectId: null, name: "Kimi Code", now } as const;
+    const base = { organizationId, source: "kimi_code", repoRoot: null, repoRemote: null, projectId: null, name: "Kimi Code", now } as const;
     const mine = await repository.upsertForKey({ ...base, ownerUserId });
     const theirs = await repository.upsertForKey({ ...base, ownerUserId: otherUserId });
 
@@ -139,7 +139,7 @@ integration("agents operator-and-repo identity upsert", () => {
   // on the pay run - which also undid every merge on the following shift.
   it("mints a fresh identity once a retired one has released the key", async () => {
     const now = new Date();
-    const key = { organizationId, ownerUserId, source: "cursor", repoRoot: clockIn, projectId, name: "Cursor", now } as const;
+    const key = { organizationId, ownerUserId, source: "cursor", repoRoot: clockIn, repoRemote: null, projectId, name: "Cursor", now } as const;
     const first = await repository.upsertForKey(key);
     await database.client`update agents set status = 'retired' where id = ${first.id}`;
 
@@ -152,7 +152,7 @@ integration("agents operator-and-repo identity upsert", () => {
 
   it("mints a fresh unassigned identity once the retired one has released the key", async () => {
     const now = new Date();
-    const key = { organizationId, ownerUserId, source: "opencode", repoRoot: null, projectId: null, name: "opencode", now } as const;
+    const key = { organizationId, ownerUserId, source: "opencode", repoRoot: null, repoRemote: null, projectId: null, name: "opencode", now } as const;
     const first = await repository.upsertForKey(key);
     await database.client`update agents set status = 'retired' where id = ${first.id}`;
 
@@ -167,7 +167,7 @@ integration("agents operator-and-repo identity upsert", () => {
   // retired row back is a conflict the caller can act on rather than a 500.
   it("refuses to un-retire an identity another agent now holds", async () => {
     const now = new Date();
-    const key = { organizationId, ownerUserId, source: "copilot", repoRoot: clockIn, projectId, name: "Copilot", now } as const;
+    const key = { organizationId, ownerUserId, source: "copilot", repoRoot: clockIn, repoRemote: null, projectId, name: "Copilot", now } as const;
     const retired = await repository.upsertForKey(key);
     await database.client`update agents set status = 'retired' where id = ${retired.id}`;
     await repository.upsertForKey(key);
@@ -182,7 +182,7 @@ integration("agents operator-and-repo identity upsert", () => {
   // bucket keeps its own row for the shifts still pooled in it.
   it("answers a graduating shift with the codebase's own identity, never the bucket's", async () => {
     const now = new Date();
-    const base = { organizationId, ownerUserId, source: "grok", projectId: null, name: "Grok", now } as const;
+    const base = { organizationId, ownerUserId, source: "grok", repoRemote: null, projectId: null, name: "Grok", now } as const;
     const bucket = await repository.upsertForKey({ ...base, repoRoot: null });
 
     const graduated = await repository.upsertForKey({ ...base, repoRoot: piggies });
@@ -197,7 +197,7 @@ integration("agents operator-and-repo identity upsert", () => {
 
   it("retires an emptied unassigned bucket, and leaves one that still has shifts", async () => {
     const now = new Date();
-    const key = { organizationId, ownerUserId, source: "pi", repoRoot: null, projectId: null, name: "Pi", now } as const;
+    const key = { organizationId, ownerUserId, source: "pi", repoRoot: null, repoRemote: null, projectId: null, name: "Pi", now } as const;
     const bucket = await repository.upsertForKey(key);
 
     await expect(repository.retireIfSessionless(organizationId, bucket.id, now)).resolves.toBe(true);
@@ -216,11 +216,125 @@ integration("agents operator-and-repo identity upsert", () => {
   // machine-minted. An emptied bucket someone named keeps its id and its name.
   it("leaves an emptied unassigned bucket alone once a member has named it", async () => {
     const now = new Date();
-    const key = { organizationId, ownerUserId, source: "zed", repoRoot: null, projectId: null, name: "Zed", now } as const;
+    const key = { organizationId, ownerUserId, source: "zed", repoRoot: null, repoRemote: null, projectId: null, name: "Zed", now } as const;
     const named = await repository.upsertForKey(key);
     await repository.update(subject, named.id, { name: "Alex's helper", status: "registered", updatedAt: now });
 
     await expect(repository.retireIfSessionless(organizationId, named.id, now)).resolves.toBe(false);
     expect(await repository.findById(subject, named.id)).toMatchObject({ name: "Alex's helper", status: "registered" });
+  });
+  // The regression this whole change exists for, and the one the Overlord has
+  // now reported twice. Five `precisiondocs` rows sat on one roster because
+  // every treehouse worktree is its own path and identity keyed on the path,
+  // while the name was composed from the last segment - so all five rendered
+  // the same string. Keyed by path, displayed by basename.
+  //
+  // It runs against a real PostgreSQL because the collapse is enforced by the
+  // partial unique index, and an ON CONFLICT arbiter whose predicate does not
+  // restate that index's own predicate passes every mock and then fails every
+  // insert.
+  it("gives two worktrees of one remote a single identity", async () => {
+    const now = new Date();
+    const remote = "git@github.com:fpresta0607/precisiondocs.git";
+    const base = { organizationId, ownerUserId, source: "claude_code", projectId: null, name: "Claude Code", now } as const;
+    const worktrees = [
+      "C:/Users/fpres/.treehouse/precisiondocs-fdd5f2/1/precisiondocs",
+      "C:/Users/fpres/.treehouse/precisiondocs-fdd5f2/2/precisiondocs",
+      "C:/Users/fpres/.treehouse/precisiondocs-fdd5f2/3/precisiondocs",
+    ];
+    const minted = [];
+    for (const repoRoot of worktrees) {
+      minted.push(await repository.upsertForKey({ ...base, repoRoot, repoRemote: remote }));
+    }
+
+    expect(new Set(minted.map((agent) => agent.id)).size).toBe(1);
+    const record = await repository.findById(subject, minted[0]!.id);
+    expect(record?.repoKey).toBe("github.com/fpresta0607/precisiondocs");
+    // The root stays on the row as evidence of where the work happened - the
+    // first worktree that minted it - and never moves the identity again.
+    expect(record?.repoRoot).toBe(worktrees[0]);
+    expect(record?.name).toBe("Claude Code @ precisiondocs");
+  });
+
+  // `PrecisionDocs-AI` and `precisiondocs` are one GitHub repository checked
+  // out twice on one machine, under two directory names and two different
+  // spellings of the same remote. No basename comparison could ever collapse
+  // these; only the remote can.
+  it("gives two checkouts of one repository a single identity, whatever they are called", async () => {
+    const now = new Date();
+    const base = { organizationId, ownerUserId, source: "codex", projectId: null, name: "Codex", now } as const;
+    const first = await repository.upsertForKey({
+      ...base,
+      repoRoot: "C:/dev/PrecisionDocs-AI",
+      repoRemote: "https://github.com/fpresta0607/PrecisionDocs-AI.git",
+    });
+    const second = await repository.upsertForKey({
+      ...base,
+      repoRoot: "C:/dev/code-goblins/projects/precisiondocs",
+      repoRemote: "git@github.com:fpresta0607/precisiondocs-ai.git",
+    });
+
+    expect(second.id).toBe(first.id);
+  });
+
+  // A worktree named after its run identifies no codebase by itself, which is
+  // why it used to land in the bucket. Its remote identifies the repository
+  // all the same, so the shift reaches that repository's row - and reads as
+  // that codebase rather than as "unassigned".
+  it("keys a run-named worktree on its remote, and says which codebase it is", async () => {
+    const now = new Date();
+    const base = { organizationId, ownerUserId, source: "amp", projectId: null, name: "Amp", now } as const;
+    const slug = await repository.upsertForKey({
+      ...base,
+      repoRoot: "C:/Users/fpres/.treehouse/goofy-haslett-4b3191",
+      repoRemote: "git@github.com:acme/instantly-client.git",
+    });
+    const checkout = await repository.upsertForKey({
+      ...base,
+      repoRoot: "C:/dev/instantly-client",
+      repoRemote: "https://github.com/acme/instantly-client",
+    });
+
+    expect(checkout.id).toBe(slug.id);
+    const record = await repository.findById(subject, slug.id);
+    expect(record?.name).toBe("Amp @ instantly-client");
+    expect(record?.repoKey).toBe("github.com/acme/instantly-client");
+  });
+
+  // A repository with no remote is legitimate, and collapsing every one of
+  // them into a single bucket would be a different bug of the same family.
+  it("keeps two local-only repositories apart, and out of the bucket", async () => {
+    const now = new Date();
+    const base = { organizationId, ownerUserId, source: "cursor", repoRemote: null, projectId: null, name: "Cursor", now } as const;
+    const scratch = await repository.upsertForKey({ ...base, repoRoot: "C:/dev/scratchpad" });
+    const notes = await repository.upsertForKey({ ...base, repoRoot: "C:/dev/notes" });
+    const bucket = await repository.upsertForKey({ ...base, repoRoot: null });
+
+    expect(new Set([scratch.id, notes.id, bucket.id]).size).toBe(3);
+    expect((await repository.findById(subject, scratch.id))?.repoKey).toBe("path:C:/dev/scratchpad");
+    expect((await repository.findById(subject, bucket.id))?.repoKey).toBeNull();
+    // Replay finds the same row rather than minting a second one - which is
+    // also what makes 0016's `'path:' || repo_root` backfill land on the key
+    // this lane composes.
+    await expect(repository.upsertForKey({ ...base, repoRoot: "C:/dev/scratchpad" })).resolves.toEqual({ id: scratch.id });
+  });
+
+  // The transition, in one test: a desktop that predates the remote probe
+  // keyed on the path, then the same repository arrives with its remote. The
+  // two are separate rows on purpose - nothing in the API can know they are
+  // the same repository, because only a machine holding the checkout can read
+  // the remote - and scripts/repair-agent-identity-by-remote.mjs is what folds
+  // them together. What must not happen is the reverse: a later path-keyed
+  // sighting must never split the remote-keyed row again.
+  it("keeps a remote-keyed identity stable once it exists", async () => {
+    const now = new Date();
+    const base = { organizationId, ownerUserId, source: "kimi_code", projectId: null, name: "Kimi Code", now } as const;
+    const root = "C:/dev/legacy-checkout";
+    const beforeProbe = await repository.upsertForKey({ ...base, repoRoot: root, repoRemote: null });
+    const afterProbe = await repository.upsertForKey({ ...base, repoRoot: root, repoRemote: "git@github.com:acme/legacy.git" });
+
+    expect(afterProbe.id).not.toBe(beforeProbe.id);
+    const replay = await repository.upsertForKey({ ...base, repoRoot: "C:/other/legacy", repoRemote: "https://github.com/acme/legacy.git" });
+    expect(replay.id).toBe(afterProbe.id);
   });
 });

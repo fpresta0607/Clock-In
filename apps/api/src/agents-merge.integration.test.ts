@@ -115,7 +115,7 @@ integration("agent merge re-points shift_commits and agent_usage", () => {
       organizationId,
       ownerUserId,
       source: "codex",
-      repoRoot: null,
+      repoRoot: null, repoRemote: null,
       projectId: null,
       name: "Codex",
       now: new Date(),

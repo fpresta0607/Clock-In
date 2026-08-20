@@ -55,6 +55,12 @@ export async function graduateAgentForSession(
       ownerUserId: session.userId,
       source,
       repoRoot,
+      // A commit names a directory and nothing else, so this lane can only ever
+      // reach the path key. That is the honest answer here and a transitional
+      // one: once the runtime reports the remote, its own shifts key on the
+      // remote directly, and scripts/repair-agent-identity-by-remote.mjs folds
+      // whatever this minted into the row the remote identifies.
+      repoRemote: null,
       projectId: session.projectId,
       name: agentRuntimeLabel(source),
       now,
@@ -87,13 +93,19 @@ export async function graduateAgentForSession(
   // An agent the caller cannot see is not one to re-home a shift onto.
   if (current === null) return session.agentId;
   if (current.repoRoot === repoRoot) return session.agentId;
+  // A remote-keyed identity is never re-homed onto a directory. The commit
+  // carries no remote, so the best this lane can mint is the path key for the
+  // worktree the commit was authored in - which is precisely the identity the
+  // remote was introduced to replace. Demoting would split one repository's
+  // shifts back across its worktrees, one commit at a time.
+  if (current.repoKey !== null && !current.repoKey.startsWith("path:")) return session.agentId;
 
   const target = await mintIdentity();
   if (target === session.agentId) return target;
   await dependencies.agents.restampSession(subject.organizationId, session.id, target, now);
   // Only a bucket can be emptied this way; a repo-keyed agent keeps its row
   // whatever happens to one shift.
-  if (current.repoRoot === null) await dependencies.agents.retireIfSessionless(subject.organizationId, current.id, now);
+  if (current.repoKey === null) await dependencies.agents.retireIfSessionless(subject.organizationId, current.id, now);
   session.agentId = target;
   return target;
 }

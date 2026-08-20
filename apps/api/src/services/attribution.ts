@@ -15,9 +15,11 @@ export function normalizePath(value: string): string {
 /**
  * A directory named after a run rather than after a codebase. Tooling that
  * checks a repo out per run - a no-mistakes gate worktree lives at
- * `<hash>.git/worktrees/<ULID>`, and CI runners use similar shapes - leaves a
- * working directory whose last segment is an opaque id. A ULID (26 Crockford
- * base32 characters), a UUID, or a bare hex hash names no codebase to anyone.
+ * `<hash>.git/worktrees/<ULID>`, a treehouse worktree at `<slug>-<6hex>`, and
+ * CI runners use similar shapes - leaves a working directory whose last
+ * segment is an opaque id. A ULID (26 Crockford base32 characters), a UUID, a
+ * bare hex hash, or a slug carrying a random hex suffix names no codebase to
+ * anyone.
  *
  * The ULID branch is uppercase-only, which the other two are not. Crockford is
  * canonically uppercase and every real gate worktree is
@@ -28,9 +30,21 @@ export function normalizePath(value: string): string {
  * would silently disable it while looking like a fix. Length does the work
  * there instead - only a full SHA-1 (40) or SHA-256 (64) hex string is
  * refused, so a shorter all-hex codebase name is never swallowed.
+ *
+ * The suffix branch - `dazzling-lamarr-0aacbd`, `upwork-automation-build-c164f2` -
+ * is deliberately the narrowest of the four, because it is the only one whose
+ * shape a real codebase could plausibly wear. It requires a non-empty slug, a
+ * hyphen, then six or more lowercase hex characters *containing at least one
+ * digit*. Without the digit rule the six-letter words that happen to spell hex
+ * - `decade`, `facade`, `beaded` - would fold a real repository into its
+ * operator's bucket and lose its attribution. Roughly one worktree suffix in
+ * 350 is all-letters and slips through; that is the accepted ceiling, and it
+ * costs nothing, because identity comes from the remote (`identityRepoKey`)
+ * and only the label ever consults this. Needing this regex to hold the line
+ * means the remote never reached the lane, which is the finding, not the fix.
  */
 const OPAQUE_SEGMENT =
-  /^(?:[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/;
+  /^(?:[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64}|.+-(?=[0-9a-f]*[0-9])[0-9a-f]{6,})$/;
 
 /**
  * A working directory's codebase label: its last path segment, separators
@@ -53,9 +67,9 @@ export function repoLabel(path: string): string | null {
 }
 
 /**
- * The repo root an agent identity is keyed on. A directory that names no
- * codebase cannot identify one either: keying on it mints a separate agent for
- * every run, which is how one operator's roster filled with a row per
+ * The repo root that can stand in for a missing remote. A directory that names
+ * no codebase cannot identify one either: keying on it mints a separate agent
+ * for every run, which is how one operator's roster filled with a row per
  * no-mistakes gate worktree. Such a shift lands in that operator's unassigned
  * bucket instead - the same place an un-probed session goes - and stays there
  * until one of its own commits names a codebase, at which point that shift
@@ -65,6 +79,122 @@ export function repoLabel(path: string): string | null {
 export function identityRepoRoot(root: string | null): string | null {
   if (root === null) return null;
   return repoLabel(root) === null ? null : root;
+}
+
+/** The prefix that separates a path-keyed identity from a remote-keyed one. */
+const pathKeyPrefix = "path:";
+
+/** A URL scheme, which an scp-style remote (`git@host:owner/repo`) does not have. */
+const remoteScheme = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+/**
+ * The scp-style remote git accepts without a scheme: an optional user, a host,
+ * a colon, then a path. The host is two characters or more and the colon is not
+ * followed by a separator, which is what keeps a Windows path out: `C:/dev/repo`
+ * and `C:devepo` are directories, not remotes, and a drive letter is one
+ * character.
+ */
+const scpLikeRemote = /^(?:[^@/\\:]+@)?([^/\\:]{2,}):(?![\\/])(.+)$/;
+
+/**
+ * One git remote reduced to the identity it names: `github.com/owner/repo`.
+ *
+ * The same repository is spelled `git@github.com:owner/repo.git`,
+ * `https://github.com/owner/repo.git`, `https://github.com/owner/repo` and
+ * `ssh://git@github.com/owner/repo` by four people on one team, so the host,
+ * the `.git` suffix, the transport, any credentials in the URL and any port
+ * are all stripped, and what is left is lowercased. Case folds because GitHub
+ * treats `Owner/Repo` and `owner/repo` as one repository and two clones can
+ * legitimately have been typed either way; a host that really did distinguish
+ * them would be the first anyone has met.
+ *
+ * Null when the remote names no host - a `file://` URL, a bare path, or a UNC
+ * share. Those are directories, and a directory identifies a checkout rather
+ * than a repository, so they fall through to the path lane in
+ * `identityRepoKey` rather than pretending to be a shared identity.
+ */
+export function normalizeRemote(remote: string): string | null {
+  const trimmed = remote.trim();
+  if (trimmed === "") return null;
+  let authority: string;
+  let path: string;
+  const scheme = remoteScheme.exec(trimmed);
+  if (scheme !== null) {
+    if (scheme[0].toLowerCase() === "file://") return null;
+    const rest = trimmed.slice(scheme[0].length);
+    const separator = rest.indexOf("/");
+    if (separator <= 0) return null;
+    authority = rest.slice(0, separator);
+    path = rest.slice(separator + 1);
+  } else {
+    const scp = scpLikeRemote.exec(trimmed);
+    if (scp === null) return null;
+    authority = scp[1]!;
+    path = scp[2]!;
+  }
+  // Credentials and transport are not identity: a token embedded in the URL
+  // and a non-default ssh port both name the same repository as the plain form.
+  const host = authority.slice(authority.lastIndexOf("@") + 1).replace(/:\d+$/, "").toLowerCase();
+  if (host === "") return null;
+  const owned = path
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "")
+    .replace(/\.git$/i, "")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+  if (owned === "") return null;
+  return `${host}/${owned}`;
+}
+
+/**
+ * The value an agent identity is keyed on, in preference order.
+ *
+ * 1. **The normalized remote.** The only identifier that is the same in every
+ *    worktree, in a second checkout of the same repository under another
+ *    directory name, and on another machine - which is the whole point. Keying
+ *    on the repo root instead is what put five `precisiondocs` rows on one
+ *    operator's roster: every treehouse worktree is its own path, so every
+ *    worktree minted its own agent, and because the name is composed from the
+ *    last segment all five rendered the same string. Keyed by path, displayed
+ *    by basename.
+ * 2. **The repo root, as `path:<root>`.** A repository with no remote is
+ *    legitimate and must not collapse into one bucket with every other
+ *    local-only repository, so its own directory identifies it - the best
+ *    available answer, and the same answer identity gave before remotes were
+ *    read. Its own lane so it can never collide with a remote, and the root is
+ *    carried through verbatim: this lane must reproduce exactly the identity
+ *    the repo-root key already gave, or `0016_agent_identity_by_remote`'s
+ *    backfill would fold two live rows onto one key and abort on the unique
+ *    index it then builds. Git emits one spelling of a root
+ *    (`rev-parse --show-toplevel`), so there is nothing to normalize away.
+ * 3. **Nothing.** Work that happened outside any repository at all, which is
+ *    the honest unassigned case: the operator's bucket, shared by every such
+ *    shift rather than minting a row each.
+ *
+ * A working directory that names only a run reaches lane 2 as no name at all,
+ * so it falls to lane 3 - but only when the remote is missing too. A gate
+ * worktree of a real repository has a remote, and that remote is what it is.
+ */
+export function identityRepoKey(repoRoot: string | null, repoRemote: string | null): string | null {
+  const remote = repoRemote === null ? null : normalizeRemote(repoRemote);
+  if (remote !== null) return remote;
+  const root = identityRepoRoot(repoRoot);
+  return root === null ? null : `${pathKeyPrefix}${root}`;
+}
+
+/**
+ * The codebase name an identity key carries: the repository's own name from a
+ * remote key, and the directory's last segment from a path key. The fallback
+ * for a row whose repo root names only a run - a worktree of a repository the
+ * remote did identify - so the roster still says which codebase, rather than
+ * reading "unassigned" about work whose repository is known.
+ */
+export function repoKeyLabel(repoKey: string): string | null {
+  if (repoKey.startsWith(pathKeyPrefix)) return repoLabel(repoKey.slice(pathKeyPrefix.length));
+  const segments = repoKey.split("/");
+  const last = segments[segments.length - 1] ?? "";
+  return last === "" ? null : last.slice(0, 200);
 }
 
 /**

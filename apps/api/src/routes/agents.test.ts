@@ -50,7 +50,7 @@ beforeAll(async () => {
 });
 
 function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
-  return {
+  const record: AgentRecord = {
     id: ids.agent,
     organizationId: ids.organization,
     name: "Claude Code @ Field work",
@@ -59,9 +59,16 @@ function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
     owner: { id: ids.admin, name: "Alex" },
     project: { id: ids.project, name: "Field work" },
     repoRoot: null,
+    repoKey: null,
     createdAt: new Date("2026-08-01T00:00:00.000Z"),
     ...overrides,
   };
+  // A fixture that names a root carries the key that root implies, the way
+  // upsertForKey composes one - so `repoKey` is never null on a row that knows
+  // its repository, which is exactly what "is this the bucket?" reads.
+  return record.repoKey === null && record.repoRoot !== null
+    ? { ...record, repoKey: `path:${record.repoRoot}` }
+    : record;
 }
 
 /** In-memory roster: merge re-points nothing here but retires the loser, which the route asserts. */

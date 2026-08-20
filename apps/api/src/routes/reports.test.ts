@@ -204,6 +204,7 @@ describe("report routes", () => {
       owner: { id: ids.user, name: "Alex" },
       project: { id: ids.project, name: "Timer" },
       repoRoot: null,
+      repoKey: null,
       createdAt: new Date("2026-08-01T00:00:00.000Z"),
     };
     const response = await app(reports, new AgentSessions(), new Agents([agentRecord]))
@@ -238,6 +239,7 @@ describe("report routes", () => {
       owner: { id: ids.outsideProject, name: "Sam" },
       project: null,
       repoRoot: "C:/dev/clock-in",
+      repoKey: "path:C:/dev/clock-in",
       createdAt: new Date("2026-08-01T00:00:00.000Z"),
     };
     const mine: AgentRecord = { ...theirs, id: ids.project, owner: { id: ids.user, name: "Alex" } };

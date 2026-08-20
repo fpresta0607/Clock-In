@@ -23,7 +23,7 @@ import type {
   ShiftCommitRepository,
 } from "../repositories.js";
 import type { AgentSessionReaper } from "./agent-sessions.js";
-import { repoLabel } from "./attribution.js";
+import { repoKeyLabel, repoLabel } from "./attribution.js";
 import { hourlySeries, maxConcurrentCount, medianDurationSeconds, normalizedQuery, safeInteger } from "./reports.js";
 
 export interface AgentPatchInput {
@@ -71,7 +71,11 @@ export function mayReadRepoRoot(subject: AuthenticatedSubject, ownerId: string):
  * through the same strict schema.
  */
 export function asAgentView(record: AgentRecord, subject: AuthenticatedSubject): AgentPaystubResponse["agent"] {
-  const name = record.repoRoot === null ? null : repoLabel(record.repoRoot);
+  // The repository the identity is keyed on answers when the directory cannot:
+  // a worktree checked out per run names no codebase, but the remote that
+  // identified it does. A name either way, never a path.
+  const name = (record.repoRoot === null ? null : repoLabel(record.repoRoot))
+    ?? (record.repoKey === null ? null : repoKeyLabel(record.repoKey));
   return {
     id: record.id,
     name: record.name,
