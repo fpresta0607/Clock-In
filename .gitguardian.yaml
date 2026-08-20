@@ -6,6 +6,8 @@
 # for both halves hold fixture values shaped exactly like the thing they strip.
 # A scanner cannot tell a fixture from a live credential by shape alone, and
 # these two files are the only places in the tree that carry one on purpose.
+# `ignored_matches` pins the same fixtures as they appeared in this branch's
+# commit history, where earlier commits still hold the literal strings.
 version: 2
 
 secret:
@@ -16,3 +18,34 @@ secret:
     # Fixture: a credentialed https remote, proving `normalizeRemote` drops the
     # credential along with the transport because neither names a repository.
     - "apps/api/src/services/attribution.test.ts"
+  # Incident 36424548 and its siblings are false positives on commit history:
+  # earlier commits on this branch carried these fixture strings literally, and a
+  # PR scan walks those commits even though the current tree builds every
+  # credentialed remote at runtime and holds no literal `user:pass@host` at all.
+  # Each fixture is pinned in every spelling a Basic Auth detector can report.
+  ignored_matches:
+    # attribution.test.ts: password shaped like a token, replaced by a placeholder.
+    - name: attribution fixture, token-shaped password
+      match: alex:ghp_secret@github.com
+    - name: attribution fixture, token-shaped password, full URL
+      match: https://alex:ghp_secret@github.com/acme/api.git
+    # attribution.test.ts: the placeholder spelling that replaced it.
+    - name: attribution fixture, placeholder password
+      match: alex:secret@github.com
+    - name: attribution fixture, placeholder password, full URL
+      match: https://alex:secret@github.com/acme/api.git
+    # git_evidence.rs: Azure DevOps remote with a port, both historical spellings.
+    - name: git evidence fixture, azure remote
+      match: user:pat@dev.azure.test:8443
+    - name: git evidence fixture, azure remote, full URL
+      match: https://user:pat@dev.azure.test:8443/org/proj/_git/repo
+    - name: git evidence fixture, azure remote, placeholder password
+      match: user:secret@dev.azure.test:8443
+    - name: git evidence fixture, azure remote, placeholder password, full URL
+      match: https://user:secret@dev.azure.test:8443/org/proj/_git/repo
+    # git_evidence.rs: all-zeros token, the spelling a token-authenticated clone
+    # writes; the current tree joins it from parts so no literal remains.
+    - name: git evidence fixture, all-zeros token remote
+      match: x-access-token:ghp_000000000000000000000000000000000000@github.com
+    - name: git evidence fixture, all-zeros token remote, full URL
+      match: https://x-access-token:ghp_000000000000000000000000000000000000@github.com/acme/clock-in.git
