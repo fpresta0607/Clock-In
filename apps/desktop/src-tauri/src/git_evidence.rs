@@ -668,8 +668,8 @@ mod tests {
     /// transmission was still transmitted, so it never goes on the wire.
     #[tokio::test]
     async fn repo_remote_strips_embedded_credentials() {
-        // Obviously fake, so nobody mistakes the fixture for a live token.
-        let fake_token = "ghp_000000000000000000000000000000000000";
+        // Shaped unlike any real token so a secret scanner never flags the fixture.
+        let fake_token = "fixture-credential";
         let dir = temp_dir("repo-remote-credentialed");
         init_repo(&dir).await;
         commit_at(&dir, "a.txt", "first", 1_700_000_000).await;
@@ -697,7 +697,7 @@ mod tests {
     fn credential_stripping_keeps_every_other_spelling_intact() {
         // Host, port and path survive; only the credential goes.
         assert_eq!(
-            without_embedded_credentials("https://user:pat@dev.azure.test:8443/org/proj/_git/repo"),
+            without_embedded_credentials("https://user:secret@dev.azure.test:8443/org/proj/_git/repo"),
             "https://dev.azure.test:8443/org/proj/_git/repo"
         );
         assert_eq!(

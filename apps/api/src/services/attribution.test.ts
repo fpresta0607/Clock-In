@@ -151,7 +151,7 @@ describe("normalizeRemote", () => {
   });
 
   it("drops credentials and transport, which name no repository", () => {
-    expect(normalizeRemote("https://alex:ghp_secret@github.com/acme/api.git")).toBe("github.com/acme/api");
+    expect(normalizeRemote("https://alex:secret@github.com/acme/api.git")).toBe("github.com/acme/api");
     expect(normalizeRemote("ssh://git@github.com:2222/acme/api.git")).toBe("github.com/acme/api");
     expect(normalizeRemote("https://github.com:443/acme/api")).toBe("github.com/acme/api");
   });
