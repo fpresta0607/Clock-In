@@ -43,15 +43,19 @@ fn run() -> Result<(), String> {
         },
     };
     if event.event == AgentEventKind::Started {
-        // One probe of the working directory answers both questions: which
-        // commit the shift opened at, and which codebase it is working in.
+        // One probe of the working directory answers three questions: which
+        // commit the shift opened at, which directory it is working in, and
+        // which repository that directory belongs to. The remote is the one
+        // the identity keys on - a worktree and a second checkout report two
+        // roots and one remote - and the root rides along as evidence.
         // Each collapses any failure to `None` on its own, so a machine
-        // without git records neither and nothing else changes.
+        // without git records none of them and nothing else changes.
         let cwd = event.cwd.clone();
         if let Some(cwd) = cwd.as_deref().map(Path::new) {
             event.start_head = git_evidence::head_sha(cwd);
             event.repo_root =
                 git_evidence::repo_root(cwd).map(|root| root.to_string_lossy().into_owned());
+            event.repo_remote = git_evidence::repo_remote(cwd);
         }
     }
     let path = spool::agent_spool_path();

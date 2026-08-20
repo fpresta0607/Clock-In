@@ -358,6 +358,11 @@ pub struct AgentEventUpload<'a> {
     /// which is why the installer ships only after the API accepting it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_root: Option<&'a str>,
+    /// The identity key the server actually uses, and contract data on the
+    /// same terms as `repo_root`: an older API rejects an unknown field
+    /// outright, so the installer ships only after the API accepting it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_remote: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -373,6 +378,7 @@ impl<'a> From<&'a SpoolEvent> for AgentEventUpload<'a> {
             occurred_at: &event.occurred_at,
             cwd: event.cwd.as_deref(),
             repo_root: event.repo_root.as_deref(),
+            repo_remote: event.repo_remote.as_deref(),
             model: event.model.as_deref(),
             rule_id: event.rule_id.as_deref(),
         }

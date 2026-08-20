@@ -126,6 +126,49 @@ fn probe_repo_root(git: &str, cwd: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(root))
 }
 
+/// The repository's `origin` remote, or `None` when it has none - a
+/// repository nobody pushed anywhere is legitimate, and the server keys such
+/// an agent on its root instead.
+///
+/// This is what makes the agent roster one row per repository rather than one
+/// per directory: every worktree is its own path and every second checkout is
+/// another, but they all report the same remote, on this machine and on the
+/// next one. Sent verbatim; the server normalizes the spellings
+/// (`normalizeRemote` in apps/api/src/services/attribution.ts), because the
+/// same repository is `git@github.com:owner/repo.git` here and
+/// `https://github.com/owner/repo` on a teammate's machine.
+///
+/// `config --get` rather than `remote get-url`: the configured value, with no
+/// `insteadOf` rewriting applied, is the same string in both checkouts of one
+/// repository on one machine. Synchronous and non-blocking for the same
+/// reasons `repo_root` is.
+pub fn repo_remote(cwd: &Path) -> Option<String> {
+    probe_repo_remote("git", cwd)
+}
+
+fn probe_repo_remote(git: &str, cwd: &Path) -> Option<String> {
+    let mut command = std::process::Command::new(git);
+    command
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let remote = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    // The contract caps it at 1000 characters and rejects an empty string, so
+    // an absurd value is dropped here rather than 400ing the whole batch.
+    if remote.is_empty() || remote.chars().count() > 1_000 {
+        return None;
+    }
+    Some(remote)
+}
+
 /// One commit authored during a shift, ready to become a `shift_commits` row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitEvidence {
@@ -467,6 +510,71 @@ mod tests {
         // the hook.
         assert_eq!(
             probe_repo_root("clock-in-git-that-is-not-installed", &dir),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two worktrees of one repository are two roots and one remote. That is
+    /// the whole reason identity keys on the remote: keyed on the root, this
+    /// repository would have minted an agent per worktree.
+    #[tokio::test]
+    async fn repo_remote_is_the_same_in_every_worktree() {
+        let dir = temp_dir("repo-remote");
+        init_repo(&dir).await;
+        commit_at(&dir, "a.txt", "first", 1_700_000_000).await;
+        run(
+            &dir,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:fpresta0607/clock-in.git",
+            ],
+        )
+        .await;
+        let worktree = dir.join("..").join(format!(
+            "{}-worktree",
+            dir.file_name().expect("a name").to_string_lossy()
+        ));
+        run(
+            &dir,
+            &["worktree", "add", "-b", "side", &worktree.to_string_lossy()],
+        )
+        .await;
+
+        assert_eq!(
+            repo_remote(&dir).as_deref(),
+            Some("git@github.com:fpresta0607/clock-in.git")
+        );
+        assert_eq!(repo_remote(&worktree), repo_remote(&dir));
+        // The roots differ, which is exactly what used to split them.
+        assert_ne!(repo_root(&worktree), repo_root(&dir));
+
+        let _ = std::fs::remove_dir_all(&worktree);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn repo_remote_of_a_repository_with_no_origin_is_an_honest_none() {
+        let dir = temp_dir("repo-remote-local-only");
+        init_repo(&dir).await;
+        commit_at(&dir, "a.txt", "first", 1_700_000_000).await;
+
+        // A local-only repository is legitimate; the server keys it on its
+        // root instead, rather than pooling every one of them together.
+        assert_eq!(repo_remote(&dir), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repo_remote_without_git_on_path_is_an_honest_none() {
+        let dir = temp_dir("repo-remote-no-git");
+
+        assert_eq!(
+            probe_repo_remote("clock-in-git-that-is-not-installed", &dir),
             None
         );
 

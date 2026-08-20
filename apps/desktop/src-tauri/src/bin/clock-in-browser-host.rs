@@ -200,6 +200,7 @@ fn span_reply(dir: &Path, message: &Value) -> Option<Value> {
             cwd: None,
             start_head: None,
             repo_root: None,
+            repo_remote: None,
             model: None,
             rule_id: Some(rule_id.to_string()),
             transcript_path: None,
