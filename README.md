@@ -402,14 +402,23 @@ Run from the repository root.
 
 | Command | What it does |
 |---|---|
-| `pnpm typecheck` | `tsc --noEmit` across every package |
-| `pnpm test` | the full Vitest suite (services, routes, contracts, React) |
+| `pnpm typecheck` | `tsc --noEmit` across every package, and the layout suite |
+| `pnpm test` | the full Vitest suite (services, routes, contracts, React), then the layout suite |
+| `pnpm test:browser` | the layout suite alone; needs `pnpm exec playwright install chromium` once |
 | `pnpm build` | production build of every package |
 | `DATABASE_URL=… pnpm --filter @clock-in/database migrate` | apply migrations |
 | `pnpm --filter @clock-in/database test:integration` | PostgreSQL migration tests; needs `TEST_DATABASE_URL` |
 | `pnpm --filter @clock-in/desktop tauri build` | build desktop installers |
 | `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` | the Rust suite |
 | `cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings` | Rust lints, as CI runs them |
+
+A claim about what a page *looks* like is checked in a real browser, never in jsdom
+and never against source text: `tests/browser` drives Chromium over the apps' own
+stylesheets and the real WebGL background, and it is the tail of `pnpm test`.
+jsdom has neither a layout engine nor WebGL, so a rule about columns and a shader's
+scale both pass there whatever they actually render.
+The suite builds the web app and serves the bundle, so it needs Chromium on the
+machine: `pnpm exec playwright install chromium` once, which CI does for itself.
 
 CI runs typecheck → test → build → `docker build` on the API image, plus Rust
 fmt/clippy/test, on every push and pull request.

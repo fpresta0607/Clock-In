@@ -49,6 +49,10 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # `pnpm test` ends with the layout suite, which drives a real Chromium: a
+      # stylesheet rule and a shader uniform are claims about what a page looks
+      # like, and jsdom has neither a layout engine nor WebGL to check one.
+      - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build

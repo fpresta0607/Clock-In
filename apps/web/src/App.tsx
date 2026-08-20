@@ -21,7 +21,7 @@ import {
 import { ClientError, type Client } from "./client.js";
 import { DownloadInstaller } from "./DownloadInstaller.js";
 import { HelpModal } from "./HelpModal.js";
-import { WebGLShader } from "./WebGLShader.js";
+import { WebGLShader } from "@clock-in/shared/webgl-shader";
 
 type AppProps = { client: Client };
 
@@ -1284,13 +1284,22 @@ const ShiftsTab = ({ shifts, shiftsFailed, range, rangeLabel }: ShiftsTabProps) 
       {shifts.groups.length === 0 ? (
         <p className="subtle">No agent worked in this range.</p>
       ) : shifts.groups.map((group) => (
+        /* The head reads in the shared meter row - mark, name, a bar of this
+           codebase's share of the recorded agent time, duration - so a column
+           of codebases scans the way a breakdown does. */
         <div className="shift-group" key={group.repo ?? ""} data-testid="shift-group">
-          <div className="stat-row shift-group-head">
-            <span className="stat-name">
+          <div className="meter-row shift-group-head">
+            <span className="project-dot" aria-hidden="true" />
+            <span className="meter-name">
               {group.repo ?? "No codebase recorded"}
-              {group.heldRate !== null && <span className="held-tag"> · {Math.round(group.heldRate * 100)}% held</span>}
+              {group.heldRate !== null && <span className="meter-detail held-tag"> · {Math.round(group.heldRate * 100)}% held</span>}
             </span>
-            <span className="stat-duration">{formatHumanDuration(group.agentSeconds)}</span>
+            <span
+              className="meter-bar"
+              aria-hidden="true"
+              style={{ "--share": `${shifts.totalAgentSeconds === 0 ? 0 : Math.round((group.agentSeconds / shifts.totalAgentSeconds) * 100)}%` } as React.CSSProperties}
+            />
+            <span className="meter-duration">{formatHumanDuration(group.agentSeconds)}</span>
           </div>
           <ul className="shift-list">
             {group.shifts.map((shift) => (

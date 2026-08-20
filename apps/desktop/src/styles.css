@@ -17,11 +17,6 @@ body { min-width: 320px; }
 /* Kill the brand pill shape: desktop buttons are rounded rectangles. */
 button { border-radius: var(--radius); }
 
-/* Fixed WebGL backdrop. The z-index MUST stay -1: a GPU compositing quirk on
-   some Chrome stacks paints the canvas over non-backdrop-filtered content at
-   z-index 0. */
-.shader-bg { position: fixed; inset: 0; z-index: -1; width: 100%; height: 100%; display: block; }
-
 .app-shell { position: relative; display: flex; height: 100vh; flex-direction: column; overflow: hidden; }
 
 /* Frameless-window titlebar: the bar itself is the drag region (the Tauri
@@ -239,26 +234,24 @@ select:disabled { opacity: .55; }
 .today-total strong { font-variant-numeric: tabular-nums; }
 
 /* The Today surface below the clock: one row per project, then one row per
-   app. Each row is a single line - icon, name, meter, duration. */
-.meter-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+   app, in the shared .meter-row shape.
+
+   Up to two columns of them once the panel is wide enough, one when it is not.
+   `columns` fills the first column top to bottom before it starts the second,
+   so the heaviest-first sort still reads straight down. A .meter-row is itself
+   a four-column grid, and 20rem is the narrowest column that still leaves the
+   name its 10rem, the bar something to draw in and the duration a single line;
+   under twice that plus the gap the panel simply gets one column, which is the
+   520px window the app opens at. */
+.meter-list { columns: 20rem 2; column-gap: 20px; margin: 0; padding: 0; list-style: none; }
+/* A multicol container has no row gap to give - `row-gap` does not apply
+   between items in one - so the 2px that separated the rows as a grid rides on
+   the rows themselves. */
+.meter-row { break-inside: avoid; margin-bottom: 2px; }
+.meter-row:last-child { margin-bottom: 0; }
 .meter-apps { margin-top: 10px; border-top: 1px solid rgba(163, 179, 194, 0.12); padding-top: 8px; }
 /* An agent's row trades the share bar for its plan dial, in the same cell. */
 .meter-row .quota { min-width: 0; justify-items: start; }
-.meter-row {
-  display: grid;
-  grid-template-columns: 18px minmax(0, 10rem) minmax(24px, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 2px;
-  font-size: .84rem;
-}
-.meter-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Which folder an agent session is working in, beside the tool's name. */
-.meter-detail { color: var(--text-secondary); font-size: .78rem; }
-.meter-duration { flex: none; color: #ffffff; font-variant-numeric: tabular-nums; font-size: .8rem; }
-.meter-bar { height: 4px; border-radius: 999px; background: rgba(163, 179, 194, 0.14); }
-.meter-bar::before { display: block; width: var(--share, 0%); height: 100%; border-radius: inherit; background: var(--accent-green); opacity: .55; content: ""; }
-.project-dot { width: 10px; height: 10px; margin: 0 auto; border-radius: 50%; background: var(--accent-green); }
 /* Keeps a plain app's name aligned with a runtime's, which carries a mark. */
 .app-mark { display: block; flex: none; width: 18px; height: 18px; border-radius: 4px; }
 .app-mark.is-plain { background: rgba(163, 179, 194, 0.14); }
@@ -476,6 +469,15 @@ select:disabled { opacity: .55; }
   .screen { max-width: 560px; gap: 16px; padding: 22px 26px 30px; }
 }
 
+/* The next step up the same ladder. The column stops at 560px because that is
+   a comfortable measure for one row per line, and one row per line is all the
+   Today card could do; a window this wide has room for two columns of them,
+   and 780px is what it takes to give both columns a full .meter-row. Below
+   this the column stays where it was and the list stays single. */
+@media (min-width: 860px) {
+  .screen { max-width: 780px; }
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .signal-button, .stop-button { transition: filter 120ms ease, transform 120ms ease; }
   .signal-button:not(:disabled):hover, .stop-button:not(:disabled):hover { filter: brightness(1.1); transform: translateY(-1px); }
@@ -550,9 +552,10 @@ select:disabled { opacity: .55; }
 .swatch-agent3 { background: #00a868; }
 .swatch-away { background: var(--accent-blue); }
 
-/* The Agents tab's map: one head row per codebase in the app-list rhythm,
-   its shifts indented beneath. A shift row is when · facts · duration; the
-   facts shrink and ellipsize before the duration ever wraps. */
+/* The Agents tab's map: one head row per codebase, in the shared meter row -
+   the same scan line the Today card reads - with its shifts indented beneath.
+   A shift row is when · facts · duration; the facts shrink and ellipsize
+   before the duration ever wraps. */
 .shift-group { margin-top: 10px; }
 .shift-group-head { font-weight: 650; }
 .held-tag { color: var(--mint); font-size: .78rem; font-weight: 400; }
