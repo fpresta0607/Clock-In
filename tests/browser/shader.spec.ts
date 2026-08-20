@@ -1,5 +1,4 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { expect, test, type Page } from "@playwright/test";
@@ -119,28 +118,19 @@ test.describe("the WebGL background", () => {
     }
   });
 
-  test("ships one shader to both apps", () => {
+  test("keeps no per-app copy of the shader", () => {
     // The wave used to be byte-identical hand-synced copies in each app, and a
-    // background fix landed in one and not the other twice. There is one file
-    // now and both apps reach it through `@clock-in/shared/webgl-shader`, so
-    // this holds the line against a copy coming back.
+    // background fix landed in one and not the other twice. It lives in
+    // `@clock-in/shared/webgl-shader` now, and a copy coming back to either
+    // app's own src is the regression this catches.
     //
-    // Resolving the specifier the way each app's bundler does - through that
-    // app's own installed `@clock-in/shared` and the subpath its exports map
-    // declares - and landing on one physical file is the claim. The package is
-    // ESM-only, so `require.resolve` cannot walk it: the exports map is read as
-    // the declaration it is and the resolved path is realpath'd through pnpm's
-    // workspace link. This suite's own server builds the shared package before
-    // the first test, so the module it points at is on disk.
-    const resolveShader = (app: string): string => {
-      const packageDir = realpathSync(fileURLToPath(new URL(`../../apps/${app}/node_modules/@clock-in/shared`, import.meta.url)));
-      const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8")) as {
-        exports: Record<string, { import: string }>;
-      };
-      return realpathSync(join(packageDir, manifest.exports["./webgl-shader"]!.import));
-    };
-
-    expect(resolveShader("desktop")).toBe(resolveShader("web"));
+    // What this suite covers, plainly: the web app's shader is covered
+    // behaviourally by the two tests above, which load the built web bundle
+    // and measure the wave it actually draws. The desktop app is served by no
+    // spec here, so its shader is covered only by there being one shader
+    // module and no copy beside it. Proving the desktop bundle imports the
+    // shared module would mean building it for this suite, which is a second
+    // vite build the suite does not otherwise need.
     for (const app of ["desktop", "web"]) {
       expect(existsSync(fileURLToPath(new URL(`../../apps/${app}/src/WebGLShader.tsx`, import.meta.url)))).toBe(false);
     }

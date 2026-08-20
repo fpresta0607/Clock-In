@@ -114,14 +114,16 @@ export async function openTodayCard(page: Page): Promise<void> {
  *
  * The containers differ, and the row's width comes from them: the desktop tab
  * lives in the All-stats overlay (`.modal-overlay` > `.today-card.card.modal`),
- * the web tab in the dashboard's own `.shell`. Rendering the desktop group in
- * `.screen` would measure it at a width it is never shown at.
+ * the web tab in the dashboard's leaderboard card (`.shell` > `.card`). Both
+ * end in a `.card`, whose 18px padding and 1px border are 38px the row does
+ * not get: rendering either group without its own container would measure it
+ * at a width it is never shown at.
  */
 export async function openAgentsGroup(page: Page, app: "desktop" | "web"): Promise<void> {
   const open = app === "desktop"
     ? `<main class="app-shell"><div class="modal-overlay"><section class="today-card card modal">`
-    : `<main class="page"><div class="shell">`;
-  const close = app === "desktop" ? `</section></div></main>` : `</div></main>`;
+    : `<main class="page"><div class="shell"><section class="card">`;
+  const close = `</section></div></main>`;
   await page.setContent(`
     ${open}
         <section class="member-stats" data-testid="agent-shifts">
