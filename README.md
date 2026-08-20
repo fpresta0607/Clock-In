@@ -256,8 +256,8 @@ roster entry, on this machine and on the next one. A repository with no remote i
 identified by its own directory, which keeps local-only work from pooling into a
 single row. Each `agent_sessions` row is that identity's shift. The operator is
 whoever's desktop uploaded the shift, so every runtime gets the distinction the
-day its hooks are wired. A shift with no repository at all — it is not in one, or
-the desktop predates the probe and its directory names no codebase either — lands
+day its hooks are wired. A shift with no repository at all - it is not in one, or
+the desktop predates the probe and its directory names no codebase either - lands
 in that person's **unassigned** bucket, a real roster row several shifts share.
 The bucket itself never becomes a codebase:
 when a shift's own commit names one, that shift alone moves onto that codebase's
@@ -334,7 +334,7 @@ Not by policy, but because the code never reads it:
   Win32 queries plus broadcasts delivered to Clock-In's own hidden window.
 
 What *is* collected: coarse activity segments with timestamps, the foreground process name, agent
-session boundaries with their working directory and — when that directory is in a git repository —
+session boundaries with their working directory and - when that directory is in a git repository -
 that repository's root and its `origin` remote URL, which is what names the repository an agent
 works, browser spans naming which URL rule matched and
 for how long, the start and end of each session the monitor observed, and — for an AI coding shift

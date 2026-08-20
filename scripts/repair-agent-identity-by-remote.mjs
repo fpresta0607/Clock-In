@@ -71,13 +71,9 @@ try {
 }
 
 const confirm = process.argv.includes("--confirm");
-const databaseUrl = process.env.DATABASE_URL;
-if (databaseUrl === undefined || databaseUrl === "") {
-  console.error("DATABASE_URL is required.");
-  process.exit(2);
-}
 
-const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+/** Opened by the entrypoint at the foot of this file, so an import connects to nothing. */
+let sql;
 
 /** The declared runtimes' display names, from the one roster both sides read. */
 const runtimeLabels = new Map(registry.runtimes.map((runtime) => [runtime.id, runtime.label]));
@@ -129,16 +125,16 @@ function resolveKey(agent) {
 /**
  * The name the API would compose for this row, so a repaired roster reads
  * exactly like a freshly minted one: `defaultAgentName` in
- * apps/api/src/drizzle-repositories.ts prefers the directory's own name and
- * falls back to the key's - which is what stops a survivor whose root is a
- * worktree slug from reading "@ unassigned" about work whose repository is
- * known. `agents_name_length_valid` caps it at 200; a directory name is
- * bounded by nothing.
+ * apps/api/src/drizzle-repositories.ts names the row after the repository its
+ * key identifies and only falls back to the directory when there is no key -
+ * which is what stops a survivor whose root is one worktree from labelling the
+ * whole repository after that worktree. `agents_name_length_valid` caps it at
+ * 200; a directory name is bounded by nothing.
  */
 function defaultName(source, repoRoot, key) {
   const runtime = runtimeLabels.get(source) ?? source;
   const fromKey = key.startsWith("path:") ? repoLabel(key.slice("path:".length)) : key.split("/").pop();
-  const label = (repoRoot === null ? null : repoLabel(repoRoot)) ?? fromKey;
+  const label = fromKey ?? (repoRoot === null ? null : repoLabel(repoRoot));
   return `${runtime} @ ${label ?? "unassigned"}`.slice(0, 200);
 }
 
@@ -187,30 +183,45 @@ async function requireClockInSchema() {
   }
 }
 
-async function main() {
-  await requireClockInSchema();
-  const agents = await sql`
-    select a.id, a.organization_id, a.owner_user_id, a.source, a.repo_root, a.repo_key,
-           a.name, a.status, a.created_at, u.name as owner_name,
-           (select count(*)::int from agent_sessions s where s.organization_id = a.organization_id and s.agent_id = a.id) as shifts,
-           (select count(*)::int from shift_commits c where c.organization_id = a.organization_id and c.agent_id = a.id) as commits,
-           (select count(*)::int from agent_usage g where g.organization_id = a.organization_id and g.agent_id = a.id) as usage_rows
-    from agents a
-    join users u on u.organization_id = a.organization_id and u.id = a.owner_user_id
-    where a.repo_root is not null and a.status <> 'retired'
-    order by a.organization_id, u.name, a.source, a.created_at, a.id
-  `;
-
-  console.log(`Clock-In agent identity repair, keyed on the git remote. ${confirm ? "Applying." : "Dry run."}`);
-  console.log(`${agents.length} live repo-keyed agent(s) to consider.\n`);
-
+/**
+ * What this run would do, decided before anything is printed or written.
+ *
+ * The rule the whole script rests on: a key we cannot verify is never written.
+ * A row whose `repo_root` is not a directory on this machine is inert - never
+ * a group member, never a merge winner or loser, never re-keyed - because the
+ * only key we could compose for it is `path:<root>`, and writing that over a
+ * remote key would split that repository back across its worktrees, which is
+ * the defect this script exists to undo. That is every row belonging to
+ * another operator, since the documented workflow is for each operator to run
+ * this on their own machine; it is also what keeps a second run idempotent
+ * once a worktree has been deleted.
+ *
+ * A `local-only` row does take part: its own directory is the right identity
+ * for a repository with no remote, and it is the key that row already carries,
+ * so it settles without a write. The one exception is a row whose origin was
+ * removed after it had been keyed on that remote - demoting it would be the
+ * same split by another route, so it is refused too.
+ *
+ * `resolve` is injected so this can be exercised without checkouts on disk.
+ */
+export function planRepair(agents, resolve = resolveKey) {
   const refusals = [];
   const localOnly = [];
   const groups = new Map();
   for (const agent of agents) {
-    const { key, status, detail } = resolveKey(agent);
-    if (status === "unreadable") refusals.push({ agent, detail });
-    if (status === "local-only") localOnly.push({ agent, detail });
+    const { key, status, detail } = resolve(agent);
+    if (status === "unreadable") {
+      refusals.push({ agent, detail });
+      continue;
+    }
+    const remoteKeyed = agent.repo_key !== null && !agent.repo_key.startsWith("path:");
+    if (status === "local-only") {
+      if (remoteKeyed) {
+        refusals.push({ agent, detail: `${detail}, and the row is already keyed on ${agent.repo_key}` });
+        continue;
+      }
+      localOnly.push({ agent, detail });
+    }
     const groupKey = `${agent.organization_id}|${agent.owner_user_id}|${agent.source}|${key}`;
     const existing = groups.get(groupKey);
     if (existing === undefined) groups.set(groupKey, { key, members: [agent] });
@@ -236,6 +247,27 @@ async function main() {
     const only = group.members[0];
     if (only.repo_key !== group.key) rekeys.push({ key: group.key, agent: only });
   }
+  return { merges, rekeys, ambiguous, localOnly, refusals };
+}
+
+async function main() {
+  await requireClockInSchema();
+  const agents = await sql`
+    select a.id, a.organization_id, a.owner_user_id, a.source, a.repo_root, a.repo_key,
+           a.name, a.status, a.created_at, u.name as owner_name,
+           (select count(*)::int from agent_sessions s where s.organization_id = a.organization_id and s.agent_id = a.id) as shifts,
+           (select count(*)::int from shift_commits c where c.organization_id = a.organization_id and c.agent_id = a.id) as commits,
+           (select count(*)::int from agent_usage g where g.organization_id = a.organization_id and g.agent_id = a.id) as usage_rows
+    from agents a
+    join users u on u.organization_id = a.organization_id and u.id = a.owner_user_id
+    where a.repo_root is not null and a.status <> 'retired'
+    order by a.organization_id, u.name, a.source, a.created_at, a.id
+  `;
+
+  console.log(`Clock-In agent identity repair, keyed on the git remote. ${confirm ? "Applying." : "Dry run."}`);
+  console.log(`${agents.length} live repo-keyed agent(s) to consider.\n`);
+
+  const { merges, rekeys, ambiguous, localOnly, refusals } = planRepair(agents);
 
   const describe = (agent) =>
     `${agent.name} (${agent.id.slice(0, 8)}) ${agent.shifts} shift(s), ${agent.commits} commit(s), ${agent.usage_rows} usage row(s)`;
@@ -459,8 +491,16 @@ async function reportUnassignedBucket() {
   }
 }
 
-main().catch(async (error) => {
-  console.error(error);
-  await sql.end({ timeout: 5 });
-  process.exit(1);
-});
+if (process.argv[1] !== undefined && process.argv[1].endsWith("repair-agent-identity-by-remote.mjs")) {
+  const databaseUrl = process.env.DATABASE_URL;
+  if (databaseUrl === undefined || databaseUrl === "") {
+    console.error("DATABASE_URL is required.");
+    process.exit(2);
+  }
+  sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+  main().catch(async (error) => {
+    console.error(error);
+    await sql.end({ timeout: 5 });
+    process.exit(1);
+  });
+}

@@ -264,6 +264,24 @@ describe("agent routes", () => {
     expect(body.agents[0]).not.toHaveProperty("repoRoot");
   });
 
+  // The roster reads the repository the identity is keyed on, never the one
+  // worktree that happened to mint the row - otherwise every shift from every
+  // worktree of this repository renders "@ fix-login".
+  it("renders the repository the identity is keyed on, not the worktree it was minted from", async () => {
+    const worktree = agentRecord({
+      repoRoot: "C:/dev/clock-in-worktrees/fix-login",
+      repoKey: "github.com/acme/clock-in",
+    });
+    const { app } = createTestApp(new MemoryAgents([worktree]));
+
+    const response = await app.request("http://api.test/agents", { headers: { authorization: adminHeader } });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      agents: [{ repoName: "clock-in", repoRoot: "C:/dev/clock-in-worktrees/fix-login" }],
+    });
+  });
+
   it("renames an agent that carries a repo, which re-validates the whole record", async () => {
     // The trap: `patch` re-validates the merged agent against the strict
     // schema, so an identity column left out of that literal fails a rename

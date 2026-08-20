@@ -34,17 +34,19 @@ export function normalizePath(value: string): string {
  * The suffix branch - `dazzling-lamarr-0aacbd`, `upwork-automation-build-c164f2` -
  * is deliberately the narrowest of the four, because it is the only one whose
  * shape a real codebase could plausibly wear. It requires a non-empty slug, a
- * hyphen, then six or more lowercase hex characters *containing at least one
- * digit*. Without the digit rule the six-letter words that happen to spell hex
- * - `decade`, `facade`, `beaded` - would fold a real repository into its
- * operator's bucket and lose its attribution. Roughly one worktree suffix in
- * 350 is all-letters and slips through; that is the accepted ceiling, and it
- * costs nothing, because identity comes from the remote (`identityRepoKey`)
- * and only the label ever consults this. Needing this regex to hold the line
- * means the remote never reached the lane, which is the finding, not the fix.
+ * hyphen, then six or more lowercase hex characters carrying *both* a digit
+ * and a letter. Each half of that rule keeps a real repository out of its
+ * operator's bucket: without the digit the six-letter words that spell hex -
+ * `decade`, `facade`, `beaded` - are swallowed, and without the letter every
+ * dated or numbered directory is - `invoices-202601`, `release-20240115`,
+ * `sprint-123456`. Roughly one random suffix in 16 is all-letters or
+ * all-digits and slips through; that is the accepted ceiling, and it costs
+ * nothing, because identity comes from the remote (`identityRepoKey`) and only
+ * the label ever consults this. Needing this regex to hold the line means the
+ * remote never reached the lane, which is the finding, not the fix.
  */
 const OPAQUE_SEGMENT =
-  /^(?:[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64}|.+-(?=[0-9a-f]*[0-9])[0-9a-f]{6,})$/;
+  /^(?:[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64}|.+-(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{6,})$/;
 
 /**
  * A working directory's codebase label: its last path segment, separators

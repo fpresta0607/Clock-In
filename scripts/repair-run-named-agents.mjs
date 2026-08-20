@@ -66,14 +66,20 @@ const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
 
 /**
  * Mirrors `OPAQUE_SEGMENT` in apps/api/src/services/attribution.ts: a ULID, a
- * UUID, or a bare hex hash names no codebase to anyone. Keep the two identical
- * - the ULID branch is uppercase-only there for the same reason it is here, so
- * a lowercase 26-character codebase name is never folded away. The hex branch
- * cannot be uppercase-only (git SHAs are lowercase), so it is keyed on length
- * instead: exactly a full SHA-1 (40) or SHA-256 (64) hex string.
+ * UUID, a bare hex hash, or a slug carrying a random hex suffix names no
+ * codebase to anyone. Keep the two identical - this script decides which
+ * shifts get re-homed onto a directory's name, so a shape missing here re-homes
+ * a shift onto an agent named after a run, which is the very thing it exists
+ * to undo. The ULID branch is uppercase-only there for the same reason it is
+ * here, so a lowercase 26-character codebase name is never folded away. The hex
+ * branch cannot be uppercase-only (git SHAs are lowercase), so it is keyed on
+ * length instead: exactly a full SHA-1 (40) or SHA-256 (64) hex string. The
+ * suffix branch requires both a digit and a letter in the hex tail, so neither
+ * a six-letter word that spells hex (`facade`) nor a dated directory
+ * (`invoices-202601`) is swallowed.
  */
 const OPAQUE_SEGMENT =
-  /^(?:[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/;
+  /^(?:[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64}|.+-(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{6,})$/;
 
 /** The declared runtimes' display names, from the one roster both sides read. */
 const runtimeLabels = new Map(registry.runtimes.map((runtime) => [runtime.id, runtime.label]));

@@ -120,6 +120,18 @@ describe("repoLabel and the worktree slug", () => {
     expect(repoLabel("/src/base-64")).toBe("base-64");
     expect(repoLabel("/src/es2015")).toBe("es2015");
   });
+
+  // The mirror of the digit rule, and the more expensive half: a dated or
+  // numbered directory is a name someone chose, and for a local-only
+  // repository swallowing it costs the identity rather than the label -
+  // `identityRepoKey` reaches lane 2 through `repoLabel`, so the whole
+  // repository would pool into its operator's unassigned bucket.
+  it("keeps a dated or numbered directory, whose suffix carries no hex letter", () => {
+    expect(repoLabel("C:/dev/invoices-202601")).toBe("invoices-202601");
+    expect(repoLabel("C:/archive/release-20240115")).toBe("release-20240115");
+    expect(repoLabel("C:/dev/sprint-123456")).toBe("sprint-123456");
+    expect(identityRepoKey("C:/dev/invoices-202601", null)).toBe("path:C:/dev/invoices-202601");
+  });
 });
 
 describe("normalizeRemote", () => {

@@ -275,6 +275,28 @@ integration("agents operator-and-repo identity upsert", () => {
     });
 
     expect(second.id).toBe(first.id);
+    // One name for the repository, taken from the remote, rather than from
+    // whichever checkout's directory happened to mint the row. Reading the
+    // directory first is how a worktree's folder name became the displayed
+    // codebase for a whole repository.
+    expect((await repository.findById(subject, first.id))?.name).toBe("Codex @ precisiondocs-ai");
+  });
+
+  // The label follows the identity even when the directory could have supplied
+  // one: a worktree checked out under a branch name is still that repository,
+  // and every shift from every worktree has to read as the same codebase.
+  it("names a worktree's row after its repository, not after the worktree's folder", async () => {
+    const now = new Date();
+    const base = { organizationId, ownerUserId, source: "opencode", projectId: null, name: "opencode", now } as const;
+    const worktree = await repository.upsertForKey({
+      ...base,
+      repoRoot: "C:/dev/clock-in-worktrees/fix-login",
+      repoRemote: "git@github.com:acme/clock-in.git",
+    });
+
+    const record = await repository.findById(subject, worktree.id);
+    expect(record?.name).toBe("opencode @ clock-in");
+    expect(record?.repoRoot).toBe("C:/dev/clock-in-worktrees/fix-login");
   });
 
   // A worktree named after its run identifies no codebase by itself, which is

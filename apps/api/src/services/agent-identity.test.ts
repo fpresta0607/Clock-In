@@ -293,6 +293,28 @@ describe("late repo discovery", () => {
     expect(agents.restamped).toEqual([]);
   });
 
+  // A commit names a directory and nothing else, so this lane can only ever
+  // mint a path key - which is precisely the identity the remote replaced.
+  // Re-homing onto it would split one repository back across its worktrees,
+  // one commit at a time, and the roster would refill with the rows the repair
+  // script had just folded together.
+  it("keeps a shift on its remote-keyed agent when a commit names another worktree", async () => {
+    const agents = new MemoryAgents([agentRecord({
+      id: ids.incumbent,
+      repoRoot: clockIn,
+      repoKey: "github.com/acme/clock-in",
+      name: "Claude Code @ clock-in",
+    })]);
+    const row = session({ agentId: ids.incumbent });
+
+    await expect(graduate(agents, row, "C:/w/clock-in-fix-login").result).resolves.toBe(ids.incumbent);
+
+    expect(agents.upserts).toEqual([]);
+    expect(agents.restamped).toEqual([]);
+    expect(agents.rows).toHaveLength(1);
+    expect(row.agentId).toBe(ids.incumbent);
+  });
+
   it("mints nothing for a source that is not on the roster", async () => {
     const agents = new MemoryAgents();
     const agentSessions = new MemorySessions();

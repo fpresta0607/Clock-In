@@ -71,11 +71,16 @@ export function mayReadRepoRoot(subject: AuthenticatedSubject, ownerId: string):
  * through the same strict schema.
  */
 export function asAgentView(record: AgentRecord, subject: AuthenticatedSubject): AgentPaystubResponse["agent"] {
-  // The repository the identity is keyed on answers when the directory cannot:
-  // a worktree checked out per run names no codebase, but the remote that
-  // identified it does. A name either way, never a path.
-  const name = (record.repoRoot === null ? null : repoLabel(record.repoRoot))
-    ?? (record.repoKey === null ? null : repoKeyLabel(record.repoKey));
+  // The repository the identity is keyed on names it, and the directory only
+  // answers when there is no key at all. Preferring the directory is how a
+  // worktree's folder name becomes the displayed codebase for a whole
+  // repository - every shift from every worktree reading "@ fix-login". For a
+  // path key the two are the same string; for a remote key this is the
+  // repository's own name, lowercased, and that trade is deliberate: one
+  // canonical name across every worktree and every checkout beats preserving
+  // one directory's capitalisation. A name either way, never a path.
+  const name = (record.repoKey === null ? null : repoKeyLabel(record.repoKey))
+    ?? (record.repoRoot === null ? null : repoLabel(record.repoRoot));
   return {
     id: record.id,
     name: record.name,
