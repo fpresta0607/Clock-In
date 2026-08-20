@@ -697,7 +697,9 @@ mod tests {
     fn credential_stripping_keeps_every_other_spelling_intact() {
         // Host, port and path survive; only the credential goes.
         assert_eq!(
-            without_embedded_credentials("https://user:secret@dev.azure.test:8443/org/proj/_git/repo"),
+            without_embedded_credentials(
+                "https://user:secret@dev.azure.test:8443/org/proj/_git/repo"
+            ),
             "https://dev.azure.test:8443/org/proj/_git/repo"
         );
         assert_eq!(
