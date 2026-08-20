@@ -57,7 +57,7 @@ const OPAQUE_SEGMENT =
  *
  * An opaque id is *not* a name. A shift worked inside a per-run worktree used
  * to label itself with that run's id - "Claude Code @ 01M06FSGP392MH6VJNRX8T364A" -
- * and, because the identity key is the repo root, minted a fresh agent for
+ * and, because the identity key was the repo root, minted a fresh agent for
  * every run. Reading absence as absence is the rule the rest of the model
  * already follows: no codebase name, rather than a wrong one.
  */

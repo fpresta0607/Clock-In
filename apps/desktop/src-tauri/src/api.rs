@@ -353,8 +353,9 @@ pub struct AgentEventUpload<'a> {
     pub occurred_at: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<&'a str>,
-    /// Contract data, unlike `start_head`: it names the codebase this shift's
-    /// identity is keyed on. An older API rejects an unknown field outright,
+    /// Contract data, unlike `start_head`: the path the shift's identity falls
+    /// back to when no remote was read, and evidence of where the work
+    /// happened otherwise. An older API rejects an unknown field outright,
     /// which is why the installer ships only after the API accepting it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_root: Option<&'a str>,

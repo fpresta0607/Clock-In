@@ -545,9 +545,11 @@ export const agentStatusValues = ["anonymous", "registered", "retired"] as const
 export const agentStatusSchema = z.enum(agentStatusValues);
 
 /**
- * A codebase label: the last segment of a repo root or working directory, so
- * the surfaces can say which codebase an agent worked without handing anyone a
- * path. Paths themselves stay behind the `repoRoot` rule.
+ * A codebase label - a name like `clock-in`: the repository's own name when an
+ * agent's identity is keyed on its remote, and the last segment of a repo root
+ * or working directory otherwise - so the surfaces can say which codebase an
+ * agent worked without handing anyone a path. Paths themselves stay behind
+ * the `repoRoot` rule.
  */
 export const repoLabelSchema = z.string().min(1).max(200);
 
@@ -560,9 +562,10 @@ export const agentSchema = z
     owner: z.object({ id: idSchema, name: z.string().min(1) }).strict(),
     project: z.object({ id: idSchema, name: z.string().min(1) }).strict().nullable(),
     /**
-     * The codebase this agent works, as a folder name. Safe for every member,
-     * exactly as a shift's `repo` label is. Absent on the operator's
-     * unassigned bucket, and on an API from before v2.
+     * The codebase this agent works, as a name (`agentCodebaseLabel`): the
+     * repository's own name from a remote key, a folder name from a path key.
+     * Safe for every member, exactly as a shift's `repo` label is. Absent on
+     * the operator's unassigned bucket, and on an API from before v2.
      */
     repoName: repoLabelSchema.optional(),
     /**

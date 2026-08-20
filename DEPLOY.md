@@ -170,9 +170,10 @@ them on `agents.repo_key` instead. Its sequence:
 4. Repair, from a machine that holds the checkouts:
    `DATABASE_URL=… node scripts/repair-agent-identity-by-remote.mjs` prints the
    merges; `--confirm` performs them, and a second run is a no-op. It refuses a
-   database whose `agents` table is missing, and leaves alone any row whose
-   `repo_root` is not a directory on the machine running it - so run it from
-   each operator's own machine to fold that operator's rows.
+   database without `agents.repo_key` - one this migration has not reached -
+   and leaves alone any row whose `repo_root` is not a directory on the machine
+   running it, so run it from each operator's own machine to fold that
+   operator's rows.
 5. Optionally run `repair-run-named-agents.mjs` afterwards; it re-homes shifts
    out of the unassigned bucket, which the repair above reports but never
    touches. The two are independent, and this is the order that loses nothing:

@@ -9,7 +9,7 @@
 
   <p>
     <a href="https://github.com/fpresta0607/Clock-In/actions/workflows/ci.yml"><img src="https://github.com/fpresta0607/Clock-In/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-    <img src="https://img.shields.io/badge/node-%E2%89%A522-3c873a" alt="Node 22+">
+    <img src="https://img.shields.io/badge/node-%E2%89%A522.18-3c873a" alt="Node 22.18+">
     <img src="https://img.shields.io/badge/rust-1.89%2B-b7410e" alt="Rust 1.89+">
     <img src="https://img.shields.io/badge/desktop-Tauri%202-24c8db" alt="Tauri 2">
   </p>
@@ -357,7 +357,8 @@ against explicit fakes, so the behavior suite needs no database.
 
 **Prerequisites**
 
-- Node **22+** and pnpm **10.14+** (`corepack enable`)
+- Node **22.18+** (the `scripts/` repairs import the API's own TypeScript through Node's unflagged type stripping)
+  and pnpm **10.14+** (`corepack enable`)
 - A PostgreSQL database with **Neon Auth** configured — the API verifies JWTs against its JWKS
 - For the desktop app: Rust **1.89+** (`File::try_lock`, used by the spool) plus Tauri's system
   dependencies. On Debian/Ubuntu: `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev`
