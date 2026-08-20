@@ -6,8 +6,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
-import { planRepair, remoteProbeFailure, resolveKey } from "./repair-agent-identity-by-remote.mjs";
+import { ownerArgument, planRepair, remoteProbeFailure, resolveKey } from "./repair-agent-identity-by-remote.mjs";
 
 const organization = "8d1c2f7e-0000-4000-8000-000000000001";
 const owner = "8d1c2f7e-0000-4000-8000-000000000002";
@@ -305,4 +306,38 @@ test("resolveKey separates a non-repository, a remote-less repository and a remo
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+});
+
+// The scoping guard, at the one boundary it has to hold: presence on disk says
+// only "I can read what this row points at", never "this row is mine". Two
+// operators can each keep a different repository at `C:/dev/api`, so an
+// unscoped `--confirm` can re-key - and, where the other operator already
+// holds that remote, merge away - a row belonging to someone else.
+test("--owner is read from either spelling, and its absence is not an empty value", () => {
+  assert.equal(ownerArgument(["node", "s.mjs", "--owner", "you@example.com"]), "you@example.com");
+  assert.equal(ownerArgument(["node", "s.mjs", "--owner=you@example.com", "--confirm"]), "you@example.com");
+  assert.equal(ownerArgument(["node", "s.mjs", "--confirm"]), undefined);
+  // Named nobody, which is not everybody: `--confirm` refuses this too.
+  assert.equal(ownerArgument(["node", "s.mjs", "--owner", "--confirm"]), "");
+  assert.equal(ownerArgument(["node", "s.mjs", "--owner"]), "");
+});
+
+test("--confirm without --owner refuses before it opens the database", () => {
+  const script = fileURLToPath(new URL("./repair-agent-identity-by-remote.mjs", import.meta.url));
+  // A port nothing listens on: reaching the database at all fails loudly and
+  // slowly, so a clean exit 2 is proof the refusal came first.
+  let failed;
+  assert.throws(() => execFileSync(process.execPath, [script, "--confirm"], {
+    env: { ...process.env, DATABASE_URL: "postgres://127.0.0.1:1/nowhere" },
+    encoding: "utf8",
+    stdio: "pipe",
+    timeout: 30_000,
+  }), (error) => {
+    failed = error;
+    return true;
+  });
+
+  assert.equal(failed.status, 2);
+  assert.match(failed.stderr, /--confirm requires --owner/);
+  assert.doesNotMatch(failed.stderr, /ECONNREFUSED/);
 });

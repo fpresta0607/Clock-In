@@ -5,7 +5,8 @@
  * that remote. Dry run by default: prints exactly what it would merge into
  * what, and exits. Pass --confirm to perform it.
  *
- *   DATABASE_URL=postgres://... node scripts/repair-agent-identity-by-remote.mjs [--confirm]
+ *   DATABASE_URL=postgres://... node scripts/repair-agent-identity-by-remote.mjs
+ *   DATABASE_URL=postgres://... node scripts/repair-agent-identity-by-remote.mjs --owner you@example.com --confirm
  *
  * Identity used to be (organization, owner, source, repo_root), and a repo
  * root is a *path*. Every treehouse worktree is its own path, so every worktree
@@ -25,8 +26,19 @@
  * can only be read from a machine that holds the checkouts - which is why this
  * runs locally against the shared database rather than as a migration. A row
  * whose `repo_root` is not a directory on this machine is left exactly as it
- * is and reported; that is what keeps another operator's rows out of a repair
- * run by whoever happens to have the database URL.
+ * is and reported: we cannot read what it points at, so we cannot say what its
+ * key should be.
+ *
+ * Two different questions, so two guards. Presence on disk answers "can I read
+ * what this row points at". It does not answer "are these rows mine to touch",
+ * because the same absolute path on two machines is two different
+ * repositories: `C:/dev/api` is somebody's checkout on every one of them. So
+ * `--owner <email or user id>` names the one operator whose rows a run may
+ * write, and `--confirm` refuses without it. The dry run may be taken without
+ * `--owner`, because the whole roster is what makes it worth reading; it
+ * labels every line with whose row it is and closes by naming the `--owner`
+ * value each plan needs. With `--owner`, both passes consider only that
+ * operator's rows, so the plan printed is the plan performed.
  *
  * Rules, none of them negotiable:
  *
@@ -80,6 +92,21 @@ try {
 }
 
 const confirm = process.argv.includes("--confirm");
+
+/**
+ * `--owner <value>` or `--owner=<value>`; `undefined` when it was not given at
+ * all, which is a different answer from an empty one. `--owner` with nothing
+ * after it names nobody, and a run that silently read that as "everybody"
+ * would be the unscoped run `--confirm` exists to refuse.
+ */
+export function ownerArgument(argv) {
+  const flag = argv.indexOf("--owner");
+  if (flag !== -1) return argv[flag + 1]?.startsWith("--") === false ? argv[flag + 1] : "";
+  const inline = argv.find((argument) => argument.startsWith("--owner="));
+  return inline === undefined ? undefined : inline.slice("--owner=".length);
+}
+
+const ownerValue = ownerArgument(process.argv);
 
 /** Opened by the entrypoint at the foot of this file, so an import connects to nothing. */
 let sql;
@@ -135,8 +162,8 @@ export function remoteProbeFailure(error) {
  *   directory is the right identity for it, which is what it already had.
  * - `unreadable`: the directory is not on this machine, is no longer a
  *   repository, or git could not be run. We cannot say, so nothing changes and
- *   the row is reported. This is what keeps another operator's rows out of a
- *   repair run by whoever happens to hold the database URL.
+ *   the row is reported. Whose row it is, is a separate question and a separate
+ *   guard: `--owner` answers that one.
  *
  * The difference between the last two is decided by `remoteProbeFailure`, not
  * assumed: a `local-only` row does take part in the grouping and does get
@@ -230,6 +257,45 @@ async function requireClockInSchema() {
   }
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The one operator this run may write, resolved to a row before anything is
+ * read about agents.
+ *
+ * Matched on email, because that is what a human running this has to hand, or
+ * on the user id, because an email is unique only within a workspace and the
+ * same person may hold one in two. Zero matches and more than one are both
+ * refused: a value that does not name exactly one operator cannot scope a run
+ * to exactly one operator, and guessing which of two was meant is the mistake
+ * the scoping exists to prevent.
+ */
+async function resolveOwner(value) {
+  const wanted = value.trim();
+  if (wanted === "") {
+    console.error("--owner needs a value: the operator's email address, or their user id.");
+    await sql.end();
+    process.exit(2);
+  }
+  const matches = UUID.test(wanted)
+    ? await sql`select id, organization_id, name, email from users where id = ${wanted} or lower(email) = lower(${wanted}) order by email, id`
+    : await sql`select id, organization_id, name, email from users where lower(email) = lower(${wanted}) order by email, id`;
+  if (matches.length === 0) {
+    console.error(`No user matches --owner ${wanted}.`);
+    console.error("Give the operator's email address as the workspace records it, or their user id.");
+    await sql.end();
+    process.exit(2);
+  }
+  if (matches.length > 1) {
+    console.error(`--owner ${wanted} matches ${matches.length} users, so it does not name one operator:`);
+    for (const match of matches) console.error(`    ${match.id}  ${match.email}  ${match.name}  (workspace ${match.organization_id})`);
+    console.error("An email is unique only within a workspace. Pass the user id instead.");
+    await sql.end();
+    process.exit(2);
+  }
+  return matches[0];
+}
+
 /**
  * What this run would do, decided before anything is printed or written.
  *
@@ -238,10 +304,10 @@ async function requireClockInSchema() {
  * a group member, never a merge winner or loser, never re-keyed - because the
  * only key we could compose for it is `path:<root>`, and writing that over a
  * remote key would split that repository back across its worktrees, which is
- * the defect this script exists to undo. That is every row belonging to
- * another operator, since the documented workflow is for each operator to run
- * this on their own machine; it is also what keeps a second run idempotent
- * once a worktree has been deleted.
+ * the defect this script exists to undo. It is also what keeps a second run
+ * idempotent once a worktree has been deleted. It says nothing about who owns
+ * a row - a write pass only ever sees the rows `--owner` selected, so the rows
+ * this reasons over are already one operator's.
  *
  * A `local-only` row does take part: its own directory is the right identity
  * for a repository with no remote, and it is the key that row already carries,
@@ -332,16 +398,34 @@ export function planRepair(agents, resolve = resolveKey) {
 }
 
 async function main() {
+  // Before the schema probe, before the roster read, before anything: an
+  // unscoped write pass is refused rather than planned and then declined.
+  if (confirm && ownerValue === undefined) {
+    console.error("--confirm requires --owner <email or user id>.");
+    console.error("This database is shared. A repair scoped to nobody in particular can re-key a row that belongs to");
+    console.error("someone else: two operators can each keep a different repository at the same absolute path, so a");
+    console.error("checkout being present on this machine does not make the row that names it yours.");
+    console.error("You can only vouch for the checkouts on your own machine, so name the operator whose rows this run");
+    console.error("may write. Take the dry run without --owner first; it ends by naming the value to pass.");
+    await sql.end();
+    process.exit(2);
+  }
   await requireClockInSchema();
+  const scope = ownerValue === undefined ? null : await resolveOwner(ownerValue);
+  // Built per statement rather than shared: every read this run makes sees the
+  // same rows the write pass may touch, and nothing else.
+  const scoped = () => (scope === null
+    ? sql``
+    : sql`and a.organization_id = ${scope.organization_id} and a.owner_user_id = ${scope.id}`);
   const agents = await sql`
     select a.id, a.organization_id, a.owner_user_id, a.source, a.repo_root, a.repo_key,
-           a.name, a.status, a.created_at, u.name as owner_name,
+           a.name, a.status, a.created_at, u.name as owner_name, u.email as owner_email,
            (select count(*)::int from agent_sessions s where s.organization_id = a.organization_id and s.agent_id = a.id) as shifts,
            (select count(*)::int from shift_commits c where c.organization_id = a.organization_id and c.agent_id = a.id) as commits,
            (select count(*)::int from agent_usage g where g.organization_id = a.organization_id and g.agent_id = a.id) as usage_rows
     from agents a
     join users u on u.organization_id = a.organization_id and u.id = a.owner_user_id
-    where a.status <> 'retired'
+    where a.status <> 'retired' ${scoped()}
     order by a.organization_id, u.name, a.source, a.created_at, a.id
   `;
   // Rows with no repo root are read only for the keys they hold: there is
@@ -349,6 +433,9 @@ async function main() {
   const considered = agents.filter((agent) => agent.repo_root !== null);
 
   console.log(`Clock-In agent identity repair, keyed on the git remote. ${confirm ? "Applying." : "Dry run."}`);
+  console.log(scope === null
+    ? "Every operator's rows, because no --owner was given."
+    : `Only ${scope.name}'s rows (${scope.email}), because --owner names them.`);
   console.log(`${considered.length} live repo-keyed agent(s) to consider.\n`);
 
   const { merges, rekeys, ambiguous, contended, localOnly, refusals } = planRepair(agents);
@@ -371,14 +458,16 @@ async function main() {
 
   if (rekeys.length > 0) {
     console.log(`${rekeys.length} agent(s) already alone on their repository, re-keyed onto its remote:`);
-    for (const rekey of rekeys) console.log(`    ${rekey.agent.name} (${rekey.agent.id.slice(0, 8)})  ${rekey.agent.repo_key} -> ${rekey.key}`);
+    for (const rekey of rekeys) {
+      console.log(`    ${rekey.agent.owner_name.padEnd(18)} ${rekey.agent.name} (${rekey.agent.id.slice(0, 8)})  ${rekey.agent.repo_key} -> ${rekey.key}`);
+    }
     console.log("");
   }
 
   if (ambiguous.length > 0) {
     console.log(`${ambiguous.length} group(s) refused: more than one agent there carries a name a member chose.`);
     for (const group of ambiguous) {
-      console.log(`    ${group.key}`);
+      console.log(`    ${group.key}  [${group.members[0].owner_name}]`);
       for (const agent of group.members) console.log(`      ${agent.status.padEnd(10)} ${describe(agent)}`);
     }
     console.log("    Rename or merge these by hand; a name someone chose is not this script's to drop.\n");
@@ -387,7 +476,7 @@ async function main() {
   if (contended.length > 0) {
     console.log(`${contended.length} group(s) refused: another live agent already holds the key they resolve to.`);
     for (const clash of contended) {
-      console.log(`    ${clash.key}`);
+      console.log(`    ${clash.key}  [${clash.members[0].owner_name}]`);
       for (const agent of clash.members) console.log(`      resolves  ${agent.id} ${describe(agent)}`);
       console.log(`      holds     ${clash.holder.id} ${describe(clash.holder)}`);
       console.log(`      root      ${clash.holder.repo_root ?? "(none recorded)"}`);
@@ -433,10 +522,31 @@ async function main() {
     + contended.reduce((total, clash) => total + clash.members.length, 0);
   console.log(`  refused                ${refusedRows}`);
 
-  await reportUnassignedBucket();
+  await reportUnassignedBucket(scoped());
 
   if (!confirm) {
-    console.log("\nDry run: nothing was written. Pass --confirm to perform the merges and re-keys above.");
+    if (scope !== null) {
+      console.log("\nDry run: nothing was written. Pass --confirm to perform the merges and re-keys above.");
+    } else {
+      // The plan above spans whoever this machine can read, and applying it
+      // takes one operator at a time - so end by naming the ones it holds
+      // writes for, rather than leaving the operator to find the flag.
+      const owners = new Map();
+      for (const row of [...merges.map((merge) => merge.winner), ...rekeys.map((rekey) => rekey.agent)]) {
+        owners.set(row.owner_user_id, row);
+      }
+      console.log("\nDry run: nothing was written.");
+      if (owners.size === 0) {
+        console.log("There is nothing here to apply.");
+      } else {
+        console.log("--confirm needs --owner, which names the one operator whose rows a run may write: on a shared");
+        console.log("database a repair scoped to nobody in particular can re-key a row that belongs to someone else,");
+        console.log("and you can only vouch for the checkouts on your own machine. To apply the plan above, re-run");
+        console.log("with --confirm and one of:");
+        for (const row of owners.values()) console.log(`    --owner ${row.owner_email}   (${row.owner_name})`);
+        console.log("Each run considers only that operator's rows, so the plan it prints is the plan it performs.");
+      }
+    }
     await sql.end();
     return;
   }
@@ -536,7 +646,7 @@ async function main() {
     throw error;
   }
 
-  const [after] = await sql`select count(*)::int as count from agents where repo_root is not null and status <> 'retired'`;
+  const [after] = await sql`select count(*)::int as count from agents a where a.repo_root is not null and a.status <> 'retired' ${scoped()}`;
   applied();
   console.log(`Live repo-keyed agents now: ${after.count}.`);
   await sql.end();
@@ -558,7 +668,7 @@ async function main() {
  * - a shift whose directory names only a run belongs in the bucket;
  * - a shift with no directory at all is genuinely unattributable.
  */
-async function reportUnassignedBucket() {
+async function reportUnassignedBucket(scoped) {
   const shifts = await sql`
     select s.id, s.cwd, u.name as owner_name,
            extract(epoch from (coalesce(s.ended_at, s.last_event_at) - s.started_at))::int as seconds,
@@ -568,7 +678,7 @@ async function reportUnassignedBucket() {
     from agent_sessions s
     join agents a on a.organization_id = s.organization_id and a.id = s.agent_id
     join users u on u.organization_id = s.organization_id and u.id = s.user_id
-    where a.repo_key is null and a.status <> 'retired' and s.source <> 'browser'
+    where a.repo_key is null and a.status <> 'retired' and s.source <> 'browser' ${scoped}
   `;
   const buckets = {
     "resolution failure, its own commit names the codebase": [],

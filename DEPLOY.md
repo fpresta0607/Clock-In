@@ -169,11 +169,20 @@ them on `agents.repo_key` instead. Its sequence:
    through the path lane, exactly as before.
 4. Repair, from a machine that holds the checkouts:
    `DATABASE_URL=… node scripts/repair-agent-identity-by-remote.mjs` prints the
-   merges; `--confirm` performs them, and a second run is a no-op. It refuses a
-   database without `agents.repo_key` - one this migration has not reached -
-   and leaves alone any row whose `repo_root` is not a directory on the machine
-   running it, so run it from each operator's own machine to fold that
-   operator's rows.
+   merges for every operator this machine can read, labelled by owner, and ends
+   by naming the `--owner` value each plan needs.
+   `DATABASE_URL=… node scripts/repair-agent-identity-by-remote.mjs --owner you@example.com --confirm`
+   performs that one operator's, and a second run is a no-op.
+   `--confirm` refuses without `--owner`: the database is shared, two operators
+   can each keep a different repository at the same absolute path, and only the
+   person at the keyboard can vouch for the checkouts on their own machine.
+   The value is the owner's email address, or their user id when one email
+   spans two workspaces; anything matching zero or more than one user is
+   refused.
+   It also refuses a database without `agents.repo_key` - one this migration
+   has not reached - and leaves alone any row whose `repo_root` is not a
+   directory on the machine running it, so run it from each operator's own
+   machine to fold that operator's rows.
 5. Optionally run `repair-run-named-agents.mjs` afterwards; it re-homes shifts
    out of the unassigned bucket, which the repair above reports but never
    touches. The two are independent, and this is the order that loses nothing:
