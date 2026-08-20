@@ -37,19 +37,23 @@ directory (`repoLabel`), when that segment names a codebase - while the path its
 `repoRoot` rule. A shift whose directory names no codebase reads "No codebase recorded"; there is no
 default codebase, just as `resolveProjectForCwd` returns null rather than falling back to a project.
 
-Agents are durable identities, not rows per run: one `agents` row per `(organization, owner, source,
-repo_root)` — one person's harness working one codebase — and each `agent_sessions` row is one of its
-shifts. The operator is the authenticated uploader, so the dimension costs each runtime nothing. A
-null `repo_root` is that operator's unassigned bucket, a real roster row that several shifts share. A
-bucket never claims a codebase in place: when a commit names one, `graduateAgentForSession` mints that
-codebase's identity and re-stamps only the shift that produced the commit, because the bucket's other
-shifts are not evidence of it. `project_id` stays on the row as a re-derivable attribute and never as
-identity. A working directory named after a run rather than a codebase - a per-run worktree such as
-`<hash>.git/worktrees/<ULID>` - names no codebase and identifies none, so its shifts land in that same
-bucket instead of minting a row each (`repoLabel`, `identityRepoRoot`). Both partial uniques exclude retired rows, and
-`upsertForKey`'s ON CONFLICT `targetWhere` must restate each index's predicate exactly - postgres
-matches an arbiter to a partial index by that predicate, and a mismatch passes every mocked
-repository and then fails every insert.
+Agents are durable identities, not rows per run: one `agents` row per `(organization, owner, source, repo_key)` - one person's harness working one **repository** - and each `agent_sessions` row is one of its shifts.
+The operator is the authenticated uploader, so the dimension costs each runtime nothing.
+
+`repo_key` is the repository's normalized git remote (`github.com/owner/repo`), and `identityRepoKey` is the one place it is composed.
+Nothing else is stable: every worktree is its own path, and a second checkout of one repository under another directory name shares no basename with the first.
+Keying on `repo_root` minted an agent per path while the name - the last path segment - rendered them all the same string.
+Keyed by path, displayed by basename; that defect was reported twice before the remote replaced it.
+A repository with no remote keys on `path:<root>` verbatim, which is both the honest answer for a local-only repo and exactly the identity it had before, so `0016`'s `'path:' || repo_root` backfill lands on the key the code composes.
+`repo_root` stays on the row as evidence of where the work happened and is never keyed on again.
+
+A null `repo_key` is that operator's unassigned bucket, a real roster row that several shifts share.
+A bucket never claims a codebase in place: when a commit names one, `graduateAgentForSession` mints that codebase's identity and re-stamps only the shift that produced the commit, because the bucket's other shifts are not evidence of it.
+A commit names a directory and nothing else, so graduation can only ever mint a path key - which is why it refuses to re-home a shift off a remote-keyed identity, and why `scripts/repair-agent-identity-by-remote.mjs` exists to fold path-keyed rows onto the remote they share.
+That script reads the remote from checkouts on the machine running it, because the remote is not in the database and never has been.
+`project_id` stays on the row as a re-derivable attribute and never as identity.
+A working directory named after a run rather than a codebase - a per-run worktree such as `<hash>.git/worktrees/<ULID>` or a treehouse `<slug>-<6hex>` - names no codebase, so a shift with no remote either lands in that bucket instead of minting a row each (`repoLabel`, `identityRepoRoot`); with a remote it reaches its repository's row normally, and `OPAQUE_SEGMENT` only ever decides a label.
+Both partial uniques exclude retired rows, and `upsertForKey`'s ON CONFLICT `targetWhere` must restate each index's predicate exactly - postgres matches an arbiter to a partial index by that predicate, and a mismatch passes every mocked repository and then fails every insert.
 A model is an attribute of a shift, never an identity: `agent_sessions.model` says what the runtime
 was driving, and neither it nor `source` is ever derived from the other. Browser spans are attention
 rather than payroll, so `rosterEligibleSource` keeps them off the roster. Commits made during a

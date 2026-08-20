@@ -152,12 +152,32 @@ Its own sequence, back to back in one window:
 Between steps 3 and 4 the roster shows the retired v1 rows beside fresh v2
 rows. That is expected, not an error state.
 
+`0016_agent_identity_by_remote` is the same kind of migration and carries the
+same window, for the same reason: it drops both partial uniques and creates
+them on `agents.repo_key` instead. Its sequence:
+
+1. Apply the migration. Its hand-added backfill sets `repo_key = 'path:' ||
+   repo_root` for every row that has a root, which is exactly the identity that
+   row already had - so the new indexes are built on values already unique, and
+   the running API's arbiters are the only thing broken by the window.
+2. Deploy the API.
+3. Ship the desktop, whenever. Until it does, every shift keys on its root
+   through the path lane, exactly as before.
+4. Repair, from a machine that holds the checkouts:
+   `DATABASE_URL=… node scripts/repair-agent-identity-by-remote.mjs` prints the
+   merges; `--confirm` performs them, and a second run is a no-op. It refuses a
+   database whose `agents` table is missing, and leaves alone any row whose
+   `repo_root` is not a directory on the machine running it - so run it from
+   each operator's own machine to fold that operator's rows. Run
+   `repair-run-named-agents.mjs` first; this one reports the unassigned bucket
+   but never re-homes out of it.
+
 The desktop ships last and only through an installer: the hook's `repo_root`
-probe reaches the server as contract data, so an installer sending it must
-never precede the API that accepts it. Old installers keep working
-indefinitely - their shifts mint per-operator unassigned agents, and a shift
-moves onto a codebase alone when that shift's own commit names one, which is
-the designed degradation path.
+and `repo_remote` probes reach the server as contract data, so an installer
+sending them must never precede the API that accepts them. Old installers keep
+working indefinitely - their shifts key on the repo root, and a shift with no
+root at all moves onto a codebase alone when that shift's own commit names one,
+which is the designed degradation path.
 
 ---
 

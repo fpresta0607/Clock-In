@@ -246,15 +246,20 @@ refusals never fail a batch.
 ### Roster: agents as identities
 
 An agent's identity is durable across sessions, keyed by **(operator, runtime,
-codebase)** per organization — the same person's Claude Code working the same
+repository)** per organization — the same person's Claude Code working the same
 repository is one roster entry, not a new row per shift, and two people running
-the same runtime on the same repository are two workers rather than one. Each
-`agent_sessions` row is that identity's shift. The operator is whoever's desktop
-uploaded the shift, so every runtime gets the distinction the day its hooks are
-wired. A shift whose working directory names no codebase — it is not in a
-repository, the desktop predates the repo probe, or the directory is a per-run
-worktree named after a run id — lands in that person's **unassigned** bucket, a
-real roster row several shifts share. The bucket itself never becomes a codebase:
+the same runtime on the same repository are two workers rather than one. The
+repository is named by its git remote, normalized (`github.com/owner/repo`), and
+never by the directory it happens to sit in: a worktree, a second worktree, and a
+second checkout under a different folder name are all one repository and so one
+roster entry, on this machine and on the next one. A repository with no remote is
+identified by its own directory, which keeps local-only work from pooling into a
+single row. Each `agent_sessions` row is that identity's shift. The operator is
+whoever's desktop uploaded the shift, so every runtime gets the distinction the
+day its hooks are wired. A shift with no repository at all — it is not in one, or
+the desktop predates the probe and its directory names no codebase either — lands
+in that person's **unassigned** bucket, a real roster row several shifts share.
+The bucket itself never becomes a codebase:
 when a shift's own commit names one, that shift alone moves onto that codebase's
 identity and leaves the rest of the bucket behind; nothing is stranded and no
 default codebase is invented. The Clock-In project stays on the roster row as a label
@@ -329,7 +334,9 @@ Not by policy, but because the code never reads it:
   Win32 queries plus broadcasts delivered to Clock-In's own hidden window.
 
 What *is* collected: coarse activity segments with timestamps, the foreground process name, agent
-session boundaries with their working directory, browser spans naming which URL rule matched and
+session boundaries with their working directory and — when that directory is in a git repository —
+that repository's root and its `origin` remote URL, which is what names the repository an agent
+works, browser spans naming which URL rule matched and
 for how long, the start and end of each session the monitor observed, and — for an AI coding shift
 in a git repo — the branch name, and the title, commit id and repository path of each commit
 captured once the shift ends (see *Roster: agents as identities*). When an AI coding tool keeps a
