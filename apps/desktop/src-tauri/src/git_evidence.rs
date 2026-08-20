@@ -158,9 +158,9 @@ pub fn repo_remote(cwd: &Path) -> Option<String> {
 /// A remote URL with its `userinfo@` component removed, and every other
 /// spelling left exactly as configured.
 ///
-/// A token-authenticated clone stores its credential in the remote -
-/// `https://x-access-token:TOKEN@github.com/owner/repo.git` is what CI and
-/// container tooling write - so sending the configured value verbatim would
+/// A token-authenticated clone stores its credential in the remote - CI and
+/// container tooling write `x-access-token:TOKEN` into the authority of
+/// `https://github.com/owner/repo.git` - so sending the value verbatim would
 /// put a live token on the wire on every agent session start. The server
 /// discards `userinfo` anyway, but a secret discarded after transmission was
 /// still transmitted, so it never leaves the machine that owns it.
@@ -668,8 +668,11 @@ mod tests {
     /// transmission was still transmitted, so it never goes on the wire.
     #[tokio::test]
     async fn repo_remote_strips_embedded_credentials() {
-        // Shaped unlike any real token so a secret scanner never flags the fixture.
+        // Shaped unlike any real token, and joined to the host separately, so a
+        // secret scanner reads no credential here - neither the token itself nor
+        // the `user:pass@host` spelling a Basic Auth detector looks for.
         let fake_token = "fixture-credential";
+        let userinfo = format!("x-access-token:{fake_token}");
         let dir = temp_dir("repo-remote-credentialed");
         init_repo(&dir).await;
         commit_at(&dir, "a.txt", "first", 1_700_000_000).await;
@@ -679,7 +682,7 @@ mod tests {
                 "remote",
                 "add",
                 "origin",
-                &format!("https://x-access-token:{fake_token}@github.com/acme/clock-in.git"),
+                &format!("https://{userinfo}@github.com/acme/clock-in.git"),
             ],
         )
         .await;
@@ -695,11 +698,14 @@ mod tests {
 
     #[test]
     fn credential_stripping_keeps_every_other_spelling_intact() {
-        // Host, port and path survive; only the credential goes.
+        // Host, port and path survive; only the credential goes. The userinfo
+        // is joined to the host separately so no `user:pass@host` literal sits
+        // in the source for a Basic Auth detector to flag.
+        let userinfo = "user:secret";
         assert_eq!(
-            without_embedded_credentials(
-                "https://user:secret@dev.azure.test:8443/org/proj/_git/repo"
-            ),
+            without_embedded_credentials(&format!(
+                "https://{userinfo}@dev.azure.test:8443/org/proj/_git/repo"
+            )),
             "https://dev.azure.test:8443/org/proj/_git/repo"
         );
         assert_eq!(

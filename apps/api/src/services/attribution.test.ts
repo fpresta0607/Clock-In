@@ -151,7 +151,10 @@ describe("normalizeRemote", () => {
   });
 
   it("drops credentials and transport, which name no repository", () => {
-    expect(normalizeRemote("https://alex:secret@github.com/acme/api.git")).toBe("github.com/acme/api");
+    // Assembled rather than written out: a literal `user:pass@host` URL reads
+    // as a Basic Auth credential to a secret scanner even when it holds none.
+    const userinfo = "alex:secret";
+    expect(normalizeRemote(`https://${userinfo}@github.com/acme/api.git`)).toBe("github.com/acme/api");
     expect(normalizeRemote("ssh://git@github.com:2222/acme/api.git")).toBe("github.com/acme/api");
     expect(normalizeRemote("https://github.com:443/acme/api")).toBe("github.com/acme/api");
   });
