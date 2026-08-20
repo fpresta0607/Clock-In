@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { planRepair, remoteProbeFailure } from "./repair-agent-identity-by-remote.mjs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import process from "node:process";
+
+import { planRepair, remoteProbeFailure, resolveKey } from "./repair-agent-identity-by-remote.mjs";
 
 const organization = "8d1c2f7e-0000-4000-8000-000000000001";
 const owner = "8d1c2f7e-0000-4000-8000-000000000002";
@@ -258,4 +264,47 @@ test("git missing from PATH and a timed-out probe are both unreadable", () => {
   assert.equal(remoteProbeFailure({ status: null, signal: "SIGTERM" }).status, "unreadable");
   assert.match(remoteProbeFailure({ code: "ENOENT" }).detail, /PATH/);
   assert.match(remoteProbeFailure({ status: null, signal: "SIGTERM" }).detail, /SIGTERM/);
+});
+
+// The three states the report rests on, read from real directories rather
+// than from a mapping: `config --get` without `--local` is the one git
+// subcommand that does not fail outside a repository, so a pruned worktree
+// whose folder was left behind would be reported as a healthy repository with
+// no remote - and the refusals section, which is the operator's only signal to
+// run this elsewhere, would stay silent about it.
+test("resolveKey separates a non-repository, a remote-less repository and a remote", () => {
+  const scratch = mkdtempSync(join(tmpdir(), "clock-in-resolve-key-"));
+  const globalConfig = join(scratch, "gitconfig-global");
+  // The hazard made deterministic: exactly the key the probe reads, set where
+  // a bare `config --get` would fall through to.
+  writeFileSync(globalConfig, '[remote "origin"]\n\turl = https://github.com/someone/unrelated.git\n');
+  const previous = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = globalConfig;
+  const git = (cwd, args) => execFileSync("git", ["-C", cwd, ...args], { stdio: ["ignore", "ignore", "ignore"] });
+  try {
+    const plain = join(scratch, "not-a-repo");
+    mkdirSync(plain);
+    assert.equal(resolveKey({ repo_root: plain }).status, "unreadable");
+
+    const bare = join(scratch, "no-origin");
+    mkdirSync(bare);
+    git(bare, ["init", "--quiet"]);
+    assert.equal(resolveKey({ repo_root: bare }).status, "local-only");
+
+    const pushed = join(scratch, "with-origin");
+    mkdirSync(pushed);
+    git(pushed, ["init", "--quiet"]);
+    git(pushed, ["remote", "add", "origin", "git@github.com:acme/api.git"]);
+    assert.deepEqual(
+      { key: resolveKey({ repo_root: pushed }).key, status: resolveKey({ repo_root: pushed }).status },
+      { key: "github.com/acme/api", status: "remote" },
+    );
+
+    const absent = join(scratch, "never-existed");
+    assert.equal(resolveKey({ repo_root: absent }).status, "unreadable");
+  } finally {
+    if (previous === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = previous;
+    rmSync(scratch, { recursive: true, force: true });
+  }
 });

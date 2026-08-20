@@ -88,7 +88,7 @@ let sql;
 const runtimeLabels = new Map(registry.runtimes.map((runtime) => [runtime.id, runtime.label]));
 
 /**
- * What a failed `git config --get remote.origin.url` actually means.
+ * What a failed `git config --local --get remote.origin.url` actually means.
  *
  * Only exit 1 is git config's documented "the key is not set", and only that
  * honestly says this checkout has no origin. Every other outcome is unknown,
@@ -99,6 +99,16 @@ const runtimeLabels = new Map(registry.runtimes.map((runtime) => [runtime.id, ru
  * shared or admin-created directory, which is precisely the setup this script
  * is run under. Collapsing those onto `local-only` would report a probe that
  * never worked as "nothing to repair".
+ *
+ * Reading exit 1 that way is only sound because the probe passes `--local`.
+ * A bare `config --get` is the one git subcommand that does not fail outside a
+ * repository: it falls through to global and system config and exits 1 when
+ * the key is absent there too, so a pruned worktree whose folder was left
+ * behind would report as a healthy repository with no remote. `--local` reads
+ * nothing but the repository's own config and exits 128 outside one, which is
+ * what separates the three states cleanly - and a linked worktree shares its
+ * parent's config, so every worktree of one repository still reports the same
+ * origin.
  */
 export function remoteProbeFailure(error) {
   const firstLine = typeof error?.stderr === "string" ? error.stderr.trim().split(/\r?\n/)[0]?.trim() ?? "" : "";
@@ -134,7 +144,7 @@ export function remoteProbeFailure(error) {
  * would re-key a checkout git had merely refused to read, and say nothing
  * about it in the report.
  */
-function resolveKey(agent) {
+export function resolveKey(agent) {
   const pathKey = `path:${agent.repo_root}`;
   let present = false;
   try {
@@ -146,7 +156,7 @@ function resolveKey(agent) {
 
   let remote;
   try {
-    remote = execFileSync("git", ["-C", agent.repo_root, "config", "--get", "remote.origin.url"], {
+    remote = execFileSync("git", ["-C", agent.repo_root, "config", "--local", "--get", "remote.origin.url"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 10_000,

@@ -141,8 +141,15 @@ fn probe_repo_root(git: &str, cwd: &Path) -> Option<PathBuf> {
 ///
 /// `config --get` rather than `remote get-url`: the configured value, with no
 /// `insteadOf` rewriting applied, is the same string in both checkouts of one
-/// repository on one machine. Synchronous and non-blocking for the same
-/// reasons `repo_root` is.
+/// repository on one machine. `--local` because a bare `config --get` is the
+/// one git subcommand that does not fail outside a repository - it falls
+/// through to global and system config, so a working directory that is not a
+/// checkout at all would report whatever `remote.origin.url` the user happens
+/// to have set globally, and `identityRepoKey` would attribute that shift to a
+/// repository it never touched. `--local` reads the repository's own config
+/// and nothing else, which a linked worktree shares with its parent, so every
+/// worktree of one repository still reports the same origin. Synchronous and
+/// non-blocking for the same reasons `repo_root` is.
 pub fn repo_remote(cwd: &Path) -> Option<String> {
     probe_repo_remote("git", cwd)
 }
@@ -185,7 +192,7 @@ fn without_embedded_credentials(remote: &str) -> String {
 fn probe_repo_remote(git: &str, cwd: &Path) -> Option<String> {
     let mut command = std::process::Command::new(git);
     command
-        .args(["config", "--get", "remote.origin.url"])
+        .args(["config", "--local", "--get", "remote.origin.url"])
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -603,6 +610,38 @@ mod tests {
         // root instead, rather than pooling every one of them together.
         assert_eq!(repo_remote(&dir), None);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A working directory that is not a checkout names no repository, and
+    /// must not borrow one. `config --get` without `--local` is the one git
+    /// subcommand that does not fail outside a repository: it falls through to
+    /// global config, so on a machine where `remote.origin.url` happens to be
+    /// set globally this probe would return a repository the shift never
+    /// touched, while `repo_root` correctly returned `None` - and
+    /// `identityRepoKey` keys on the remote first, so that shift would be
+    /// attributed to someone else's codebase.
+    ///
+    /// `GIT_CONFIG_GLOBAL` makes that hazard the test's own condition rather
+    /// than a property of whoever runs it: the fixture below sets exactly the
+    /// key the probe reads, so dropping `--local` fails here every time.
+    #[test]
+    fn repo_remote_of_a_non_repo_directory_is_an_honest_none() {
+        let dir = temp_dir("repo-remote-plain");
+        let global = dir.join("gitconfig-global");
+        std::fs::write(
+            &global,
+            "[remote \"origin\"]\n\turl = https://github.com/someone/unrelated.git\n",
+        )
+        .expect("global config writes");
+        std::env::set_var("GIT_CONFIG_GLOBAL", &global);
+
+        assert_eq!(repo_remote(&dir), None);
+        // The root probe already got this right, and the two have to agree:
+        // a shift with no root must not arrive carrying a remote.
+        assert_eq!(repo_root(&dir), None);
+
+        std::env::remove_var("GIT_CONFIG_GLOBAL");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
