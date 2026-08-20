@@ -1,0 +1,18 @@
+# GitGuardian scanning policy for this repository.
+#
+# `repo_remote` reads the configured origin remote and `without_embedded_credentials`
+# strips the `userinfo@` component back off it before anything leaves the machine.
+# Proving that removal works needs a URL that carries a credential, so the tests
+# for both halves hold fixture values shaped exactly like the thing they strip.
+# A scanner cannot tell a fixture from a live credential by shape alone, and
+# these two files are the only places in the tree that carry one on purpose.
+version: 2
+
+secret:
+  ignored_paths:
+    # Fixture: `x-access-token:<placeholder>@github.com/...`, the spelling CI and
+    # container tooling write into a token-authenticated clone's origin remote.
+    - "apps/desktop/src-tauri/src/git_evidence.rs"
+    # Fixture: a credentialed https remote, proving `normalizeRemote` drops the
+    # credential along with the transport because neither names a repository.
+    - "apps/api/src/services/attribution.test.ts"
