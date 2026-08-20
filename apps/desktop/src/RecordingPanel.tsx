@@ -54,7 +54,7 @@ const KEPT = [
   // wording README's "What is collected" will carry - one rule told once - and
   // is ahead of it here: README's matching update lands with the
   // agent-identity-by-remote work that made the remote part of identity.
-  "When an AI coding tool starts and finishes, which folder it worked in, and - when that folder is in a git repository - that repository's root and its origin remote URL, which is what names the repository it worked in.",
+  "When an AI coding tool starts and finishes, which folder it worked in, and - when that folder is in a git repository - that repository's root and its origin remote URL with any embedded credentials removed, which is what names the repository it worked in.",
   "For AI coding shifts in a git repo: the branch name, and the title, commit id, and repository folder of each commit made during the shift, checked later on this machine, read-only. The repository folder is shown only to you and your workspace's admins.",
   "For AI coding shifts that keep a session log: the number of tokens used and which model the tool ran, read from that log on this computer. The numbers and the model name only.",
 ];
@@ -63,7 +63,7 @@ const NEVER = [
   "What you type. Not one keystroke.",
   "Pictures of your screen.",
   "The titles of your windows, files, or documents. Commit titles are the one exception, listed above.",
-  "Web addresses, or the pages you visit.",
+  "Browsing addresses, history, or page content. A repository's origin remote URL is not browsing: it names which repository an agent worked, and is listed above.",
   "Anything inside your files, messages, or email. Token counts and model names from an AI tool's own session log are the one exception, listed above.",
   "Anything you type into a form, chat, or document.",
   "Clock-In never reaches inside or controls your other apps.",
