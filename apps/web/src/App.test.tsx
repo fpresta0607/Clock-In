@@ -8,7 +8,7 @@ import { ClientError, type Client } from "./client.js";
 import { windowsInstallerUrl } from "./DownloadInstaller.js";
 
 // jsdom has no WebGL context; the shader is decorative.
-vi.mock("./WebGLShader.js", () => ({ WebGLShader: () => null }));
+vi.mock("@clock-in/shared/webgl-shader", () => ({ WebGLShader: () => null }));
 
 const organization = { id: "00000000-0000-4000-8000-000000000001", name: "SIQstack", inviteCode: "ACDEF-GHJKM" };
 
@@ -206,6 +206,9 @@ describe("dashboard", () => {
     expect(dialog).toHaveTextContent("Hours are filed under a project.");
     const kept = within(dialog).getByRole("heading", { name: "Clock-In writes down" }).nextElementSibling;
     expect(kept).toHaveTextContent("The name only.");
+    // Identity is keyed on the repository and the repository is named by its
+    // remote, so the remote leaves the machine too and the sentence says so.
+    expect(kept).toHaveTextContent("origin remote URL");
     const never = within(dialog).getByRole("heading", { name: "Clock-In never writes down" }).nextElementSibling;
     expect(never).toHaveTextContent("Not one keystroke.");
     expect(never).toHaveTextContent("Web addresses");
@@ -815,6 +818,47 @@ describe("the agents tab", () => {
     // than "pending", because a rate with no decided commits is not a fact.
     expect(groups[1]).toHaveTextContent("No codebase recorded");
     expect(groups[1]!.textContent).not.toMatch(/held|pending/);
+  });
+
+  it("emits the meter row the layout suite styles, four cells to a row", async () => {
+    // tests/browser/harness.ts hand-writes this markup to measure it in a real
+    // browser, because jsdom has no layout engine. That only holds while the
+    // app really does emit these classes, so this is the pin between the two.
+    const person = await signIn(clientFor());
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+    const heads = within(await screen.findByTestId("agent-shifts")).getAllByTestId("shift-group")
+      .map((group) => group.querySelector(".shift-group-head"));
+
+    for (const head of heads) {
+      expect(head).not.toBeNull();
+      expect(head!).toHaveClass("meter-row");
+      expect(head!.children).toHaveLength(4);
+    }
+  });
+
+  it("gives each codebase a Today row: a mark, the name, its share, its duration", async () => {
+    const person = await signIn(clientFor());
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+    const groups = within(await screen.findByTestId("agent-shifts")).getAllByTestId("shift-group");
+
+    // The head reads in the shared meter row, so a column of codebases scans
+    // the way Today's breakdown does. The bar is this codebase's share of the
+    // recorded agent time: 5,400s and 1,800s of 7,200s.
+    const shares = groups.map((group) => {
+      // `head?.querySelector(...)` would be `undefined` - and pass - when the
+      // head itself is missing, so the head is asserted before it is read.
+      const head = group.querySelector(".meter-row.shift-group-head");
+      expect(head).not.toBeNull();
+      expect(head!.querySelector(".project-dot")).not.toBeNull();
+      expect(head!.querySelector(".meter-name")).not.toBeNull();
+      expect(head!.querySelector(".meter-duration")).not.toBeNull();
+      return head!.querySelector<HTMLElement>(".meter-bar")?.style.getPropertyValue("--share");
+    });
+    expect(shares).toEqual(["75%", "25%"]);
   });
 
   it("shows no hourly graph on all time, keeping the groups and total", async () => {

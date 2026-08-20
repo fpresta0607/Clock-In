@@ -344,7 +344,7 @@ A pnpm workspace. Contracts flow down; nothing flows back up.
 
 | Package | What lives there |
 |---|---|
-| **`packages/shared`** | Zod contracts shared by every client and the API, the interval/time model (`intervals.ts`), invite-code and duration helpers, and the SIQstack brand stylesheet both frontends import. |
+| **`packages/shared`** | Zod contracts shared by every client and the API, the interval/time model (`intervals.ts`), invite-code and duration helpers, the SIQstack brand stylesheet both frontends import, and the WebGL background behind the `./webgl-shader` entry (react and three are that entry's optional peers, so the API pulls neither). |
 | **`packages/database`** | Drizzle schema, SQL migrations, the connection factory, and the migration runner. |
 | **`apps/api`** | Hono API: env validation, Neon Auth JWT verification, services (sessions, activity, agent sessions, attribution, reports), Drizzle repositories, CSV export. |
 | **`apps/desktop`** | The tray app. React UI over a Tauri 2 Rust host: `monitor.rs` (activity), `spool.rs` (shared with the helper binaries), `uploader.rs`, `recovery.rs`, the All stats overlay, and the `clock-in-hook` and `clock-in-browser-host` bin targets. |
@@ -402,14 +402,23 @@ Run from the repository root.
 
 | Command | What it does |
 |---|---|
-| `pnpm typecheck` | `tsc --noEmit` across every package |
-| `pnpm test` | the full Vitest suite (services, routes, contracts, React) |
+| `pnpm typecheck` | `tsc --noEmit` across every package, and the layout suite |
+| `pnpm test` | the full Vitest suite (services, routes, contracts, React), then the layout suite |
+| `pnpm test:browser` | the layout suite alone; needs `pnpm exec playwright install chromium` once |
 | `pnpm build` | production build of every package |
 | `DATABASE_URL=… pnpm --filter @clock-in/database migrate` | apply migrations |
 | `pnpm --filter @clock-in/database test:integration` | PostgreSQL migration tests; needs `TEST_DATABASE_URL` |
 | `pnpm --filter @clock-in/desktop tauri build` | build desktop installers |
 | `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` | the Rust suite |
 | `cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings` | Rust lints, as CI runs them |
+
+A claim about what a page *looks* like is checked in a real browser, never in jsdom
+and never against source text: `tests/browser` drives Chromium over the apps' own
+stylesheets and the real WebGL background, and it is the tail of `pnpm test`.
+jsdom has neither a layout engine nor WebGL, so a rule about columns and a shader's
+scale both pass there whatever they actually render.
+The suite builds the web app and serves the bundle, so it needs Chromium on the
+machine: `pnpm exec playwright install chromium` once, which CI does for itself.
 
 CI runs typecheck → test → build → `docker build` on the API image, plus Rust
 fmt/clippy/test, on every push and pull request.

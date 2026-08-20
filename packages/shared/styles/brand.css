@@ -102,3 +102,48 @@ button:disabled { opacity: .55; cursor: default; }
 .invite-code { border: 1px solid var(--glass-border); border-radius: 6px; padding: 7px 12px; background: rgba(3, 5, 10, 0.7); color: var(--accent-green); font-family: var(--brand-mono); font-size: 1rem; letter-spacing: .12em; }
 
 .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* The meter row: one scan line of measured time, and the shape both apps read
+   a breakdown in. Four columns - a mark, a name that may carry a `·` subtitle,
+   a proportional bar (or, on desktop, a quota dial in the same cell), and a
+   right-aligned duration - so a column of them lines up whatever each row is
+   about.
+
+   The name is the only thing that gives way when the row is narrow: the third
+   cell's 6rem floor is what the quota dial needs to say its plan and its reset
+   time beside the face, and a bar narrower than that draws a small row's share
+   as a dot rather than a measure.
+
+   Every row is its own grid, so the columns only line up while all four tracks
+   compute to the same numbers in each. That is why the duration is a fixed
+   5rem rather than `auto`: an `auto` track sizes to its own row's text, so
+   "connected" and "46m" left different amounts of free space for the rest of
+   the row to divide, and the bars started at different places down the column.
+   With the duration fixed, the name and the bar can share what is left 2:1 and
+   still line up - which is what lets a repo label finish on a wide dashboard
+   instead of ellipsizing at a 10rem cap beside a bar 1,000px wide. The name
+   takes the larger share because a name that ran out of room says less than a
+   bar that did: past the third cell's floor, what a row has left goes to the
+   words. */
+.meter-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 2fr) minmax(6rem, 1fr) 5rem;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 2px;
+  font-size: .84rem;
+}
+.meter-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The subtitle after the `·`: which folder an agent session is working in, or
+   how much of a codebase's decided work held. */
+.meter-detail { color: var(--text-secondary); font-size: .78rem; }
+.meter-duration { flex: none; color: #ffffff; font-variant-numeric: tabular-nums; font-size: .8rem; white-space: nowrap; text-align: right; }
+.meter-bar { height: 4px; border-radius: 999px; background: rgba(163, 179, 194, 0.14); }
+.meter-bar::before { display: block; width: var(--share, 0%); height: 100%; border-radius: inherit; background: var(--accent-green); opacity: .55; content: ""; }
+.project-dot { width: 10px; height: 10px; margin: 0 auto; border-radius: 50%; background: var(--accent-green); }
+
+/* The box the WebGL background paints into, shipped with the component that
+   paints it (`@clock-in/shared/webgl-shader`). The z-index MUST stay -1: a GPU
+   compositing quirk on some Chrome stacks paints the canvas over
+   non-backdrop-filtered content at z-index 0. */
+.shader-bg { position: fixed; inset: 0; z-index: -1; display: block; width: 100%; height: 100%; }

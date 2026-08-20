@@ -10,16 +10,41 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./brand.css": "./styles/brand.css"
+    "./brand.css": "./styles/brand.css",
+    "./webgl-shader": {
+      "types": "./dist/webgl-shader.d.ts",
+      "import": "./dist/webgl-shader.js"
+    }
   },
-  "files": ["dist", "styles"],
+  "files": [
+    "dist",
+    "styles"
+  ],
   "scripts": {
-    "build": "pnpm clean && tsc --project tsconfig.json",
+    "build": "pnpm clean && tsc --project tsconfig.json && tsc --project tsconfig.browser.json",
     "clean": "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit --project tsconfig.json && tsc --noEmit --project tsconfig.browser.json"
   },
   "dependencies": {
     "zod": "^3.24.4"
+  },
+  "peerDependencies": {
+    "react": "^19.1.1",
+    "three": "^0.185.1"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "three": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.12",
+    "@types/three": "^0.185.4",
+    "react": "^19.1.1",
+    "three": "^0.185.1"
   }
 }

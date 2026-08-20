@@ -33,7 +33,7 @@ import {
   type AgentRuntimeReportsModel,
 } from "@clock-in/shared";
 import { RecordingPanel, recordingState, type RecordingState } from "./RecordingPanel.js";
-import { WebGLShader } from "./WebGLShader.js";
+import { WebGLShader } from "@clock-in/shared/webgl-shader";
 
 type AppProps = {
   bridge?: TimerBridge;
@@ -1938,16 +1938,26 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                     <p className="subtle">No agent worked in this range.</p>
                   ) : agentShifts.groups.map((group) => (
                     /* One codebase, its total, and every shift that worked
-                       it, newest first. The held share appears only once a
-                       commit is decided: a rate with no decided commits is
-                       not a fact, so the row says nothing instead. */
+                       it, newest first. The head reads in Today's meter row -
+                       mark, name, a bar of this codebase's share of the
+                       recorded agent time, duration - so a column of
+                       codebases scans the way a column of apps does. The held
+                       share appears only once a commit is decided: a rate
+                       with no decided commits is not a fact, so the head says
+                       nothing instead. */
                     <div className="shift-group" key={group.repo ?? ""} data-testid="shift-group">
-                      <div className="app-row shift-group-head">
-                        <span className="app-name">
+                      <div className="meter-row shift-group-head">
+                        <span className="project-dot" aria-hidden="true" />
+                        <span className="meter-name">
                           {group.repo ?? "No codebase recorded"}
-                          {group.heldRate !== null && <span className="held-tag"> · {Math.round(group.heldRate * 100)}% held</span>}
+                          {group.heldRate !== null && <span className="meter-detail held-tag"> · {Math.round(group.heldRate * 100)}% held</span>}
                         </span>
-                        <span className="app-duration">{formatHuman(group.agentSeconds)}</span>
+                        <span
+                          className="meter-bar"
+                          aria-hidden="true"
+                          style={{ "--share": `${agentShifts.totalAgentSeconds === 0 ? 0 : Math.round((group.agentSeconds / agentShifts.totalAgentSeconds) * 100)}%` } as React.CSSProperties}
+                        />
+                        <span className="meter-duration">{formatHuman(group.agentSeconds)}</span>
                       </div>
                       <ul className="shift-list">
                         {group.shifts.map((shift) => (

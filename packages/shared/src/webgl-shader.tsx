@@ -20,6 +20,14 @@ type WaveUniforms = {
  * Fullscreen chromatic sine-wave shader, ported from the SIQstack homepage
  * hero (web-gl-shader.tsx). Green/blue/purple waves with cursor-reactive
  * electric jitter; plain three.js, no react-three-fiber.
+ *
+ * It lives here because it shipped for months as byte-identical hand-synced
+ * copies in `apps/desktop/src` and `apps/web/src`, and a background fix landed
+ * in one app and not the other twice. React and three are this package's only
+ * optional peers, reached through the `./webgl-shader` entry alone, so the API
+ * - which imports the contracts entry and nothing else - never pulls either.
+ * `.shader-bg`, the rule that gives the canvas its box, travels with it in
+ * `styles/brand.css`.
  */
 export function WebGLShader({ className }: WebGLShaderProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -86,6 +94,22 @@ export function WebGLShader({ className }: WebGLShaderProps) {
       uniform float influence;   // 0–1 cursor-activity level
       uniform float onCanvas;    // 0–1 whether cursor is over the hero
 
+      // The wave was drawn against a landscape hero, where the canvas is
+      // wider than it is tall. Normalising both axes by min(resolution.x,
+      // resolution.y) - the usual fullscreen-shader idiom - picks the height
+      // there, so the sine's period and its amplitude were both a share of the
+      // height. Clock-In's window is portrait (520x920 by default, never
+      // narrower than 400x600), so that same expression picks the *width*: the
+      // period becomes 2*PI*width, under a third of one fits across the
+      // window, and every band reads as a straight streak running off both
+      // edges instead of a wave behind the card. Normalising each axis by its
+      // own extent makes the wave's shape a property of the drawing rather
+      // than of the window - the same number of periods across the canvas and
+      // the same share of its height at every aspect - and WAVE_ASPECT gives
+      // back the proportions it was drawn at, so a 16:10 window renders
+      // exactly what it rendered before.
+      const float WAVE_ASPECT = 1.6;
+
       // ── Hash noise ──────────────────────────────────────────────────────
       float hash(float n) { return fract(sin(n) * 43758.5453); }
       float smoothNoise(float x) {
@@ -96,18 +120,20 @@ export function WebGLShader({ className }: WebGLShaderProps) {
       }
 
       void main() {
-        vec2 p = (gl_FragCoord.xy * 2.0 - resolution) / min(resolution.x, resolution.y);
-        float d = length(p) * distortion;
+        // p spans -1..1 across the canvas on each axis; px is that same
+        // horizontal position in the wave's own proportions.
+        vec2 p  = (gl_FragCoord.xy * 2.0 - resolution) / resolution;
+        float px = p.x * WAVE_ASPECT;
+        float d = length(vec2(px, p.y)) * distortion;
 
-        float rx = p.x * (1.0 + d);
-        float gx = p.x;
-        float bx = p.x * (1.0 - d);
+        float rx = px * (1.0 + d);
+        float gx = px;
+        float bx = px * (1.0 - d);
 
         // ── Convert mouse → shader coordinate space ─────────────────────
         // gl_FragCoord.y = 0 at bottom; canvas mouse.y = 0 at top
-        float aspect   = resolution.x / min(resolution.x, resolution.y);
-        float mxShader = (mouse.x * 2.0 - 1.0) * aspect;
-        float myShader = ((1.0 - mouse.y) * 2.0 - 1.0) * (resolution.y / min(resolution.x, resolution.y));
+        float mxShader = (mouse.x * 2.0 - 1.0) * WAVE_ASPECT;
+        float myShader = (1.0 - mouse.y) * 2.0 - 1.0;
 
         // ── Where are the waves at cursor X? ────────────────────────────
         // Evaluate sine at cursor's X to find each wave's Y there
@@ -126,12 +152,12 @@ export function WebGLShader({ className }: WebGLShaderProps) {
         float cursorOnWave = smoothstep(0.12, 0.0, minWaveDist);
 
         // Effect spreads from cursor X along the wave path
-        float xProx   = smoothstep(0.5, 0.0, abs(p.x - mxShader));
+        float xProx   = smoothstep(0.5, 0.0, abs(px - mxShader));
         float electric = cursorOnWave * xProx * onCanvas;
 
         // ── Electric jitter (only when cursor is on a wave) ──────────────
-        float jitterCoarse = (smoothNoise(p.x * 30.0  + time * 15.0) * 2.0 - 1.0);
-        float jitterFine   = (smoothNoise(p.x * 120.0 + time * 40.0) * 2.0 - 1.0);
+        float jitterCoarse = (smoothNoise(px * 30.0  + time * 15.0) * 2.0 - 1.0);
+        float jitterFine   = (smoothNoise(px * 120.0 + time * 40.0) * 2.0 - 1.0);
         float jitter    = jitterCoarse * 0.6 + jitterFine * 0.4;
         float jitterAmt = electric * (0.025 + influence * 0.055) * jitter;
 
@@ -186,8 +212,8 @@ export function WebGLShader({ className }: WebGLShaderProps) {
 
       refs.uniforms = {
         // `handleResize` below sets the real one. A canvas that has not been
-        // laid out yet measures zero, and the shader divides by the smaller
-        // axis, so the placeholder is 1×1 rather than 0×0.
+        // laid out yet measures zero, and the shader divides by each axis, so
+        // the placeholder is 1x1 rather than 0x0.
         resolution: { value: [1, 1] },
         time: { value: 0.0 },
         xScale: { value: 1.0 },

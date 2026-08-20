@@ -193,8 +193,23 @@ timer once said RECORDING above a card reading "Turn on recording in settings".
   both names. Never link a workflow-run artifact publicly: downloading one needs auth.
   The app version lives only in `apps/desktop/src-tauri/tauri.conf.json` and nothing bumps
   it for you, so a fresh build will introduce itself as the last version you shipped.
-- Both frontends share `packages/shared/styles/brand.css` and ship a single dark
-  theme; there is no light theme to match, so use the tokens rather than literals.
+- Both frontends share `packages/shared`. `styles/brand.css` is a single dark theme
+  with no light one to match, so use the tokens rather than literals; it also holds
+  `.meter-row`, the four-column scan line (mark, name with a `·` subtitle, share bar
+  or quota dial, duration) that the Today card and the Agents tab both read a
+  breakdown in. The WebGL background is a React component reached through the
+  `./webgl-shader` entry **alone**: react and three are that entry's optional peers,
+  so re-exporting it from `src/index.ts` would start pulling both into the API. It
+  was two hand-synced copies and a background fix landed in one app and not the
+  other twice; there is one file now. Its wave normalises each axis by its own
+  extent and scales x by `WAVE_ASPECT`, the landscape hero it was drawn at -
+  `min(resolution.x, resolution.y)` picks the *width* in this app's portrait window
+  and stretches every band into a straight streak.
+- A claim about what a page looks like is checked in a real browser, never in jsdom
+  and never against source text. `tests/browser` drives Chromium over the apps' own
+  stylesheets and the real shader (`pnpm test:browser`, and the tail of `pnpm test`;
+  CI installs chromium first). jsdom has neither a layout engine nor WebGL, so a
+  rule about columns and a shader's scale both pass there whatever they render.
 - Nothing deploys on merge. The API (Railway) and the web dashboard (Vercel) are
   separate manual pushes, so production can run two different commits of
   `packages/shared`. Because the report filters are `.strict()`, a newer web

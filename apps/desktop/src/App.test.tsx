@@ -6,7 +6,7 @@ import { App } from "./App.js";
 import { sourceLabel } from "./agent-sources.js";
 import type { TimerBridge } from "./bridge.js";
 
-vi.mock("./WebGLShader.js", () => ({ WebGLShader: () => null }));
+vi.mock("@clock-in/shared/webgl-shader", () => ({ WebGLShader: () => null }));
 
 const windowControls = vi.hoisted(() => ({
   minimize: vi.fn(),
@@ -1267,6 +1267,51 @@ describe("the agents tab", () => {
     expect(groups[1]!.textContent).not.toMatch(/held|pending/);
     // There is no leaderboard here: nothing ranks, nothing is clickable.
     expect(within(panel).queryByTestId("agent-roster-list")).not.toBeInTheDocument();
+  });
+
+  it("emits the meter row the layout suite styles, four cells to a row", async () => {
+    // tests/browser/harness.ts hand-writes this markup to measure it in a real
+    // browser, because jsdom has no layout engine. That only means anything
+    // while the app really does emit these classes, so this is the pin between
+    // the two: change a class here and the browser suite is measuring a page
+    // this app no longer renders.
+    render(<App bridge={bridgeFor()} />);
+
+    const list = await screen.findByTestId("session-app-list");
+    expect(list).toHaveClass("meter-list");
+    const rows = within(list).getAllByRole("listitem");
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row).toHaveClass("meter-row");
+      expect(row.querySelector(".meter-name")).not.toBeNull();
+      expect(row.querySelector(".meter-duration")).not.toBeNull();
+      // The third cell is a share bar or an agent's plan dial, never nothing:
+      // the row is a four-column grid and the duration rides in the fourth.
+      expect(row.children).toHaveLength(4);
+    }
+  });
+
+  it("gives each codebase a Today row: a mark, the name, its share, its duration", async () => {
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor()} />);
+
+    const panel = await openAgentsTab(person);
+    const groups = within(panel).getAllByTestId("shift-group");
+
+    // The head reads in the shared meter row, so a column of codebases scans
+    // the way the Today card's rows do. The bar is this codebase's share of
+    // the recorded agent time: 5,400s and 1,800s of 7,200s.
+    const shares = groups.map((group) => {
+      // `head?.querySelector(...)` would be `undefined` - and pass - when the
+      // head itself is missing, so the head is asserted before it is read.
+      const head = group.querySelector(".meter-row.shift-group-head");
+      expect(head).not.toBeNull();
+      expect(head!.querySelector(".project-dot")).not.toBeNull();
+      expect(head!.querySelector(".meter-name")).not.toBeNull();
+      expect(head!.querySelector(".meter-duration")).not.toBeNull();
+      return head!.querySelector<HTMLElement>(".meter-bar")?.style.getPropertyValue("--share");
+    });
+    expect(shares).toEqual(["75%", "25%"]);
   });
 
   it("shows no hourly graph on all time, keeping the groups and total", async () => {
