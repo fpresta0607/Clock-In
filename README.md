@@ -344,7 +344,7 @@ A pnpm workspace. Contracts flow down; nothing flows back up.
 
 | Package | What lives there |
 |---|---|
-| **`packages/shared`** | Zod contracts shared by every client and the API, the interval/time model (`intervals.ts`), invite-code and duration helpers, and the SIQstack brand stylesheet both frontends import. |
+| **`packages/shared`** | Zod contracts shared by every client and the API, the interval/time model (`intervals.ts`), invite-code and duration helpers, the SIQstack brand stylesheet both frontends import, and the WebGL background behind the `./webgl-shader` entry (react and three are that entry's optional peers, so the API pulls neither). |
 | **`packages/database`** | Drizzle schema, SQL migrations, the connection factory, and the migration runner. |
 | **`apps/api`** | Hono API: env validation, Neon Auth JWT verification, services (sessions, activity, agent sessions, attribution, reports), Drizzle repositories, CSV export. |
 | **`apps/desktop`** | The tray app. React UI over a Tauri 2 Rust host: `monitor.rs` (activity), `spool.rs` (shared with the helper binaries), `uploader.rs`, `recovery.rs`, the All stats overlay, and the `clock-in-hook` and `clock-in-browser-host` bin targets. |
