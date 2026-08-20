@@ -23,7 +23,7 @@ import type {
   ShiftCommitRepository,
 } from "../repositories.js";
 import type { AgentSessionReaper } from "./agent-sessions.js";
-import { repoKeyLabel, repoLabel } from "./attribution.js";
+import { agentCodebaseLabel, repoLabel } from "./attribution.js";
 import { hourlySeries, maxConcurrentCount, medianDurationSeconds, normalizedQuery, safeInteger } from "./reports.js";
 
 export interface AgentPatchInput {
@@ -71,16 +71,9 @@ export function mayReadRepoRoot(subject: AuthenticatedSubject, ownerId: string):
  * through the same strict schema.
  */
 export function asAgentView(record: AgentRecord, subject: AuthenticatedSubject): AgentPaystubResponse["agent"] {
-  // The repository the identity is keyed on names it, and the directory only
-  // answers when there is no key at all. Preferring the directory is how a
-  // worktree's folder name becomes the displayed codebase for a whole
-  // repository - every shift from every worktree reading "@ fix-login". For a
-  // path key the two are the same string; for a remote key this is the
-  // repository's own name, lowercased, and that trade is deliberate: one
-  // canonical name across every worktree and every checkout beats preserving
-  // one directory's capitalisation. A name either way, never a path.
-  const name = (record.repoKey === null ? null : repoKeyLabel(record.repoKey))
-    ?? (record.repoRoot === null ? null : repoLabel(record.repoRoot));
+  // A name either way, never a path; the rule itself lives in attribution.ts
+  // so the roster, the minted default name and the repair script cannot drift.
+  const name = agentCodebaseLabel(record.repoRoot, record.repoKey);
   return {
     id: record.id,
     name: record.name,

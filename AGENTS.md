@@ -34,7 +34,14 @@ keeps serving them; only the surfaces moved.
 
 A codebase reaches every member as a **label** - the last segment of a repo root or working
 directory (`repoLabel`), when that segment names a codebase - while the path itself stays under the
-`repoRoot` rule. A shift whose directory names no codebase reads "No codebase recorded"; there is no
+`repoRoot` rule.
+An agent row is labelled by the repository its identity is keyed on rather than by its directory
+(`agentCodebaseLabel`): the repository's own name from a remote key, the directory's last segment
+from a path key, and the directory itself only when there is no key at all.
+That is one definition, read by the roster view, by the default name the API mints and by
+scripts/repair-agent-identity-by-remote.mjs, so a row whose root is one worktree still renders the
+whole repository's name and a repaired roster reads exactly like a freshly minted one.
+A shift whose directory names no codebase reads "No codebase recorded"; there is no
 default codebase, just as `resolveProjectForCwd` returns null rather than falling back to a project.
 
 Agents are durable identities, not rows per run: one `agents` row per `(organization, owner, source, repo_key)` - one person's harness working one **repository** - and each `agent_sessions` row is one of its shifts.

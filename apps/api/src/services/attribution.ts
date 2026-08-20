@@ -91,12 +91,13 @@ const remoteScheme = /^[a-z][a-z0-9+.-]*:\/\//i;
 
 /**
  * The scp-style remote git accepts without a scheme: an optional user, a host,
- * a colon, then a path. The host is two characters or more and the colon is not
- * followed by a separator, which is what keeps a Windows path out: `C:/dev/repo`
- * and `C:devepo` are directories, not remotes, and a drive letter is one
- * character.
+ * a colon, then a path. The host is two characters or more, which is what keeps
+ * a Windows path out on its own: `C:/dev/repo` and `C:devepo` are directories,
+ * and a drive letter is one character. The path may be absolute -
+ * `git@git.example.com:/srv/git/api.git` is a form `git clone` accepts and
+ * self-hosted setups use - so nothing here refuses a leading separator.
  */
-const scpLikeRemote = /^(?:[^@/\\:]+@)?([^/\\:]{2,}):(?![\\/])(.+)$/;
+const scpLikeRemote = /^(?:[^@/\\:]+@)?([^/\\:]{2,}):(.+)$/;
 
 /**
  * One git remote reduced to the identity it names: `github.com/owner/repo`.
@@ -197,6 +198,27 @@ export function repoKeyLabel(repoKey: string): string | null {
   const segments = repoKey.split("/");
   const last = segments[segments.length - 1] ?? "";
   return last === "" ? null : last.slice(0, 200);
+}
+
+/**
+ * The codebase name an agent row renders, wherever it renders: the repository
+ * the identity is keyed on, and the directory only when there is no key at all.
+ *
+ * Reading the directory first is how one worktree's folder name becomes the
+ * displayed codebase for a whole repository - every shift from every worktree
+ * of `github.com/acme/clock-in` reading "@ fix-login". For a path key the two
+ * answer the same string; for a remote key this is the repository's own name,
+ * lowercased, and that trade is deliberate: one canonical name across every
+ * worktree and every checkout beats preserving one directory's capitalisation.
+ *
+ * One definition on purpose. The roster view, the default name the API mints,
+ * and the name scripts/repair-agent-identity-by-remote.mjs writes onto a
+ * survivor all read this, so a repaired roster reads exactly like a freshly
+ * minted one and no copy can drift from the others.
+ */
+export function agentCodebaseLabel(repoRoot: string | null, repoKey: string | null): string | null {
+  return (repoKey === null ? null : repoKeyLabel(repoKey))
+    ?? (repoRoot === null ? null : repoLabel(repoRoot));
 }
 
 /**

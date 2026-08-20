@@ -27,6 +27,17 @@
  *
  * Run it after the migration and after the new API is deployed, never before:
  * the old API keeps minting v1-keyed rows until it is replaced.
+ *
+ * **Historical.** This belongs to the 0015 identity-v2 sequence and its job is
+ * done. `0016_agent_identity_by_remote` moved identity onto `agents.repo_key`,
+ * dropped the repo-root unique this script's ON CONFLICT arbitrates on, and
+ * rewrote the unassigned unique's predicate, so every insert here would now
+ * either fail to find an arbiter or mint a row with a codebase and no key. Its
+ * misattribution test is inverted too: it compares a commit's repo root
+ * against the agent's, which after 0016 flags every shift committed from a
+ * second worktree of a correctly keyed row. So it refuses a 0016 database
+ * outright rather than being taught the new key -
+ * scripts/repair-agent-identity-by-remote.mjs supersedes it.
  */
 import process from "node:process";
 
@@ -140,7 +151,33 @@ async function restamp(tx, session, agentId) {
     where organization_id = ${session.organization_id} and agent_session_id = ${session.session_id}`;
 }
 
+/**
+ * Refuses a database that has moved past this script's identity model.
+ *
+ * `agents.repo_key` exists only from `0016_agent_identity_by_remote` onward,
+ * and that migration invalidated every write below. Running this against such
+ * a database with `--confirm` would abort on a missing arbiter at best and
+ * mint keyless repo-keyed rows at worst, so the column's presence is the
+ * refusal: this script's window has closed.
+ */
+async function requirePreRemoteSchema() {
+  const [found] = await sql`
+    select exists (
+      select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = 'agents' and column_name = 'repo_key'
+    ) as has_repo_key
+  `;
+  if (found.has_repo_key) {
+    console.error("`agents` carries `repo_key`, so this database is on 0016_agent_identity_by_remote or later.");
+    console.error("This script belongs to the 0015 identity-v2 sequence and its writes are invalid against that schema.");
+    console.error("Use scripts/repair-agent-identity-by-remote.mjs, which supersedes it.");
+    await sql.end();
+    process.exit(2);
+  }
+}
+
 async function main() {
+  await requirePreRemoteSchema();
   const stamped = await stampedOntoV1Rows();
   // A shift needs moving when its current identity does not name its own
   // operator, or when its commit evidence names a different codebase. A shift

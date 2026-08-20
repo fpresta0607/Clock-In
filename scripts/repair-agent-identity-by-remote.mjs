@@ -41,8 +41,10 @@
  *
  * It also reports the unassigned bucket without touching it: how much of that
  * time was genuinely unattributable and how much is a resolution failure.
- * Re-homing those shifts is `repair-run-named-agents.mjs`'s job, and it should
- * be run first.
+ * Re-homing those shifts is `repair-run-named-agents.mjs`'s job. The two
+ * repairs are independent, and this one is the better first move: it reads
+ * `remote.origin.url` out of the directory `repo_root` names, while the fold
+ * moves a row to the bucket and discards that root.
  */
 import { execFileSync } from "node:child_process";
 import { statSync } from "node:fs";
@@ -53,16 +55,17 @@ import postgres from "postgres";
 import registry from "../packages/shared/src/agent-runtimes.json" with { type: "json" };
 
 /**
- * The one implementation, imported rather than mirrored. The precedent script
- * keeps its own copy of `OPAQUE_SEGMENT` and a comment asking the two to stay
- * identical; a normalizer that drifts here does not just mislabel a row, it
- * decides which agents get merged, so this reads the module the API itself
- * reads. Node strips the types (22.18+, 23.6+, 24+).
+ * The one implementation of each rule, imported rather than mirrored: a
+ * normalizer that drifts here does not just mislabel a row, it decides which
+ * agents get merged, and a label rule that drifts leaves a repaired roster
+ * reading differently from a freshly minted one. Node strips the types
+ * (22.18+, 23.6+, 24+).
  */
 let normalizeRemote;
 let repoLabel;
+let agentCodebaseLabel;
 try {
-  ({ normalizeRemote, repoLabel } = await import("../apps/api/src/services/attribution.ts"));
+  ({ normalizeRemote, repoLabel, agentCodebaseLabel } = await import("../apps/api/src/services/attribution.ts"));
 } catch (error) {
   console.error("Could not load apps/api/src/services/attribution.ts.");
   console.error("This script reads the API's own normalizer rather than copying it, which needs a Node that strips types (22.18+, 23.6+ or 24+).");
@@ -124,18 +127,14 @@ function resolveKey(agent) {
 
 /**
  * The name the API would compose for this row, so a repaired roster reads
- * exactly like a freshly minted one: `defaultAgentName` in
- * apps/api/src/drizzle-repositories.ts names the row after the repository its
- * key identifies and only falls back to the directory when there is no key -
- * which is what stops a survivor whose root is one worktree from labelling the
- * whole repository after that worktree. `agents_name_length_valid` caps it at
- * 200; a directory name is bounded by nothing.
+ * exactly like a freshly minted one: the same runtime label beside the same
+ * `agentCodebaseLabel` that `defaultAgentName` in
+ * apps/api/src/drizzle-repositories.ts composes, clamped to the 200 characters
+ * `agents_name_length_valid` allows.
  */
 function defaultName(source, repoRoot, key) {
   const runtime = runtimeLabels.get(source) ?? source;
-  const fromKey = key.startsWith("path:") ? repoLabel(key.slice("path:".length)) : key.split("/").pop();
-  const label = fromKey ?? (repoRoot === null ? null : repoLabel(repoRoot));
-  return `${runtime} @ ${label ?? "unassigned"}`.slice(0, 200);
+  return `${runtime} @ ${agentCodebaseLabel(repoRoot, key) ?? "unassigned"}`.slice(0, 200);
 }
 
 /** Registered beats anonymous - a member named it - then oldest, then id. */
@@ -208,6 +207,17 @@ export function planRepair(agents, resolve = resolveKey) {
   const refusals = [];
   const localOnly = [];
   const groups = new Map();
+  // Every live row by the key it already holds, refused rows included. The
+  // unique index is partial on non-retired rows, so re-keying onto a key one
+  // of them still holds raises a unique violation - and it would raise it
+  // after earlier merges had already committed, which is the half-applied
+  // repair this script exists to avoid. Only a row kept out of the grouping
+  // can be that holder, since anything grouped under this key is in the group.
+  const liveByKey = new Map();
+  for (const agent of agents) {
+    if (agent.repo_key === null) continue;
+    liveByKey.set(`${agent.organization_id}|${agent.owner_user_id}|${agent.source}|${agent.repo_key}`, agent);
+  }
   for (const agent of agents) {
     const { key, status, detail } = resolve(agent);
     if (status === "unreadable") {
@@ -245,9 +255,27 @@ export function planRepair(agents, resolve = resolveKey) {
       continue;
     }
     const only = group.members[0];
-    if (only.repo_key !== group.key) rekeys.push({ key: group.key, agent: only });
+    if (only.repo_key === group.key) continue;
+    const holder = liveByKey.get(`${only.organization_id}|${only.owner_user_id}|${only.source}|${group.key}`);
+    if (holder === undefined || holder.id === only.id) {
+      rekeys.push({ key: group.key, agent: only });
+      continue;
+    }
+    // Two rows, one repository, proven twice over: this one resolves to that
+    // key from its checkout and the other already carries it. Folding them is
+    // the whole job, so the collision becomes a merge rather than a write that
+    // would abort mid-run.
+    if (only.status === "registered" && holder.status === "registered") {
+      ambiguous.push({ key: group.key, members: [only, holder] });
+      continue;
+    }
+    const winner = pickWinner([only, holder]);
+    merges.push({ key: group.key, winner, losers: [winner.id === only.id ? holder : only] });
   }
-  return { merges, rekeys, ambiguous, localOnly, refusals };
+  // A row drawn into a merge by that collision is no longer refused, and
+  // reporting it as untouched would be a lie about a row this run does write.
+  const merging = new Set(merges.flatMap((merge) => [merge.winner.id, ...merge.losers.map((loser) => loser.id)]));
+  return { merges, rekeys, ambiguous, localOnly, refusals: refusals.filter((refusal) => !merging.has(refusal.agent.id)) };
 }
 
 async function main() {
@@ -346,84 +374,99 @@ async function main() {
   let heldCommits = 0;
   let actuallyMovedShifts = 0;
   let actuallyMovedCommits = 0;
-  for (const merge of merges) {
-    await sql.begin(async (tx) => {
-      for (const loser of merge.losers) {
-        const shifts = await tx`
-          update agent_sessions set agent_id = ${merge.winner.id}, updated_at = now()
-          where organization_id = ${loser.organization_id} and agent_id = ${loser.id}
-          returning id
-        `;
-        actuallyMovedShifts += shifts.length;
-        // `shift_commits` and `agent_usage` carry their own `agent_id`, so the
-        // evidence does not follow its shift on its own: re-pointing only the
-        // shift would strand every commit tally and token total on the row
-        // being retired. The commit move is guarded the way
-        // DrizzleAgentRepository.merge guards its own - two worktrees of one
-        // repository can both have recorded the same sha, and
-        // (organization, agent, repo_root, sha) is unique - so a duplicate
-        // sighting stays where it is rather than aborting the merge. It is
-        // still counted, never dropped.
-        const commits = await tx`
-          update shift_commits as loser_commits set agent_id = ${merge.winner.id}, updated_at = now()
-          where loser_commits.organization_id = ${loser.organization_id}
-            and loser_commits.agent_id = ${loser.id}
-            and not exists (
-              select 1 from shift_commits as winner_commits
-              where winner_commits.organization_id = loser_commits.organization_id
-                and winner_commits.agent_id = ${merge.winner.id}
-                and winner_commits.repo_root = loser_commits.repo_root
-                and winner_commits.sha = loser_commits.sha
-            )
-          returning loser_commits.id
-        `;
-        actuallyMovedCommits += commits.length;
-        const held = await tx`
-          select id from shift_commits
-          where organization_id = ${loser.organization_id} and agent_id = ${loser.id}
-        `;
-        heldCommits += held.length;
-        // `agent_usage` needs no guard: its bucket unique is keyed on
-        // agent_session_id, which does not move, so re-pointing cannot collide.
+  let rekeyed = 0;
+  const applied = () => {
+    console.log(`\nMerged ${mergedAgents} agent(s) in, carrying ${actuallyMovedShifts} shift(s) and ${actuallyMovedCommits} commit(s). No evidence row was deleted.`);
+    if (heldCommits > 0) {
+      console.log(`${heldCommits} commit(s) stayed on a retired row: the surviving agent already records that sha for the same repository.`);
+    }
+    console.log(`Re-keyed ${rekeyed} agent(s) already alone on their repository.`);
+  };
+  // Each merge and each re-key is its own transaction, so a failure part way
+  // through leaves the ones before it applied. That is recoverable, because a
+  // second run picks up exactly where this one stopped - but only if the
+  // operator is told what landed rather than left reading a bare stack trace.
+  try {
+    for (const merge of merges) {
+      await sql.begin(async (tx) => {
+        for (const loser of merge.losers) {
+          const shifts = await tx`
+            update agent_sessions set agent_id = ${merge.winner.id}, updated_at = now()
+            where organization_id = ${loser.organization_id} and agent_id = ${loser.id}
+            returning id
+          `;
+          actuallyMovedShifts += shifts.length;
+          // `shift_commits` and `agent_usage` carry their own `agent_id`, so the
+          // evidence does not follow its shift on its own: re-pointing only the
+          // shift would strand every commit tally and token total on the row
+          // being retired. The commit move is guarded the way
+          // DrizzleAgentRepository.merge guards its own - two worktrees of one
+          // repository can both have recorded the same sha, and
+          // (organization, agent, repo_root, sha) is unique - so a duplicate
+          // sighting stays where it is rather than aborting the merge. It is
+          // still counted, never dropped.
+          const commits = await tx`
+            update shift_commits as loser_commits set agent_id = ${merge.winner.id}, updated_at = now()
+            where loser_commits.organization_id = ${loser.organization_id}
+              and loser_commits.agent_id = ${loser.id}
+              and not exists (
+                select 1 from shift_commits as winner_commits
+                where winner_commits.organization_id = loser_commits.organization_id
+                  and winner_commits.agent_id = ${merge.winner.id}
+                  and winner_commits.repo_root = loser_commits.repo_root
+                  and winner_commits.sha = loser_commits.sha
+              )
+            returning loser_commits.id
+          `;
+          actuallyMovedCommits += commits.length;
+          const held = await tx`
+            select id from shift_commits
+            where organization_id = ${loser.organization_id} and agent_id = ${loser.id}
+          `;
+          heldCommits += held.length;
+          // `agent_usage` needs no guard: its bucket unique is keyed on
+          // agent_session_id, which does not move, so re-pointing cannot collide.
+          await tx`
+            update agent_usage set agent_id = ${merge.winner.id}, updated_at = now()
+            where organization_id = ${loser.organization_id} and agent_id = ${loser.id}
+          `;
+          // Retired before the winner takes the key: the partial unique excludes
+          // retired rows, so releasing the losers' keys first is what lets the
+          // winner claim the one they all resolve to.
+          await tx`
+            update agents set status = 'retired', updated_at = now()
+            where organization_id = ${loser.organization_id} and id = ${loser.id}
+          `;
+          mergedAgents += 1;
+        }
         await tx`
-          update agent_usage set agent_id = ${merge.winner.id}, updated_at = now()
-          where organization_id = ${loser.organization_id} and agent_id = ${loser.id}
+          update agents
+          set repo_key = ${merge.key},
+              name = case when status = 'registered' then name else ${defaultName(merge.winner.source, merge.winner.repo_root, merge.key)} end,
+              updated_at = now()
+          where organization_id = ${merge.winner.organization_id} and id = ${merge.winner.id}
         `;
-        // Retired before the winner takes the key: the partial unique excludes
-        // retired rows, so releasing the losers' keys first is what lets the
-        // winner claim the one they all resolve to.
-        await tx`
-          update agents set status = 'retired', updated_at = now()
-          where organization_id = ${loser.organization_id} and id = ${loser.id}
-        `;
-        mergedAgents += 1;
-      }
-      await tx`
-        update agents
-        set repo_key = ${merge.key},
-            name = case when status = 'registered' then name else ${defaultName(merge.winner.source, merge.winner.repo_root, merge.key)} end,
-            updated_at = now()
-        where organization_id = ${merge.winner.organization_id} and id = ${merge.winner.id}
-      `;
-    });
-  }
+      });
+    }
 
-  for (const rekey of rekeys) {
-    await sql`
-      update agents
-      set repo_key = ${rekey.key},
-          name = case when status = 'registered' then name else ${defaultName(rekey.agent.source, rekey.agent.repo_root, rekey.key)} end,
-          updated_at = now()
-      where organization_id = ${rekey.agent.organization_id} and id = ${rekey.agent.id}
-    `;
+    for (const rekey of rekeys) {
+      await sql`
+        update agents
+        set repo_key = ${rekey.key},
+            name = case when status = 'registered' then name else ${defaultName(rekey.agent.source, rekey.agent.repo_root, rekey.key)} end,
+            updated_at = now()
+        where organization_id = ${rekey.agent.organization_id} and id = ${rekey.agent.id}
+      `;
+      rekeyed += 1;
+    }
+  } catch (error) {
+    console.error("\nStopped part way through. What had already been applied:");
+    applied();
+    throw error;
   }
 
   const [after] = await sql`select count(*)::int as count from agents where repo_root is not null and status <> 'retired'`;
-  console.log(`\nMerged ${mergedAgents} agent(s) in, carrying ${actuallyMovedShifts} shift(s) and ${actuallyMovedCommits} commit(s). No evidence row was deleted.`);
-  if (heldCommits > 0) {
-    console.log(`${heldCommits} commit(s) stayed on a retired row: the surviving agent already records that sha for the same repository.`);
-  }
-  console.log(`Re-keyed ${rekeys.length} agent(s) already alone on their repository.`);
+  applied();
   console.log(`Live repo-keyed agents now: ${after.count}.`);
   await sql.end();
 }

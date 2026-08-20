@@ -4,7 +4,7 @@
   "type": "module",
   "packageManager": "pnpm@10.14.0",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.18"
   },
   "scripts": {
     "build": "pnpm --recursive --workspace-concurrency=1 --if-present build",

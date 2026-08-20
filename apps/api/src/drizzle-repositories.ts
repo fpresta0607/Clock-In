@@ -29,7 +29,7 @@ import type {
   OrganizationRecord,
 } from "./auth.js";
 import { AppError } from "./errors.js";
-import { identityRepoKey, repoKeyLabel, repoLabel } from "./services/attribution.js";
+import { agentCodebaseLabel, identityRepoKey } from "./services/attribution.js";
 import {
   PathMappingRepositoryError,
   SessionRepositoryError,
@@ -1287,21 +1287,13 @@ function identityKeyConstraint(error: unknown): boolean {
  * name, or "unassigned" for the operator's repo-less bucket. Only the
  * basename is ever displayed, so the full path never has to leave the row.
  *
- * The identity key names the codebase, and the directory only answers when
- * there is no key at all. Reading the directory first is how a worktree's
- * folder name becomes the displayed codebase for a whole repository, and how a
- * run-named worktree read "@ unassigned" about work whose repository is known.
- * For a path key the two are the same string; for a remote key this is the
- * repository's own name, lowercased, and that trade is deliberate: one
- * canonical name across every worktree and every checkout beats preserving one
- * directory's capitalisation. Clamped to the 200 characters
- * `agents_name_length_valid` allows, because a directory name is bounded by
- * nothing and a rejected insert would drop the shift, not just the name.
+ * Which codebase that is comes from `agentCodebaseLabel`, the one definition
+ * of the rule. Clamped to the 200 characters `agents_name_length_valid` allows,
+ * because a directory name is bounded by nothing and a rejected insert would
+ * drop the shift, not just the name.
  */
 export function defaultAgentName(runtimeLabel: string, repoRoot: string | null, repoKey: string | null): string {
-  const label = (repoKey === null ? null : repoKeyLabel(repoKey))
-    ?? (repoRoot === null ? null : repoLabel(repoRoot));
-  return `${runtimeLabel} @ ${label ?? "unassigned"}`.slice(0, 200);
+  return `${runtimeLabel} @ ${agentCodebaseLabel(repoRoot, repoKey) ?? "unassigned"}`.slice(0, 200);
 }
 
 function asAgentRecord(row: { agent: typeof agents.$inferSelect; ownerName: string; projectName: string | null }): AgentRecord {

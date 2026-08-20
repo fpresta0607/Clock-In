@@ -122,6 +122,48 @@ test("two worktrees of one remote fold onto the older row, and a lone row is re-
   assert.deepEqual(plan.rekeys.map((rekey) => [rekey.agent.id, rekey.key]), [[alone.id, "github.com/acme/web"]]);
 });
 
+// The hole that making unreadable rows inert opened: the row we refuse still
+// holds its key, and the partial unique is on live rows, so re-keying another
+// row onto it raises a unique violation - after earlier merges have already
+// committed, which is the half-applied repair the script exists to prevent.
+// Two rows proven to be one repository is a merge, not a collision.
+test("a re-key that would collide with a live row becomes a merge instead", () => {
+  const key = "github.com/acme/api";
+  const holder = agent({
+    id: "8d1c2f7e-0000-4000-8000-00000000000b",
+    repo_root: "D:/gone/api",
+    repo_key: key,
+    created_at: new Date("2026-01-01T00:00:00.000Z"),
+  });
+  const here = agent({
+    id: "8d1c2f7e-0000-4000-8000-00000000000c",
+    repo_root: "C:/dev/api",
+    created_at: new Date("2026-03-01T00:00:00.000Z"),
+  });
+
+  const plan = planRepair([holder, here], machine({ "C:/dev/api": remote(key) }));
+
+  assert.deepEqual(plan.rekeys, []);
+  assert.equal(plan.merges.length, 1);
+  assert.equal(plan.merges[0].key, key);
+  assert.equal(plan.merges[0].winner.id, holder.id);
+  assert.deepEqual(plan.merges[0].losers.map((loser) => loser.id), [here.id]);
+  // The row drawn into that merge is no longer reported as untouched.
+  assert.deepEqual(plan.refusals, []);
+});
+
+test("a collision between two names a member chose is refused, not merged", () => {
+  const key = "github.com/acme/api";
+  const holder = agent({ id: "8d1c2f7e-0000-4000-8000-00000000000b", repo_root: "D:/gone/api", repo_key: key, status: "registered", name: "Reviewer" });
+  const here = agent({ id: "8d1c2f7e-0000-4000-8000-00000000000c", status: "registered", name: "Alex's helper" });
+
+  const plan = planRepair([holder, here], machine({ "C:/dev/api": remote(key) }));
+
+  assert.deepEqual(plan.merges, []);
+  assert.deepEqual(plan.rekeys, []);
+  assert.equal(plan.ambiguous.length, 1);
+});
+
 // A second run sees keys that are already right and has nothing left to do.
 test("a run over an already repaired roster is a no-op", () => {
   const key = "github.com/acme/api";

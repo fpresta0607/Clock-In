@@ -137,6 +137,10 @@ Its own sequence, back to back in one window:
    would move; `--confirm` performs it, and `--include-unstamped` additionally
    moves shifts that never got an identity at all. Nothing it does deletes an
    evidence row.
+   Historical from `0016_agent_identity_by_remote` onward: that migration moved
+   identity onto `agents.repo_key` and invalidated this script's writes, so it
+   now refuses any database carrying that column and
+   `scripts/repair-agent-identity-by-remote.mjs` supersedes it.
 5. The retired v1 rows stay as audit trail. Deleting them is possible once the
    backfill reports zero references (all three FKs are `restrict`, so the
    database enforces that precondition), but retirement is the end state.
@@ -168,9 +172,13 @@ them on `agents.repo_key` instead. Its sequence:
    merges; `--confirm` performs them, and a second run is a no-op. It refuses a
    database whose `agents` table is missing, and leaves alone any row whose
    `repo_root` is not a directory on the machine running it - so run it from
-   each operator's own machine to fold that operator's rows. Run
-   `repair-run-named-agents.mjs` first; this one reports the unassigned bucket
-   but never re-homes out of it.
+   each operator's own machine to fold that operator's rows.
+5. Optionally run `repair-run-named-agents.mjs` afterwards; it re-homes shifts
+   out of the unassigned bucket, which the repair above reports but never
+   touches. The two are independent, and this is the order that loses nothing:
+   the repair above identifies a row by reading `remote.origin.url` inside the
+   directory `repo_root` names, while the fold moves a row to the bucket and
+   discards that root.
 
 The desktop ships last and only through an installer: the hook's `repo_root`
 and `repo_remote` probes reach the server as contract data, so an installer

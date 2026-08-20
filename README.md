@@ -324,9 +324,11 @@ Not by policy, but because the code never reads it:
 - **Screenshots**, of any kind.
 - **Window titles.** The foreground query returns a process name and stops there.
 - **Input content.** Clock-In never records anything typed into a form, chat, or document.
-- **URLs, browsing history, or page content.** The browser extension matches the active tab
+- **Browsing URLs, history, or page content.** The browser extension matches the active tab
   against the user's own URL rules inside the browser and reports only which rule matched;
-  the URL, page title, and browsing history never leave the browser.
+  the URL, page title, and browsing history never leave the browser. A repository's `origin`
+  remote URL is not browsing: it names which repository an agent worked, and is listed under
+  *What is collected* below.
 - **Document names, file contents, message or email bodies.** Token counts and model
   names read from an AI tool's own session log are the one exception, described in *What is
   collected* below.
@@ -584,8 +586,9 @@ them.
 - A working directory can contain a user name, so it's shown only to the owning user and org
   admins, and redacted from logs like session descriptions are. A captured commit's repository
   path is a working directory and follows the same rule: a paystub read by anyone else carries
-  the commit without it. What every member does see is the codebase's **label** - the path's
-  last segment, a name like `clock-in` - which says which codebase an agent worked in without
+  the commit without it. What every member does see is the codebase's **label** - a name like
+  `clock-in`, taken from the repository the agent's identity is keyed on when there is one and
+  from the path's last segment otherwise - which says which codebase an agent worked in without
   saying where it lives.
 - `clock-in-hook` holds no credentials and opens no sockets. The spool file is its entire
   interface.

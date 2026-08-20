@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  agentCodebaseLabel,
   identityRepoKey,
   identityRepoRoot,
   normalizePath,
@@ -159,6 +160,14 @@ describe("normalizeRemote", () => {
     expect(normalizeRemote("git@gitlab.example.test:team/group/service.git")).toBe("gitlab.example.test/team/group/service");
   });
 
+  // The form `git clone` accepts with an absolute path after the colon, which
+  // self-hosted setups use. Refusing it dropped that repository into the path
+  // lane, where it goes on splitting per worktree - the defect itself.
+  it("accepts an scp-style remote whose path is absolute", () => {
+    expect(normalizeRemote("git@git.example.com:/srv/git/api.git")).toBe("git.example.com/srv/git/api");
+    expect(normalizeRemote("git.example.com:/srv/git/api")).toBe("git.example.com/srv/git/api");
+  });
+
   // A directory is a checkout, not a repository: two clones from one local bare
   // repo are still two checkouts, so these fall through to the path lane rather
   // than pretending to be a shared identity.
@@ -224,6 +233,26 @@ describe("repoKeyLabel", () => {
 
   it("has nothing to say about a path key that names only a run", () => {
     expect(repoKeyLabel("path:C:/w/dazzling-lamarr-0aacbd")).toBeNull();
+  });
+});
+
+describe("agentCodebaseLabel", () => {
+  // The regression the roster showed: one worktree of a repository minted the
+  // row, so its folder name became the displayed codebase for every shift from
+  // every worktree. The key is what the identity is, so the key names it.
+  it("names the repository the identity is keyed on, not the worktree that minted the row", () => {
+    expect(agentCodebaseLabel("C:/dev/clock-in-worktrees/fix-login", "github.com/acme/clock-in")).toBe("clock-in");
+    expect(agentCodebaseLabel("C:/dev/PrecisionDocs-AI", "github.com/fpresta0607/precisiondocs-ai")).toBe("precisiondocs-ai");
+  });
+
+  it("reads a path key as its own directory, and falls back to the root only without a key", () => {
+    expect(agentCodebaseLabel("C:/dev/Clock-In", "path:C:/dev/Clock-In")).toBe("Clock-In");
+    expect(agentCodebaseLabel("C:/dev/Clock-In", null)).toBe("Clock-In");
+  });
+
+  it("has no name for the unassigned bucket, or for a key and a root that both name only a run", () => {
+    expect(agentCodebaseLabel(null, null)).toBeNull();
+    expect(agentCodebaseLabel("C:/w/dazzling-lamarr-0aacbd", "path:C:/w/dazzling-lamarr-0aacbd")).toBeNull();
   });
 });
 
