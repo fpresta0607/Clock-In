@@ -600,6 +600,10 @@ export const App = ({ client }: AppProps) => {
   const [boardTab, setBoardTab] = useState<"people" | "agents">("people");
   const [agentShifts, setAgentShifts] = useState<AgentShiftsResponse | undefined>();
   const [agentShiftsFailed, setAgentShiftsFailed] = useState(false);
+  /// The Agents tab's own person selection. Undefined means everyone, which
+  /// is why it cannot borrow `member`: that one falls back to the signed-in
+  /// user, so "nobody picked" would silently open the tab on yourself.
+  const [shiftsMember, setShiftsMember] = useState<{ id: string; name: string } | undefined>();
   const [loading, setLoading] = useState(false);
   const [dataError, setDataError] = useState<string | undefined>();
   const [boardFailed, setBoardFailed] = useState(false);
@@ -753,7 +757,12 @@ export const App = ({ client }: AppProps) => {
     if (!signedIn || !preferencesReady || boardTab !== "agents") return undefined;
     let cancelled = false;
     setAgentShiftsFailed(false);
-    client.agentShifts(scopeParams(rangeQuery(range))).then(
+    // Nobody selected sends no parameter at all, so the default tab keeps
+    // working against an API deployed before `userId` existed: the filters
+    // schema is strict, and an unknown key is a 400 that empties the tab.
+    client.agentShifts(scopeParams(
+      shiftsMember === undefined ? rangeQuery(range) : withParams(rangeQuery(range), { userId: shiftsMember.id }),
+    )).then(
       (result) => {
         if (!cancelled) setAgentShifts(result);
       },
@@ -769,7 +778,7 @@ export const App = ({ client }: AppProps) => {
     return () => {
       cancelled = true;
     };
-  }, [client, signedIn, preferencesReady, boardTab, range, scopeParams, expireSession]);
+  }, [client, signedIn, preferencesReady, boardTab, range, shiftsMember, scopeParams, expireSession]);
 
   // Recent sessions load only while their tab is open, one page at a time.
   useEffect(() => {
@@ -1083,6 +1092,10 @@ export const App = ({ client }: AppProps) => {
             shiftsFailed={agentShiftsFailed}
             range={range}
             rangeLabel={rangeSentence[range]}
+            people={agentShifts?.people ?? []}
+            selected={shiftsMember}
+            onSelect={setShiftsMember}
+            selfId={selfId}
           />
         ) : boardFailed ? (
           <p className="subtle">Could not load hours for this range.</p>
@@ -1264,35 +1277,87 @@ type ShiftsTabProps = {
   shiftsFailed: boolean;
   range: Range;
   rangeLabel: string;
+  people: AgentShiftsResponse["people"];
+  selected: { id: string; name: string } | undefined;
+  onSelect: (person: { id: string; name: string } | undefined) => void;
+  selfId: string | undefined;
 };
 
-/// The Agents tab: what ran and where. The same shape as a member's
-/// breakdown - the recorded total up top, then one group per codebase with
-/// its shifts underneath - rather than a leaderboard to filter. Held rates
-/// appear only once a commit is decided; a rate with no decided commits is
-/// not a fact, so the group says nothing instead of "pending".
-const ShiftsTab = ({ shifts, shiftsFailed, range, rangeLabel }: ShiftsTabProps) => {
+/// The Agents tab: who ran agents, and what those agents ran. A board of the
+/// people the range recorded opens it, ranked by agent time, and picking one
+/// narrows everything below to their shifts. Then the recorded total, and one
+/// collapsible group per codebase with its shifts inside.
+///
+/// A person row is a sum over shifts rather than an agent, so it carries a
+/// shift count beside its hours: one row can be several agents running at
+/// once rather than one worker's long day. It carries no bar, because the
+/// board is deliberately computed before the filter and a pre-filter
+/// numerator over the post-filter total would read past 100%.
+///
+/// Held rates appear only once a commit is decided; a rate with no decided
+/// commits is not a fact, so the group says nothing instead of "pending".
+const ShiftsTab = ({ shifts, shiftsFailed, range, rangeLabel, people, selected, onSelect, selfId }: ShiftsTabProps) => {
   if (shiftsFailed) return <p className="subtle">Could not load the shifts for this range.</p>;
   if (shifts === undefined) return <p className="subtle" role="status">Loading…</p>;
   return (
     <section className="member-stats" aria-labelledby="agent-shifts-title" data-testid="agent-shifts">
       <div className="member-stats-head">
-        <h3 id="agent-shifts-title">Agents · {rangeLabel}</h3>
+        <h3 id="agent-shifts-title">{selected === undefined ? "Agents" : selected.name} · {rangeLabel}</h3>
+        {selected !== undefined && (
+          <button type="button" className="member-self" onClick={() => onSelect(undefined)}>
+            All people
+          </button>
+        )}
       </div>
+      {people.length > 1 && (
+        <ol className="board-list" data-testid="agent-people">
+          {people.map((person, index) => (
+            <li key={person.owner.id} className={person.owner.id === selected?.id ? "is-selected" : undefined}>
+              <button
+                type="button"
+                className="board-choice"
+                aria-pressed={person.owner.id === selected?.id}
+                onClick={() => onSelect(
+                  person.owner.id === selected?.id ? undefined : { id: person.owner.id, name: person.owner.name },
+                )}
+              >
+                <span className="board-rank">{index + 1}</span>
+                <span className="board-name">
+                  {person.owner.name}
+                  {person.owner.id === selfId && <span className="you-tag"> you</span>}
+                </span>
+                <span className="board-times">
+                  <span className="board-hours">{formatHumanDuration(person.agentSeconds)}</span>
+                  <span className="board-agent">
+                    {person.shiftCount} shift{person.shiftCount === 1 ? "" : "s"}
+                  </span>
+                </span>
+              </button>
+            </li>
+          ))}
+        </ol>
+      )}
       <p className="member-total"><strong>{formatHumanDuration(shifts.totalAgentSeconds)}</strong> recorded</p>
       <HourlyGraph buckets={hourlyFromShifts(shifts, range)} formatDuration={formatHumanDuration} />
       {shifts.groups.length === 0 ? (
         <p className="subtle">No agent worked in this range.</p>
       ) : shifts.groups.map((group) => (
-        /* The head reads in the shared meter row - mark, name, a bar of this
-           codebase's share of the recorded agent time, duration - so a column
-           of codebases scans the way a breakdown does. */
-        <div className="shift-group" key={group.repo ?? ""} data-testid="shift-group">
-          <div className="meter-row shift-group-head">
+        /* A drawer, because a busy week runs to hundreds of shifts and the
+           codebases are the map. The head reads in the shared meter row -
+           mark, name, a bar of this codebase's share of the recorded agent
+           time, duration - so a column of codebases scans the way a
+           breakdown does, and it stays exactly four cells: the summary is a
+           four-track grid, so a disclosure glyph added as a fifth child
+           would wrap onto an implicit second row and double its height.
+           Open state is left to the DOM: nothing is gated on opening, and
+           the keys are stable, so a viewer's open drawers survive a refetch. */
+        <details className="shift-group" key={group.repo ?? ""} data-testid="shift-group">
+          <summary className="meter-row shift-group-head">
             <span className="project-dot" aria-hidden="true" />
             <span className="meter-name">
               {group.repo ?? "No codebase recorded"}
               {group.heldRate !== null && <span className="meter-detail held-tag"> · {Math.round(group.heldRate * 100)}% held</span>}
+              <span className="meter-detail"> · {group.shiftCount} shift{group.shiftCount === 1 ? "" : "s"}</span>
             </span>
             <span
               className="meter-bar"
@@ -1300,7 +1365,7 @@ const ShiftsTab = ({ shifts, shiftsFailed, range, rangeLabel }: ShiftsTabProps) 
               style={{ "--share": `${shifts.totalAgentSeconds === 0 ? 0 : Math.round((group.agentSeconds / shifts.totalAgentSeconds) * 100)}%` } as React.CSSProperties}
             />
             <span className="meter-duration">{formatHumanDuration(group.agentSeconds)}</span>
-          </div>
+          </summary>
           <ul className="shift-list">
             {group.shifts.map((shift) => (
               <li key={shift.id} className="shift-row">
@@ -1315,7 +1380,7 @@ const ShiftsTab = ({ shifts, shiftsFailed, range, rangeLabel }: ShiftsTabProps) 
               </li>
             ))}
           </ul>
-        </div>
+        </details>
       ))}
     </section>
   );

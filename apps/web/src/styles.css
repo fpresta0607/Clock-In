@@ -87,7 +87,14 @@ a.primary { display: inline-block; text-decoration: none; }
    A shift row is when · facts · duration; the facts shrink and ellipsize
    before the duration ever wraps. */
 .shift-group { margin-top: 10px; }
-.shift-group-head { font-weight: 650; }
+/* The head is a <summary>, so both engines' default markers are suppressed:
+   no glyph is added back, because .meter-row is a four-track grid and a
+   generated fifth box would auto-place onto an implicit second row and
+   double the head's height. The open state reads on the mark instead. */
+.shift-group-head { font-weight: 650; cursor: pointer; list-style: none; }
+.shift-group-head::-webkit-details-marker { display: none; }
+.shift-group-head:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; }
+.shift-group[open] > .shift-group-head .project-dot { background: var(--mint); }
 .held-tag { color: var(--mint); font-size: .78rem; font-weight: 400; }
 .shift-list { display: grid; gap: 2px; margin: 2px 0 0; padding: 0 0 0 14px; list-style: none; }
 .shift-row { display: flex; align-items: baseline; gap: 10px; padding: 3px 2px; border-bottom: 1px solid rgba(163, 179, 194, .08); font-size: .82rem; }

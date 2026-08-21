@@ -813,23 +813,49 @@ export const agentShiftsFiltersSchema = z
     toExclusiveAt: timestampSchema.optional(),
     /** Absent means all projects. */
     scope: projectScopeSchema.optional(),
+    /**
+     * Names one person in the caller's workspace, so the tab narrows to the
+     * shifts their agents worked. Absent means everyone. An id from outside
+     * the workspace is a stable not_found, the same answer the org report
+     * gives.
+     */
+    userId: idSchema.optional(),
   })
   .strict();
 
 /**
- * The Agents tab's whole story: what ran, where, grouped by codebase. One
- * group per repo label the shifts named, heaviest first, the label-less group
- * last; each group lists its shifts newest first. No ranking and no roster
- * facts - the shifts are the record, and an agent's identity shows only as
- * the runtime and operator on each shift. `heldRate` is null until a commit
- * is decided, and the client says nothing rather than "pending": a rate with
- * no decided commits is not a fact.
+ * The Agents tab's whole story: who ran agents, what those agents ran, and
+ * where. `people` opens the tab, ranked by the agent time the range recorded,
+ * and doubles as the tab's person filter. Then one group per repo label the
+ * shifts named, heaviest first, the label-less group last; each group lists
+ * its shifts newest first.
+ *
+ * The roster is still not the model here: a person row is a sum over shifts,
+ * not an agent, which is why it carries `shiftCount` beside its seconds. One
+ * row can be four agents in a ten-hour day rather than one worker's long one,
+ * and the count is what says so.
+ *
+ * `heldRate` is null until a commit is decided, and the client says nothing
+ * rather than "pending": a rate with no decided commits is not a fact.
  */
 export const agentShiftsResponseSchema = z
   .object({
     filters: agentShiftsFiltersSchema,
     /** Summed across groups, so parallel shifts legitimately exceed wall clock. */
     totalAgentSeconds: z.number().int().nonnegative().safe(),
+    /**
+     * Everyone whose agents the range recorded, heaviest first, computed
+     * before `userId` narrows the tab so that picking a person never empties
+     * the board that picked them. Summed the way the total is summed, so one
+     * person's parallel agents legitimately exceed wall clock.
+     */
+    people: z.array(z
+      .object({
+        owner: z.object({ id: idSchema, name: z.string().min(1) }).strict(),
+        agentSeconds: z.number().int().nonnegative().safe(),
+        shiftCount: z.number().int().nonnegative().safe(),
+      })
+      .strict()),
     groups: z.array(z
       .object({
         /** A codebase's folder name, never a path; null groups the shifts that recorded neither a commit root nor a working directory. */

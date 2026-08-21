@@ -82,6 +82,21 @@ describe("web and API report contract", () => {
     expect(agentShiftsFiltersSchema.parse(parametersOf(`?scope=${scope}`)).scope).toBe(scope);
   });
 
+  it("carries the person the Agents tab is narrowed to, and omits the key entirely when nobody is picked", () => {
+    const parameters = parametersOf(`${rangeQuery("today")}&userId=${memberId}`);
+
+    const filters = agentShiftsFiltersSchema.parse(parameters);
+
+    expect(filters.userId).toBe(memberId);
+    expect(filters.fromAt).toBe(parameters.fromAt);
+    // An unbounded range still carries the person.
+    expect(agentShiftsFiltersSchema.parse(parametersOf(`?userId=${memberId}`)).userId).toBe(memberId);
+    // And the default tab sends no `userId` at all, which is what lets it keep
+    // working against an API deployed before the field existed. Sending an
+    // empty one instead would be a flat 400 on every request.
+    expect(Object.keys(parametersOf(rangeQuery("today")))).not.toContain("userId");
+  });
+
   it("sends instant bounds rather than calendar dates, which the API refuses to mix", () => {
     const parameters = parametersOf(rangeQuery("today"));
 

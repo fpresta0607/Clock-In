@@ -1314,6 +1314,31 @@ describe("the agents tab", () => {
     expect(shares).toEqual(["75%", "25%"]);
   });
 
+  it("keeps each codebase's shifts in a drawer that starts closed, the way the web does", async () => {
+    const person = userEvent.setup();
+    render(<App bridge={bridgeFor()} />);
+
+    const panel = await openAgentsTab(person);
+    const group = within(panel).getAllByTestId("shift-group")[0]!;
+    const head = group.querySelector("summary");
+
+    // The two apps hand-mirror this markup, so the desktop pins the same
+    // three facts the web does: the head is the summary, it is the details'
+    // first child - jsdom only treats the first one as the toggle - and it
+    // stays four cells, because a fifth would wrap the four-track grid.
+    expect(group.tagName).toBe("DETAILS");
+    expect(head).not.toBeNull();
+    expect(group.firstElementChild).toBe(head);
+    expect(head!.children).toHaveLength(4);
+    // The count rides in the name cell, so a closed drawer still says how
+    // much is inside it.
+    expect(group).toHaveTextContent("2 shifts");
+
+    expect(group).not.toHaveAttribute("open");
+    await person.click(head!);
+    expect(group).toHaveAttribute("open");
+  });
+
   it("shows no hourly graph on all time, keeping the groups and total", async () => {
     // Pinned to the afternoon the fixture's shifts ran, so "Today" really does
     // bound them and the folded line has something to draw.

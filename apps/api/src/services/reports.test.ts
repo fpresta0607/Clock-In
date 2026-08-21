@@ -1306,6 +1306,78 @@ describe("agent shifts", () => {
     expect(siqshift.shifts[1]).toMatchObject({ source: "claude_code", model: "claude-opus-5", owner: { name: "Alex" }, agentSeconds: 3_600 });
   });
 
+  // The board that opens the tab, and the filter it doubles as. Two owners,
+  // because a single-owner fixture cannot falsify a per-person roll-up.
+  const twoOwners = () => {
+    const reports = new Reports();
+    reports.agentIntervals = [
+      { sessionId: "s1", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/siqshift", projectId: ids.project, agentId: ids.session, startedAt: at(10), endedAt: at(11) },
+      { sessionId: "s2", user: { id: ids.otherUser, name: "Sam" }, source: "claude_code", model: null, cwd: "C:/dev/siqshift", projectId: ids.project, agentId: ids.otherAgent, startedAt: at(12), endedAt: at(12, 30) },
+      { sessionId: "s3", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "/home/a/src/quartermaster", projectId: ids.project, agentId: ids.session, startedAt: at(13), endedAt: at(13, 10) },
+      // Browser spans are attention, never shifts, on the board as in the groups.
+      { sessionId: "s4", user: { id: ids.otherUser, name: "Sam" }, source: "browser", model: null, cwd: null, projectId: ids.project, agentId: null, startedAt: at(10), endedAt: at(16) },
+    ];
+    return reports;
+  };
+
+  it("opens on a board of people, heaviest first, that sums back to the recorded total", async () => {
+    const service = createReportService({ reports: twoOwners(), reaper: silentReaper });
+
+    const result = await service.agentShifts(subject, {});
+
+    expect(result.people.map((person) => [person.owner.name, person.agentSeconds, person.shiftCount])).toEqual([
+      ["Alex", 4_200, 2],
+      ["Sam", 1_800, 1],
+    ]);
+    // The board is a partition of the same seconds the groups spend, so it
+    // reconciles exactly. Nothing else in this suite would catch a shift
+    // counted into two people, or a second rounded twice.
+    expect(result.people.reduce((sum, person) => sum + person.agentSeconds, 0)).toBe(result.totalAgentSeconds);
+    // Sam's six-hour browser span is attention, not a shift, so it reaches
+    // neither the board nor the total.
+    expect(result.people[1]!.agentSeconds).toBe(1_800);
+  });
+
+  it("keeps every person on the board while narrowing everything else to one of them", async () => {
+    const service = createReportService({ reports: twoOwners(), reaper: silentReaper });
+
+    const result = await service.agentShifts(subject, { userId: ids.user });
+
+    // The board is computed before the filter. If it narrowed too, picking a
+    // person would empty the control that picked them and there would be no
+    // way back to the board.
+    expect(result.people.map((person) => person.owner.name)).toEqual(["Alex", "Sam"]);
+    expect(result.people[1]!.agentSeconds).toBe(1_800);
+    // Everything below the board is Alex alone.
+    expect(result.totalAgentSeconds).toBe(4_200);
+    expect(result.totalAgentSeconds).toBe(result.people[0]!.agentSeconds);
+    expect(result.groups.flatMap((group) => group.shifts.map((shift) => shift.id))).toEqual(["s1", "s3"]);
+    expect(result.filters.userId).toBe(ids.user);
+  });
+
+  it("sums one person's parallel agents rather than unioning them, so a row can exceed the clock", async () => {
+    const reports = new Reports();
+    reports.agentIntervals = [
+      { sessionId: "s1", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/siqshift", projectId: ids.project, agentId: ids.session, startedAt: at(10), endedAt: at(11) },
+      { sessionId: "s2", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/siqshift", projectId: ids.project, agentId: ids.otherAgent, startedAt: at(10), endedAt: at(11) },
+    ];
+    const service = createReportService({ reports, reaper: silentReaper });
+
+    const result = await service.agentShifts(subject, {});
+
+    // One hour of wall clock, two agents, two hours on the row - and the
+    // shift count is what says it was several agents and not a long day.
+    expect(result.people[0]).toMatchObject({ agentSeconds: 7_200, shiftCount: 2 });
+    expect(result.people[0]!.agentSeconds).toBe(result.totalAgentSeconds);
+  });
+
+  it("refuses a shifts userId from outside the workspace, like the org report does", async () => {
+    const service = createReportService({ reports: new Reports([], new Set()), reaper: silentReaper });
+
+    await expect(service.agentShifts(subject, { userId: ids.otherUser }))
+      .rejects.toMatchObject({ code: "not_found", message: "User not found." });
+  });
+
   it("labels a shift by its commit's repo root over its cwd, and holds the rate back until a commit is decided", async () => {
     const reports = new Reports();
     reports.agentIntervals = [

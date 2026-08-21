@@ -24,13 +24,33 @@ section is the authoritative prose; keep it true when you change the model.
 **Agent numbers belong to the agent.** The All-stats/board Humans tab answers for the person -
 their active time and how many agents ran through it - and everything the agents themselves did
 lives on the Agents tab as a map of shifts grouped by codebase (`/reports/agent-shifts`): the
-recorded total on top, then one group per repo label with its shifts underneath, each shift naming
-its runtime, operator, model and commits. There is no roster to pick from and no ranking - the
-leaderboard was retired deliberately - and a group's held share renders only once a commit is
-decided, never as "pending". Do not fold agent time back under a person; a per-person fold reads
-as one worker's shifts when it is several. The roster (`agents` table, `/agents` routes) remains
-the identity model and the deployed desktop builds still read the old report routes, so the API
-keeps serving them; only the surfaces moved.
+recorded total, then one collapsible group per repo label with its shifts underneath, each shift
+naming its runtime, operator, model and commits. A group's held share renders only once a commit
+is decided, never as "pending". The roster (`agents` table, `/agents` routes) remains the identity
+model and the deployed desktop builds still read the old report routes, so the API keeps serving
+them; only the surfaces moved.
+
+**The web Agents tab opens on a board of people, and that board is the tab's filter.** This
+reverses the earlier rule that there was "no roster to pick from and no ranking". The reason the
+ranking was retired was that the tab had become unreadable, not that a person is the wrong way in;
+once a workspace runs hundreds of shifts a week, the codebase map alone cannot answer "whose
+agents did this". So `people` ranks by recorded agent time, `userId` narrows the tab to one of
+them, and the drawers keep the map readable underneath. Three rules keep the old objection
+answered rather than forgotten:
+
+- **A person row is a sum over shifts, not an agent.** It carries `shiftCount` beside its seconds,
+  because one row can be four agents in a ten-hour day rather than one worker's long one. Do not
+  add a bar to it: `people` is computed *before* `userId` narrows anything, so a pre-filter
+  numerator over the post-filter total would read past 100%.
+- **`people` is deliberately pre-filter.** `agentShifts` authorizes `userId` and then reads
+  without it, because `normalizedQuery` would otherwise push it into the SQL and collapse the
+  board to the one person who was picked, leaving nothing to clear the selection with.
+- **The filter is server-side, and not for tidiness.** `heldRate` is derived from commit
+  verification states the client never receives, so a client-side filter would leave every
+  group's held tag silently stale.
+
+The desktop gets the drawers, not the board: its All-stats modal is 440px wide and its Humans tab
+already lists every member with their agent time one click away.
 
 A codebase reaches every member as a **label** - the last segment of a repo root or working
 directory (`repoLabel`), when that segment names a codebase - while the path itself stays under the

@@ -22,6 +22,7 @@ const ids = {
   user: "e1c7e513-b094-4d4c-ae55-21790ae019a4",
   project: "a1c7e513-b094-4d4c-ae55-21790ae019a4",
   outsideProject: "b1c7e513-b094-4d4c-ae55-21790ae019a4",
+  outsideUser: "d1c7e513-b094-4d4c-ae55-21790ae019a4",
 };
 const config = parseEnv({
   DATABASE_URL: "postgres://siqshift:password@localhost:5432/siqshift",
@@ -295,6 +296,9 @@ describe("report routes", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
       totalAgentSeconds: 3_600,
+      // The board the tab opens on rides the same strict schema, so a
+      // misshapen person row is a 500 here rather than a silent field.
+      people: [{ owner: { id: ids.user, name: "Alex" }, agentSeconds: 3_600, shiftCount: 1 }],
       groups: [{
         // The codebase reaches every member as a name, never as the path.
         repo: "siqshift",
@@ -326,5 +330,13 @@ describe("report routes", () => {
     const response = await app().request(`http://api.test/reports/agent-shifts?scope=${ids.outsideProject}`, { headers: { authorization: bearerHeader } });
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toEqual({ error: { code: "not_found", message: "Project not found." } });
+  });
+
+  it("rejects an agent-shifts person from outside the workspace, the same answer the scope gives", async () => {
+    const response = await app().request(`http://api.test/reports/agent-shifts?userId=${ids.outsideUser}`, { headers: { authorization: bearerHeader } });
+    expect(response.status).toBe(404);
+    // A stable not_found, so a probe cannot tell "not in your workspace" from
+    // "does not exist".
+    await expect(response.json()).resolves.toEqual({ error: { code: "not_found", message: "User not found." } });
   });
 });
