@@ -94,6 +94,18 @@ function utcStart(date: string): Date {
 
 type ReportRangeFilters = Pick<ReportFilters, "from" | "to" | "fromAt" | "toExclusiveAt">;
 
+/**
+ * A uuid the way PostgreSQL stores and returns one. `idSchema` accepts either
+ * case, and a `uuid` column compares either case, so an id only ever differs
+ * from the rows it selects once a predicate moves out of SQL and into
+ * JavaScript - where `!==` is a plain string compare. Canonicalizing here, at
+ * the single point every `ReportQuery.userId` is built, keeps the two kinds of
+ * consumer agreeing instead of patching whichever one moved.
+ */
+function canonicalId(id: string): string {
+  return id.toLowerCase();
+}
+
 /** Shared range normalization; the agents paystub and pay-run reuse the exact reporting rules. */
 export function normalizedQuery(filters: ReportRangeFilters & Partial<Pick<ReportFilters, "projectId" | "userId">>): ReportQuery {
   const hasInstantBoundary = filters.fromAt !== undefined || filters.toExclusiveAt !== undefined;
@@ -111,7 +123,7 @@ export function normalizedQuery(filters: ReportRangeFilters & Partial<Pick<Repor
       from,
       toExclusive,
       ...(filters.projectId === undefined ? {} : { projectId: filters.projectId }),
-      ...(filters.userId === undefined ? {} : { userId: filters.userId }),
+      ...(filters.userId === undefined ? {} : { userId: canonicalId(filters.userId) }),
     };
   }
   const from = filters.from === undefined ? undefined : utcStart(filters.from);
@@ -126,7 +138,7 @@ export function normalizedQuery(filters: ReportRangeFilters & Partial<Pick<Repor
     ...(from === undefined ? {} : { from }),
     ...(inclusiveTo === undefined ? {} : { toExclusive: new Date(inclusiveTo.getTime() + millisecondsPerDay) }),
     ...(filters.projectId === undefined ? {} : { projectId: filters.projectId }),
-    ...(filters.userId === undefined ? {} : { userId: filters.userId }),
+    ...(filters.userId === undefined ? {} : { userId: canonicalId(filters.userId) }),
   };
 }
 

@@ -872,10 +872,42 @@ describe("the agents tab", () => {
     expect(rows[0]).toHaveTextContent("2 shifts");
     expect(rows[1]).toHaveTextContent("1 shift");
     expect(rows.every((row) => row.getAttribute("aria-pressed") === "false")).toBe(true);
+    // No bar, deliberately: the board is computed before the filter, so a
+    // person's seconds over the filtered total would read past 100%. This
+    // asserts the omission, because adding one back would otherwise pass
+    // every suite silently.
+    expect(rows.every((row) => row.querySelector(".meter-bar") === null)).toBe(true);
+  });
+
+  it("keeps the way out of a filter even when the filtered request fails", async () => {
+    const agentShifts = vi.fn()
+      .mockResolvedValueOnce(agentShiftsResponse)
+      .mockRejectedValue(new Error("nope"));
+    const person = await signIn(clientFor({ agentShifts }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+    await person.click(within(await screen.findByTestId("agent-people")).getByRole("button", { name: /Sam/ }));
+
+    // The failure is reported, but "All people" outlives it: without it a
+    // deterministically failing filter would strand the tab with no control
+    // to clear the filter that is causing the failure.
+    expect(await screen.findByText("Could not load the shifts for this range.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "All people" })).toBeInTheDocument();
   });
 
   it("narrows the tab to whoever is picked on the board, and offers a way back", async () => {
-    const agentShifts = vi.fn().mockResolvedValue(agentShiftsResponse);
+    // Echoes the filter the way the API does, so the heading and the numbers
+    // under it are read from the same response rather than from the click.
+    const agentShifts = vi.fn().mockImplementation((query: string = "") => {
+      const userId = new URLSearchParams(query.replace(/^\?/, "")).get("userId");
+      return Promise.resolve(userId === null ? agentShiftsResponse : {
+        ...agentShiftsResponse,
+        filters: { userId },
+        totalAgentSeconds: 1_800,
+        groups: [agentShiftsResponse.groups[1]!],
+      });
+    });
     const person = await signIn(clientFor({ agentShifts }));
     await screen.findByRole("heading", { name: "SIQstack" });
 

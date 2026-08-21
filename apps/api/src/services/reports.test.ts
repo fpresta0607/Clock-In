@@ -25,7 +25,7 @@ import type {
   ShiftRepoRootRecord,
   SiteTotalRecord,
 } from "../repositories.js";
-import { createReportService } from "./reports.js";
+import { createReportService, normalizedQuery } from "./reports.js";
 
 const ids = {
   organization: "0e59dfd6-3d1f-4795-9420-3ab65f0df843",
@@ -80,7 +80,7 @@ class Reports implements ReportRepository {
   public presenceIntervals: PresenceIntervalRecord[] = [];
   public sessionIntervals: SessionIntervalRecord[] = [];
   public agentIntervals: AgentIntervalRecord[] = [];
-  public constructor(private readonly rows: ReportRowRecord[] = [], private readonly accessible = new Set([ids.project, ids.user])) {}
+  public constructor(private readonly rows: ReportRowRecord[] = [], public readonly accessible = new Set([ids.project, ids.user])) {}
   public async readLeaderboardForOrganization(_subject: AuthenticatedSubject, query: ReportQuery) {
     this.lastLeaderboardQuery = query;
     return this.leaderboardRows;
@@ -1422,5 +1422,45 @@ describe("agent shifts", () => {
     expect(result.groups).toHaveLength(1);
     expect(result.groups[0]!.shifts.map((shift) => shift.id)).toEqual(["s1"]);
     expect(result.groups[0]!.agentSeconds).toBe(3_600);
+    // The board is clipped by the same bounds the groups are, so the invariant
+    // holds on a bounded range too and not only on the unbounded one.
+    expect(result.people[0]!.agentSeconds).toBe(3_600);
+    expect(result.people.reduce((sum, person) => sum + person.agentSeconds, 0)).toBe(result.totalAgentSeconds);
+  });
+
+  // Why the filter has to be server-side at all: a client holding the shifts
+  // could recount seconds, but it never receives the verification states a
+  // held rate is derived from, so it would keep rendering the unfiltered one.
+  it("narrows each codebase's held rate to the selected person, which no client could recompute", async () => {
+    const reports = new Reports();
+    reports.agentIntervals = [
+      { sessionId: "s1", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/siqshift", projectId: ids.project, agentId: ids.session, startedAt: at(10), endedAt: at(11) },
+      { sessionId: "s2", user: { id: ids.otherUser, name: "Sam" }, source: "claude_code", model: null, cwd: "C:/dev/siqshift", projectId: ids.project, agentId: ids.otherAgent, startedAt: at(12), endedAt: at(13) },
+    ];
+    const commits = new ShiftCommits([
+      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "merged", authoredAt: at(10, 30), agentSessionId: "s1", repoRoot: "C:/dev/siqshift" },
+      { userId: ids.otherUser, agentId: ids.otherAgent, projectId: ids.project, verification: "reverted", authoredAt: at(12, 30), agentSessionId: "s2", repoRoot: "C:/dev/siqshift" },
+    ]);
+    // Both owners are members here, so the selection authorizes and the test
+    // reaches the held rate rather than stopping at the tenancy check.
+    reports.accessible.add(ids.otherUser);
+    const service = createReportService({ reports, reaper: silentReaper, shiftCommits: commits });
+
+    // One merged, one reverted, in the same codebase: half of it held.
+    expect((await service.agentShifts(subject, {})).groups[0]!.heldRate).toBe(0.5);
+    // Alex's alone held completely; Sam's alone held not at all. Only the
+    // server can say either, because only the server has the verifications.
+    expect((await service.agentShifts(subject, { userId: ids.user })).groups[0]!.heldRate).toBe(1);
+    expect((await service.agentShifts(subject, { userId: ids.otherUser })).groups[0]!.heldRate).toBe(0);
+  });
+
+  // The predicate used to live in SQL, where a uuid column compares either
+  // case. In memory `!==` does not, so an id that authorizes would silently
+  // match no shift and answer 200 with nothing in it.
+  it("keeps a selected id in the one spelling the database hands back", () => {
+    const bounds = { fromAt: at(10).toISOString(), toExclusiveAt: at(12).toISOString() };
+
+    expect(normalizedQuery({ ...bounds, userId: ids.user.toUpperCase() }).userId).toBe(ids.user);
+    expect(normalizedQuery({ from: "2026-08-06", to: "2026-08-06", userId: ids.user.toUpperCase() }).userId).toBe(ids.user);
   });
 });

@@ -847,6 +847,13 @@ export const App = ({ client }: AppProps) => {
     setMemberStats(undefined);
     setMemberFailed(false);
     setBoardFailed(false);
+    // The Agents tab holds another workspace's shifts and another workspace's
+    // person id, and the id would go on being sent as a filter. Cleared with
+    // the rest of the board, so the next account opens on its own data.
+    setBoardTab("people");
+    setShiftsMember(undefined);
+    setAgentShifts(undefined);
+    setAgentShiftsFailed(false);
     setSessionsOpen(false);
     setSessionRows([]);
     setPreferencesReady(false);
@@ -1297,18 +1304,47 @@ type ShiftsTabProps = {
 /// Held rates appear only once a commit is decided; a rate with no decided
 /// commits is not a fact, so the group says nothing instead of "pending".
 const ShiftsTab = ({ shifts, shiftsFailed, range, rangeLabel, people, selected, onSelect, selfId }: ShiftsTabProps) => {
-  if (shiftsFailed) return <p className="subtle">Could not load the shifts for this range.</p>;
-  if (shifts === undefined) return <p className="subtle" role="status">Loading…</p>;
+  // The heading names whoever the numbers below it are actually about, which
+  // is the request that came back rather than the row last clicked: naming the
+  // new person over the old person's total is the one way this tab can lie.
+  // The board's own highlight is what acknowledges the click immediately.
+  const shownId = shifts?.filters.userId;
+  const shown = shownId === undefined ? undefined : people.find((person) => person.owner.id === shownId);
   return (
     <section className="member-stats" aria-labelledby="agent-shifts-title" data-testid="agent-shifts">
+      {/* The head renders before anything can fail, because "All people" is
+          the only way out of a filter and a filtered request that keeps
+          failing would otherwise strand the tab with no control to clear it. */}
       <div className="member-stats-head">
-        <h3 id="agent-shifts-title">{selected === undefined ? "Agents" : selected.name} · {rangeLabel}</h3>
+        <h3 id="agent-shifts-title">{shown?.owner.name ?? "Agents"} · {rangeLabel}</h3>
         {selected !== undefined && (
           <button type="button" className="member-self" onClick={() => onSelect(undefined)}>
             All people
           </button>
         )}
       </div>
+      {shiftsFailed && <p className="subtle">Could not load the shifts for this range.</p>}
+      {!shiftsFailed && shifts === undefined && <p className="subtle" role="status">Loading…</p>}
+      {!shiftsFailed && shifts !== undefined && (
+        <ShiftsTabBody
+          shifts={shifts}
+          range={range}
+          people={people}
+          selected={selected}
+          onSelect={onSelect}
+          selfId={selfId}
+        />
+      )}
+    </section>
+  );
+};
+
+type ShiftsTabBodyProps = Omit<ShiftsTabProps, "shifts" | "shiftsFailed" | "rangeLabel"> & { shifts: AgentShiftsResponse };
+
+/// Everything under the head: the board, the total, the graph, the drawers.
+const ShiftsTabBody = ({ shifts, range, people, selected, onSelect, selfId }: ShiftsTabBodyProps) => {
+  return (
+    <>
       {people.length > 1 && (
         <ol className="board-list" data-testid="agent-people">
           {people.map((person, index) => (
@@ -1382,7 +1418,7 @@ const ShiftsTab = ({ shifts, shiftsFailed, range, rangeLabel, people, selected, 
           </ul>
         </details>
       ))}
-    </section>
+    </>
   );
 };
 
