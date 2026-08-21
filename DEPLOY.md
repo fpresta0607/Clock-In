@@ -2,8 +2,10 @@
 
 Three things get deployed: the API (Railway), the web dashboard (Vercel), and
 the desktop installers (GitHub Releases). Neon already hosts the database and
-Neon Auth, so neither needs deploying. DNS lives in **Azure DNS** for
-`siqstack.com`.
+Neon Auth, so neither needs deploying. DNS for `siqstack.com` lives in the
+**Microsoft 365 admin center** (Settings, Domains, siqstack.com, DNS records),
+on the `ns1-4.bdm.microsoftonline.com` nameservers. Not Azure DNS: this doc
+said Azure for a while and sent people to the wrong portal.
 
 | Piece | Runs at | Deployed by |
 |---|---|---|
@@ -23,20 +25,37 @@ about it:
 | Rename | Where | What breaks until it is done |
 |---|---|---|
 | Repo `Clock-In` → `SIQshift` | GitHub → Settings → Repository name | README badges 404, and the site's **Download for Windows** button and the updater endpoint both point at `.../SIQshift/releases/...`. GitHub redirects the *old* name to the new one after the rename, never before |
-| Railway project + domain `api.clock` → `api.siqshift` | `railway domain api.siqshift.siqstack.com`, then Azure DNS | The API keeps serving only the old hostname; the desktop build and the web bundle both target the new one |
-| Vercel project `clock-in` → `siqshift`, domain `clock` → `siqshift` | Vercel → Project Settings, then Azure DNS | The dashboard is only reachable at the old hostname |
+| Railway project + domain `api.clock` → `api.siqshift` | `railway domain api.siqshift.siqstack.com`, then Microsoft 365 DNS | The API keeps serving only the old hostname; the desktop build and the web bundle both target the new one |
+| Vercel project `clock-in` → `siqshift`, domain `clock` → `siqshift` | Vercel → Project Settings, then Microsoft 365 DNS | The dashboard is only reachable at the old hostname |
 | Repo variables `CLOCK_IN_*` → `SIQSHIFT_*` | GitHub → Settings → Variables | Desktop builds compile against `.cargo/config.toml`'s localhost defaults, and `build.rs` fails every release build. `SIQSHIFT_AUTH_URL`, `SIQSHIFT_API_URL`, and the three extension ids |
 | `CORS_ORIGINS` → the new dashboard origin | Railway → API service variables | Every dashboard request fails CORS |
 | Neon Auth trusted origin | Neon → Auth → Trusted origins | Sign-in fails from the new dashboard origin |
 | Extension listings + `SIQSHIFT_*_EXTENSION_ID` | Chrome Web Store / Edge Add-ons | The store ids are per-listing. A renamed listing keeps its id; a *new* listing does not, and `browser::sync_extension_policies` force-installs by id |
 
 Two identifiers change what an installed copy is, not just what it is called:
-`com.siqshift.desktop` moves the desktop app's data directory and its spool, and
+`com.siqshift.desktop` moves the desktop app's data directory, and
 `com.siqshift.browser_host` is the native-messaging host name the extension
-connects by. An existing v0.1.7 install finds neither, so it reads as a fresh
-install with no settings and no queued spool, and its agent hooks still point at
-the old `clock-in-hook` path until each is re-registered from the new app. Ship
-the rename as a version bump people install over, not as a silent update.
+connects by.
+
+**The spool is handled in code.** It is not a cache: it holds activity already
+recorded and not yet uploaded, so a fresh `%APPDATA%/siqshift` would have
+stranded real customer work where nothing reads it again. `resolve_data_dir` in
+`spool.rs` prefers the current directory and adopts the pre-rename `clock-in`
+one when that is the only one present, so an upgraded machine keeps draining
+the spool it already has. It is a read, not a migration, on purpose: the app,
+`siqshift-hook` and `siqshift-browser-host` all resolve this path
+independently and any of them can start at any moment, so moving files here
+would race a hook mid-append on the one file that must never lose a line. The
+cost is a stale directory name on disk for upgraders, which no user sees.
+
+**Settings and the extension are not.** Tauri keys its config directory off the
+bundle identifier, so an upgraded install opens with defaults, and the agent
+hooks still point at the old `clock-in-hook` path until each is re-registered
+from the new app. The extension reconnects only once its native-messaging host
+manifest names `com.siqshift.browser_host`.
+
+`tauri.conf.json` is therefore **0.2.0**, not a 0.1.x bump: this is an install
+people replace their old copy with, not a silent update.
 
 ## Deploy the API and the web dashboard together
 
@@ -219,11 +238,11 @@ typo here fails loudly at boot rather than silently allowing plaintext.
 railway domain api.siqshift.siqstack.com
 ```
 
-It prints the DNS records to create. **In Azure DNS** (portal → `siqstack.com`
+It prints the DNS records to create. **In the Microsoft 365 admin center** (portal → `siqstack.com`
 zone → Record sets), add:
 
 ```
-Type: CNAME  Name: api.siqshift                  Value: nnv28u39.up.railway.app
+Type: CNAME  Name: api.siqshift                  Value: ttvfmerw.up.railway.app
 Type: TXT    Name: _railway-verify.api.siqshift  Value: railway-verify=<the value `railway domain` printed>
 ```
 
@@ -231,8 +250,10 @@ The `railway-verify` value is issued per hostname, so the one recorded for the
 old `api.clock` hostname is not reusable — take the fresh value from the
 `railway domain` output above.
 
-Azure DNS does not proxy records, so Railway can issue its TLS certificate as
-soon as the CNAME resolves. `railway domain status` shows progress.
+Microsoft 365 DNS does not proxy records, so Railway can issue its TLS
+certificate as soon as the CNAME resolves. `railway domain status <id>` shows
+progress: it reads `Verified: no` until the TXT is visible, then flips to
+`Verified: yes` with `CERTIFICATE_STATUS_TYPE_VALID`.
 
 **Run the migrations once**, from your machine, against production:
 
@@ -265,19 +286,39 @@ vercel deploy --prebuilt --prod
 ```
 
 **Custom domain:** `siqshift.siqstack.com` is attached to the project. To activate
-it, add these records in Azure DNS:
+it, add these records in the Microsoft 365 admin center:
 
 ```
 Type: TXT    Name: _vercel     Value: vc-domain-verify=siqshift.siqstack.com,<token from Vercel>
-Type: CNAME  Name: siqshift    Value: cname.vercel-dns.com
+Type: CNAME  Name: siqshift    Value: <per-project target from Vercel>
 ```
 
 Vercel mints the `vc-domain-verify` token against the exact hostname, so the
 token recorded for the old `clock.siqstack.com` domain does not carry over —
 read the current one off the domain's row in the Vercel dashboard.
 
-The TXT record is Vercel's one-time proof that we own `siqstack.com`; once the
-domain shows **Verified** in Vercel, the TXT can be removed.
+Newer Vercel projects also get their own CNAME target (`<hash>.vercel-dns-017.com`)
+rather than the shared `cname.vercel-dns.com` the old `clock` record still uses,
+so read both values off the domain's row in the dashboard.
+
+The TXT record is Vercel's proof that we own `siqstack.com`; once the domain
+shows **Verified** in Vercel, the TXT can be removed.
+
+**Vercel does not re-check DNS on its own.** A domain whose first check ran
+before the TXT existed stays `pending_domain_verification` indefinitely and
+serves no certificate. The failure looks nothing like a DNS problem: the
+hostname resolves, accepts the TCP connection on 443, and presents no
+certificate, so the site is simply down while every record is correct. Adding
+the record is not enough. Press **Refresh** on the domain row, or:
+
+```bash
+curl -X POST -H "Authorization: Bearer $VERCEL_TOKEN" \
+  "https://api.vercel.com/v9/projects/siqshift/domains/siqshift.siqstack.com/verify?slug=siqstack-llc"
+```
+
+This cost a live outage on 2026-08-21: `clock.siqstack.com` was redirected to
+`siqshift.siqstack.com` before that domain had ever verified, so both hostnames
+were dark until the verify call ran.
 
 `apps/web/vercel.json` sets the CSP and security headers. Its `connect-src`
 names the API, auth, and GitHub API hosts explicitly — **if you change any of

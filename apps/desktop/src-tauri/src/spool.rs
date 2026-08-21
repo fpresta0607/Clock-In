@@ -1125,16 +1125,50 @@ pub fn discard_locked(path: &Path) -> SpoolResult<()> {
     Ok(())
 }
 
+/// The data directory this app writes today.
+const DATA_DIR_NAME: &str = "siqshift";
+
+/// What the same directory was called before the SIQshift rename. An install
+/// upgrading from Clock-In still has its spool here, and the spool is not a
+/// cache: it holds activity already recorded and NOT yet uploaded. A fresh
+/// `siqshift` directory would strand those records where nothing ever reads
+/// them again, so the customer silently loses work that was captured.
+const LEGACY_DATA_DIR_NAME: &str = "clock-in";
+
+/// Pick the data directory, preferring the current name and adopting the
+/// pre-rename one when it is the only one present.
+///
+/// Deliberately a READ, not a migration. Three binaries resolve this
+/// independently — the app, `siqshift-hook`, and `siqshift-browser-host` — and
+/// any of them can start at any moment, so moving files here would race a hook
+/// mid-append for the one file that must never lose a line. Adopting in place
+/// costs an upgraded machine nothing but a stale directory name on disk, which
+/// no user sees.
+fn resolve_data_dir(base: &Path, exists: impl Fn(&Path) -> bool) -> PathBuf {
+    let current = base.join(DATA_DIR_NAME);
+    if exists(&current) {
+        return current;
+    }
+    let legacy = base.join(LEGACY_DATA_DIR_NAME);
+    if exists(&legacy) {
+        return legacy;
+    }
+    current
+}
+
+fn app_data_dir() -> PathBuf {
+    resolve_data_dir(&default_data_dir(), |path| path.exists())
+}
+
 /// Where the spool lives unless `SIQSHIFT_SPOOL` says otherwise:
 /// `%APPDATA%/siqshift/agent-spool.jsonl` on Windows, the XDG data dir
-/// elsewhere.
+/// elsewhere — or the pre-rename `clock-in` directory when this machine is
+/// carrying one, see [`resolve_data_dir`].
 pub fn default_spool_path() -> PathBuf {
     if let Some(override_path) = std::env::var_os(SPOOL_ENV_VAR).filter(|value| !value.is_empty()) {
         return PathBuf::from(override_path);
     }
-    default_data_dir()
-        .join("siqshift")
-        .join("agent-spool.jsonl")
+    app_data_dir().join("agent-spool.jsonl")
 }
 
 /// The directory the browser spool, rules file, tally, and handshake marker
@@ -3282,5 +3316,45 @@ mod tests {
             PathBuf::from("C:/tmp/custom-spool.jsonl")
         );
         std::env::remove_var(SPOOL_ENV_VAR);
+    }
+
+    // The rename moved the data directory. The spool is not a cache — it holds
+    // activity recorded but not yet uploaded — so an upgraded install that
+    // looked only at the new name would silently strand real customer work.
+
+    #[test]
+    fn a_fresh_install_writes_under_the_current_name() {
+        let base = PathBuf::from("/base");
+        assert_eq!(resolve_data_dir(&base, |_| false), base.join(DATA_DIR_NAME));
+    }
+
+    #[test]
+    fn an_upgraded_install_adopts_its_pre_rename_directory() {
+        let base = PathBuf::from("/base");
+        let legacy = base.join(LEGACY_DATA_DIR_NAME);
+        assert_eq!(
+            resolve_data_dir(&base, |path| path == legacy),
+            legacy,
+            "an upgrade must keep reading the spool it already has"
+        );
+    }
+
+    #[test]
+    fn the_current_directory_wins_when_both_exist() {
+        // Someone who ran a new build before this fix has both. The new one is
+        // where the running app has been appending, so it is the live spool.
+        let base = PathBuf::from("/base");
+        assert_eq!(resolve_data_dir(&base, |_| true), base.join(DATA_DIR_NAME));
+    }
+
+    #[test]
+    fn every_sidecar_follows_the_adopted_directory() {
+        // The browser spool, rules, tally, handshake marker and evidence all
+        // hang off the spool's parent. Adopting the spool but not its siblings
+        // would split one install's state across two directories.
+        let base = PathBuf::from("/base");
+        let legacy = base.join(LEGACY_DATA_DIR_NAME);
+        let adopted = resolve_data_dir(&base, |path| path == legacy);
+        assert_eq!(adopted.join("agent-spool.jsonl").parent(), Some(&*adopted));
     }
 }
