@@ -208,10 +208,13 @@ describe("dashboard", () => {
     expect(kept).toHaveTextContent("The name only.");
     // Identity is keyed on the repository and the repository is named by its
     // remote, so the remote leaves the machine too and the sentence says so.
-    expect(kept).toHaveTextContent("origin remote URL");
+    expect(kept).toHaveTextContent("origin remote URL with any embedded credentials removed");
     const never = within(dialog).getByRole("heading", { name: "SIQshift never writes down" }).nextElementSibling;
     expect(never).toHaveTextContent("Not one keystroke.");
-    expect(never).toHaveTextContent("Web addresses");
+    // The remote is a repository name, not browsing, and the never-list says so
+    // rather than claiming a category the code no longer honours.
+    expect(never).toHaveTextContent("Browsing addresses, history, or page content.");
+    expect(never).toHaveTextContent("is not browsing");
     expect(never).toHaveTextContent("Anything you type into a form, chat, or document.");
     expect(never).toHaveTextContent("SIQshift never reaches inside or controls your other apps.");
     expect(dialog).toHaveTextContent("Everyone sees the same numbers.");

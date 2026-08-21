@@ -134,7 +134,7 @@ class Reports implements ReportRepository {
 }
 
 function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
-  return {
+  const record: AgentRecord = {
     id: ids.session,
     organizationId: ids.organization,
     name: "Claude Code @ Timer",
@@ -143,9 +143,16 @@ function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
     owner: { id: ids.user, name: "Alex" },
     project: { id: ids.project, name: "Timer" },
     repoRoot: null,
+    repoKey: null,
     createdAt: new Date("2026-08-01T00:00:00.000Z"),
     ...overrides,
   };
+  // A fixture that names a root carries the key that root implies, the way
+  // upsertForKey composes one - so `repoKey` is never null on a row that knows
+  // its repository, which is exactly what "is this the bucket?" reads.
+  return record.repoKey === null && record.repoRoot !== null
+    ? { ...record, repoKey: `path:${record.repoRoot}` }
+    : record;
 }
 
 /** The pay-run report's roster; empty by default so existing report/leaderboard/meStats tests are unaffected. */

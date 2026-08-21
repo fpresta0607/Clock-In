@@ -40,6 +40,31 @@ async function migrationsBeforeTheNewest(): Promise<string> {
   return directory;
 }
 
+/**
+ * A copy of the chain stopping after `tag`, so a migration can be run against
+ * a database that already holds rows the previous one wrote. Pinned by tag
+ * rather than by position because the test below is about one specific
+ * migration's backfill, not about whichever migration happens to be newest.
+ */
+async function migrationsThrough(tag: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "siqshift-migrations-through-"));
+  const metadata = JSON.parse(await readFile(join(migrationsFolder, "meta", "_journal.json"), "utf8")) as {
+    entries: Array<{ idx: number; tag: string }>;
+  };
+  const cutoff = metadata.entries.findIndex((entry) => entry.tag === tag);
+  if (cutoff < 0) throw new Error(`no migration tagged ${tag}`);
+  const entries = metadata.entries.slice(0, cutoff + 1);
+  await mkdir(join(directory, "meta"));
+  await writeFile(join(directory, "meta", "_journal.json"), JSON.stringify({ ...metadata, entries }));
+  await Promise.all(entries.map(async (entry) => {
+    await writeFile(
+      join(directory, `${entry.tag}.sql`),
+      await readFile(join(migrationsFolder, `${entry.tag}.sql`)),
+    );
+  }));
+  return directory;
+}
+
 integration(integrationDescription, () => {
   let disposable: DisposableTestDatabase | undefined;
   let database = undefined as unknown as DatabaseConnection;
@@ -314,3 +339,95 @@ integration(integrationDescription, () => {
     `).rejects.toThrow();
   });
 });
+
+
+/**
+ * `0016_agent_identity_by_remote` moves the roster's identity key from
+ * `repo_root` onto `repo_key` and hand-adds a backfill between the new column
+ * and the unique indexes built on it. Two things have to hold, and neither is
+ * visible on an empty database:
+ *
+ * - the indexes must build, which they only do if the backfill cannot fold two
+ *   live rows onto one key - hence `'path:' || repo_root` verbatim rather than
+ *   any normalization;
+ * - the key it writes must be exactly the one `identityRepoKey` composes for a
+ *   repository with no known remote, or the first shift after the deploy mints
+ *   a duplicate of every agent that already existed.
+ */
+integration(
+  databaseUrl
+    ? "0016 carries existing agents onto the repository key"
+    : "0016 carries existing agents onto the repository key (skipped: TEST_DATABASE_URL is not set)",
+  () => {
+    let disposable: DisposableTestDatabase | undefined;
+    let database = undefined as unknown as DatabaseConnection;
+    let throughFifteen: string | undefined;
+    const organizationId = randomUUID();
+    const ownerId = randomUUID();
+    const otherOwnerId = randomUUID();
+    const siqshift = "C:/dev/siqshift";
+    const worktree = "C:/Users/fpres/.treehouse/precisiondocs-fdd5f2/2/precisiondocs";
+
+    beforeAll(async () => {
+      if (!databaseUrl) return;
+      disposable = await createDisposableTestDatabase(databaseUrl, "migrations_0016");
+      database = disposable.database;
+      throughFifteen = await migrationsThrough("0015_agent_identity_v2");
+      await runMigrations(database, { migrationsFolder: throughFifteen });
+      await database.client`
+        insert into organizations (id, name, invite_code)
+        values (${organizationId}, 'Identity backfill', ${randomUUID().replaceAll("-", "").slice(0, 11)})
+      `;
+      await database.client`
+        insert into users (id, organization_id, email, name)
+        values (${ownerId}, ${organizationId}, 'owner@example.test', 'Owner'),
+               (${otherOwnerId}, ${organizationId}, 'other@example.test', 'Other')
+      `;
+      // The roster as it stands before the repair: one row per path, two
+      // operators' buckets, and a retired row whose key is released.
+      await database.client`
+        insert into agents (organization_id, owner_user_id, source, repo_root, name, status)
+        values
+          (${organizationId}, ${ownerId}, 'claude_code', ${siqshift}, 'Claude Code @ siqshift', 'anonymous'),
+          (${organizationId}, ${ownerId}, 'claude_code', ${worktree}, 'Claude Code @ precisiondocs', 'anonymous'),
+          (${organizationId}, ${ownerId}, 'claude_code', null, 'Claude Code @ unassigned', 'anonymous'),
+          (${organizationId}, ${otherOwnerId}, 'claude_code', ${siqshift}, 'Claude Code @ siqshift', 'anonymous'),
+          (${organizationId}, ${otherOwnerId}, 'claude_code', null, 'Claude Code @ unassigned', 'anonymous'),
+          (${organizationId}, ${ownerId}, 'codex', ${siqshift}, 'Codex @ siqshift', 'retired')
+      `;
+    }, 60_000);
+
+    afterAll(async () => {
+      if (throughFifteen !== undefined) await rm(throughFifteen, { recursive: true, force: true });
+      if (disposable !== undefined) await disposable.cleanup();
+    });
+
+    it("keys every existing row on the path it already had, and stays idempotent", async () => {
+      if (!database) return;
+      await runMigrations(database);
+
+      const rows = await database.client`
+        select repo_root, repo_key, status from agents
+        where organization_id = ${organizationId}
+        order by owner_user_id, source, repo_root nulls first
+      `;
+      for (const row of rows) {
+        // The one invariant the deploy rests on: `identityRepoKey(root, null)`
+        // composes exactly this, so a replayed shift finds its own row.
+        expect(row.repo_key).toBe(row.repo_root === null ? null : `path:${row.repo_root}`);
+      }
+      // The buckets stayed null and so stayed one row per operator, which is
+      // what the unassigned half of the key means.
+      expect(rows.filter((row) => row.repo_key === null)).toHaveLength(2);
+      // A retired row is carried across too - it is audit trail, not a key
+      // holder, and both indexes exclude it either way.
+      expect(rows.filter((row) => row.status === "retired")).toHaveLength(1);
+
+      await runMigrations(database);
+      const replayed = await database.client`
+        select count(*)::int as count from agents where organization_id = ${organizationId}
+      `;
+      expect(replayed).toEqual([{ count: 6 }]);
+    });
+  },
+);

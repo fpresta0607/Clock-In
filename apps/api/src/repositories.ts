@@ -283,8 +283,13 @@ export interface AgentRecord {
   status: AgentStatus;
   owner: ReportLookupRecord;
   project: ReportLookupRecord | null;
-  /** The codebase this identity works; null is the operator's unassigned bucket. */
+  /** Where this identity's first shift worked, as evidence; never its key. */
   repoRoot: string | null;
+  /**
+   * The identity's repository - a normalized remote, or `path:<root>` for a
+   * repository with no remote. Null is the operator's unassigned bucket.
+   */
+  repoKey: string | null;
   createdAt: Date;
 }
 
@@ -292,8 +297,14 @@ export interface UpsertAgentForKey {
   organizationId: string;
   ownerUserId: string;
   source: AgentSource;
-  /** The identity's codebase; null mints (or finds) the operator's unassigned bucket. */
+  /** The working directory's repository root, as the runtime probed it. */
   repoRoot: string | null;
+  /**
+   * The repository's `origin` remote as the runtime read it, unnormalized.
+   * This is what makes two worktrees, and two checkouts under different
+   * directory names, one identity; null falls back to the repo root.
+   */
+  repoRemote: string | null;
   /** A re-derivable attribute written beside the identity, never part of the key. */
   projectId: string | null;
   /**
@@ -325,7 +336,7 @@ export interface AgentShiftRecord {
 }
 
 export interface AgentRepository {
-  /** Mints or finds the identity for (org, operator, source, repo); replay yields the same id. */
+  /** Mints or finds the identity for (org, operator, source, repository); replay yields the same id. */
   upsertForKey(input: UpsertAgentForKey): Promise<{ id: string }>;
   listForOrganization(subject: AuthenticatedSubject): Promise<AgentRecord[]>;
   findById(subject: AuthenticatedSubject, agentId: string): Promise<AgentRecord | null>;

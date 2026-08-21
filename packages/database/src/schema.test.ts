@@ -190,7 +190,7 @@ describe("database schema", () => {
     expect(userTimelineIndex?.config.where).toBeUndefined();
   });
 
-  it("defines roster agents as one durable identity per operator, runtime and codebase", () => {
+  it("defines roster agents as one durable identity per operator, runtime and repository", () => {
     expect(agents.id.primary).toBe(true);
     expect(agents.organizationId.notNull).toBe(true);
     expect(agents.ownerUserId.notNull).toBe(true);
@@ -198,9 +198,14 @@ describe("database schema", () => {
     // directory re-mapped to another project must move this column alone.
     expect(agents.projectId.notNull).toBe(false);
     expect(agents.projectId.columnType).toBe("PgUUID");
-    // Null repo is the operator's unassigned bucket; the key holds through it.
+    // The root is evidence of where the work happened, never the key: every
+    // worktree is its own path, so keying on it minted an agent per path.
     expect(agents.repoRoot.notNull).toBe(false);
     expect(agents.repoRoot.columnType).toBe("PgText");
+    // The key is the repository - its normalized remote, or `path:<root>` when
+    // it has none. Null is the operator's unassigned bucket.
+    expect(agents.repoKey.notNull).toBe(false);
+    expect(agents.repoKey.columnType).toBe("PgText");
     expect(agents.source.notNull).toBe(true);
     expect(agents.source.columnType).toBe("PgText");
     expect(agents.name.notNull).toBe(true);
@@ -218,7 +223,7 @@ describe("database schema", () => {
     // constraint: retiring an agent has to release its key so the next shift
     // mints a fresh identity instead of resurrecting the retired one.
     const identityIndex = config.indexes.find(
-      (index) => index.config.name === "agents_organization_owner_source_repo_unique",
+      (index) => index.config.name === "agents_organization_owner_source_repo_key_unique",
     );
     expect(identityIndex).toBeDefined();
     expect(identityIndex!.config.unique).toBe(true);
@@ -226,7 +231,7 @@ describe("database schema", () => {
       "organization_id",
       "owner_user_id",
       "source",
-      "repo_root",
+      "repo_key",
     ]);
     const identityWhere = new PgDialect().sqlToQuery(identityIndex!.config.where!).sql;
     // The arbiter in upsertForKey has to restate this predicate exactly, so
@@ -252,7 +257,13 @@ describe("database schema", () => {
       "agents_organization_id_id_unique",
     ]);
     expect(config.checks.map((constraint) => constraint.name)).toEqual(
-      expect.arrayContaining(["agents_status_valid", "agents_source_valid", "agents_name_length_valid", "agents_repo_root_length_valid"]),
+      expect.arrayContaining([
+        "agents_status_valid",
+        "agents_source_valid",
+        "agents_name_length_valid",
+        "agents_repo_root_length_valid",
+        "agents_repo_key_length_valid",
+      ]),
     );
     // The source shape rule matches agent_sessions': the same id must land in both.
     const sourceCheck = config.checks.find((constraint) => constraint.name === "agents_source_valid");

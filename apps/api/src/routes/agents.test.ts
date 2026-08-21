@@ -50,7 +50,7 @@ beforeAll(async () => {
 });
 
 function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
-  return {
+  const record: AgentRecord = {
     id: ids.agent,
     organizationId: ids.organization,
     name: "Claude Code @ Field work",
@@ -59,9 +59,16 @@ function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
     owner: { id: ids.admin, name: "Alex" },
     project: { id: ids.project, name: "Field work" },
     repoRoot: null,
+    repoKey: null,
     createdAt: new Date("2026-08-01T00:00:00.000Z"),
     ...overrides,
   };
+  // A fixture that names a root carries the key that root implies, the way
+  // upsertForKey composes one - so `repoKey` is never null on a row that knows
+  // its repository, which is exactly what "is this the bucket?" reads.
+  return record.repoKey === null && record.repoRoot !== null
+    ? { ...record, repoKey: `path:${record.repoRoot}` }
+    : record;
 }
 
 /** In-memory roster: merge re-points nothing here but retires the loser, which the route asserts. */
@@ -255,6 +262,24 @@ describe("agent routes", () => {
     expect(body.agents[0]).toMatchObject({ repoName: "siqshift" });
     // Absent, not blanked - the roster still reads correctly from the name.
     expect(body.agents[0]).not.toHaveProperty("repoRoot");
+  });
+
+  // The roster reads the repository the identity is keyed on, never the one
+  // worktree that happened to mint the row - otherwise every shift from every
+  // worktree of this repository renders "@ fix-login".
+  it("renders the repository the identity is keyed on, not the worktree it was minted from", async () => {
+    const worktree = agentRecord({
+      repoRoot: "C:/dev/clock-in-worktrees/fix-login",
+      repoKey: "github.com/acme/clock-in",
+    });
+    const { app } = createTestApp(new MemoryAgents([worktree]));
+
+    const response = await app.request("http://api.test/agents", { headers: { authorization: adminHeader } });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      agents: [{ repoName: "clock-in", repoRoot: "C:/dev/clock-in-worktrees/fix-login" }],
+    });
   });
 
   it("renames an agent that carries a repo, which re-validates the whole record", async () => {

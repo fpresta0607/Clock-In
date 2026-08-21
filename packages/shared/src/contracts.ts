@@ -473,6 +473,16 @@ export const agentSessionEventSchema = z
      * never sends it and its shifts graduate late from their commits instead.
      */
     repoRoot: z.string().min(1).max(1_000).optional(),
+    /**
+     * The repository's `origin` remote, as the hook read it - any spelling git
+     * accepts. The server normalizes it (`github.com/owner/repo`) and keys the
+     * agent identity on that, which is what makes every worktree of one
+     * repository, and a second checkout of it under another directory name,
+     * one agent instead of one per path. Optional: a desktop from before the
+     * probe shipped never sends it, and a repository with no remote has none,
+     * and both fall back to the repo root exactly as identity worked before.
+     */
+    repoRemote: z.string().min(1).max(1_000).optional(),
     model: z.string().min(1).max(200).optional(),
     ruleId: idSchema.optional(),
   })
@@ -487,10 +497,15 @@ export const agentSessionEventSchema = z
       // either; accepting one would hand a repo to a path that never resolves
       // it. The clause rides here rather than in the object because the field
       // is legal on every other source.
-      if (event.ruleId === undefined || event.cwd !== undefined || event.repoRoot !== undefined) {
+      if (
+        event.ruleId === undefined
+        || event.cwd !== undefined
+        || event.repoRoot !== undefined
+        || event.repoRemote !== undefined
+      ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: "Browser spans carry a ruleId and no cwd or repoRoot.",
+          message: "Browser spans carry a ruleId and no cwd, repoRoot or repoRemote.",
         });
       }
     } else {
@@ -530,9 +545,11 @@ export const agentStatusValues = ["anonymous", "registered", "retired"] as const
 export const agentStatusSchema = z.enum(agentStatusValues);
 
 /**
- * A codebase label: the last segment of a repo root or working directory, so
- * the surfaces can say which codebase an agent worked without handing anyone a
- * path. Paths themselves stay behind the `repoRoot` rule.
+ * A codebase label - a name like `siqshift`: the repository's own name when an
+ * agent's identity is keyed on its remote, and the last segment of a repo root
+ * or working directory otherwise - so the surfaces can say which codebase an
+ * agent worked without handing anyone a path. Paths themselves stay behind
+ * the `repoRoot` rule.
  */
 export const repoLabelSchema = z.string().min(1).max(200);
 
@@ -545,9 +562,10 @@ export const agentSchema = z
     owner: z.object({ id: idSchema, name: z.string().min(1) }).strict(),
     project: z.object({ id: idSchema, name: z.string().min(1) }).strict().nullable(),
     /**
-     * The codebase this agent works, as a folder name. Safe for every member,
-     * exactly as a shift's `repo` label is. Absent on the operator's
-     * unassigned bucket, and on an API from before v2.
+     * The codebase this agent works, as a name (`agentCodebaseLabel`): the
+     * repository's own name from a remote key, a folder name from a path key.
+     * Safe for every member, exactly as a shift's `repo` label is. Absent on
+     * the operator's unassigned bucket, and on an API from before v2.
      */
     repoName: repoLabelSchema.optional(),
     /**

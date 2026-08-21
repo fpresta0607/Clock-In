@@ -1,5 +1,11 @@
 # Agent identity v2 - design
 
+This plan shipped and is preserved here as the reasoning behind the code; the durable
+knowledge it earned is folded into AGENTS.md.
+Where it says agent identity is keyed on `repo_root`, `0016_agent_identity_by_remote` has since
+re-keyed it on `agents.repo_key` - the normalized git remote, with `path:<root>` as the lane for a
+repository that has none - and AGENTS.md owns that rule.
+
 ## Scope
 
 Agent identity v2 fixes the two ways the roster lies today: it has no operator dimension, and it is keyed on the SIQshift project rather than the codebase the agent actually works on.

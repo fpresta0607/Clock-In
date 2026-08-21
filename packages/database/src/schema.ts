@@ -290,10 +290,19 @@ export const agents = pgTable(
     // separate questions.
     projectId: uuid("project_id"),
     // The codebase this agent works, as the working directory its shifts
-    // reported. Null is the operator's unassigned bucket - a real roster row
-    // several shifts share, never a default. The bucket itself never becomes a
-    // codebase: a commit moves its own shift onto one and leaves the rest.
+    // reported. Evidence, never identity: a human reading the roster wants to
+    // know where the work happened, and the first directory that minted the
+    // row answers that. Keying on it is what put five `precisiondocs` rows on
+    // one operator's roster - every worktree is its own path.
     repoRoot: text("repo_root"),
+    // The identity: the repository's normalized remote (`github.com/owner/repo`),
+    // or `path:<normalized root>` when the repository has no remote to name it.
+    // Null is the operator's unassigned bucket - a real roster row several
+    // shifts share, never a default. The bucket itself never becomes a
+    // codebase: a commit moves its own shift onto one and leaves the rest.
+    // `identityRepoKey` in apps/api/src/services/attribution.ts is the one
+    // place this is composed.
+    repoKey: text("repo_key"),
     source: text("source").notNull(),
     name: text("name").notNull(),
     status: text("status").$type<"anonymous" | "registered" | "retired">().default("anonymous").notNull(),
@@ -302,9 +311,9 @@ export const agents = pgTable(
   (table) => [
     // Composite-FK target so shift rows stay inside the tenant.
     unique("agents_organization_id_id_unique").on(table.organizationId, table.id),
-    // The identity key - (organization, operator, source, repo) - in two
-    // partial indexes because a nullable repo needs both halves: one for
-    // agents that know their codebase, one collapsing every repo-less
+    // The identity key - (organization, operator, source, repository) - in two
+    // partial indexes because a nullable repository needs both halves: one for
+    // agents that know their repository, one collapsing every repo-less
     // sighting onto a single row per operator (a plain unique treats NULLs as
     // distinct, which would mint an identity per shift). Both exclude retired
     // rows, so retiring - by hand or as the loser of a merge - releases the
@@ -312,12 +321,12 @@ export const agents = pgTable(
     // the retired one. `upsertForKey`'s ON CONFLICT targetWhere must restate
     // these predicates exactly; postgres matches an arbiter to a partial
     // index by its predicate, and a mismatch fails every insert.
-    uniqueIndex("agents_organization_owner_source_repo_unique")
-      .on(table.organizationId, table.ownerUserId, table.source, table.repoRoot)
-      .where(sql`${table.repoRoot} is not null and ${table.status} <> 'retired'`),
+    uniqueIndex("agents_organization_owner_source_repo_key_unique")
+      .on(table.organizationId, table.ownerUserId, table.source, table.repoKey)
+      .where(sql`${table.repoKey} is not null and ${table.status} <> 'retired'`),
     uniqueIndex("agents_organization_owner_source_unassigned_unique")
       .on(table.organizationId, table.ownerUserId, table.source)
-      .where(sql`${table.repoRoot} is null and ${table.status} <> 'retired'`),
+      .where(sql`${table.repoKey} is null and ${table.status} <> 'retired'`),
     foreignKey({
       columns: [table.organizationId, table.ownerUserId],
       foreignColumns: [users.organizationId, users.id],
@@ -333,6 +342,9 @@ export const agents = pgTable(
     check("agents_name_length_valid", sql`char_length(${table.name}) between 1 and 200`),
     // Written null-or-valid, the same 1..1000 shape shift_commits.repo_root carries.
     check("agents_repo_root_length_valid", sql`${table.repoRoot} is null or char_length(${table.repoRoot}) between 1 and 1000`),
+    // A remote key is far shorter than a root; a path key is one 1000-character
+    // root behind its five-character `path:` lane marker, hence 1005.
+    check("agents_repo_key_length_valid", sql`${table.repoKey} is null or char_length(${table.repoKey}) between 1 and 1005`),
     index("agents_organization_id_idx").on(table.organizationId),
   ],
 );

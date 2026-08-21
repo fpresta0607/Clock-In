@@ -23,7 +23,7 @@ import type {
   ShiftCommitRepository,
 } from "../repositories.js";
 import type { AgentSessionReaper } from "./agent-sessions.js";
-import { repoLabel } from "./attribution.js";
+import { agentCodebaseLabel, repoLabel } from "./attribution.js";
 import { hourlySeries, maxConcurrentCount, medianDurationSeconds, normalizedQuery, safeInteger } from "./reports.js";
 
 export interface AgentPatchInput {
@@ -71,7 +71,9 @@ export function mayReadRepoRoot(subject: AuthenticatedSubject, ownerId: string):
  * through the same strict schema.
  */
 export function asAgentView(record: AgentRecord, subject: AuthenticatedSubject): AgentPaystubResponse["agent"] {
-  const name = record.repoRoot === null ? null : repoLabel(record.repoRoot);
+  // A name either way, never a path; the rule itself lives in attribution.ts
+  // so the roster, the minted default name and the repair script cannot drift.
+  const name = agentCodebaseLabel(record.repoRoot, record.repoKey);
   return {
     id: record.id,
     name: record.name,

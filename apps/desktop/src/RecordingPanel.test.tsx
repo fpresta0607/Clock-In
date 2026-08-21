@@ -214,7 +214,7 @@ describe("RecordingPanel", () => {
     expect(kept).toHaveTextContent("which folder it worked in");
     // Identity is keyed on the repository and the repository is named by its
     // remote, so the remote leaves the machine too and the sentence says so.
-    expect(kept).toHaveTextContent("origin remote URL");
+    expect(kept).toHaveTextContent("origin remote URL with any embedded credentials removed");
     // The sentence has to name everything that leaves the machine, repository
     // folder included, and who can see it.
     expect(kept).toHaveTextContent("title, commit id, and repository folder of each commit");
@@ -226,7 +226,10 @@ describe("RecordingPanel", () => {
     expect(never).toHaveTextContent("Pictures of your screen.");
     expect(never).toHaveTextContent("titles of your windows");
     expect(never).toHaveTextContent("the one exception, listed above");
-    expect(never).toHaveTextContent("Web addresses");
+    // The remote is a repository name, not browsing, and the never-list says so
+    // rather than claiming a category the code no longer honours.
+    expect(never).toHaveTextContent("Browsing addresses, history, or page content.");
+    expect(never).toHaveTextContent("is not browsing");
     expect(never).toHaveTextContent("inside your files");
   });
 
