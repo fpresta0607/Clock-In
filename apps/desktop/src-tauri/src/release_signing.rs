@@ -111,7 +111,7 @@ fn validate_updater_key(
     minisign::sign(
         Some(&public),
         &secret,
-        Cursor::new(b"clock-in signing credential validation"),
+        Cursor::new(b"siqshift signing credential validation"),
         None,
         None,
     )

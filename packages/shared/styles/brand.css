@@ -143,7 +143,7 @@ button:disabled { opacity: .55; cursor: default; }
 .project-dot { width: 10px; height: 10px; margin: 0 auto; border-radius: 50%; background: var(--accent-green); }
 
 /* The box the WebGL background paints into, shipped with the component that
-   paints it (`@clock-in/shared/webgl-shader`). The z-index MUST stay -1: a GPU
+   paints it (`@siqshift/shared/webgl-shader`). The z-index MUST stay -1: a GPU
    compositing quirk on some Chrome stacks paints the canvas over
    non-backdrop-filtered content at z-index 0. */
 .shader-bg { position: fixed; inset: 0; z-index: -1; display: block; width: 100%; height: 100%; }

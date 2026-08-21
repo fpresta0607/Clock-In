@@ -1,5 +1,5 @@
 //! MV3 service worker: thin adapters from chrome.* events into the pure span
-//! machine, and the native-messaging channel to `clock-in-browser-host`.
+//! machine, and the native-messaging channel to `siqshift-browser-host`.
 //!
 //! Privacy posture, enforced here: rules arrive from the host and matching
 //! happens in this process; only verdict events (`ruleId`, span id,
@@ -7,7 +7,7 @@
 //! matching and the local unmatched-origin tally, and are never transmitted.
 //! Unmatched tabs produce nothing. Off-the-record tabs are excluded via
 //! `tab.incognito` (Chrome's Guest windows report as off-the-record too);
-//! that flag is the entire exclusion mechanism, and Clock-In never asks for
+//! that flag is the entire exclusion mechanism, and SIQshift never asks for
 //! the browser's per-extension incognito toggle.
 //!
 //! Durability: the span machine's subjects are persisted to extension
@@ -72,7 +72,7 @@ import {
 } from "./startup.js";
 
 /** The registered native-messaging host name (the desktop registers it). */
-const HOST_NAME = "com.clock_in.browser_host";
+const HOST_NAME = "com.siqshift.browser_host";
 const TICK_MS = TICK_ALARM_PERIOD_MINUTES * 60_000;
 const TALLY_FLUSH_MS = 60_000;
 const IDLE_DETECTION_SECONDS = 15;

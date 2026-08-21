@@ -1,5 +1,5 @@
 {
-  "name": "@clock-in/api",
+  "name": "@siqshift/api",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -12,15 +12,15 @@
     }
   },
   "scripts": {
-    "build": "pnpm --filter @clock-in/shared build && pnpm --filter @clock-in/database build && tsc --project tsconfig.json",
-    "test": "pnpm --filter @clock-in/shared build && pnpm --filter @clock-in/database build && vitest run",
-    "typecheck": "pnpm --filter @clock-in/shared build && pnpm --filter @clock-in/database build && tsc --noEmit",
+    "build": "pnpm --filter @siqshift/shared build && pnpm --filter @siqshift/database build && tsc --project tsconfig.json",
+    "test": "pnpm --filter @siqshift/shared build && pnpm --filter @siqshift/database build && vitest run",
+    "typecheck": "pnpm --filter @siqshift/shared build && pnpm --filter @siqshift/database build && tsc --noEmit",
     "start": "node --env-file-if-exists=../../.env dist/server.js",
     "dev": "tsx watch --env-file-if-exists=../../.env src/server.ts"
   },
   "dependencies": {
-    "@clock-in/database": "workspace:*",
-    "@clock-in/shared": "workspace:*",
+    "@siqshift/database": "workspace:*",
+    "@siqshift/shared": "workspace:*",
     "@hono/node-server": "^2.1.0",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.9.3",

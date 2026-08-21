@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const script = fileURLToPath(new URL("./release-tauri-config.mjs", import.meta.url));
 
 async function runConfig(environment) {
-  const directory = await mkdtemp(path.join(tmpdir(), "clock-in-release-config-"));
+  const directory = await mkdtemp(path.join(tmpdir(), "siqshift-release-config-"));
   const output = path.join(directory, "github-output");
   try {
     execFileSync(process.execPath, [script], {
@@ -25,9 +25,9 @@ async function runConfig(environment) {
 
 test("emits a final-artifact signing configuration for thumbprint releases", async () => {
   const config = await runConfig({
-    CLOCK_IN_UPDATER_ENABLED: "true",
-    CLOCK_IN_WINDOWS_SIGNING: "true",
-    CLOCK_IN_WINDOWS_CERTIFICATE_THUMBPRINT: "ABC123",
+    SIQSHIFT_UPDATER_ENABLED: "true",
+    SIQSHIFT_WINDOWS_SIGNING: "true",
+    SIQSHIFT_WINDOWS_CERTIFICATE_THUMBPRINT: "ABC123",
     WINDOWS_TIMESTAMP_URL: "https://timestamp.example.test",
   });
 
@@ -47,9 +47,9 @@ test("rejects a release configuration without updater signing", () => {
   assert.throws(() => execFileSync(process.execPath, [script], {
     env: {
       ...process.env,
-      CLOCK_IN_UPDATER_ENABLED: "false",
-      CLOCK_IN_WINDOWS_SIGNING: "false",
-      GITHUB_OUTPUT: path.join(tmpdir(), "clock-in-release-config-missing-updater"),
+      SIQSHIFT_UPDATER_ENABLED: "false",
+      SIQSHIFT_WINDOWS_SIGNING: "false",
+      GITHUB_OUTPUT: path.join(tmpdir(), "siqshift-release-config-missing-updater"),
     },
     stdio: "pipe",
   }));
@@ -59,9 +59,9 @@ test("rejects a claimed Windows signing release without an imported certificate"
   assert.throws(() => execFileSync(process.execPath, [script], {
     env: {
       ...process.env,
-      CLOCK_IN_UPDATER_ENABLED: "true",
-      CLOCK_IN_WINDOWS_SIGNING: "true",
-      GITHUB_OUTPUT: path.join(tmpdir(), "clock-in-release-config-missing-thumbprint"),
+      SIQSHIFT_UPDATER_ENABLED: "true",
+      SIQSHIFT_WINDOWS_SIGNING: "true",
+      GITHUB_OUTPUT: path.join(tmpdir(), "siqshift-release-config-missing-thumbprint"),
     },
     stdio: "pipe",
   }));

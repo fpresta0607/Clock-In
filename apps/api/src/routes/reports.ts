@@ -1,4 +1,4 @@
-import { agentShiftsFiltersSchema, agentShiftsResponseSchema, agentsReportFiltersSchema, agentsReportResponseSchema, leaderboardFiltersSchema, leaderboardResponseSchema, reportFiltersSchema, reportResponseSchema } from "@clock-in/shared";
+import { agentShiftsFiltersSchema, agentShiftsResponseSchema, agentsReportFiltersSchema, agentsReportResponseSchema, leaderboardFiltersSchema, leaderboardResponseSchema, reportFiltersSchema, reportResponseSchema } from "@siqshift/shared";
 import { Hono } from "hono";
 import { streamText } from "hono/streaming";
 
@@ -47,7 +47,7 @@ export function createReportRoutes(service: ReportService): Hono<ApiEnvironment>
       await stream.write(reportCsvTotal(report.totalDurationSeconds));
     });
     response.headers.set("content-type", "text/csv; charset=utf-8");
-    response.headers.set("content-disposition", 'attachment; filename="clock-in-report.csv"');
+    response.headers.set("content-disposition", 'attachment; filename="siqshift-report.csv"');
     return response;
   });
   return routes;

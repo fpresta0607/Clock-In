@@ -14,7 +14,7 @@ use crate::monitor::lock;
 
 /// Resolved icons, kept for the process lifetime. Extraction walks the
 /// process table, the registry, and disk; an executable's icon does not
-/// change while Clock-In runs, so each name is paid for once.
+/// change while SIQshift runs, so each name is paid for once.
 static ICON_CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
 
 /// The most names one call resolves. The UI asks for at most a screenful of

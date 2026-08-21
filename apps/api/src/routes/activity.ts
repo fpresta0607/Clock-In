@@ -1,4 +1,4 @@
-import { activitySegmentBatchRequestSchema, activitySegmentBatchResponseSchema } from "@clock-in/shared";
+import { activitySegmentBatchRequestSchema, activitySegmentBatchResponseSchema } from "@siqshift/shared";
 import { Hono } from "hono";
 
 import { getAuthenticatedSubject, type ApiEnvironment } from "../app.js";

@@ -27,11 +27,11 @@ describe("createDisposableTestDatabase", () => {
     };
     postgresMock.mockReturnValueOnce(createControl).mockReturnValueOnce(dropControl);
 
-    await expect(createDisposableTestDatabase("postgresql://user:secret@example.test:5432/source?clock_in_disposable_test_capability=local-test-capability", "create-failure", "local-test-capability"))
+    await expect(createDisposableTestDatabase("postgresql://user:secret@example.test:5432/source?siqshift_disposable_test_capability=local-test-capability", "create-failure", "local-test-capability"))
       .rejects.toThrow("Could not create the disposable integration database: connection dropped after create");
 
     expect(dropControl.unsafe).toHaveBeenCalledWith(expect.stringMatching(
-      /^drop database if exists "clock_in_test_create_failu_[a-f0-9]+" with \(force\)$/,
+      /^drop database if exists "siqshift_test_create_failu_[a-f0-9]+" with \(force\)$/,
     ));
     expect(dropControl.end).toHaveBeenCalledTimes(1);
     expect(createDatabaseMock).not.toHaveBeenCalled();
@@ -49,7 +49,7 @@ describe("createDisposableTestDatabase", () => {
     };
     postgresMock.mockReturnValueOnce(createControl).mockReturnValueOnce(dropControl);
 
-    await expect(createDisposableTestDatabase("postgresql://user:secret@example.test:5432/source?clock_in_disposable_test_capability=local-test-capability", "close-failure", "local-test-capability"))
+    await expect(createDisposableTestDatabase("postgresql://user:secret@example.test:5432/source?siqshift_disposable_test_capability=local-test-capability", "close-failure", "local-test-capability"))
       .rejects.toBe(closeError);
 
     expect(createControl.unsafe).toHaveBeenCalledTimes(1);

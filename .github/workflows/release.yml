@@ -130,7 +130,7 @@ jobs:
           fi
 
       # tauri-action signs the app binary and the installers itself, but the
-      # helper binaries (clock-in-hook, clock-in-browser-host) are ours to
+      # helper binaries (siqshift-hook, siqshift-browser-host) are ours to
       # sign. Build them first and sign them with the same certificate; the
       # subsequent tauri-action build reuses the untouched cargo artifacts,
       # so the signed binaries are what end up in the installer. The build is
@@ -150,7 +150,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:WINDOWS_CERTIFICATE) {
-            $pfx = Join-Path $env:RUNNER_TEMP 'clock-in-codesign.pfx'
+            $pfx = Join-Path $env:RUNNER_TEMP 'siqshift-codesign.pfx'
             try {
               [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
               $password = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
@@ -180,8 +180,8 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
-          keychain="$RUNNER_TEMP/clock-in-release.keychain-db"
-          certificate="$RUNNER_TEMP/clock-in-release.p12"
+          keychain="$RUNNER_TEMP/siqshift-release.keychain-db"
+          certificate="$RUNNER_TEMP/siqshift-release.p12"
           keychain_password="$(uuidgen)"
           printf '%s' "$APPLE_CERTIFICATE" | python3 -c 'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))' > "$certificate"
           security create-keychain -p "$keychain_password" "$keychain"
@@ -199,11 +199,11 @@ jobs:
       - name: Build helper binaries
         shell: bash
         env:
-          CLOCK_IN_AUTH_URL: ${{ vars.CLOCK_IN_AUTH_URL }}
-          CLOCK_IN_API_URL: ${{ vars.CLOCK_IN_API_URL }}
-          CLOCK_IN_CHROME_EXTENSION_ID: ${{ vars.CLOCK_IN_CHROME_EXTENSION_ID }}
-          CLOCK_IN_EDGE_EXTENSION_ID: ${{ vars.CLOCK_IN_EDGE_EXTENSION_ID }}
-          CLOCK_IN_FIREFOX_EXTENSION_ID: ${{ vars.CLOCK_IN_FIREFOX_EXTENSION_ID }}
+          SIQSHIFT_AUTH_URL: ${{ vars.SIQSHIFT_AUTH_URL }}
+          SIQSHIFT_API_URL: ${{ vars.SIQSHIFT_API_URL }}
+          SIQSHIFT_CHROME_EXTENSION_ID: ${{ vars.SIQSHIFT_CHROME_EXTENSION_ID }}
+          SIQSHIFT_EDGE_EXTENSION_ID: ${{ vars.SIQSHIFT_EDGE_EXTENSION_ID }}
+          SIQSHIFT_FIREFOX_EXTENSION_ID: ${{ vars.SIQSHIFT_FIREFOX_EXTENSION_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
@@ -214,14 +214,14 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          CLOCK_IN_RELEASE_TARGET: ${{ matrix.target }}
+          SIQSHIFT_RELEASE_TARGET: ${{ matrix.target }}
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ steps.windows_signing.outputs.thumbprint }}
           WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
         run: |
           set -euo pipefail
           TAURI_CONFIG="$(node -e '
             const bundle = { externalBin: [] };
-            if (process.env.CLOCK_IN_RELEASE_TARGET === "windows") {
+            if (process.env.SIQSHIFT_RELEASE_TARGET === "windows") {
               bundle.windows = {
                 certificateThumbprint: process.env.WINDOWS_CERTIFICATE_THUMBPRINT,
                 digestAlgorithm: "sha256",
@@ -244,7 +244,7 @@ jobs:
             Select-Object -First 1 -ExpandProperty FullName
           $ts = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
           $certArgs = @('/sha1', $env:WINDOWS_CERTIFICATE_THUMBPRINT)
-          foreach ($bin in 'clock-in-hook.exe', 'clock-in-browser-host.exe') {
+          foreach ($bin in 'siqshift-hook.exe', 'siqshift-browser-host.exe') {
             $path = Join-Path 'apps/desktop/src-tauri/target/release' $bin
             & $signtool sign /fd sha256 /td sha256 /tr $ts @certArgs $path
             if ($LASTEXITCODE -ne 0) { throw "signtool failed for $bin" }
@@ -258,7 +258,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force 'apps/desktop/src-tauri/binaries' | Out-Null
-          foreach ($bin in 'clock-in-hook', 'clock-in-browser-host') {
+          foreach ($bin in 'siqshift-hook', 'siqshift-browser-host') {
             Copy-Item "apps/desktop/src-tauri/target/release/$bin.exe" "apps/desktop/src-tauri/binaries/$bin-x86_64-pc-windows-msvc.exe" -Force
           }
 
@@ -267,16 +267,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p apps/desktop/src-tauri/binaries
-          for bin in clock-in-hook clock-in-browser-host; do
+          for bin in siqshift-hook siqshift-browser-host; do
             cp "apps/desktop/src-tauri/target/release/$bin" "apps/desktop/src-tauri/binaries/$bin-aarch64-apple-darwin"
           done
 
       - name: Create Tauri bundle configuration
         id: tauri_config
         env:
-          CLOCK_IN_UPDATER_ENABLED: "true"
-          CLOCK_IN_WINDOWS_SIGNING: ${{ matrix.target == 'windows' && 'true' || 'false' }}
-          CLOCK_IN_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ steps.windows_signing.outputs.thumbprint }}
+          SIQSHIFT_UPDATER_ENABLED: "true"
+          SIQSHIFT_WINDOWS_SIGNING: ${{ matrix.target == 'windows' && 'true' || 'false' }}
+          SIQSHIFT_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ steps.windows_signing.outputs.thumbprint }}
           WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
         run: node scripts/release-tauri-config.mjs
 
@@ -284,11 +284,11 @@ jobs:
       # Without them the installer ships pointing at localhost.
       - uses: tauri-apps/tauri-action@v0
         env:
-          CLOCK_IN_AUTH_URL: ${{ vars.CLOCK_IN_AUTH_URL }}
-          CLOCK_IN_API_URL: ${{ vars.CLOCK_IN_API_URL }}
-          CLOCK_IN_CHROME_EXTENSION_ID: ${{ vars.CLOCK_IN_CHROME_EXTENSION_ID }}
-          CLOCK_IN_EDGE_EXTENSION_ID: ${{ vars.CLOCK_IN_EDGE_EXTENSION_ID }}
-          CLOCK_IN_FIREFOX_EXTENSION_ID: ${{ vars.CLOCK_IN_FIREFOX_EXTENSION_ID }}
+          SIQSHIFT_AUTH_URL: ${{ vars.SIQSHIFT_AUTH_URL }}
+          SIQSHIFT_API_URL: ${{ vars.SIQSHIFT_API_URL }}
+          SIQSHIFT_CHROME_EXTENSION_ID: ${{ vars.SIQSHIFT_CHROME_EXTENSION_ID }}
+          SIQSHIFT_EDGE_EXTENSION_ID: ${{ vars.SIQSHIFT_EDGE_EXTENSION_ID }}
+          SIQSHIFT_FIREFOX_EXTENSION_ID: ${{ vars.SIQSHIFT_FIREFOX_EXTENSION_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_CONFIG: ${{ steps.tauri_config.outputs.config }}
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ steps.windows_signing.outputs.thumbprint }}
@@ -306,7 +306,7 @@ jobs:
         with:
           projectPath: apps/desktop
           tagName: ${{ github.ref_name }}
-          releaseName: Clock-In ${{ github.ref_name }}
+          releaseName: SIQshift ${{ github.ref_name }}
           # Published (not draft) so the web app's download links work immediately.
           releaseDraft: false
           # A hyphen in the tag (v0.2.0-rc.1) marks a prerelease, so the
@@ -323,6 +323,6 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Compress-Archive `
-            -Path 'apps/desktop/src-tauri/target/release/clock-in-hook.exe', 'apps/desktop/src-tauri/target/release/clock-in-browser-host.exe' `
-            -DestinationPath 'clock-in-helpers-windows.zip' -Force
-          gh release upload $env:GITHUB_REF_NAME 'clock-in-helpers-windows.zip' --clobber
+            -Path 'apps/desktop/src-tauri/target/release/siqshift-hook.exe', 'apps/desktop/src-tauri/target/release/siqshift-browser-host.exe' `
+            -DestinationPath 'siqshift-helpers-windows.zip' -Force
+          gh release upload $env:GITHUB_REF_NAME 'siqshift-helpers-windows.zip' --clobber

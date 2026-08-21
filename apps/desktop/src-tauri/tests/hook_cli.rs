@@ -1,14 +1,14 @@
-//! End-to-end checks for the `clock-in-hook` binary: valid input lands as one
+//! End-to-end checks for the `siqshift-hook` binary: valid input lands as one
 //! canonical spool line, invalid input exits non-zero and writes nothing.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use clock_in_desktop_lib::spool::{self, MAX_SPOOL_RECORD_BYTES};
+use siqshift_desktop_lib::spool::{self, MAX_SPOOL_RECORD_BYTES};
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("clock-in-hook-test-{}-{tag}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("siqshift-hook-test-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir is created");
     dir
@@ -31,9 +31,9 @@ fn active_agent_spool(root: &Path) -> PathBuf {
 }
 
 fn run_hook(root: &Path, args: &[&str], stdin: Option<&str>) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_clock-in-hook"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_siqshift-hook"))
         .args(args)
-        .env("CLOCK_IN_SPOOL", root.join("agent-spool.jsonl"))
+        .env("SIQSHIFT_SPOOL", root.join("agent-spool.jsonl"))
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
@@ -72,7 +72,7 @@ fn an_event_lands_in_the_default_spool_when_no_identity_is_active() {
             "--session-id",
             "s1",
             "--cwd",
-            "/home/dev/Clock-In",
+            "/home/dev/SIQshift",
             "--model",
             "deepseek-v4-pro",
         ],
@@ -89,7 +89,7 @@ fn an_event_lands_in_the_default_spool_when_no_identity_is_active() {
         serde_json::from_str(content.lines().next().expect("one line")).expect("line parses");
     assert_eq!(value["source"], "pi");
     assert_eq!(value["model"], "deepseek-v4-pro");
-    assert_eq!(value["cwd"], "/home/dev/Clock-In");
+    assert_eq!(value["cwd"], "/home/dev/SIQshift");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -115,7 +115,7 @@ fn concurrent_runtimes_each_land_as_their_own_line() {
                 "--session-id",
                 session,
                 "--cwd",
-                "/home/dev/Clock-In",
+                "/home/dev/SIQshift",
                 "--model",
                 model,
             ],
@@ -159,7 +159,7 @@ fn a_valid_stdin_event_lands_as_one_canonical_line() {
         &dir,
         &[],
         Some(
-            r#"{"version":1,"source":"claude-code","event":"session-start","sessionId":"s1","cwd":"C:/dev/Clock-In","occurredAt":"2026-08-07T12:00:00Z"}"#,
+            r#"{"version":1,"source":"claude-code","event":"session-start","sessionId":"s1","cwd":"C:/dev/SIQshift","occurredAt":"2026-08-07T12:00:00Z"}"#,
         ),
     );
 
@@ -185,7 +185,7 @@ fn a_claude_native_stdin_payload_is_translated_and_spooled() {
         &dir,
         &[],
         Some(
-            r#"{"session_id":"s1","transcript_path":"/tmp/t.jsonl","cwd":"C:/dev/Clock-In","hook_event_name":"SessionStart","source":"startup"}"#,
+            r#"{"session_id":"s1","transcript_path":"/tmp/t.jsonl","cwd":"C:/dev/SIQshift","hook_event_name":"SessionStart","source":"startup"}"#,
         ),
     );
 
@@ -197,7 +197,7 @@ fn a_claude_native_stdin_payload_is_translated_and_spooled() {
     assert_eq!(value["source"], "claude_code");
     assert_eq!(value["event"], "started");
     assert_eq!(value["externalSessionId"], "s1");
-    assert_eq!(value["cwd"], "C:/dev/Clock-In");
+    assert_eq!(value["cwd"], "C:/dev/SIQshift");
     // Claude's payload has no timestamp; the hook stamps the current time.
     assert!(value["occurredAt"]
         .as_str()
@@ -238,7 +238,7 @@ fn a_claude_payload_without_a_session_id_exits_non_zero() {
     assert!(!output.status.success());
     assert!(!spool.exists());
     let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
-    assert!(stderr.contains("clock-in-hook:"));
+    assert!(stderr.contains("siqshift-hook:"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -253,7 +253,7 @@ fn malformed_stdin_exits_non_zero_and_writes_nothing() {
     assert!(!output.status.success());
     assert!(!spool.exists());
     let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
-    assert!(stderr.contains("clock-in-hook:"));
+    assert!(stderr.contains("siqshift-hook:"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -329,7 +329,7 @@ fn cursor_flags_with_a_native_payload_spool_an_event() {
     let output = run_hook(
         &dir,
         &["--source", "cursor", "--event", "session-start"],
-        Some(r#"{"conversation_id":"c1","workspace_roots":["C:/dev/Clock-In"]}"#),
+        Some(r#"{"conversation_id":"c1","workspace_roots":["C:/dev/SIQshift"]}"#),
     );
 
     assert!(output.status.success());
@@ -340,7 +340,7 @@ fn cursor_flags_with_a_native_payload_spool_an_event() {
     assert_eq!(value["source"], "cursor");
     assert_eq!(value["event"], "started");
     assert_eq!(value["externalSessionId"], "c1");
-    assert_eq!(value["cwd"], "C:/dev/Clock-In");
+    assert_eq!(value["cwd"], "C:/dev/SIQshift");
     // Cursor's payload has no timestamp; the hook stamps the current time.
     assert!(value["occurredAt"]
         .as_str()
@@ -497,7 +497,7 @@ fn cumulative_token_flags_land_on_the_spool_event() {
             "--session-id",
             "s1",
             "--cwd",
-            "/home/dev/Clock-In",
+            "/home/dev/SIQshift",
             "--input-tokens",
             "1200",
             "--output-tokens",
@@ -543,7 +543,7 @@ fn an_empty_token_flag_reads_as_absent() {
             "--session-id",
             "s1",
             "--cwd",
-            "/home/dev/Clock-In",
+            "/home/dev/SIQshift",
             "--input-tokens",
             "",
             "--output-tokens",
@@ -589,7 +589,7 @@ fn token_flags_ride_a_cli_native_stdin_payload() {
             "--input-tokens",
             "42",
         ],
-        Some(r#"{"conversation_id":"c1","workspace_roots":["C:/dev/Clock-In"]}"#),
+        Some(r#"{"conversation_id":"c1","workspace_roots":["C:/dev/SIQshift"]}"#),
     );
 
     assert!(
@@ -621,7 +621,7 @@ fn a_non_numeric_token_flag_exits_non_zero_and_writes_nothing() {
             "--session-id",
             "s1",
             "--cwd",
-            "/home/dev/Clock-In",
+            "/home/dev/SIQshift",
             "--input-tokens",
             "lots",
         ],

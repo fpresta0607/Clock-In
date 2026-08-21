@@ -68,7 +68,7 @@ describe("RecordingPanel", () => {
   it("says recording is on and needs no fixing", async () => {
     panelFor();
 
-    const panel = screen.getByRole("dialog", { name: "What Clock-In is recording" });
+    const panel = screen.getByRole("dialog", { name: "What SIQshift is recording" });
     expect(within(panel).getByText("Recording is on")).toBeInTheDocument();
     expect(within(panel).queryByRole("button", { name: "Turn recording on" })).not.toBeInTheDocument();
     expect(within(panel).getByText("This computer").closest("li")).toHaveTextContent("On, looks every 30 seconds");
@@ -78,7 +78,7 @@ describe("RecordingPanel", () => {
     const person = userEvent.setup();
     const props = panelFor({ status: { ...status, enabled: false, running: false } });
 
-    const panel = screen.getByRole("dialog", { name: "What Clock-In is recording" });
+    const panel = screen.getByRole("dialog", { name: "What SIQshift is recording" });
     expect(within(panel).getByText("Recording is off")).toBeInTheDocument();
     expect(within(panel).getByText("This computer").closest("li")).toHaveTextContent("Off");
 
@@ -89,7 +89,7 @@ describe("RecordingPanel", () => {
   it("explains a paused recorder without offering a switch that is already on", () => {
     panelFor({ status: { ...status, running: false } });
 
-    const panel = screen.getByRole("dialog", { name: "What Clock-In is recording" });
+    const panel = screen.getByRole("dialog", { name: "What SIQshift is recording" });
     expect(within(panel).getByText("Recording is on, but not running right now")).toBeInTheDocument();
     expect(within(panel).queryByRole("button", { name: "Turn recording on" })).not.toBeInTheDocument();
     expect(within(panel).getByText("This computer").closest("li")).toHaveTextContent("Waiting to start");
@@ -98,13 +98,13 @@ describe("RecordingPanel", () => {
   it("stays honest when the host never answered", () => {
     panelFor({ status: undefined });
 
-    const panel = screen.getByRole("dialog", { name: "What Clock-In is recording" });
-    expect(within(panel).getByText("Clock-In can't check this computer")).toBeInTheDocument();
+    const panel = screen.getByRole("dialog", { name: "What SIQshift is recording" });
+    expect(within(panel).getByText("SIQshift can't check this computer")).toBeInTheDocument();
     expect(within(panel).queryByText("This computer")).not.toBeInTheDocument();
     // The lists and the explainer are always true, so they stay on screen.
     expect(within(panel).getByText("What you type. Not one keystroke.")).toBeInTheDocument();
     expect(within(panel).getByText("Anything you type into a form, chat, or document.")).toBeInTheDocument();
-    expect(within(panel).getByText("Clock-In never reaches inside or controls your other apps.")).toBeInTheDocument();
+    expect(within(panel).getByText("SIQshift never reaches inside or controls your other apps.")).toBeInTheDocument();
     expect(within(panel).getByText(/You do nothing/)).toBeInTheDocument();
   });
 
@@ -112,7 +112,7 @@ describe("RecordingPanel", () => {
     const person = userEvent.setup();
     const props = panelFor();
 
-    const panel = screen.getByRole("dialog", { name: "What Clock-In is recording" });
+    const panel = screen.getByRole("dialog", { name: "What SIQshift is recording" });
     expect(within(panel).getByText("Claude Code").closest("li")).toHaveTextContent("Connected");
     const codex = within(panel).getByText("Codex").closest("li");
     expect(codex).toHaveTextContent("Not connected");
@@ -135,7 +135,7 @@ describe("RecordingPanel", () => {
       },
     });
 
-    const panel = screen.getByRole("dialog", { name: "What Clock-In is recording" });
+    const panel = screen.getByRole("dialog", { name: "What SIQshift is recording" });
     const connected = within(panel).getByText("Claude Code").closest("li") as HTMLElement;
     expect(connected).toHaveTextContent("Connected");
     expect(within(connected).queryByRole("button")).not.toBeInTheDocument();
@@ -154,7 +154,7 @@ describe("RecordingPanel", () => {
   it("says the browser is not watched rather than implying a connection", () => {
     panelFor();
 
-    const panel = screen.getByRole("dialog", { name: "What Clock-In is recording" });
+    const panel = screen.getByRole("dialog", { name: "What SIQshift is recording" });
     expect(within(panel).getByText(/does not watch your web browser/)).toBeInTheDocument();
   });
 
@@ -168,7 +168,7 @@ describe("RecordingPanel", () => {
       ],
     });
 
-    const panel = screen.getByRole("dialog", { name: "What Clock-In is recording" });
+    const panel = screen.getByRole("dialog", { name: "What SIQshift is recording" });
     const chrome = within(panel).getByText("Chrome").closest("li") as HTMLElement;
     expect(chrome).toHaveTextContent("Not connected");
     await person.click(within(chrome).getByRole("button", { name: "Add extension" }));
@@ -191,24 +191,24 @@ describe("RecordingPanel", () => {
       ],
     });
 
-    const panel = screen.getByRole("dialog", { name: "What Clock-In is recording" });
+    const panel = screen.getByRole("dialog", { name: "What SIQshift is recording" });
     expect(within(panel).queryByText("Chrome")).not.toBeInTheDocument();
     expect(within(panel).getByText(/does not watch your web browser/)).toBeInTheDocument();
   });
 
   it("shows what to paste when a tool cannot be connected automatically", () => {
-    panelFor({ hookSnippets: { codex: 'notify = ["clock-in-hook"]' } });
+    panelFor({ hookSnippets: { codex: 'notify = ["siqshift-hook"]' } });
 
-    const panel = screen.getByRole("dialog", { name: "What Clock-In is recording" });
+    const panel = screen.getByRole("dialog", { name: "What SIQshift is recording" });
     expect(within(panel).getByText(/can't switch this one on by itself/)).toBeInTheDocument();
-    expect(within(panel).getByText('notify = ["clock-in-hook"]')).toBeInTheDocument();
+    expect(within(panel).getByText('notify = ["siqshift-hook"]')).toBeInTheDocument();
   });
 
   it("lists what is written down and what never is, in plain words", () => {
     panelFor();
 
-    const panel = screen.getByRole("dialog", { name: "What Clock-In is recording" });
-    const kept = within(panel).getByRole("heading", { name: "Clock-In writes down" }).nextElementSibling;
+    const panel = screen.getByRole("dialog", { name: "What SIQshift is recording" });
+    const kept = within(panel).getByRole("heading", { name: "SIQshift writes down" }).nextElementSibling;
     expect(kept).toHaveTextContent("away from it");
     expect(kept).toHaveTextContent("The name only.");
     expect(kept).toHaveTextContent("which folder it worked in");
@@ -221,7 +221,7 @@ describe("RecordingPanel", () => {
     expect(kept).toHaveTextContent("shown only to you and your workspace's admins");
     expect(kept).not.toHaveTextContent(/press start/i);
 
-    const never = within(panel).getByRole("heading", { name: "Clock-In never writes down" }).nextElementSibling;
+    const never = within(panel).getByRole("heading", { name: "SIQshift never writes down" }).nextElementSibling;
     expect(never).toHaveTextContent("Not one keystroke.");
     expect(never).toHaveTextContent("Pictures of your screen.");
     expect(never).toHaveTextContent("titles of your windows");
@@ -233,8 +233,8 @@ describe("RecordingPanel", () => {
   it("explains that nothing is pressed, and where the numbers go", () => {
     panelFor();
 
-    const panel = screen.getByRole("dialog", { name: "What Clock-In is recording" });
-    const steps = within(panel).getByRole("heading", { name: "How Clock-In works" }).nextElementSibling;
+    const panel = screen.getByRole("dialog", { name: "What SIQshift is recording" });
+    const steps = within(panel).getByRole("heading", { name: "How SIQshift works" }).nextElementSibling;
     expect(steps).toHaveTextContent("You do nothing.");
     expect(steps).toHaveTextContent("no button to press and no timer to forget");
     expect(steps).toHaveTextContent("Quiet time is never counted.");

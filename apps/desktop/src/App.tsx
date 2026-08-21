@@ -31,9 +31,9 @@ import {
   friendlyAppName,
   leverage,
   type AgentRuntimeReportsModel,
-} from "@clock-in/shared";
+} from "@siqshift/shared";
 import { RecordingPanel, recordingState, type RecordingState } from "./RecordingPanel.js";
-import { WebGLShader } from "@clock-in/shared/webgl-shader";
+import { WebGLShader } from "@siqshift/shared/webgl-shader";
 
 type AppProps = {
   bridge?: TimerBridge;
@@ -592,11 +592,11 @@ const IDLE_HEADING: Record<RecordingState, string> = {
 };
 
 const IDLE_BLURB: Record<RecordingState, string> = {
-  on: "Clock-In starts writing your hours down as soon as you use this computer. There is nothing to press.",
-  stalled: "Clock-In has not looked at this computer for a while. Restarting the app starts it again.",
+  on: "SIQshift starts writing your hours down as soon as you use this computer. There is nothing to press.",
+  stalled: "SIQshift has not looked at this computer for a while. Restarting the app starts it again.",
   paused: "It starts on its own in a moment.",
-  off: "Turn recording on and Clock-In keeps your hours without you doing anything.",
-  unknown: "Clock-In is asking this computer what it is doing.",
+  off: "Turn recording on and SIQshift keeps your hours without you doing anything.",
+  unknown: "SIQshift is asking this computer what it is doing.",
 };
 
 const TODAY_EMPTY: Record<RecordingState, string> = {
@@ -604,7 +604,7 @@ const TODAY_EMPTY: Record<RecordingState, string> = {
   stalled: "Nothing new is being written down, because recording stopped responding.",
   paused: "Nothing yet. Recording is about to start.",
   off: "Nothing yet. Turn recording on to see where your time goes.",
-  unknown: "Clock-In can't reach the recorder on this computer, so it can't say.",
+  unknown: "SIQshift can't reach the recorder on this computer, so it can't say.",
 };
 
 /// What the AI-tools picker says about a runtime that is not connected yet:
@@ -701,7 +701,7 @@ const Titlebar = ({ onOpenSettings }: TitlebarProps) => {
   const appWindow = getCurrentWindow();
   return (
     <header className="titlebar" data-tauri-drag-region>
-      <span className="titlebar-title" data-tauri-drag-region>Clock-In</span>
+      <span className="titlebar-title" data-tauri-drag-region>SIQshift</span>
       <div className="titlebar-controls">
         {onOpenSettings && (
           <button type="button" className="titlebar-button" aria-label="Settings" title="Settings" onClick={onOpenSettings}>⚙</button>
@@ -1460,7 +1460,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
         <WebGLShader />
         <Titlebar />
         <div className="center-stage" aria-busy="true">
-          <p className="boot-message" role="status">Connecting to clock service…</p>
+          <p className="boot-message" role="status">Connecting to SIQshift…</p>
         </div>
       </main>
     );
@@ -1480,7 +1480,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
             <p className="subtle">
               {isSignUp
                 ? "Your workspace and first project are set up automatically."
-                : "Clock-In keeps your hours for you."}
+                : "SIQshift keeps your hours for you."}
             </p>
             {authError && <p className="form-error" role="alert">{authError}</p>}
             <form onSubmit={submitAuth}>
@@ -1670,7 +1670,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
       <div className="screen">
         {updateVersion && (
           <p className="update-banner" role="status" data-testid="update-banner">
-            Version {updateVersion} is on its way — Clock-In restarts itself when it&apos;s ready.
+            Version {updateVersion} is on its way — SIQshift restarts itself when it&apos;s ready.
           </p>
         )}
         {accountError && !settingsOpen && <p className="form-error" role="alert">{accountError}</p>}
@@ -2131,7 +2131,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                       <input type="checkbox" checked={settings.agentOverrideEnabled} onChange={(event) => void applySettings({ agentOverrideEnabled: event.target.checked })} />
                     </label>
                     <label className="toggle-row">
-                      <span>Add the Clock-In extension to my browsers automatically</span>
+                      <span>Add the SIQshift extension to my browsers automatically</span>
                       <input type="checkbox" checked={settings.browserAutoInstall} onChange={(event) => void applySettings({ browserAutoInstall: event.target.checked })} />
                     </label>
                     <label className="toggle-row">

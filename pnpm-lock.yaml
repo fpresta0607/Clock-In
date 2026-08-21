@@ -30,10 +30,10 @@ importers:
 
   apps/api:
     dependencies:
-      '@clock-in/database':
+      '@siqshift/database':
         specifier: workspace:*
         version: link:../../packages/database
-      '@clock-in/shared':
+      '@siqshift/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@hono/node-server':
@@ -70,7 +70,7 @@ importers:
 
   apps/desktop:
     dependencies:
-      '@clock-in/shared':
+      '@siqshift/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@tauri-apps/api':
@@ -113,7 +113,7 @@ importers:
 
   apps/web:
     dependencies:
-      '@clock-in/shared':
+      '@siqshift/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       react:

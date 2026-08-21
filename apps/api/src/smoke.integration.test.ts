@@ -6,7 +6,7 @@ import {
   runMigrations,
   type DatabaseConnection,
   type DisposableTestDatabase,
-} from "@clock-in/database";
+} from "@siqshift/database";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createApp } from "./app.js";
@@ -32,7 +32,7 @@ const integrationDescription = databaseUrl
 
 let config = parseEnv({
   DATABASE_URL: "postgres://unused:unused@localhost:5432/unused",
-  AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
+  AUTH_BASE_URL: "https://auth.siqshift.test/neondb/auth",
   NODE_ENV: "test",
 });
 
@@ -50,14 +50,14 @@ integration(integrationDescription, () => {
     database = disposable.database;
     config = parseEnv({
       DATABASE_URL: disposable.databaseUrl,
-      AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
+      AUTH_BASE_URL: "https://auth.siqshift.test/neondb/auth",
       NODE_ENV: "test",
     });
     await runMigrations(database);
 
     auth = await createTestAuth(config, new Date());
     authorized = {
-      authorization: await auth.bearer(authUserId, { email: "smoke@clock-in.test", name: "Smoke User" }),
+      authorization: await auth.bearer(authUserId, { email: "smoke@siqshift.test", name: "Smoke User" }),
       "content-type": "application/json",
     };
     app = createApp({
@@ -83,7 +83,7 @@ integration(integrationDescription, () => {
     const me = await app.request("/me", { headers: authorized });
     expect(me.status).toBe(200);
     const { user } = await me.json();
-    expect(user).toMatchObject({ id: authUserId, email: "smoke@clock-in.test", name: "Smoke User" });
+    expect(user).toMatchObject({ id: authUserId, email: "smoke@siqshift.test", name: "Smoke User" });
     expect(user.organizationId).toMatch(/^[0-9a-f-]{36}$/i);
 
     // A second request must reuse the provisioned account rather than create another.
@@ -157,7 +157,7 @@ integration(integrationDescription, () => {
   it("records the creator's admin claim when provisioning a workspace", async () => {
     const creatorId = randomUUID();
     const headers = {
-      authorization: await auth.bearer(creatorId, { email: "claim-creator@clock-in.test", name: "Claim Creator" }),
+      authorization: await auth.bearer(creatorId, { email: "claim-creator@siqshift.test", name: "Claim Creator" }),
       "content-type": "application/json",
     };
     const me = await app.request("/me", { headers });
@@ -179,7 +179,7 @@ integration(integrationDescription, () => {
     const observerId = randomUUID();
     const observer = {
       authorization: await auth.bearer(observerId, {
-        email: "observer@clock-in.test",
+        email: "observer@siqshift.test",
         name: "Observer User",
       }),
       "content-type": "application/json",
@@ -257,7 +257,7 @@ integration(integrationDescription, () => {
   it("resolves a shift against a database the migration chain built, and mints its roster identity", async () => {
     const agentUserId = randomUUID();
     const agentHeaders = {
-      authorization: await auth.bearer(agentUserId, { email: "roster@clock-in.test", name: "Roster User" }),
+      authorization: await auth.bearer(agentUserId, { email: "roster@siqshift.test", name: "Roster User" }),
       "content-type": "application/json",
     };
     await app.request("/me", { headers: agentHeaders });
@@ -315,9 +315,9 @@ integration(integrationDescription, () => {
     await database.client`
       insert into users (id, organization_id, email, name)
       values
-        (${firstUserId}, ${organizationId}, 'legacy-first@clock-in.test', 'Legacy First'),
-        (${secondUserId}, ${organizationId}, 'legacy-second@clock-in.test', 'Legacy Second'),
-        (${otherUserId}, ${otherOrganizationId}, 'other@clock-in.test', 'Other User')
+        (${firstUserId}, ${organizationId}, 'legacy-first@siqshift.test', 'Legacy First'),
+        (${secondUserId}, ${organizationId}, 'legacy-second@siqshift.test', 'Legacy Second'),
+        (${otherUserId}, ${otherOrganizationId}, 'other@siqshift.test', 'Other User')
     `;
     const firstAuth = await createTestAuth(config, new Date());
     const secondAuth = await createTestAuth(config, new Date());
@@ -330,7 +330,7 @@ integration(integrationDescription, () => {
       sessionRepository: new DrizzleSessionRepository(database.db),
     });
     const firstHeaders = {
-      authorization: await firstAuth.bearer(firstUserId, { email: "legacy-first@clock-in.test", name: "Legacy First" }),
+      authorization: await firstAuth.bearer(firstUserId, { email: "legacy-first@siqshift.test", name: "Legacy First" }),
       "content-type": "application/json",
     };
     const secondApp = createApp({
@@ -341,7 +341,7 @@ integration(integrationDescription, () => {
       sessionRepository: new DrizzleSessionRepository(database.db),
     });
     const secondHeaders = {
-      authorization: await secondAuth.bearer(secondUserId, { email: "legacy-second@clock-in.test", name: "Legacy Second" }),
+      authorization: await secondAuth.bearer(secondUserId, { email: "legacy-second@siqshift.test", name: "Legacy Second" }),
       "content-type": "application/json",
     };
 
@@ -431,7 +431,7 @@ integration(integrationDescription, () => {
       pathMappingRepository: new DrizzlePathMappingRepository(database.db),
     });
     const headers = {
-      authorization: await other.bearer(randomUUID(), { email: "other@clock-in.test", name: "Other User" }),
+      authorization: await other.bearer(randomUUID(), { email: "other@siqshift.test", name: "Other User" }),
     };
 
     const projects = await otherApp.request("/projects", { headers });
@@ -461,7 +461,7 @@ integration(integrationDescription, () => {
       pathMappingRepository: new DrizzlePathMappingRepository(database.db),
     });
     const teammateAuth = {
-      authorization: await teammate.bearer(teammateId, { email: "teammate@clock-in.test", name: "Teammate" }),
+      authorization: await teammate.bearer(teammateId, { email: "teammate@siqshift.test", name: "Teammate" }),
       "content-type": "application/json",
     };
 
@@ -525,7 +525,7 @@ integration(integrationDescription, () => {
     const response = await strangerApp.request("/accounts", {
       method: "POST",
       headers: {
-        authorization: await stranger.bearer(randomUUID(), { email: "stranger@clock-in.test", name: "Stranger" }),
+        authorization: await stranger.bearer(randomUUID(), { email: "stranger@siqshift.test", name: "Stranger" }),
         "content-type": "application/json",
       },
       body: JSON.stringify({ inviteCode: "ACDEF-GHJKM" }),
@@ -552,7 +552,7 @@ integration(integrationDescription, () => {
       pathMappingRepository: new DrizzlePathMappingRepository(database.db),
     });
     const headers = {
-      authorization: await latecomer.bearer(latecomerId, { email: "late@clock-in.test", name: "Late Comer" }),
+      authorization: await latecomer.bearer(latecomerId, { email: "late@siqshift.test", name: "Late Comer" }),
       "content-type": "application/json",
     };
 
@@ -605,14 +605,14 @@ integration(integrationDescription, () => {
       accounts: new DrizzleAccountStore(database.db),
     });
     const creatorHeaders = {
-      authorization: await creatorAuth.bearer(creatorId, { email: "creator-continuity@clock-in.test", name: "Creator Continuity" }),
+      authorization: await creatorAuth.bearer(creatorId, { email: "creator-continuity@siqshift.test", name: "Creator Continuity" }),
       "content-type": "application/json",
     };
     const creator = (await (await creatorApp.request("/me", { headers: creatorHeaders })).json()).user;
     const memberId = randomUUID();
     await database.client`
       insert into users (id, organization_id, email, name)
-      values (${memberId}, ${creator.organizationId}, 'creator-continuity-member@clock-in.test', 'Creator Continuity Member')
+      values (${memberId}, ${creator.organizationId}, 'creator-continuity-member@siqshift.test', 'Creator Continuity Member')
     `;
 
     const blocked = await creatorApp.request("/organization/join", {
@@ -647,7 +647,7 @@ integration(integrationDescription, () => {
     const claim = await memberApp.request("/organization/claim-admin", {
       method: "POST",
       headers: {
-        authorization: await memberAuth.bearer(memberId, { email: "creator-continuity-member@clock-in.test", name: "Creator Continuity Member" }),
+        authorization: await memberAuth.bearer(memberId, { email: "creator-continuity-member@siqshift.test", name: "Creator Continuity Member" }),
         "content-type": "application/json",
       },
     });
@@ -670,7 +670,7 @@ integration(integrationDescription, () => {
       pathMappingRepository: new DrizzlePathMappingRepository(database.db),
     });
     const headers = {
-      authorization: await tracked.bearer(randomUUID(), { email: "tracked@clock-in.test", name: "Tracked User" }),
+      authorization: await tracked.bearer(randomUUID(), { email: "tracked@siqshift.test", name: "Tracked User" }),
       "content-type": "application/json",
     };
 
@@ -735,7 +735,7 @@ integration(integrationDescription, () => {
         organization_id, user_id, client_id, device_id, kind, process_name,
         started_at, ended_at, received_at
       ) values (
-        ${user.organizationId}, ${user.id}, ${randomUUID()}, ${randomUUID()}, 'active', 'clock-in.exe',
+        ${user.organizationId}, ${user.id}, ${randomUUID()}, ${randomUUID()}, 'active', 'siqshift.exe',
         ${startedAt.toISOString()}, ${stoppedAt.toISOString()}, ${new Date("2026-03-08T06:31:00.000Z").toISOString()}
       )
     `;
@@ -756,14 +756,14 @@ integration(integrationDescription, () => {
       unattributedSeconds: 0,
       sessionCount: 1,
     }]);
-    expect(priorStatsBody.apps).toEqual([{ processName: "clock-in.exe", durationSeconds: 1_800 }]);
+    expect(priorStatsBody.apps).toEqual([{ processName: "siqshift.exe", durationSeconds: 1_800 }]);
 
     const dstStats = await app.request(`/me/stats?${dstDay}`, { headers: authorized });
     expect(dstStats.status).toBe(200);
     const dstStatsBody = await dstStats.json();
     expect(dstStatsBody.totalDurationSeconds).toBe(0);
     expect(dstStatsBody.projects).toEqual([]);
-    expect(dstStatsBody.apps).toEqual([{ processName: "clock-in.exe", durationSeconds: 1_800 }]);
+    expect(dstStatsBody.apps).toEqual([{ processName: "siqshift.exe", durationSeconds: 1_800 }]);
 
     const priorReports = await app.request(`/reports?${priorDay}`, { headers: authorized });
     expect(priorReports.status).toBe(200);

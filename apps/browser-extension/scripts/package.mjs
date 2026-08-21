@@ -108,5 +108,5 @@ function pack(variant, manifestFile, zipName) {
   console.log(`wrote ${out}`);
 }
 
-pack("chrome", "manifest.chrome.json", `clock-in-extension-chrome-${manifestVersion}.zip`);
-pack("firefox", "manifest.firefox.json", `clock-in-extension-firefox-${manifestVersion}.zip`);
+pack("chrome", "manifest.chrome.json", `siqshift-extension-chrome-${manifestVersion}.zip`);
+pack("firefox", "manifest.firefox.json", `siqshift-extension-firefox-${manifestVersion}.zip`);

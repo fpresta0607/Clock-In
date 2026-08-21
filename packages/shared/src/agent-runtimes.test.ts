@@ -11,7 +11,7 @@ import {
 import { agentSourceSchema } from "./contracts.js";
 
 describe("the agent runtime roster", () => {
-  it("declares the runtimes Clock-In is expected to recognize", () => {
+  it("declares the runtimes SIQshift is expected to recognize", () => {
     for (const id of ["claude_code", "codex", "cursor", "kimi_code", "pi", "opencode"]) {
       expect(agentRuntimeIds).toContain(id);
     }
@@ -54,12 +54,12 @@ describe("the agent runtime roster", () => {
 
   it("gives every unmergeable runtime a snippet that names the hook binary", () => {
     for (const runtime of agentRuntimes) {
-      const snippet = agentRuntimeManualSnippet(runtime.id, "/opt/clock-in-hook");
+      const snippet = agentRuntimeManualSnippet(runtime.id, "/opt/siqshift-hook");
       if (runtime.registration !== "manual") {
         expect(snippet).toBeUndefined();
         continue;
       }
-      expect(snippet).toContain("/opt/clock-in-hook");
+      expect(snippet).toContain("/opt/siqshift-hook");
       expect(snippet).not.toContain("{command}");
       // Each snippet takes whatever form that CLI actually needs — a shell
       // line, or JavaScript for the ones whose hooks are code — but every one
@@ -89,18 +89,18 @@ describe("the agent runtime roster", () => {
 
   it("keeps the unconfirmed mechanisms saying so while showing the --model flag", () => {
     for (const id of ["kimi_code", "grok", "muse", "copilot"]) {
-      const snippet = agentRuntimeManualSnippet(id, "/opt/clock-in-hook");
+      const snippet = agentRuntimeManualSnippet(id, "/opt/siqshift-hook");
       expect(snippet).toContain("unconfirmed");
       expect(snippet).toContain("--model");
     }
     // opencode's events genuinely carry no model, so its snippet shows none
     // and says why instead of inventing a source for one.
-    const opencode = agentRuntimeManualSnippet("opencode", "/opt/clock-in-hook");
+    const opencode = agentRuntimeManualSnippet("opencode", "/opt/siqshift-hook");
     expect(opencode).toContain("unconfirmed");
     expect(opencode).not.toContain("--model");
     // Pi's extensions name the model through ctx.model?.id on every event.
     for (const id of ["pi", "pi_signed"]) {
-      expect(agentRuntimeManualSnippet(id, "/opt/clock-in-hook")).toContain("--model");
+      expect(agentRuntimeManualSnippet(id, "/opt/siqshift-hook")).toContain("--model");
     }
   });
 

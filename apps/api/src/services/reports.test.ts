@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ReportFilters } from "@clock-in/shared";
+import type { ReportFilters } from "@siqshift/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import type {
@@ -1083,9 +1083,9 @@ describe("agents report", () => {
   it("names each agent's codebases from its shifts' working directories, deduped and path-free", async () => {
     const reports = new Reports();
     reports.agentIntervals = [
-      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:\\dev\\clock-in", projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:\\dev\\siqshift", projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
       // A deeper directory in the same codebase adds no second label.
-      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/clock-in/", projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T15:00:00.000Z"), endedAt: new Date("2026-08-06T16:00:00.000Z") },
+      { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/siqshift/", projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T15:00:00.000Z"), endedAt: new Date("2026-08-06T16:00:00.000Z") },
       { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "/home/alex/src/pocket-piggies", projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T16:00:00.000Z"), endedAt: new Date("2026-08-06T17:00:00.000Z") },
       // A shift that recorded no directory contributes nothing rather than a blank.
       { user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: null, projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T17:00:00.000Z"), endedAt: new Date("2026-08-06T18:00:00.000Z") },
@@ -1094,7 +1094,7 @@ describe("agents report", () => {
 
     const result = await service.agentsReport(subject, {});
 
-    expect(result.rows[0]!.repos).toEqual(["clock-in", "pocket-piggies"]);
+    expect(result.rows[0]!.repos).toEqual(["siqshift", "pocket-piggies"]);
   });
 
   // The Overlord's roster was mostly rows reading "0s · 0 shifts · pending"
@@ -1144,18 +1144,18 @@ describe("agents report", () => {
     const reports = new Reports();
     reports.agentIntervals = [
       // Run from a subdirectory: the cwd alone would read "web".
-      { sessionId: "shift-1", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/clock-in/apps/web", projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
+      { sessionId: "shift-1", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/siqshift/apps/web", projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T14:00:00.000Z"), endedAt: new Date("2026-08-06T15:00:00.000Z") },
       // No commit recorded a repo root here, so the cwd still names the codebase.
       { sessionId: "shift-2", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "/home/alex/src/pocket-piggies", projectId: ids.project, agentId: ids.session, startedAt: new Date("2026-08-06T15:00:00.000Z"), endedAt: new Date("2026-08-06T16:00:00.000Z") },
     ];
     const shiftCommits = new ShiftCommits([
-      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "pending", authoredAt: new Date("2026-08-06T14:30:00.000Z"), agentSessionId: "shift-1", repoRoot: "C:/dev/clock-in" },
+      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "pending", authoredAt: new Date("2026-08-06T14:30:00.000Z"), agentSessionId: "shift-1", repoRoot: "C:/dev/siqshift" },
     ]);
     const service = createReportService({ reports, reaper: silentReaper, agents: new Agents([agentRecord({ id: ids.session })]), shiftCommits });
 
     const result = await service.agentsReport(subject, {});
 
-    expect(result.rows[0]!.repos).toEqual(["clock-in", "pocket-piggies"]);
+    expect(result.rows[0]!.repos).toEqual(["siqshift", "pocket-piggies"]);
   });
 
   it("narrows commit tallies to the same project scope as the hours", async () => {
@@ -1274,8 +1274,8 @@ describe("agent shifts", () => {
     const reports = new Reports();
     reports.agentIntervals = [
       // Two clones of the same codebase in different treehouse worktrees.
-      { sessionId: "s1", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: "claude-opus-5", cwd: "C:/Users/a/.treehouse/clock-in-0cd188/1/clock-in", projectId: ids.project, agentId: ids.session, startedAt: at(10), endedAt: at(11) },
-      { sessionId: "s2", user: { id: ids.user, name: "Alex" }, source: "pi", model: "deepseek-v4-pro", cwd: "C:/Users/a/.treehouse/clock-in-8f31a2/1/clock-in", projectId: ids.project, agentId: ids.otherAgent, startedAt: at(12), endedAt: at(12, 30) },
+      { sessionId: "s1", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: "claude-opus-5", cwd: "C:/Users/a/.treehouse/siqshift-0cd188/1/siqshift", projectId: ids.project, agentId: ids.session, startedAt: at(10), endedAt: at(11) },
+      { sessionId: "s2", user: { id: ids.user, name: "Alex" }, source: "pi", model: "deepseek-v4-pro", cwd: "C:/Users/a/.treehouse/siqshift-8f31a2/1/siqshift", projectId: ids.project, agentId: ids.otherAgent, startedAt: at(12), endedAt: at(12, 30) },
       // A different codebase, and a shift that recorded nothing.
       { sessionId: "s3", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "/home/a/src/quartermaster", projectId: ids.project, agentId: ids.session, startedAt: at(13), endedAt: at(13, 10) },
       { sessionId: "s4", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: null, projectId: ids.project, agentId: ids.session, startedAt: at(14), endedAt: at(15) },
@@ -1288,26 +1288,26 @@ describe("agent shifts", () => {
 
     // Heaviest first, the label-less group last despite out-summing quartermaster.
     expect(result.groups.map((group) => [group.repo, group.agentSeconds, group.shiftCount])).toEqual([
-      ["clock-in", 5_400, 2],
+      ["siqshift", 5_400, 2],
       ["quartermaster", 600, 1],
       [null, 3_600, 1],
     ]);
     expect(result.totalAgentSeconds).toBe(9_600);
     // Shifts read newest first and carry their own facts.
-    const clockIn = result.groups[0]!;
-    expect(clockIn.shifts.map((shift) => shift.id)).toEqual(["s2", "s1"]);
-    expect(clockIn.shifts[1]).toMatchObject({ source: "claude_code", model: "claude-opus-5", owner: { name: "Alex" }, agentSeconds: 3_600 });
+    const siqshift = result.groups[0]!;
+    expect(siqshift.shifts.map((shift) => shift.id)).toEqual(["s2", "s1"]);
+    expect(siqshift.shifts[1]).toMatchObject({ source: "claude_code", model: "claude-opus-5", owner: { name: "Alex" }, agentSeconds: 3_600 });
   });
 
   it("labels a shift by its commit's repo root over its cwd, and holds the rate back until a commit is decided", async () => {
     const reports = new Reports();
     reports.agentIntervals = [
       // Run from a subdirectory: the cwd alone would read "web".
-      { sessionId: "s1", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/clock-in/apps/web", projectId: ids.project, agentId: ids.session, startedAt: at(10), endedAt: at(11) },
-      { sessionId: "s2", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/clock-in", projectId: ids.project, agentId: ids.session, startedAt: at(12), endedAt: at(13) },
+      { sessionId: "s1", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/siqshift/apps/web", projectId: ids.project, agentId: ids.session, startedAt: at(10), endedAt: at(11) },
+      { sessionId: "s2", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/siqshift", projectId: ids.project, agentId: ids.session, startedAt: at(12), endedAt: at(13) },
     ];
     const pendingOnly = new ShiftCommits([
-      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "pending", authoredAt: at(10, 30), agentSessionId: "s1", repoRoot: "C:/dev/clock-in", subject: "fix: the thing" },
+      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "pending", authoredAt: at(10, 30), agentSessionId: "s1", repoRoot: "C:/dev/siqshift", subject: "fix: the thing" },
     ]);
     const service = createReportService({ reports, reaper: silentReaper, shiftCommits: pendingOnly });
 
@@ -1315,15 +1315,15 @@ describe("agent shifts", () => {
 
     expect(result.groups).toHaveLength(1);
     const group = result.groups[0]!;
-    expect(group.repo).toBe("clock-in");
+    expect(group.repo).toBe("siqshift");
     // Nothing decided yet: no rate, rather than a "pending" that reads as a state.
     expect(group.heldRate).toBeNull();
     expect(group.shifts.find((shift) => shift.id === "s1")!.commitCount).toBe(1);
     expect(group.shifts.find((shift) => shift.id === "s2")!.commitCount).toBe(0);
 
     const decided = new ShiftCommits([
-      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "merged", authoredAt: at(10, 30), agentSessionId: "s1", repoRoot: "C:/dev/clock-in" },
-      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "reverted", authoredAt: at(12, 30), agentSessionId: "s2", repoRoot: "C:/dev/clock-in" },
+      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "merged", authoredAt: at(10, 30), agentSessionId: "s1", repoRoot: "C:/dev/siqshift" },
+      { userId: ids.user, agentId: ids.session, projectId: ids.project, verification: "reverted", authoredAt: at(12, 30), agentSessionId: "s2", repoRoot: "C:/dev/siqshift" },
     ]);
     const decidedService = createReportService({ reports, reaper: silentReaper, shiftCommits: decided });
     const decidedResult = await decidedService.agentShifts(subject, {});
@@ -1333,8 +1333,8 @@ describe("agent shifts", () => {
   it("clips shifts to the range and drops the ones outside it", async () => {
     const reports = new Reports();
     reports.agentIntervals = [
-      { sessionId: "s1", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/clock-in", projectId: ids.project, agentId: ids.session, startedAt: at(9), endedAt: at(11) },
-      { sessionId: "s2", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/clock-in", projectId: ids.project, agentId: ids.session, startedAt: at(5), endedAt: at(6) },
+      { sessionId: "s1", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/siqshift", projectId: ids.project, agentId: ids.session, startedAt: at(9), endedAt: at(11) },
+      { sessionId: "s2", user: { id: ids.user, name: "Alex" }, source: "claude_code", model: null, cwd: "C:/dev/siqshift", projectId: ids.project, agentId: ids.session, startedAt: at(5), endedAt: at(6) },
     ];
     const service = createReportService({ reports, reaper: silentReaper });
 

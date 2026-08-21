@@ -1,4 +1,4 @@
-//! HTTP access to Neon Auth and the Clock-In API.
+//! HTTP access to Neon Auth and the SIQshift API.
 //!
 //! Two rules hold everywhere in this module: errors never carry a response body
 //! or a URL (either can contain a token), and the caller always learns which
@@ -622,7 +622,7 @@ fn session_cookie_value(headers: &reqwest::header::HeaderMap) -> ApiResult<Strin
 }
 
 /// Talks to both services. `auth_base_url` is the Neon Auth base URL; `api_base_url`
-/// is the Clock-In API. Cheap to clone: the inner HTTP client is reference-counted.
+/// is the SIQshift API. Cheap to clone: the inner HTTP client is reference-counted.
 #[derive(Clone)]
 pub struct ApiClient {
     http: reqwest::Client,
@@ -1207,7 +1207,7 @@ mod tests {
             r#"{
                 "totalAgentSeconds": 5400,
                 "groups": [{
-                    "repo": "clock-in",
+                    "repo": "siqshift",
                     "agentSeconds": 5400,
                     "shiftCount": 1,
                     "heldRate": 0.5,
@@ -1396,7 +1396,7 @@ mod tests {
                 "attributedSeconds": 5400,
                 "unattributedSeconds": 1800,
                 "projects": [{
-                    "project": {"id": "p1", "name": "Clock-In"},
+                    "project": {"id": "p1", "name": "SIQshift"},
                     "durationSeconds": 7200,
                     "attributedSeconds": 5400,
                     "unattributedSeconds": 1800,
@@ -1469,7 +1469,7 @@ mod tests {
 
         assert_eq!(stats.filters.from.as_deref(), Some("2026-08-01"));
         assert_eq!(stats.filters.to, None);
-        assert_eq!(stats.projects[0].project.name, "Clock-In");
+        assert_eq!(stats.projects[0].project.name, "SIQshift");
         assert_eq!(stats.attributed_seconds, 5400);
         assert_eq!(stats.unattributed_seconds, 1_800);
         assert_eq!(stats.projects[0].attributed_seconds, 5400);

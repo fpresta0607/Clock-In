@@ -790,7 +790,7 @@ mod tests {
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "clock-in-agent-usage-{name}-{}-{}",
+            "siqshift-agent-usage-{name}-{}-{}",
             std::process::id(),
             unique_suffix()
         ));
@@ -822,7 +822,7 @@ mod tests {
         serde_json::json!({
             "timestamp": timestamp,
             "sessionId": "session-1",
-            "cwd": "C:/dev/clock-in",
+            "cwd": "C:/dev/siqshift",
             "isSidechain": sidechain,
             "message": {
                 "model": model,
@@ -864,7 +864,7 @@ mod tests {
             external_session_id: "session-1".to_string(),
             event: AgentEventKind::Started,
             occurred_at: occurred_at.to_string(),
-            cwd: Some("C:/dev/clock-in".to_string()),
+            cwd: Some("C:/dev/siqshift".to_string()),
             start_head: None,
             repo_root: None,
             model: model.map(str::to_string),
@@ -1460,7 +1460,7 @@ mod tests {
         assert_eq!(heartbeat.model.as_deref(), Some("claude-opus-4.1"));
         assert_eq!(heartbeat.source, source());
         assert_eq!(heartbeat.external_session_id, "session-1");
-        assert_eq!(heartbeat.cwd.as_deref(), Some("C:/dev/clock-in"));
+        assert_eq!(heartbeat.cwd.as_deref(), Some("C:/dev/siqshift"));
         assert!(heartbeat.transcript_path.is_none() && heartbeat.tokens.is_none());
         assert!(
             read_registry(&usage_path)
@@ -1557,7 +1557,7 @@ mod tests {
                 transcript_path: Some(
                     "C:/Users/alex/.claude/projects/x/session-1.jsonl".to_string(),
                 ),
-                cwd: Some("C:/dev/clock-in".to_string()),
+                cwd: Some("C:/dev/siqshift".to_string()),
                 model_from_hook: true,
                 heartbeat_sent: true,
                 hook_buckets: vec![BucketTotals {

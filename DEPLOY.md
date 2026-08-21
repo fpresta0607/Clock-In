@@ -1,4 +1,4 @@
-# Deploying Clock-In
+# Deploying SIQshift
 
 Three things get deployed: the API (Railway), the web dashboard (Vercel), and
 the desktop installers (GitHub Releases). Neon already hosts the database and
@@ -7,11 +7,36 @@ Neon Auth, so neither needs deploying. DNS lives in **Azure DNS** for
 
 | Piece | Runs at | Deployed by |
 |---|---|---|
-| API | `api.clock.siqstack.com` | Railway, from `apps/api/Dockerfile` |
-| Web dashboard | `clock.siqstack.com` | Vercel, from `apps/web` |
+| API | `api.siqshift.siqstack.com` | Railway, from `apps/api/Dockerfile` |
+| Web dashboard | `siqshift.siqstack.com` | Vercel, from `apps/web` |
 | Desktop installers | GitHub Releases | Signed: `.github/workflows/release.yml`, on a tag. Unsigned, and what the site links today: `.github/workflows/unsigned-test-installers.yml`, on **Run workflow** |
 
 Do these in order. The API has to exist before the other two can point at it.
+
+## Carrying the Clock-In rename out of the repo
+
+The repo now says SIQshift everywhere. The names it *refers to* live in other
+people's dashboards, and none of them rename themselves. Until each is done,
+the thing on the left keeps answering to the old name and the repo is wrong
+about it:
+
+| Rename | Where | What breaks until it is done |
+|---|---|---|
+| Repo `Clock-In` → `SIQshift` | GitHub → Settings → Repository name | README badges 404, and the site's **Download for Windows** button and the updater endpoint both point at `.../SIQshift/releases/...`. GitHub redirects the *old* name to the new one after the rename, never before |
+| Railway project + domain `api.clock` → `api.siqshift` | `railway domain api.siqshift.siqstack.com`, then Azure DNS | The API keeps serving only the old hostname; the desktop build and the web bundle both target the new one |
+| Vercel project `clock-in` → `siqshift`, domain `clock` → `siqshift` | Vercel → Project Settings, then Azure DNS | The dashboard is only reachable at the old hostname |
+| Repo variables `CLOCK_IN_*` → `SIQSHIFT_*` | GitHub → Settings → Variables | Desktop builds compile against `.cargo/config.toml`'s localhost defaults, and `build.rs` fails every release build. `SIQSHIFT_AUTH_URL`, `SIQSHIFT_API_URL`, and the three extension ids |
+| `CORS_ORIGINS` → the new dashboard origin | Railway → API service variables | Every dashboard request fails CORS |
+| Neon Auth trusted origin | Neon → Auth → Trusted origins | Sign-in fails from the new dashboard origin |
+| Extension listings + `SIQSHIFT_*_EXTENSION_ID` | Chrome Web Store / Edge Add-ons | The store ids are per-listing. A renamed listing keeps its id; a *new* listing does not, and `browser::sync_extension_policies` force-installs by id |
+
+Two identifiers change what an installed copy is, not just what it is called:
+`com.siqshift.desktop` moves the desktop app's data directory and its spool, and
+`com.siqshift.browser_host` is the native-messaging host name the extension
+connects by. An existing v0.1.7 install finds neither, so it reads as a fresh
+install with no settings and no queued spool, and its agent hooks still point at
+the old `clock-in-hook` path until each is re-registered from the new app. Ship
+the rename as a version bump people install over, not as a silent update.
 
 ## Deploy the API and the web dashboard together
 
@@ -30,9 +55,9 @@ simply do not exist on it, so nobody's time is recorded either.
 Check what is actually running before blaming the code:
 
 ```bash
-curl -s https://api.clock.siqstack.com/health                 # is it up
+curl -s https://api.siqshift.siqstack.com/health                 # is it up
 curl -s -H "authorization: Bearer <jwt>" \
-  'https://api.clock.siqstack.com/reports/leaderboard?fromAt=2026-01-01T00:00:00.000Z&toExclusiveAt=2026-01-02T00:00:00.000Z'
+  'https://api.siqshift.siqstack.com/reports/leaderboard?fromAt=2026-01-01T00:00:00.000Z&toExclusiveAt=2026-01-02T00:00:00.000Z'
 ```
 
 A `validation_error` from that second call means the API predates instant
@@ -45,7 +70,7 @@ commit checked out in it *are* the deploy. Neither is inferred from GitHub, and 
 feature branch left checked out will ship instead of `main`.
 
 ```bash
-cd /home/fpresta0607/firstmate/projects/Clock-In   # the directory Railway is linked to
+cd /home/fpresta0607/firstmate/projects/SIQshift   # the directory Railway is linked to
 git checkout main && git pull                      # ship main, never a feature branch
 git rev-parse --short HEAD                         # record what is going out
 railway up --detach
@@ -110,7 +135,7 @@ and read the error:
 psql "$PROD_DATABASE_URL" -c \
   'select hash, created_at from drizzle.__drizzle_migrations order by id'
 # recreate that exact schema locally, then:
-DATABASE_URL='postgres://…/replica' pnpm --filter @clock-in/database migrate
+DATABASE_URL='postgres://…/replica' pnpm --filter @siqshift/database migrate
 ```
 
 ### A migration that swaps an ON CONFLICT arbiter's index has a window
@@ -168,7 +193,7 @@ The Railway CLI deploys straight from this repo (`railway.json` builds
 
 ```bash
 railway login
-railway init --name clock-in        # once, creates the project
+railway init --name siqshift        # once, creates the project
 railway add --service api           # once, creates the service
 railway up --detach                 # builds the Docker image and deploys
 ```
@@ -179,10 +204,10 @@ Leave `PORT` alone; Railway injects it and the API reads it.
 
 ```bash
 railway variables \
-  --set 'DATABASE_URL=<Neon → Clock-In → Connection Details → the unpooled/direct string>' \
+  --set 'DATABASE_URL=<Neon → SIQshift → Connection Details → the unpooled/direct string>' \
   --set 'AUTH_BASE_URL=https://ep-tiny-mountain-ay0l41z3.neonauth.c-5.us-east-2.aws.neon.tech/neondb/auth' \
   --set 'NODE_ENV=production' \
-  --set 'CORS_ORIGINS=https://clock.siqstack.com'
+  --set 'CORS_ORIGINS=https://siqshift.siqstack.com'
 ```
 
 `NODE_ENV=production` makes the API reject any non-HTTPS CORS origin, so a
@@ -191,16 +216,20 @@ typo here fails loudly at boot rather than silently allowing plaintext.
 **Add the domain:**
 
 ```bash
-railway domain api.clock.siqstack.com
+railway domain api.siqshift.siqstack.com
 ```
 
 It prints the DNS records to create. **In Azure DNS** (portal → `siqstack.com`
 zone → Record sets), add:
 
 ```
-Type: CNAME  Name: api.clock                  Value: nnv28u39.up.railway.app
-Type: TXT    Name: _railway-verify.api.clock  Value: railway-verify=460f44864d5f397c1c0c3f0d919d94280060ff7f9ef41435b7c98d5cb9c98863
+Type: CNAME  Name: api.siqshift                  Value: nnv28u39.up.railway.app
+Type: TXT    Name: _railway-verify.api.siqshift  Value: railway-verify=<the value `railway domain` printed>
 ```
+
+The `railway-verify` value is issued per hostname, so the one recorded for the
+old `api.clock` hostname is not reusable — take the fresh value from the
+`railway domain` output above.
 
 Azure DNS does not proxy records, so Railway can issue its TLS certificate as
 soon as the CNAME resolves. `railway domain status` shows progress.
@@ -208,23 +237,23 @@ soon as the CNAME resolves. `railway domain status` shows progress.
 **Run the migrations once**, from your machine, against production:
 
 ```bash
-DATABASE_URL='<the same direct URL>' pnpm --filter @clock-in/database migrate
+DATABASE_URL='<the same direct URL>' pnpm --filter @siqshift/database migrate
 ```
 
-**Confirm:** `curl https://api.clock.siqstack.com/health` → `{"status":"ok"}`
+**Confirm:** `curl https://api.siqshift.siqstack.com/health` → `{"status":"ok"}`
 
 ---
 
 ## 2. Web dashboard on Vercel
 
-The project `clock-in` is linked from `apps/web` (`.vercel/`) with these
+The project `siqshift` is linked from `apps/web` (`.vercel/`) with these
 Production environment variables — they are read at **build** time and baked
 into the bundle, so changing one needs a redeploy, not a restart:
 
 | Variable | Value |
 |---|---|
 | `VITE_AUTH_BASE_URL` | `https://ep-tiny-mountain-ay0l41z3.neonauth.c-5.us-east-2.aws.neon.tech/neondb/auth` |
-| `VITE_API_BASE_URL` | `https://api.clock.siqstack.com` |
+| `VITE_API_BASE_URL` | `https://api.siqshift.siqstack.com` |
 
 Deploy (build locally, upload the prebuilt output — no server-side build, so
 the pnpm workspace just works):
@@ -235,13 +264,17 @@ vercel build --prod
 vercel deploy --prebuilt --prod
 ```
 
-**Custom domain:** `clock.siqstack.com` is attached to the project. To activate
+**Custom domain:** `siqshift.siqstack.com` is attached to the project. To activate
 it, add these records in Azure DNS:
 
 ```
-Type: TXT    Name: _vercel   Value: vc-domain-verify=clock.siqstack.com,723d1c2754d20297cd40
-Type: CNAME  Name: clock     Value: cname.vercel-dns.com
+Type: TXT    Name: _vercel     Value: vc-domain-verify=siqshift.siqstack.com,<token from Vercel>
+Type: CNAME  Name: siqshift    Value: cname.vercel-dns.com
 ```
+
+Vercel mints the `vc-domain-verify` token against the exact hostname, so the
+token recorded for the old `clock.siqstack.com` domain does not carry over —
+read the current one off the domain's row in the Vercel dashboard.
 
 The TXT record is Vercel's one-time proof that we own `siqstack.com`; once the
 domain shows **Verified** in Vercel, the TXT can be removed.
@@ -254,9 +287,9 @@ those hostnames, edit that file too**, or the browser will block the requests.
 
 ## 3. Neon Auth
 
-Neon → Clock-In → Auth → Configuration:
+Neon → SIQshift → Auth → Configuration:
 
-- **Add trusted origin:** `https://clock.siqstack.com`
+- **Add trusted origin:** `https://siqshift.siqstack.com`
 - **Turn off "Allow localhost"** once you stop developing against it. Leaving it
   on in production widens what may redirect through your auth instance.
 
@@ -274,11 +307,11 @@ Variables). They are baked into a public binary, so do not use secrets:
 
 | Variable | Value |
 |---|---|
-| `CLOCK_IN_AUTH_URL` | `https://ep-tiny-mountain-ay0l41z3.neonauth.c-5.us-east-2.aws.neon.tech/neondb/auth` |
-| `CLOCK_IN_API_URL` | `https://api.clock.siqstack.com` |
-| `CLOCK_IN_CHROME_EXTENSION_ID` | Released Chrome Web Store ID, when available |
-| `CLOCK_IN_EDGE_EXTENSION_ID` | Released Edge Add-ons ID, when available |
-| `CLOCK_IN_FIREFOX_EXTENSION_ID` | Released Firefox add-on ID, when available |
+| `SIQSHIFT_AUTH_URL` | `https://ep-tiny-mountain-ay0l41z3.neonauth.c-5.us-east-2.aws.neon.tech/neondb/auth` |
+| `SIQSHIFT_API_URL` | `https://api.siqshift.siqstack.com` |
+| `SIQSHIFT_CHROME_EXTENSION_ID` | Released Chrome Web Store ID, when available |
+| `SIQSHIFT_EDGE_EXTENSION_ID` | Released Edge Add-ons ID, when available |
+| `SIQSHIFT_FIREFOX_EXTENSION_ID` | Released Firefox add-on ID, when available |
 
 Then tag a release:
 
@@ -313,8 +346,8 @@ start procurement before the release, not after:
 - **Windows:** an OV/EV code-signing certificate (~$200-600/yr)
 - **macOS:** Apple Developer Program ($99/yr) for signing and notarization
 
-The three desktop binaries (the app, `clock-in-hook`, and
-`clock-in-browser-host`) sign with the same certificate. On Windows the
+The three desktop binaries (the app, `siqshift-hook`, and
+`siqshift-browser-host`) sign with the same certificate. On Windows the
 workflow imports the `.pfx` into the runner's certificate store, or uses the
 configured store thumbprint directly, then signs the helpers with `signtool`
 and configures Tauri to sign the app and installers with that thumbprint; on
@@ -322,12 +355,12 @@ macOS the bundler deep-signs everything inside the `.app` and notarizes it.
 
 The helpers ship inside the installer via `externalBin` in
 `apps/desktop/src-tauri/tauri.conf.json`: the workflow stages them as
-`src-tauri/binaries/clock-in-hook-<target-triple>` and
-`src-tauri/binaries/clock-in-browser-host-<target-triple>` before the bundler
+`src-tauri/binaries/siqshift-hook-<target-triple>` and
+`src-tauri/binaries/siqshift-browser-host-<target-triple>` before the bundler
 runs, and the bundler installs them beside the app executable. That sibling
 rule is how the app finds them at runtime — hook registration quotes the
-`clock-in-hook` path beside the running app, and the native-messaging manifest
-points at the `clock-in-browser-host` path beside it.
+`siqshift-hook` path beside the running app, and the native-messaging manifest
+points at the `siqshift-browser-host` path beside it.
 
 Set these under Settings → Secrets and variables → Actions → **Secrets**:
 
@@ -391,8 +424,8 @@ clobbers its assets, so these two URLs always serve the newest build and never
 need touching:
 
 ```
-https://github.com/fpresta0607/Clock-In/releases/download/unsigned-latest/Clock-In-UNSIGNED-TEST-windows-x64-setup.exe
-https://github.com/fpresta0607/Clock-In/releases/download/unsigned-latest/Clock-In-UNSIGNED-TEST-macos-aarch64.dmg
+https://github.com/fpresta0607/SIQshift/releases/download/unsigned-latest/SIQshift-UNSIGNED-TEST-windows-x64-setup.exe
+https://github.com/fpresta0607/SIQshift/releases/download/unsigned-latest/SIQshift-UNSIGNED-TEST-macos-aarch64.dmg
 ```
 
 `apps/web/src/DownloadInstaller.tsx` hard-codes exactly those strings, and
@@ -442,7 +475,7 @@ are still by hand.
 macOS installers are built by the same workflow. They are unsigned and
 un-notarized, so Gatekeeper blocks them harder than SmartScreen does: after
 mounting the `.dmg` and copying the app, clear the quarantine flag with
-`xattr -dr com.apple.quarantine "/Applications/Clock-In.app"` before it will
+`xattr -dr com.apple.quarantine "/Applications/SIQshift.app"` before it will
 launch.
 
 ---
@@ -475,11 +508,11 @@ artifact (the Chrome/Edge zip and the Firefox variant zip from
 3. Same id step as Chrome once approved.
 
 After each store approves its listing, set the corresponding
-`CLOCK_IN_*_EXTENSION_ID` repository variable before building the next desktop
+`SIQSHIFT_*_EXTENSION_ID` repository variable before building the next desktop
 release. The ID is compiled into that release's native-messaging manifest and
 its force-install policy, so the same variable turns on the extension's
 connection and its automatic install (see **Force-install** below). A
-missing or invalid ID leaves that browser disabled and removes Clock-In's
+missing or invalid ID leaves that browser disabled and removes SIQshift's
 native-messaging registration, so pre-release placeholder IDs never authorize
 a production host.
 
@@ -496,7 +529,7 @@ path; ship Chrome/Edge first and submit Firefox when demand exists.
 `ExtensionInstallForcelist` policy. Once the ID is compiled in, the desktop
 app writes this entry itself under HKCU (per user, no elevation), so the
 extension installs from the store on the next browser launch by default. The
-settings toggle "Add the Clock-In extension to my browsers automatically" is
+settings toggle "Add the SIQshift extension to my browsers automatically" is
 the opt-out; switching it off strips the policy entry, which uninstalls the
 extension.
 
@@ -518,14 +551,14 @@ listing must exist and stay published even when every install is managed.
 ## Verifying a deploy
 
 ```bash
-curl https://api.clock.siqstack.com/health          # {"status":"ok"}
-curl -i https://api.clock.siqstack.com/me           # 401, no token
-curl -i -X OPTIONS https://api.clock.siqstack.com/me \
-  -H 'Origin: https://clock.siqstack.com' \
+curl https://api.siqshift.siqstack.com/health          # {"status":"ok"}
+curl -i https://api.siqshift.siqstack.com/me           # 401, no token
+curl -i -X OPTIONS https://api.siqshift.siqstack.com/me \
+  -H 'Origin: https://siqshift.siqstack.com' \
   -H 'Access-Control-Request-Method: GET'           # allow-origin echoes back
 ```
 
-Then open `https://clock.siqstack.com`, create an account, and confirm the
+Then open `https://siqshift.siqstack.com`, create an account, and confirm the
 workspace and invite code appear.
 
 ## Rolling back

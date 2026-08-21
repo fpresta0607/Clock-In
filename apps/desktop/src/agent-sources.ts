@@ -1,4 +1,4 @@
-import { agentRuntimeLabel } from "@clock-in/shared";
+import { agentRuntimeLabel } from "@siqshift/shared";
 
 /// Display names for the agent runtimes the hook contract knows about, straight
 /// from the shared roster, so one tool is never called two different things and

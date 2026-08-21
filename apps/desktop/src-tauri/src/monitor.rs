@@ -897,7 +897,7 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// stale rule set beats a stopped monitor.
 pub(crate) fn set_mappings(shared: &Arc<Mutex<MonitorShared>>, mappings: Vec<PathMapping>) {
     if let Err(error) = crate::browser::write_rules_file(&crate::spool::browser_dir(), &mappings) {
-        eprintln!("clock-in: could not write the browser rules file: {error}");
+        eprintln!("siqshift: could not write the browser rules file: {error}");
     }
     lock(shared).mappings = mappings;
 }
@@ -943,7 +943,7 @@ pub struct HookRegistration {
     /// say "not installed" instead of offering to connect something that is
     /// not there.
     pub installed: bool,
-    /// Installed, not connected, and not something Clock-In can wire up on its
+    /// Installed, not connected, and not something SIQshift can wire up on its
     /// own - the only rows that should ask a person for anything.
     pub needs_you: bool,
     pub config_path: String,
@@ -955,7 +955,7 @@ pub struct HookProbe {
     pub registration: agent_runtimes::Registration,
 }
 
-const HOOK_BINARY_NAME: &str = "clock-in-hook";
+const HOOK_BINARY_NAME: &str = "siqshift-hook";
 
 /// Where each CLI keeps the config a hook registration lands in, straight from
 /// the runtime roster. Every declared runtime is probed whether or not it is
@@ -1007,7 +1007,7 @@ pub fn detect_hooks(probes: &[HookProbe]) -> Vec<HookRegistration> {
                 detected,
                 installed,
                 // The only rows worth a person's attention: the tool is here,
-                // it is not connected, and Clock-In cannot connect it itself.
+                // it is not connected, and SIQshift cannot connect it itself.
                 needs_you: installed
                     && !detected
                     && probe.registration == agent_runtimes::Registration::Manual,
@@ -1017,16 +1017,16 @@ pub fn detect_hooks(probes: &[HookProbe]) -> Vec<HookRegistration> {
         .collect()
 }
 
-/// Connects every installed CLI that Clock-In can wire up by itself, and
+/// Connects every installed CLI that SIQshift can wire up by itself, and
 /// reports which ones it connected.
 ///
 /// This is what makes the connector list report state instead of asking for
 /// clicks. It is deliberately narrow: a runtime is touched only when its own
-/// config directory already exists, so Clock-In never creates configuration
+/// config directory already exists, so SIQshift never creates configuration
 /// for a tool that is not installed, and only when its hook mechanism is a
 /// config shape the host knows how to merge. Anything else - Kimi, Pi,
 /// opencode, Grok, Muse, Copilot - stays a `needs_you` row carrying the exact
-/// text to paste, because guessing a rewrite of a file Clock-In does not own
+/// text to paste, because guessing a rewrite of a file SIQshift does not own
 /// is worse than asking.
 pub fn auto_connect_hooks(probes: &[HookProbe]) -> Vec<String> {
     let mut connected = Vec::new();
@@ -1093,19 +1093,19 @@ const CURSOR_HOOKS: [(&str, &str); 2] = [
 
 fn hook_binary_file_name() -> &'static str {
     if cfg!(windows) {
-        "clock-in-hook.exe"
+        "siqshift-hook.exe"
     } else {
         HOOK_BINARY_NAME
     }
 }
 
-/// The command a registered hook invokes: the `clock-in-hook` binary installed
+/// The command a registered hook invokes: the `siqshift-hook` binary installed
 /// next to the running app, quoted so a path with spaces survives the CLI's
 /// shell. A missing binary fails the whole registration — a hook pointing at
 /// nothing is worse than none.
 fn hook_binary_command() -> ApiResult<String> {
     let exe = std::env::current_exe()
-        .map_err(|_| BridgeError::unknown("Could not locate the Clock-In app."))?;
+        .map_err(|_| BridgeError::unknown("Could not locate the SIQshift app."))?;
     let binary = exe
         .parent()
         .map(|dir| dir.join(hook_binary_file_name()))
@@ -1131,7 +1131,7 @@ pub fn register_hook(source: &str) -> ApiResult<HookRegisterResult> {
         // A CLI whose hook mechanism is not a JSON array of commands — Pi's and
         // opencode's are JavaScript, and the rest are unconfirmed against any
         // installed version — gets the honest paste-it-yourself text from the
-        // roster rather than a guessed rewrite of a file Clock-In does not own.
+        // roster rather than a guessed rewrite of a file SIQshift does not own.
         agent_runtimes::Registration::Manual => Ok(HookRegisterResult::Manual {
             config_path: probe.config_path.to_string_lossy().into_owned(),
             snippet: agent_runtimes::manual_snippet(source, command.trim_matches('"'))
@@ -1143,7 +1143,7 @@ pub fn register_hook(source: &str) -> ApiResult<HookRegisterResult> {
 /// The last-resort snippet for a roster entry that declares no text of its own.
 fn unregistered_snippet(source: &str, path: &str) -> String {
     format!(
-        "# Clock-In has no confirmed hook mechanism for this CLI. Wire its\n\
+        "# SIQshift has no confirmed hook mechanism for this CLI. Wire its\n\
          # session events to the hook binary, e.g.:\n\
          #   \"{path}\" --source {source} --event session-start --session-id <session> --cwd <dir>"
     )
@@ -1200,7 +1200,7 @@ fn register_cursor(config_path: &Path, command: &str) -> ApiResult<HookRegisterR
         });
     }
 
-    // Clock-In writes the version-1 flat schema; a file declaring another
+    // SIQshift writes the version-1 flat schema; a file declaring another
     // version is a shape this merge will not guess at.
     match config.get("version") {
         None => {
@@ -1601,11 +1601,11 @@ impl Monitor {
         if self.is_enabled() {
             // Discovery before the first poll, so an installed CLI is already
             // wired by the time the panel is opened. Silent by design: a
-            // connector Clock-In can switch on by itself is not a decision
+            // connector SIQshift can switch on by itself is not a decision
             // worth putting in front of somebody.
             let connected = auto_connect_hooks(&default_hook_probes());
             if !connected.is_empty() {
-                eprintln!("clock-in: connected {} agent CLI(s)", connected.len());
+                eprintln!("siqshift: connected {} agent CLI(s)", connected.len());
             }
             self.start().await;
         }
@@ -1704,7 +1704,7 @@ impl Monitor {
                     })
                     .collect();
                 // A hook says a session started; the process table says one is
-                // here. An agent that was already running when Clock-In
+                // here. An agent that was already running when SIQshift
                 // started - or whose start event was uploaded and truncated
                 // long ago - leaves no event to replay, so it is found by its
                 // process instead and keyed by pid so the two never collide.
@@ -1887,7 +1887,7 @@ fn append_segment_line(path: &Path, segment: &Segment, device_id: &str) {
     };
     line.push(b'\n');
     if spool::append_line(path, &line, spool::MAX_SPOOL_BYTES).is_err() {
-        eprintln!("clock-in: could not persist an activity segment");
+        eprintln!("siqshift: could not persist an activity segment");
     }
 }
 
@@ -1995,7 +1995,7 @@ fn append_session_line(path: &Path, session: &ObservedSession) {
     };
     line.push(b'\n');
     if spool::append_line(path, &line, spool::MAX_SPOOL_BYTES).is_err() {
-        eprintln!("clock-in: could not persist a finished session");
+        eprintln!("siqshift: could not persist a finished session");
     }
 }
 
@@ -2201,7 +2201,7 @@ mod platform {
         if instance.is_null() {
             return;
         }
-        let class_name: Vec<u16> = "ClockInMonitorEvents\0".encode_utf16().collect();
+        let class_name: Vec<u16> = "SIQshiftMonitorEvents\0".encode_utf16().collect();
         let class = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
             hInstance: instance,
@@ -2376,7 +2376,7 @@ mod tests {
     /// without touching a real CLI's configuration.
     fn probe_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "clock-in-probe-{name}-{}-{}",
+            "siqshift-probe-{name}-{}-{}",
             std::process::id(),
             unix_now()
         ));
@@ -2404,7 +2404,7 @@ mod tests {
             .expect("the config directory is creatable");
     }
 
-    /// A CLI that is not installed must never be touched: Clock-In does not
+    /// A CLI that is not installed must never be touched: SIQshift does not
     /// create configuration for tools that are not there.
     #[test]
     fn discovery_leaves_uninstalled_runtimes_alone() {
@@ -2431,7 +2431,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A CLI whose hooks Clock-In cannot write stays a row that reports what
+    /// A CLI whose hooks SIQshift cannot write stays a row that reports what
     /// it needs, rather than a guessed rewrite of somebody else's file.
     #[test]
     fn discovery_surfaces_only_the_runtimes_that_genuinely_need_a_person() {
@@ -2482,7 +2482,7 @@ mod tests {
         );
         assert!(
             !detect_hooks(&probes)[0].needs_you,
-            "a runtime Clock-In can wire itself never asks a person"
+            "a runtime SIQshift can wire itself never asks a person"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -3423,7 +3423,7 @@ mod tests {
     #[test]
     fn load_settings_mints_and_persists_a_device_id_once() {
         let dir =
-            std::env::temp_dir().join(format!("clock-in-monitor-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("siqshift-monitor-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("settings.json");
 
@@ -3472,12 +3472,12 @@ mod tests {
 
     #[test]
     fn hook_detection_matches_the_binary_name_in_config_files() {
-        let dir = std::env::temp_dir().join(format!("clock-in-hook-detect-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("siqshift-hook-detect-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir is created");
         let registered = dir.join("settings.json");
         let plain = dir.join("config.toml");
-        std::fs::write(&registered, r#"{"hooks": ["C:/bin/clock-in-hook.exe"]}"#)
+        std::fs::write(&registered, r#"{"hooks": ["C:/bin/siqshift-hook.exe"]}"#)
             .expect("config writes");
         std::fs::write(&plain, "model = \"default\"").expect("config writes");
 
@@ -3511,7 +3511,7 @@ mod tests {
     #[tokio::test]
     async fn a_stopped_monitor_reports_no_recording_and_no_open_session() {
         let dir =
-            std::env::temp_dir().join(format!("clock-in-monitor-idle-{}", std::process::id()));
+            std::env::temp_dir().join(format!("siqshift-monitor-idle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let client = ApiClient::new(
             "http://127.0.0.1:9/auth".to_string(),
@@ -3562,7 +3562,7 @@ mod tests {
     #[test]
     fn changing_accounts_clears_the_previous_project_override() {
         let dir =
-            std::env::temp_dir().join(format!("clock-in-monitor-account-{}", std::process::id()));
+            std::env::temp_dir().join(format!("siqshift-monitor-account-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let client = ApiClient::new(
             "http://127.0.0.1:9/auth".to_string(),
@@ -3599,7 +3599,7 @@ mod tests {
     #[tokio::test]
     async fn status_reports_the_agent_session_holding_recording_open() {
         let dir =
-            std::env::temp_dir().join(format!("clock-in-monitor-agent-{}", std::process::id()));
+            std::env::temp_dir().join(format!("siqshift-monitor-agent-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let client = ApiClient::new(
             "http://127.0.0.1:9/auth".to_string(),
@@ -3661,14 +3661,14 @@ mod tests {
     #[test]
     fn claude_registration_merges_without_clobbering_and_backs_up_once() {
         let dir =
-            std::env::temp_dir().join(format!("clock-in-hook-register-{}", std::process::id()));
+            std::env::temp_dir().join(format!("siqshift-hook-register-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir is created");
         let config = dir.join("settings.json");
         let original = r#"{"model":"opus","hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"echo hi"}]}]}}"#;
         std::fs::write(&config, original).expect("config writes");
 
-        let result = register_claude_shaped(&config, "\"C:/bin/clock-in-hook.exe\"", "claude_code")
+        let result = register_claude_shaped(&config, "\"C:/bin/siqshift-hook.exe\"", "claude_code")
             .expect("registration succeeds");
         assert!(
             matches!(result, HookRegisterResult::Registered { .. }),
@@ -3685,7 +3685,7 @@ mod tests {
         assert_eq!(starts.len(), 2, "the existing entry is kept, ours appended");
         assert_eq!(
             starts[1]["hooks"][0]["command"],
-            "\"C:/bin/clock-in-hook.exe\" --source claude_code --event session-start"
+            "\"C:/bin/siqshift-hook.exe\" --source claude_code --event session-start"
         );
         assert_eq!(
             merged["hooks"]["SessionEnd"].as_array().map(Vec::len),
@@ -3702,7 +3702,7 @@ mod tests {
 
         // A second run detects the hook and changes nothing, backup included.
         let before = std::fs::read_to_string(&config).expect("config reads");
-        let result = register_claude_shaped(&config, "\"C:/bin/clock-in-hook.exe\"", "claude_code")
+        let result = register_claude_shaped(&config, "\"C:/bin/siqshift-hook.exe\"", "claude_code")
             .expect("re-registration succeeds");
         assert!(
             matches!(result, HookRegisterResult::AlreadyRegistered { .. }),
@@ -3723,11 +3723,11 @@ mod tests {
 
     #[test]
     fn claude_registration_starts_from_a_missing_file() {
-        let dir = std::env::temp_dir().join(format!("clock-in-hook-fresh-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("siqshift-hook-fresh-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let config = dir.join("nested").join("settings.json");
 
-        let result = register_claude_shaped(&config, "\"C:/bin/clock-in-hook.exe\"", "claude_code")
+        let result = register_claude_shaped(&config, "\"C:/bin/siqshift-hook.exe\"", "claude_code")
             .expect("registration succeeds");
         assert!(matches!(result, HookRegisterResult::Registered { .. }));
 
@@ -3751,13 +3751,13 @@ mod tests {
     #[test]
     fn claude_registration_refuses_to_clobber_an_unparseable_file() {
         let dir =
-            std::env::temp_dir().join(format!("clock-in-hook-corrupt-{}", std::process::id()));
+            std::env::temp_dir().join(format!("siqshift-hook-corrupt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir is created");
         let config = dir.join("settings.json");
         std::fs::write(&config, "not json at all").expect("config writes");
 
-        let error = register_claude_shaped(&config, "\"C:/bin/clock-in-hook.exe\"", "claude_code")
+        let error = register_claude_shaped(&config, "\"C:/bin/siqshift-hook.exe\"", "claude_code")
             .expect_err("an unparseable file fails loudly");
         assert_eq!(error.kind, ErrorKind::Unknown);
         assert_eq!(
@@ -3776,14 +3776,14 @@ mod tests {
     #[test]
     fn cursor_registration_merges_without_clobbering_and_backs_up_once() {
         let dir =
-            std::env::temp_dir().join(format!("clock-in-cursor-register-{}", std::process::id()));
+            std::env::temp_dir().join(format!("siqshift-cursor-register-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir is created");
         let config = dir.join("hooks.json");
         let original = r#"{"version":1,"hooks":{"sessionStart":[{"command":"echo hi"}]}}"#;
         std::fs::write(&config, original).expect("config writes");
 
-        let result = register_cursor(&config, "\"C:/bin/clock-in-hook.exe\"")
+        let result = register_cursor(&config, "\"C:/bin/siqshift-hook.exe\"")
             .expect("registration succeeds");
         assert!(
             matches!(result, HookRegisterResult::Registered { .. }),
@@ -3800,11 +3800,11 @@ mod tests {
         assert_eq!(starts.len(), 2, "the existing entry is kept, ours appended");
         assert_eq!(
             starts[1]["command"],
-            "\"C:/bin/clock-in-hook.exe\" --source cursor --event session-start"
+            "\"C:/bin/siqshift-hook.exe\" --source cursor --event session-start"
         );
         assert_eq!(
             merged["hooks"]["sessionEnd"][0]["command"],
-            "\"C:/bin/clock-in-hook.exe\" --source cursor --event session-end"
+            "\"C:/bin/siqshift-hook.exe\" --source cursor --event session-end"
         );
 
         // The untouched original was backed up beside the file.
@@ -3816,7 +3816,7 @@ mod tests {
 
         // A second run detects the hook and changes nothing, backup included.
         let before = std::fs::read_to_string(&config).expect("config reads");
-        let result = register_cursor(&config, "\"C:/bin/clock-in-hook.exe\"")
+        let result = register_cursor(&config, "\"C:/bin/siqshift-hook.exe\"")
             .expect("re-registration succeeds");
         assert!(
             matches!(result, HookRegisterResult::AlreadyRegistered { .. }),
@@ -3838,11 +3838,11 @@ mod tests {
     #[test]
     fn cursor_registration_starts_from_a_missing_file() {
         let dir =
-            std::env::temp_dir().join(format!("clock-in-cursor-fresh-{}", std::process::id()));
+            std::env::temp_dir().join(format!("siqshift-cursor-fresh-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let config = dir.join("nested").join("hooks.json");
 
-        let result = register_cursor(&config, "\"C:/bin/clock-in-hook.exe\"")
+        let result = register_cursor(&config, "\"C:/bin/siqshift-hook.exe\"")
             .expect("registration succeeds");
         assert!(matches!(result, HookRegisterResult::Registered { .. }));
 
@@ -3853,7 +3853,7 @@ mod tests {
         for (key, event) in CURSOR_HOOKS {
             assert_eq!(
                 created["hooks"][key][0]["command"],
-                format!("\"C:/bin/clock-in-hook.exe\" --source cursor --event {event}")
+                format!("\"C:/bin/siqshift-hook.exe\" --source cursor --event {event}")
             );
         }
 
@@ -3863,13 +3863,13 @@ mod tests {
     #[test]
     fn cursor_registration_refuses_to_clobber_an_unparseable_file() {
         let dir =
-            std::env::temp_dir().join(format!("clock-in-cursor-corrupt-{}", std::process::id()));
+            std::env::temp_dir().join(format!("siqshift-cursor-corrupt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir is created");
         let config = dir.join("hooks.json");
         std::fs::write(&config, "not json at all").expect("config writes");
 
-        let error = register_cursor(&config, "\"C:/bin/clock-in-hook.exe\"")
+        let error = register_cursor(&config, "\"C:/bin/siqshift-hook.exe\"")
             .expect_err("an unparseable file fails loudly");
         assert_eq!(error.kind, ErrorKind::Unknown);
         assert_eq!(
@@ -3885,14 +3885,14 @@ mod tests {
     #[test]
     fn cursor_registration_refuses_an_unknown_schema_version() {
         let dir =
-            std::env::temp_dir().join(format!("clock-in-cursor-version-{}", std::process::id()));
+            std::env::temp_dir().join(format!("siqshift-cursor-version-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir is created");
         let config = dir.join("hooks.json");
         let original = r#"{"version":2,"hooks":{}}"#;
         std::fs::write(&config, original).expect("config writes");
 
-        let error = register_cursor(&config, "\"C:/bin/clock-in-hook.exe\"")
+        let error = register_cursor(&config, "\"C:/bin/siqshift-hook.exe\"")
             .expect_err("an unknown schema version fails loudly");
         assert_eq!(error.kind, ErrorKind::Unknown);
         assert_eq!(
@@ -3909,14 +3909,14 @@ mod tests {
         let error = register_hook("bogus").expect_err("an unknown source is rejected");
         assert_eq!(error.kind, ErrorKind::Validation);
 
-        let kimi = agent_runtimes::manual_snippet("kimi_code", "C:/bin/clock-in-hook.exe")
+        let kimi = agent_runtimes::manual_snippet("kimi_code", "C:/bin/siqshift-hook.exe")
             .expect("a manual runtime explains itself");
         assert!(kimi.contains("--source kimi_code"));
-        assert!(kimi.contains("C:/bin/clock-in-hook.exe"));
+        assert!(kimi.contains("C:/bin/siqshift-hook.exe"));
 
         // Pi's hooks are JavaScript, so the snippet is an extension rather than
         // a command line — the roster carries whatever each CLI actually needs.
-        let pi = agent_runtimes::manual_snippet("pi", "C:/bin/clock-in-hook.exe")
+        let pi = agent_runtimes::manual_snippet("pi", "C:/bin/siqshift-hook.exe")
             .expect("a manual runtime explains itself");
         assert!(pi.contains("session_start"));
         assert!(pi.contains("--source"));

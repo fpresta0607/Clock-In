@@ -1,4 +1,4 @@
-//! `clock-in-browser-host`: the native-messaging host the browser extension
+//! `siqshift-browser-host`: the native-messaging host the browser extension
 //! connects to. A thin dispatcher — read a framed JSON message from stdin,
 //! touch the shared browser state files or the browser spool, and write one
 //! framed JSON reply to stdout. All the file logic lives in the library's
@@ -12,12 +12,12 @@ use std::io::{self, BufWriter};
 use std::path::Path;
 
 use chrono::DateTime;
-use clock_in_desktop_lib::browser::{
+use serde_json::{json, Map, Value};
+use siqshift_desktop_lib::browser::{
     self, ExtensionNamespaceCapacity, ExtensionNamespaceReservationAcknowledgement, TallyEntry,
 };
-use clock_in_desktop_lib::native_messaging::{self, Frame};
-use clock_in_desktop_lib::spool::{self, AgentEventKind, SpoolEvent};
-use serde_json::{json, Map, Value};
+use siqshift_desktop_lib::native_messaging::{self, Frame};
+use siqshift_desktop_lib::spool::{self, AgentEventKind, SpoolEvent};
 
 fn main() {
     let dir = spool::browser_dir();
@@ -266,7 +266,7 @@ mod tests {
             .expect("the clock is past the epoch")
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "clock-in-browser-host-{name}-{}-{unique}",
+            "siqshift-browser-host-{name}-{}-{unique}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).expect("the temp dir is created");

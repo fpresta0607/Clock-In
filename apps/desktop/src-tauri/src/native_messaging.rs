@@ -1,7 +1,7 @@
 //! Chrome native-messaging framing: the browser's sanctioned stdio channel.
 //!
 //! Every message on the wire is a 4-byte little-endian length prefix followed
-//! by that many bytes of UTF-8 JSON, in both directions. Clock-In caps a
+//! by that many bytes of UTF-8 JSON, in both directions. SIQshift caps a
 //! message at 64 KB — Chrome's own ceiling is far higher, but a rule set is a
 //! few hundred bytes per rule and a span verdict under two hundred, so
 //! anything bigger is a bug or abuse. Oversize and truncated frames are

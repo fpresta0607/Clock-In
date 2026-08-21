@@ -5,8 +5,8 @@ import { verifyIdentity } from "./auth.js";
 import { parseEnv } from "./env.js";
 
 const config = parseEnv({
-  DATABASE_URL: "postgres://clock_in:password@localhost:5432/clock_in",
-  AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
+  DATABASE_URL: "postgres://siqshift:password@localhost:5432/siqshift",
+  AUTH_BASE_URL: "https://auth.siqshift.test/neondb/auth",
   NODE_ENV: "test",
 });
 

@@ -1,4 +1,4 @@
-import { createDatabase } from "@clock-in/database";
+import { createDatabase } from "@siqshift/database";
 
 import { createApp } from "./app.js";
 import { createNeonAuthKeys } from "./auth.js";
@@ -40,7 +40,7 @@ const server = serveApp(
   config,
 );
 
-console.info(`Clock-In API listening on port ${config.port}.`);
+console.info(`SIQshift API listening on port ${config.port}.`);
 
 // Platforms send SIGTERM and then kill after a grace period. Finish in-flight
 // requests and close the pool so a deploy never severs a timer mid-write.

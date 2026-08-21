@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Clock-In",
+  "productName": "SIQshift",
   "version": "0.1.7",
-  "identifier": "com.clock-in.desktop",
+  "identifier": "com.siqshift.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Clock-In",
+        "title": "SIQshift",
         "width": 520,
         "height": 920,
         "minWidth": 400,
@@ -29,13 +29,13 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/clock-in-hook", "binaries/clock-in-browser-host"],
+    "externalBin": ["binaries/siqshift-hook", "binaries/siqshift-browser-host"],
     "icon": ["icons/icon.ico", "icons/icon.png"]
   },
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/fpresta0607/Clock-In/releases/download/unsigned-latest/latest.json"
+        "https://github.com/fpresta0607/SIQshift/releases/download/unsigned-latest/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQwRERGNjNDNDY5N0E5MTQKUldRVXFaZEdQUGJkUU9VaHJxTFhYRXovdzUrVkZGSGkyc0wxZE9lekI3RUFaeTNrRjhCQStNK0IK"
     }

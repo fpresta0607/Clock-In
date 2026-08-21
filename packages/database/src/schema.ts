@@ -337,7 +337,7 @@ export const agents = pgTable(
   ],
 );
 
-// Agent CLI sessions reported by clock-in-hook. Upserted on
+// Agent CLI sessions reported by siqshift-hook. Upserted on
 // (organization, user, source, external session id); end-before-start is tolerated.
 export const agentSessions = pgTable(
   "agent_sessions",
@@ -346,7 +346,7 @@ export const agentSessions = pgTable(
     organizationId: uuid("organization_id").notNull(),
     userId: uuid("user_id").notNull(),
     // Text rather than an enum, and checked only for shape: the runtime roster
-    // in packages/shared/src/agent-runtimes.json decides what Clock-In can say
+    // in packages/shared/src/agent-runtimes.json decides what SIQshift can say
     // about a runtime, never whether it may be recorded. A runtime nobody has
     // declared yet lands here under its own id instead of being rejected or
     // collapsed into 'other', so supporting a new CLI needs no migration.

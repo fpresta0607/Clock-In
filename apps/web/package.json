@@ -1,17 +1,17 @@
 {
-  "name": "@clock-in/web",
+  "name": "@siqshift/web",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "pnpm --filter @clock-in/shared build && tsc --noEmit && vite build",
+    "build": "pnpm --filter @siqshift/shared build && tsc --noEmit && vite build",
     "dev": "vite",
     "preview": "vite preview",
-    "test": "pnpm --filter @clock-in/shared build && vitest run",
-    "typecheck": "pnpm --filter @clock-in/shared build && tsc --noEmit"
+    "test": "pnpm --filter @siqshift/shared build && vitest run",
+    "typecheck": "pnpm --filter @siqshift/shared build && tsc --noEmit"
   },
   "dependencies": {
-    "@clock-in/shared": "workspace:*",
+    "@siqshift/shared": "workspace:*",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "three": "^0.185.1"

@@ -8,10 +8,10 @@ mod agent_runtimes;
 mod agent_usage;
 mod api;
 mod app_icons;
-// Shared with the `clock-in-browser-host` binary; the host calls these from
+// Shared with the `siqshift-browser-host` binary; the host calls these from
 // its own `main`, and the app calls them to register the host and drain spans.
 pub mod browser;
-// Shared with the `clock-in-hook` binary; it reads the shift's starting HEAD
+// Shared with the `siqshift-hook` binary; it reads the shift's starting HEAD
 // when a `Started` line is written.
 pub mod git_evidence;
 mod monitor;
@@ -20,7 +20,7 @@ mod quota;
 mod recovery;
 mod shift_commits;
 mod uploader;
-// Shared with the `clock-in-hook` binary; the uploader drains it from here.
+// Shared with the `siqshift-hook` binary; the uploader drains it from here.
 pub mod spool;
 
 use std::collections::HashMap;
@@ -44,7 +44,7 @@ use api::{
 use monitor::{MonitorSettings, MonitorStatus, SettingsPatch};
 use recovery::RecoveryState;
 
-const KEYRING_SERVICE: &str = "clock-in";
+const KEYRING_SERVICE: &str = "siqshift";
 const KEYRING_ACCOUNT: &str = "neon-auth-session";
 
 /// Reads the session token the OS is holding for us, if any. A free function
@@ -80,13 +80,13 @@ fn compiled_url(value: Option<&str>, fallback: &str) -> String {
 
 fn auth_base_url() -> String {
     compiled_url(
-        option_env!("CLOCK_IN_AUTH_URL"),
+        option_env!("SIQSHIFT_AUTH_URL"),
         "http://localhost:4000/auth",
     )
 }
 
 fn api_base_url() -> String {
-    compiled_url(option_env!("CLOCK_IN_API_URL"), "http://localhost:3977")
+    compiled_url(option_env!("SIQSHIFT_API_URL"), "http://localhost:3977")
 }
 
 /// The `BootstrapSnapshot` union the React bridge decodes. Signed-out carries no
@@ -210,7 +210,7 @@ impl AppState {
         // the host cannot be enabled for this account right now.
         if let Err(error) = browser::enable_collection(&spool::browser_dir(), &user_id) {
             eprintln!(
-                "clock-in: could not enable browser attribution: {}",
+                "siqshift: could not enable browser attribution: {}",
                 error.message
             );
         }
@@ -389,7 +389,7 @@ async fn auth_logout(state: State<'_, AppState>) -> ApiResult<()> {
     state.monitor.clear_account();
     if let Err(error) = browser::deactivate_collection(&spool::browser_dir()) {
         eprintln!(
-            "clock-in: could not disable browser attribution: {}",
+            "siqshift: could not disable browser attribution: {}",
             error.message
         );
     }
@@ -701,7 +701,7 @@ fn flush_monitor_and_exit(app: &tauri::AppHandle, code: i32) {
 }
 
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Show Clock-In", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "Show SIQshift", true, None::<&str>)?;
     let hide = MenuItem::with_id(app, "hide", "Hide", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
@@ -713,7 +713,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 .ok_or_else(|| tauri::Error::AssetNotFound("default window icon".to_string()))?,
         )
         .menu(&menu)
-        .tooltip("Clock-In")
+        .tooltip("SIQshift")
         .on_menu_event(|app, event| {
             let Some(window) = app.get_webview_window("main") else {
                 return;
@@ -755,7 +755,7 @@ async fn install_available_update(handle: &tauri::AppHandle) -> bool {
     let updater = match handle.updater() {
         Ok(updater) => updater,
         Err(error) => {
-            eprintln!("clock-in: the updater is unavailable: {error}");
+            eprintln!("siqshift: the updater is unavailable: {error}");
             return false;
         }
     };
@@ -764,7 +764,7 @@ async fn install_available_update(handle: &tauri::AppHandle) -> bool {
         // No update, or the host could not be reached. Both are ordinary.
         Ok(None) => return false,
         Err(error) => {
-            eprintln!("clock-in: could not check for an update: {error}");
+            eprintln!("siqshift: could not check for an update: {error}");
             return false;
         }
     };
@@ -775,11 +775,11 @@ async fn install_available_update(handle: &tauri::AppHandle) -> bool {
 
     match update.download_and_install(|_, _| {}, || {}).await {
         Ok(()) => {
-            eprintln!("clock-in: staged update {}", update.version);
+            eprintln!("siqshift: staged update {}", update.version);
             true
         }
         Err(error) => {
-            eprintln!("clock-in: could not install the update: {error}");
+            eprintln!("siqshift: could not install the update: {error}");
             false
         }
     }
@@ -913,7 +913,7 @@ pub fn run() {
             {
                 use tauri_plugin_autostart::ManagerExt;
                 if let Err(error) = app.autolaunch().enable() {
-                    eprintln!("clock-in: could not register the login autostart: {error}");
+                    eprintln!("siqshift: could not register the login autostart: {error}");
                 }
             }
             if !std::env::args().any(|argument| argument == "--hidden") {
@@ -952,7 +952,7 @@ pub fn run() {
             project_delete,
         ])
         .build(tauri::generate_context!())
-        .expect("the Clock-In desktop host failed to start")
+        .expect("the SIQshift desktop host failed to start")
         .run(|app_handle, event| match event {
             // A preventable exit request (tray Quit, and a close that destroys
             // the window on platforms without a tray-resident flow) is held
@@ -1103,10 +1103,10 @@ mod tests {
         );
         assert_eq!(
             compiled_url(
-                Some(" https://api.clock-in.example "),
+                Some(" https://api.siqshift.example "),
                 "http://localhost:3977"
             ),
-            "https://api.clock-in.example"
+            "https://api.siqshift.example"
         );
     }
 
@@ -1114,7 +1114,7 @@ mod tests {
     fn a_hidden_second_launch_stays_in_the_tray() {
         assert!(!second_launch_surfaces_window(&["--hidden".to_string()]));
         assert!(!second_launch_surfaces_window(&[
-            "clock-in-desktop.exe".to_string(),
+            "siqshift-desktop.exe".to_string(),
             "--hidden".to_string(),
         ]));
     }

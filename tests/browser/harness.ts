@@ -26,7 +26,7 @@ const withoutImports = (css: string): string => {
  * An app's real stylesheet, with its `@import`s resolved by hand.
  *
  * The pages below are served through `setContent`, which has no module
- * resolver and no network: the bare `@clock-in/shared/brand.css` import would
+ * resolver and no network: the bare `@siqshift/shared/brand.css` import would
  * not resolve and the Google Fonts one would reach out of the test run. Both
  * are replaced here - brand.css by its own text, the font by nothing - so the
  * rules under test are the ones the app actually ships.
@@ -86,7 +86,7 @@ const meterRow = (name: string, detail: string, share: number | "quota", duratio
 /// side by side is what a second column has to survive.
 const TODAY_ROWS: readonly (readonly [string, string, number | "quota", string])[] = [
   ["Visual Studio Code", "", 100, "4h 12m"],
-  ["Claude Code", "clock-in", "quota", "3h 06m"],
+  ["Claude Code", "siqshift", "quota", "3h 06m"],
   ["Google Chrome", "", 51, "2h 09m"],
   ["Windows Terminal", "", 33, "1h 24m"],
   ["Slack", "", 18, "46m"],
@@ -130,7 +130,7 @@ export async function openAgentsGroup(page: Page, app: "desktop" | "web"): Promi
           <div class="shift-group" data-testid="shift-group">
             <div class="meter-row shift-group-head">
               <span class="project-dot" aria-hidden="true"></span>
-              <span class="meter-name">clock-in<span class="meter-detail held-tag"> · 50% held</span></span>
+              <span class="meter-name">siqshift<span class="meter-detail held-tag"> · 50% held</span></span>
               <span class="meter-bar" aria-hidden="true" style="--share: 75%"></span>
               <span class="meter-duration">1h 30m</span>
             </div>

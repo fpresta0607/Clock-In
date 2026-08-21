@@ -37,7 +37,7 @@ export function buildUpdaterManifest({ version, baseUrl, signature, installerNam
 
   return {
     version: trimmedVersion,
-    notes: notes ?? "Automatic update of the Clock-In unsigned test build.",
+    notes: notes ?? "Automatic update of the SIQshift unsigned test build.",
     pub_date: pubDate ?? new Date().toISOString(),
     platforms: {
       "windows-x86_64": {

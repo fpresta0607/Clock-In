@@ -473,7 +473,7 @@ describe("agent session contracts", () => {
     externalSessionId: "session-42",
     event: "started",
     occurredAt: startedAt,
-    cwd: "C:/dev/Clock-In",
+    cwd: "C:/dev/SIQshift",
   };
 
   it("covers every event kind and takes any canonically shaped runtime", () => {
@@ -509,7 +509,7 @@ describe("agent session contracts", () => {
   });
 
   it("takes the repository the hook probed, and reads its absence as absence", () => {
-    const withRepo = { ...event, repoRoot: "C:/dev/Clock-In" };
+    const withRepo = { ...event, repoRoot: "C:/dev/SIQshift" };
     expect(agentSessionEventSchema.parse(withRepo)).toEqual(withRepo);
     // A desktop from before the probe simply never sends it; its shifts mint
     // into the operator's unassigned bucket and graduate from their commits.
@@ -522,7 +522,7 @@ describe("agent session contracts", () => {
     // A browser span has no working directory, so it has no repository
     // either; accepting one would hand a repo to a path that never resolves it.
     const span = { ...event, source: "browser", cwd: undefined, ruleId: ids.session };
-    expect(() => agentSessionEventSchema.parse({ ...span, repoRoot: "C:/dev/Clock-In" })).toThrow();
+    expect(() => agentSessionEventSchema.parse({ ...span, repoRoot: "C:/dev/SIQshift" })).toThrow();
     expect(agentSessionEventSchema.parse(span).ruleId).toBe(ids.session);
   });
 
@@ -565,8 +565,8 @@ describe("path mapping contracts", () => {
   const mapping = {
     id: ids.session,
     kind: "path_prefix",
-    pathPrefix: "C:/dev/Clock-In",
-    repoUrl: "https://github.com/siqstack/clock-in.git",
+    pathPrefix: "C:/dev/SIQshift",
+    repoUrl: "https://github.com/siqstack/siqshift.git",
     projectId: ids.project,
   };
 
@@ -691,7 +691,7 @@ describe("personal stats contracts", () => {
         commitsOrphaned: 0,
         heldRate: 1,
         models: ["claude-fable-5"],
-        repos: ["clock-in"],
+        repos: ["siqshift"],
         tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
         tokensReported: true,
       },
@@ -845,7 +845,7 @@ describe("roster agent contracts", () => {
     expect(shiftCommitVerificationValues).toEqual(["pending", "merged", "reverted", "orphaned"]);
     const commit = {
       id: ids.client,
-      repoRoot: "C:/dev/clock-in",
+      repoRoot: "C:/dev/siqshift",
       branch: "feat/roster",
       sha: "a".repeat(40),
       subject: "feat(api): roster agents",
@@ -875,14 +875,14 @@ describe("roster agent contracts", () => {
         awaySeconds: 1_800,
       },
       models: [{ model: "claude-fable-5", agentSeconds: 3_600, shiftCount: 1, maxConcurrent: 1, medianSeconds: 3_600, tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 } }],
-      codebases: [{ repo: "clock-in", agentSeconds: 3_600, shiftCount: 1 }],
+      codebases: [{ repo: "siqshift", agentSeconds: 3_600, shiftCount: 1 }],
       shifts: [{
         id: ids.session,
         startedAt,
         endedAt: stoppedAt,
         model: "claude-fable-5",
         durationSeconds: 3_600,
-        repo: "clock-in",
+        repo: "siqshift",
         commits: [commit],
       }],
       trend: [{ periodStartAt: startedAt, agentSeconds: 3_600, shiftCount: 1, heldRate: 1 }],
@@ -960,7 +960,7 @@ describe("roster agent contracts", () => {
       commitsOrphaned: 0,
       heldRate: 1,
       models: ["claude-fable-5"],
-      repos: ["clock-in"],
+      repos: ["siqshift"],
       tokens: { inputTokens: 12_000, outputTokens: 800, cacheCreationInputTokens: 400, cacheReadInputTokens: 60_000 },
       tokensReported: true,
     };
@@ -1002,7 +1002,7 @@ describe("shift commit upload contracts", () => {
     clientId: ids.client,
     source: "claude_code",
     externalSessionId: "session-1",
-    repoRoot: "C:/dev/clock-in",
+    repoRoot: "C:/dev/siqshift",
     branch: "feat/roster",
     sha: "a".repeat(40),
     subject: "feat(api): shift commits",

@@ -6,7 +6,7 @@ import { App } from "./App.js";
 import { sourceLabel } from "./agent-sources.js";
 import type { TimerBridge } from "./bridge.js";
 
-vi.mock("@clock-in/shared/webgl-shader", () => ({ WebGLShader: () => null }));
+vi.mock("@siqshift/shared/webgl-shader", () => ({ WebGLShader: () => null }));
 
 const windowControls = vi.hoisted(() => ({
   minimize: vi.fn(),
@@ -104,7 +104,7 @@ const meStats = {
 
 const mapping = {
   id: "00000000-0000-4000-8000-000000000400",
-  pathPrefix: "C:/dev/Clock-In",
+  pathPrefix: "C:/dev/SIQshift",
   repoUrl: null,
   projectId: project.id,
 };
@@ -114,7 +114,7 @@ const agentShifts = {
   totalAgentSeconds: 7_200,
   groups: [
     {
-      repo: "clock-in",
+      repo: "siqshift",
       agentSeconds: 5_400,
       shiftCount: 2,
       heldRate: 0.5,
@@ -535,7 +535,7 @@ describe("settings", () => {
     await person.click(within(dialog).getByLabelText("Keep recording while an AI tool is working"));
     await waitFor(() => expect(bridge.settingsUpdate).toHaveBeenCalledWith({ agentOverrideEnabled: false }));
 
-    await person.click(within(dialog).getByLabelText("Add the Clock-In extension to my browsers automatically"));
+    await person.click(within(dialog).getByLabelText("Add the SIQshift extension to my browsers automatically"));
     await waitFor(() => expect(bridge.settingsUpdate).toHaveBeenCalledWith({ browserAutoInstall: false }));
 
     await person.click(within(dialog).getByLabelText("Count tokens and models in my AI tools' session logs"));
@@ -630,11 +630,11 @@ describe("settings", () => {
     const dialog = await openSettings(person);
     await person.click(within(dialog).getByRole("button", { name: /See exactly what's recorded/ }));
 
-    const panel = await screen.findByRole("dialog", { name: "What Clock-In is recording" });
+    const panel = await screen.findByRole("dialog", { name: "What SIQshift is recording" });
     expect(within(panel).getByText("Recording is on")).toBeInTheDocument();
     // Escape closes the panel it belongs to, leaving settings open behind it.
     await person.keyboard("{Escape}");
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "What Clock-In is recording" })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "What SIQshift is recording" })).not.toBeInTheDocument());
     expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
   });
 
@@ -658,13 +658,13 @@ describe("the what's-recorded panel", () => {
 
     await person.click(await screen.findByRole("button", { name: "What's recorded?" }));
 
-    const panel = await screen.findByRole("dialog", { name: "What Clock-In is recording" });
+    const panel = await screen.findByRole("dialog", { name: "What SIQshift is recording" });
     expect(within(panel).getByText("Claude Code").closest("li")).toHaveTextContent("Connected");
     expect(within(panel).getByText("Codex").closest("li")).toHaveTextContent("Not connected");
     expect(within(panel).getByTestId("panel-current")).toHaveTextContent("Field work");
 
     await person.click(within(panel).getByRole("button", { name: "Close what's recorded" }));
-    expect(screen.queryByRole("dialog", { name: "What Clock-In is recording" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "What SIQshift is recording" })).not.toBeInTheDocument();
   });
 
   it("turns recording on from the panel when it is off", async () => {
@@ -676,7 +676,7 @@ describe("the what's-recorded panel", () => {
     render(<App bridge={bridge} />);
 
     await person.click(await screen.findByRole("button", { name: "What's recorded?" }));
-    const panel = await screen.findByRole("dialog", { name: "What Clock-In is recording" });
+    const panel = await screen.findByRole("dialog", { name: "What SIQshift is recording" });
     expect(within(panel).getByText("Recording is off")).toBeInTheDocument();
 
     await person.click(within(panel).getByRole("button", { name: "Turn recording on" }));
@@ -689,19 +689,19 @@ describe("the what's-recorded panel", () => {
       hookRegister: vi.fn().mockResolvedValue({
         status: "manual",
         configPath: "C:/Users/dev/.codex/config.toml",
-        snippet: "notify = [\"clock-in-hook\"]",
+        snippet: "notify = [\"siqshift-hook\"]",
       }),
     });
     const person = userEvent.setup();
     render(<App bridge={bridge} />);
 
     await person.click(await screen.findByRole("button", { name: "What's recorded?" }));
-    const panel = await screen.findByRole("dialog", { name: "What Clock-In is recording" });
+    const panel = await screen.findByRole("dialog", { name: "What SIQshift is recording" });
     await person.click(within(panel).getByRole("button", { name: "Connect" }));
 
     await waitFor(() => expect(bridge.hookRegister).toHaveBeenCalledWith("codex"));
     expect(await within(panel).findByText(/can't switch this one on by itself/)).toBeInTheDocument();
-    expect(within(panel).getByText('notify = ["clock-in-hook"]')).toBeInTheDocument();
+    expect(within(panel).getByText('notify = ["siqshift-hook"]')).toBeInTheDocument();
   });
 });
 
@@ -889,7 +889,7 @@ describe("the today panel", () => {
         label: "Claude",
         sources: ["claude_code"],
         status: "known",
-        account: { email: "dev@clock-in.test", organization: null },
+        account: { email: "dev@siqshift.test", organization: null },
         plan: "max",
         percentRemaining: 73,
         bindingWindowId: "five_hour",
@@ -1010,7 +1010,7 @@ describe("the today panel", () => {
     await screen.findByText("Recording on");
     await userEvent.setup().click(screen.getByRole("button", { name: "What's recorded?" }));
 
-    const panel = await screen.findByRole("dialog", { name: "What Clock-In is recording" });
+    const panel = await screen.findByRole("dialog", { name: "What SIQshift is recording" });
     for (const source of ["claude_code", "codex"]) {
       const mark = within(panel).getByTestId(`agent-mark-${source}`);
       // A real mark, not a letter tile standing in for one.
@@ -1257,7 +1257,7 @@ describe("the agents tab", () => {
     expect(within(panel).getByText("2h 00m")).toBeInTheDocument();
     const groups = within(panel).getAllByTestId("shift-group");
     expect(groups).toHaveLength(2);
-    expect(groups[0]).toHaveTextContent("clock-in");
+    expect(groups[0]).toHaveTextContent("siqshift");
     expect(groups[0]).toHaveTextContent("1h 30m");
     // Held appears once a commit is decided, and only then: the label-less
     // group's commits are all pending, so it says nothing rather than

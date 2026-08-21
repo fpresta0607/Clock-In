@@ -68,8 +68,8 @@ export function identityRepoRoot(root: string | null): string | null {
 }
 
 /**
- * A prefix matches only on a path-segment boundary: `c:/dev/clock` matches
- * `c:/dev/clock` and `c:/dev/clock/src` but never `c:/dev/clock-in-extra`.
+ * A prefix matches only on a path-segment boundary: `c:/dev/siqshift` matches
+ * `c:/dev/siqshift` and `c:/dev/siqshift/src` but never `c:/dev/siqshift-extra`.
  */
 function matchesBoundary(normalizedCwd: string, normalizedPrefix: string): boolean {
   if (normalizedPrefix.length === 0) return normalizedCwd.startsWith("/");

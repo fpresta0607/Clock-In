@@ -1,7 +1,7 @@
-@import "@clock-in/shared/brand.css";
+@import "@siqshift/shared/brand.css";
 
 /* Desktop layout on the SIQstack brand system. Tokens and shared primitives
-   come from @clock-in/shared/brand.css; only tray-app-specific structure lives
+   come from @siqshift/shared/brand.css; only tray-app-specific structure lives
    here. The Tauri CSP allows 'self' only, so no remote font fetch — the brand
    stack degrades to system fonts. */
 
@@ -428,7 +428,7 @@ select:disabled { opacity: .55; }
 .source-list { display: grid; gap: 8px; margin: 9px 0 0; padding: 0; list-style: none; }
 .source-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; font-size: .84rem; }
 .source-name { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* A runtime's official mark where Clock-In has one, and a plain monogram where
+/* A runtime's official mark where SIQshift has one, and a plain monogram where
    it does not — never a lookalike drawn to fill the gap. */
 /* The proof surface for the recording chain: folded away by default, because
    it is only interesting when something is wrong. */

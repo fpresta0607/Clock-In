@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Clock-In",
+  "name": "SIQshift",
   "version": "0.1.0",
-  "description": "Attributes focused time on your approved work sites to Clock-In projects. Only rule verdicts ever leave the browser: never URLs, titles, or history.",
+  "description": "Attributes focused time on your approved work sites to SIQshift projects. Only rule verdicts ever leave the browser: never URLs, titles, or history.",
   "permissions": ["tabs", "idle", "storage", "nativeMessaging", "alarms"],
   "background": {
     "service_worker": "background.js"

@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 
-const downloadBase = "https://github.com/fpresta0607/Clock-In/releases/download/unsigned-latest";
+const downloadBase = "https://github.com/fpresta0607/SIQshift/releases/download/unsigned-latest";
 
 /**
  * The permanent links to the newest desktop installer.
@@ -17,8 +17,8 @@ const downloadBase = "https://github.com/fpresta0607/Clock-In/releases/download/
  * authentication to download one, and the people who need this button are
  * signed out.
  */
-export const windowsInstallerUrl = `${downloadBase}/Clock-In-UNSIGNED-TEST-windows-x64-setup.exe`;
-export const macInstallerUrl = `${downloadBase}/Clock-In-UNSIGNED-TEST-macos-aarch64.dmg`;
+export const windowsInstallerUrl = `${downloadBase}/SIQshift-UNSIGNED-TEST-windows-x64-setup.exe`;
+export const macInstallerUrl = `${downloadBase}/SIQshift-UNSIGNED-TEST-macos-aarch64.dmg`;
 
 /// Said once, in one place, so the site cannot end up warning about the
 /// SmartScreen prompt in one corner and staying quiet about it in another.

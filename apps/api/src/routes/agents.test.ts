@@ -29,8 +29,8 @@ const ids = {
   commit: "e2c7e513-b094-4d4c-ae55-21790ae019a4",
 };
 const config = parseEnv({
-  DATABASE_URL: "postgres://clock_in:password@localhost:5432/clock_in",
-  AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
+  DATABASE_URL: "postgres://siqshift:password@localhost:5432/siqshift",
+  AUTH_BASE_URL: "https://auth.siqshift.test/neondb/auth",
   NODE_ENV: "test",
 });
 const users = {
@@ -119,7 +119,7 @@ function shiftCommitRecord(overrides: Partial<ShiftCommitRecord> = {}): ShiftCom
     agentId: ids.agent,
     agentSessionId: ids.shift,
     clientId: "f3c7e513-b094-4d4c-ae55-21790ae019a4",
-    repoRoot: "C:/dev/clock-in",
+    repoRoot: "C:/dev/siqshift",
     branch: "main",
     sha: "a".repeat(40),
     subject: "did work",
@@ -240,19 +240,19 @@ describe("agent routes", () => {
   // what optional-rather-than-nullable buys: a caller who owns neither agent
   // reads the codebase's name and simply never receives the path.
   it("sends the codebase name to every member and the path only to the owner and admins", async () => {
-    const owned = agentRecord({ repoRoot: "C:/dev/clock-in" });
+    const owned = agentRecord({ repoRoot: "C:/dev/siqshift" });
     const { app } = createTestApp(new MemoryAgents([owned]));
 
     const asOwner = await app.request("http://api.test/agents", { headers: { authorization: adminHeader } });
     expect(asOwner.status).toBe(200);
     await expect(asOwner.json()).resolves.toMatchObject({
-      agents: [{ repoName: "clock-in", repoRoot: "C:/dev/clock-in" }],
+      agents: [{ repoName: "siqshift", repoRoot: "C:/dev/siqshift" }],
     });
 
     const asOther = await app.request("http://api.test/agents", { headers: { authorization: memberHeader } });
     expect(asOther.status).toBe(200);
     const body = await asOther.json() as { agents: Record<string, unknown>[] };
-    expect(body.agents[0]).toMatchObject({ repoName: "clock-in" });
+    expect(body.agents[0]).toMatchObject({ repoName: "siqshift" });
     // Absent, not blanked - the roster still reads correctly from the name.
     expect(body.agents[0]).not.toHaveProperty("repoRoot");
   });
@@ -261,7 +261,7 @@ describe("agent routes", () => {
     // The trap: `patch` re-validates the merged agent against the strict
     // schema, so an identity column left out of that literal fails a rename
     // on a field the request never mentions.
-    const { app } = createTestApp(new MemoryAgents([agentRecord({ repoRoot: "C:/dev/clock-in" })]));
+    const { app } = createTestApp(new MemoryAgents([agentRecord({ repoRoot: "C:/dev/siqshift" })]));
 
     const response = await app.request(`http://api.test/agents/${ids.agent}`, {
       method: "PATCH",
@@ -272,7 +272,7 @@ describe("agent routes", () => {
     expect(response.status).toBe(200);
     // The route re-parses what the service projects, so a mismatched
     // projection would be a 500 on this read path rather than a type error.
-    await expect(response.json()).resolves.toMatchObject({ name: "Reviewer", repoName: "clock-in" });
+    await expect(response.json()).resolves.toMatchObject({ name: "Reviewer", repoName: "siqshift" });
   });
 
   it("patches a rename, any member allowed, and an anonymous agent registers in the same write", async () => {
@@ -424,14 +424,14 @@ describe("agent routes", () => {
       headers: { authorization: memberHeader },
     });
     expect(owner.status).toBe(200);
-    expect((await owner.json()).shifts[0].commits[0]).toMatchObject({ repoRoot: "C:/dev/clock-in" });
+    expect((await owner.json()).shifts[0].commits[0]).toMatchObject({ repoRoot: "C:/dev/siqshift" });
 
     // The admin owns nothing here and still sees it: admins always do.
     const admin = await app.request(`http://api.test/agents/${ids.agent}/paystub?${query}`, {
       headers: { authorization: adminHeader },
     });
     expect(admin.status).toBe(200);
-    expect((await admin.json()).shifts[0].commits[0]).toMatchObject({ repoRoot: "C:/dev/clock-in" });
+    expect((await admin.json()).shifts[0].commits[0]).toMatchObject({ repoRoot: "C:/dev/siqshift" });
 
     const stranger = new MemoryAgents([agentRecord({ owner: { id: ids.admin, name: "Alex" } })]);
     stranger.shifts = agents.shifts;

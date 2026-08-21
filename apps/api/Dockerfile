@@ -10,15 +10,15 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/database/package.json packages/database/
 COPY apps/api/package.json apps/api/
-RUN pnpm install --frozen-lockfile --filter @clock-in/api...
+RUN pnpm install --frozen-lockfile --filter @siqshift/api...
 
 COPY packages/shared packages/shared
 COPY packages/database packages/database
 COPY apps/api apps/api
-RUN pnpm --filter @clock-in/api build
+RUN pnpm --filter @siqshift/api build
 
 # Reinstall without dev dependencies so the runtime image carries only what it runs.
-RUN pnpm install --frozen-lockfile --prod --filter @clock-in/api...
+RUN pnpm install --frozen-lockfile --prod --filter @siqshift/api...
 
 FROM node:22-alpine AS runtime
 WORKDIR /repo

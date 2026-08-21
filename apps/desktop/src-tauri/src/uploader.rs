@@ -107,7 +107,7 @@ pub(crate) async fn upload_once(
     // the maintenance — a stale or absent collection just reports disabled.
     if let Err(error) = crate::browser::renew_collection_authorization(&spool::browser_dir()) {
         eprintln!(
-            "clock-in: could not renew browser attribution: {}",
+            "siqshift: could not renew browser attribution: {}",
             error.message
         );
     }
@@ -154,7 +154,7 @@ async fn upload_segments(client: &ApiClient, token: &str, path: &Path) -> bool {
                 // would reject forever, so they are dropped with the ack.
                 if !outcome.rejected.is_empty() {
                     eprintln!(
-                        "clock-in: the server rejected {} activity segment(s); dropping them",
+                        "siqshift: the server rejected {} activity segment(s); dropping them",
                         outcome.rejected.len()
                     );
                 }
@@ -181,7 +181,7 @@ async fn upload_sessions(client: &ApiClient, token: &str, path: &Path) -> bool {
                 // A rejected row failed permanent validation; retrying it would
                 // reject forever, so it is dropped with the ack.
                 if rejected > 0 {
-                    eprintln!("clock-in: the server rejected {rejected} session(s); dropping them");
+                    eprintln!("siqshift: the server rejected {rejected} session(s); dropping them");
                 }
             }
             Err(_) => return false,
@@ -212,7 +212,7 @@ async fn upload_agent_spool(client: &ApiClient, token: &str, path: &Path) -> boo
             Ok(results) => {
                 let rejected = results.iter().filter(|result| !result.accepted).count();
                 if rejected > 0 {
-                    eprintln!("clock-in: the server rejected {rejected} agent event(s)");
+                    eprintln!("siqshift: the server rejected {rejected} agent event(s)");
                 }
             }
             Err(_) => return false,
@@ -255,7 +255,7 @@ async fn upload_shift_commits_spool(
             .collect();
         if !permanent.is_empty() {
             eprintln!(
-                "clock-in: the server rejected {} shift commit(s)",
+                "siqshift: the server rejected {} shift commit(s)",
                 permanent.len()
             );
         }
@@ -318,7 +318,7 @@ async fn upload_agent_usage_spool(
             .collect();
         if !permanent.is_empty() {
             eprintln!(
-                "clock-in: the server rejected {} agent usage row(s)",
+                "siqshift: the server rejected {} agent usage row(s)",
                 permanent.len()
             );
         }
@@ -529,8 +529,8 @@ pub fn normalize_path(value: &str) -> String {
         .to_lowercase()
 }
 
-/// A prefix matches only on a path-segment boundary: `c:/dev/clock` matches
-/// `c:/dev/clock` and `c:/dev/clock/src` but never `c:/dev/clock-in`.
+/// A prefix matches only on a path-segment boundary: `c:/dev/siqshift` matches
+/// `c:/dev/siqshift` and `c:/dev/siqshift/src` but never `c:/dev/siqshift-extra`.
 fn matches_boundary(cwd: &str, prefix: &str) -> bool {
     if prefix.is_empty() {
         return cwd.starts_with('/');
@@ -594,7 +594,7 @@ mod tests {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!(
-            "clock-in-uploader-{name}-{}-{unique}",
+            "siqshift-uploader-{name}-{}-{unique}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -830,7 +830,7 @@ mod tests {
             client_id: client_id.to_string(),
             source: source("claude_code"),
             external_session_id: "s1".to_string(),
-            repo_root: "C:/dev/clock-in".to_string(),
+            repo_root: "C:/dev/siqshift".to_string(),
             branch: Some("main".to_string()),
             sha: sha.to_string(),
             subject: "did work".to_string(),
@@ -876,7 +876,7 @@ mod tests {
         assert!(
             request.contains("\"clientId\":\"client-1\"")
                 && request.contains(&format!("\"sha\":\"{sha}\""))
-                && request.contains("\"repoRoot\":\"C:/dev/clock-in\"")
+                && request.contains("\"repoRoot\":\"C:/dev/siqshift\"")
                 && request.contains("\"externalSessionId\":\"s1\""),
             "the wire payload carries the contract's field names: {request}"
         );
@@ -998,7 +998,7 @@ mod tests {
             external_session_id: "session-1".to_string(),
             event: AgentEventKind::Started,
             occurred_at: "2026-08-06T10:00:00Z".to_string(),
-            cwd: Some("C:/dev/clock-in".to_string()),
+            cwd: Some("C:/dev/siqshift".to_string()),
             start_head: None,
             repo_root: None,
             model: None,
@@ -1126,9 +1126,9 @@ mod tests {
             external_session_id: "session-1".to_string(),
             event: AgentEventKind::Started,
             occurred_at: "2026-08-12T13:36:06Z".to_string(),
-            cwd: Some("C:/dev/Clock-In".to_string()),
+            cwd: Some("C:/dev/SIQshift".to_string()),
             start_head: Some("a".repeat(40)),
-            repo_root: Some("C:/dev/Clock-In".to_string()),
+            repo_root: Some("C:/dev/SIQshift".to_string()),
             model: Some("claude-opus-4.1".to_string()),
             rule_id: None,
             transcript_path: Some("C:/Users/alex/.claude/projects/x/session-1.jsonl".to_string()),
@@ -1178,7 +1178,7 @@ mod tests {
         // repoRoot is contract data and rides through; startHead is
         // sidecar-local and must not, even though the hook writes them
         // together from the same probe.
-        assert_eq!(event["repoRoot"], "C:/dev/Clock-In");
+        assert_eq!(event["repoRoot"], "C:/dev/SIQshift");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1231,7 +1231,7 @@ mod tests {
             external_session_id: "session-1".to_string(),
             event: AgentEventKind::Started,
             occurred_at: "2026-08-12T13:36:06Z".to_string(),
-            cwd: Some("C:/dev/Clock-In".to_string()),
+            cwd: Some("C:/dev/SIQshift".to_string()),
             start_head: Some("a".repeat(40)),
             repo_root: None,
             model: None,
@@ -1260,7 +1260,7 @@ mod tests {
         );
         assert!(
             request.contains("\"externalSessionId\":\"session-1\"")
-                && request.contains("\"cwd\":\"C:/dev/Clock-In\""),
+                && request.contains("\"cwd\":\"C:/dev/SIQshift\""),
             "the wire payload carries the contract's field names: {request}"
         );
         assert!(
@@ -1276,28 +1276,31 @@ mod tests {
 
     #[test]
     fn path_normalization_matches_the_server() {
-        assert_eq!(normalize_path("C:\\Dev\\Clock-In\\"), "c:/dev/clock-in");
-        assert_eq!(normalize_path("c:/dev/clock-in"), "c:/dev/clock-in");
+        assert_eq!(normalize_path("C:\\Dev\\SIQshift\\"), "c:/dev/siqshift");
+        assert_eq!(normalize_path("c:/dev/siqshift"), "c:/dev/siqshift");
         assert_eq!(normalize_path("/home/alex/project//"), "/home/alex/project");
     }
 
     #[test]
     fn prefixes_match_only_on_segment_boundaries() {
-        assert!(matches_boundary("c:/dev/clock", "c:/dev/clock"));
-        assert!(matches_boundary("c:/dev/clock/src", "c:/dev/clock"));
-        assert!(!matches_boundary("c:/dev/clock-in-extra", "c:/dev/clock"));
-        assert!(!matches_boundary("c:/dev", "c:/dev/clock"));
+        assert!(matches_boundary("c:/dev/siqshift", "c:/dev/siqshift"));
+        assert!(matches_boundary("c:/dev/siqshift/src", "c:/dev/siqshift"));
+        assert!(!matches_boundary(
+            "c:/dev/siqshift-extra",
+            "c:/dev/siqshift"
+        ));
+        assert!(!matches_boundary("c:/dev", "c:/dev/siqshift"));
     }
 
     #[test]
     fn the_longest_matching_prefix_wins() {
         let mappings = vec![
             mapping("m1", "C:/dev", "p-general"),
-            mapping("m2", "c:/DEV/clock-in", "p-clockin"),
+            mapping("m2", "c:/DEV/siqshift", "p-siqshift"),
         ];
         assert_eq!(
-            resolve_project("C:\\dev\\Clock-In\\src", &mappings).as_deref(),
-            Some("p-clockin")
+            resolve_project("C:\\dev\\SIQshift\\src", &mappings).as_deref(),
+            Some("p-siqshift")
         );
         assert_eq!(
             resolve_project("C:/dev/other", &mappings).as_deref(),
@@ -1312,14 +1315,14 @@ mod tests {
             mapping("m1", "C:/dev", "p-one"),
             mapping("m2", "c:/dev/", "p-two"),
         ];
-        assert_eq!(resolve_project("c:/dev/clock-in", &tie), None);
+        assert_eq!(resolve_project("c:/dev/siqshift", &tie), None);
 
         let agreement = vec![
             mapping("m1", "C:/dev", "p-one"),
             mapping("m2", "c:/dev/", "p-one"),
         ];
         assert_eq!(
-            resolve_project("c:/dev/clock-in", &agreement).as_deref(),
+            resolve_project("c:/dev/siqshift", &agreement).as_deref(),
             Some("p-one")
         );
     }
@@ -1332,12 +1335,12 @@ mod tests {
             &[
                 event(
                     AgentEventKind::Started,
-                    "C:/dev/clock-in",
+                    "C:/dev/siqshift",
                     "2026-08-07T10:00:00Z",
                 ),
                 event(
                     AgentEventKind::Heartbeat,
-                    "C:/dev/clock-in",
+                    "C:/dev/siqshift",
                     "2026-08-07T10:05:00Z",
                 ),
             ],
@@ -1366,7 +1369,7 @@ mod tests {
         track_agent_events(
             &[event(
                 AgentEventKind::Ended,
-                "C:/dev/clock-in",
+                "C:/dev/siqshift",
                 "2026-08-07T11:00:00Z",
             )],
             &[],
@@ -1380,13 +1383,13 @@ mod tests {
 
     #[test]
     fn a_mapped_start_names_the_project_the_open_session_belongs_to() {
-        let mappings = vec![mapping("m1", "C:/dev/clock-in", "p-clockin")];
+        let mappings = vec![mapping("m1", "C:/dev/siqshift", "p-siqshift")];
         let mut tracking = AgentTracking::default();
 
         track_agent_events(
             &[event(
                 AgentEventKind::Started,
-                "C:/dev/clock-in",
+                "C:/dev/siqshift",
                 "2026-08-07T10:00:00Z",
             )],
             &mappings,
@@ -1396,7 +1399,7 @@ mod tests {
             tracking.effective_project(
                 parse_iso8601("2026-08-07T10:00:00Z").expect("timestamp parses")
             ),
-            Some("p-clockin")
+            Some("p-siqshift")
         );
 
         // An unmapped directory names nothing, so the last name stands until
@@ -1414,13 +1417,13 @@ mod tests {
             tracking.effective_project(
                 parse_iso8601("2026-08-07T11:00:00Z").expect("timestamp parses")
             ),
-            Some("p-clockin")
+            Some("p-siqshift")
         );
 
         track_agent_events(
             &[event(
                 AgentEventKind::Ended,
-                "C:/dev/clock-in",
+                "C:/dev/siqshift",
                 "2026-08-07T12:00:00Z",
             )],
             &mappings,
@@ -1483,7 +1486,7 @@ mod tests {
         let shared = Arc::new(Mutex::new(MonitorShared {
             builder: crate::monitor::SegmentBuilder::new(),
             settings: crate::monitor::MonitorSettings::default(),
-            mappings: vec![mapping("m1", "C:/clock", "p-clock")],
+            mappings: vec![mapping("m1", "C:/siqshift", "p-siqshift")],
             agent: AgentTracking::default(),
             last_upload_at: None,
             last_poll_at: None,
@@ -1504,14 +1507,18 @@ mod tests {
         let finished = replay_agent_events(
             &shared,
             &[
-                event(AgentEventKind::Started, "C:/clock", "1970-01-01T00:16:50Z"),
-                event(AgentEventKind::Ended, "C:/clock", "1970-01-01T00:17:00Z"),
+                event(
+                    AgentEventKind::Started,
+                    "C:/siqshift",
+                    "1970-01-01T00:16:50Z",
+                ),
+                event(AgentEventKind::Ended, "C:/siqshift", "1970-01-01T00:17:00Z"),
             ],
         );
 
         let agent = finished
             .iter()
-            .find(|session| session.project_id == "p-clock")
+            .find(|session| session.project_id == "p-siqshift")
             .expect("the short agent interval becomes its own session");
         assert_eq!(agent.started_at, iso8601(1_010));
         assert_eq!(agent.stopped_at, iso8601(1_020));

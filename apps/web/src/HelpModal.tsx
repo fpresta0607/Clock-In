@@ -26,11 +26,11 @@ const NEVER = [
   "Web addresses, or the pages you visit.",
   "Anything inside your files, messages, or email. Token counts and model names from an AI tool's own session log are the one exception, listed above.",
   "Anything you type into a form, chat, or document.",
-  "Clock-In never reaches inside or controls your other apps.",
+  "SIQshift never reaches inside or controls your other apps.",
 ];
 
 /**
- * "How Clock-In works" dialog for the dashboard. Closes on Escape, on the
+ * "How SIQshift works" dialog for the dashboard. Closes on Escape, on the
  * overlay, or on its Close button; the dashboard only renders it while open.
  */
 export const HelpModal = ({ open, onClose }: HelpModalProps) => {
@@ -55,7 +55,7 @@ export const HelpModal = ({ open, onClose }: HelpModalProps) => {
         onClick={(event) => event.stopPropagation()}
       >
         <div className="card-head">
-          <h2 id="help-title">How Clock-In works</h2>
+          <h2 id="help-title">How SIQshift works</h2>
           <button className="ghost" type="button" onClick={onClose} autoFocus>Close</button>
         </div>
         <ol className="help-steps">
@@ -84,7 +84,7 @@ export const HelpModal = ({ open, onClose }: HelpModalProps) => {
           </li>
         </ol>
 
-        <h3 className="help-heading">Clock-In writes down</h3>
+        <h3 className="help-heading">SIQshift writes down</h3>
         <ul className="record-list is-kept">
           {KEPT.map((line) => <li key={line}>{line}</li>)}
         </ul>
@@ -101,7 +101,7 @@ export const HelpModal = ({ open, onClose }: HelpModalProps) => {
           <li>The leaderboard ranks by your hours. Agent time and leverage sit beside them, answering a different question: how much work you got out of the tools.</li>
         </ul>
 
-        <h3 className="help-heading">Clock-In never writes down</h3>
+        <h3 className="help-heading">SIQshift never writes down</h3>
         <ul className="record-list is-never">
           {NEVER.map((line) => <li key={line}>{line}</li>)}
         </ul>

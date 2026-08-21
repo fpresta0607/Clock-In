@@ -4,7 +4,7 @@ import {
   pathMappingUpdateRequestSchema,
   projectPathMappingSchema,
   type ProjectPathMapping,
-} from "@clock-in/shared";
+} from "@siqshift/shared";
 import { Hono } from "hono";
 import { z } from "zod";
 

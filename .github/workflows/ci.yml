@@ -33,8 +33,8 @@ jobs:
     env:
       # The disposable-database helper refuses a URL that does not carry this
       # capability, so a test run can never reach a real database by accident.
-      CLOCK_IN_DISPOSABLE_TEST_CAPABILITY: ci-disposable-postgres
-      TEST_DATABASE_URL: postgres://postgres@localhost:5432/postgres?clock_in_disposable_test_capability=ci-disposable-postgres
+      SIQSHIFT_DISPOSABLE_TEST_CAPABILITY: ci-disposable-postgres
+      TEST_DATABASE_URL: postgres://postgres@localhost:5432/postgres?siqshift_disposable_test_capability=ci-disposable-postgres
     steps:
       - uses: actions/checkout@v4
       # Corepack ships with Node and installs the pnpm that the root
@@ -57,7 +57,7 @@ jobs:
       - run: pnpm test
       - run: pnpm build
       # Proves the deployable image still builds; the platform builds its own.
-      - run: docker build -f apps/api/Dockerfile -t clock-in-api:ci .
+      - run: docker build -f apps/api/Dockerfile -t siqshift-api:ci .
 
   # Builds the store packages (Chrome/Edge zip and Firefox variant zip) and
   # keeps them as artifacts for the manual store submissions in DEPLOY.md.
@@ -71,7 +71,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @clock-in/browser-extension build
+      - run: pnpm --filter @siqshift/browser-extension build
       - uses: actions/upload-artifact@v4
         with:
           name: browser-extension-store-zips
@@ -86,7 +86,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: |
-          deps="$RUNNER_TEMP/clock-in-tauri-deps"
+          deps="$RUNNER_TEMP/siqshift-tauri-deps"
           mkdir -p "$deps/lists/partial" "$deps/cache/archives/partial" "$deps/root"
           touch "$deps/status"
           apt-get update \

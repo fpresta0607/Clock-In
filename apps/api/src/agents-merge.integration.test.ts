@@ -5,7 +5,7 @@ import {
   runMigrations,
   type DatabaseConnection,
   type DisposableTestDatabase,
-} from "@clock-in/database";
+} from "@siqshift/database";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { AuthenticatedSubject } from "./auth.js";
@@ -47,7 +47,7 @@ integration("agent merge re-points shift_commits and agent_usage", () => {
     `;
     await database.client`
       insert into users (id, organization_id, email, name, role)
-      values (${ownerUserId}, ${organizationId}, 'merge@clock-in.test', 'Merge User', 'admin')
+      values (${ownerUserId}, ${organizationId}, 'merge@siqshift.test', 'Merge User', 'admin')
     `;
     await database.client`
       insert into agents (id, organization_id, owner_user_id, project_id, source, name, status)

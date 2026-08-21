@@ -8,7 +8,7 @@ knowledge it earned is folded into AGENTS.md. Where it says agent identity is ke
 
 ## Context
 
-Clock-In answers *how long*. Roster v1 made it answer *who worked*. Effort v1 makes it answer
+SIQshift answers *how long*. Roster v1 made it answer *who worked*. Effort v1 makes it answer
 *what that work cost* - and repairs the vocabulary that made the first answer unreadable.
 
 Three problems, one root: the product measures how long an agent ran and nothing about what it
@@ -16,7 +16,7 @@ was or what it did.
 
 **1. The product says "Claude Sonnet" and "Claude Code" are two agents.** Three surfaces use three
 different notions of "agent" and none agree: the roster keys identity on `(org, source, project)`
-("Claude Code @ Clock-In"); the Agent-sessions table folds by `(source, model)` and prints the
+("Claude Code @ SIQshift"); the Agent-sessions table folds by `(source, model)` and prints the
 **model first** (`apps/desktop/src/App.tsx:189-193` renders `{split.model ?? sourceLabel(...)}`
 with the runtime demoted to a hint); the live monitor rows are OS processes. So one Claude Code
 shift renders as "claude-sonnet-4-5 · Claude Code" and another as "Claude Code" - two rows reading
@@ -47,7 +47,7 @@ repo captures a token or a unit of compute - `quota.rs` reads percent-of-plan-re
   runtime hook flags to report directly. Needs a privacy disclosure and its own opt-out.
 - **Honest gaps.** A `Time | Tokens` switch on the chart; the tokens view plots only what
   reported and names what did not. It never invents a zero.
-- **Orchestrator parentage is out of scope** - document the `clock-in-hook` invocation a custom
+- **Orchestrator parentage is out of scope** - document the `siqshift-hook` invocation a custom
   harness uses instead.
 
 ## What this deliberately does not do
@@ -159,7 +159,7 @@ late on the client, uploaded idempotently, tolerant of loss.
   `MAX_SPOOL_RECORD_BYTES` line ceiling, a partially-written trailing line left unconsumed until
   complete, and a shrunken or replaced file read fresh rather than as a negative delta. Every
   failure is a state - the counters simply do not advance.
-- `bin/clock-in-hook.rs`: new flags carrying **cumulative totals for the session so far**, not
+- `bin/siqshift-hook.rs`: new flags carrying **cumulative totals for the session so far**, not
   per-turn deltas. The spool can lose a record to a crash and a hook can fire twice; under both
   faults a cumulative number the registry takes the maximum of stays correct where summed deltas
   silently drift. An empty value reads as absent, as `--model` already does (:88-90).

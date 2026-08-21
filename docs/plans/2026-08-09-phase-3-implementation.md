@@ -1,4 +1,4 @@
-# Clock-In Phase 3 Implementation Plan
+# SIQshift Phase 3 Implementation Plan
 
 **Goal:** Browser attribution that passes the grandmother test — a browser extension matching user-answered URL rules at the edge and reporting verdicts only, over a native-messaging host into the existing agent-session pipeline — plus the monitor precision fixes attribution depends on, signed installers, and auto-update.
 
@@ -55,11 +55,11 @@
 2. Windows side: `SetWinEventHook(EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS)` on the existing hidden-window thread, pushing into `PlatformEvents`; `ApplicationFrameHost.exe` resolved via the child `Windows.UI.Core.CoreWindow` PID; the two disconnect arms in the window proc; monotonic reading recorded beside `unix_now` each tick.
 3. `cargo fmt --check`, `cargo test`, clippy.
 
-### Task 5: `clock-in-browser-host`
+### Task 5: `siqshift-browser-host`
 
 **Files:**
 - Modify: `apps/desktop/src-tauri/Cargo.toml` (third `[[bin]]`)
-- Create: `apps/desktop/src-tauri/src/bin/clock-in-browser-host.rs`, `apps/desktop/src-tauri/src/native_messaging.rs`
+- Create: `apps/desktop/src-tauri/src/bin/siqshift-browser-host.rs`, `apps/desktop/src-tauri/src/native_messaging.rs`
 - Test: inline modules plus a CLI test beside `tests/hook_cli.rs`
 
 **Steps:**
@@ -97,7 +97,7 @@
 - Modify: `.github/workflows/release.yml`, `.github/workflows/ci.yml`, `DEPLOY.md`
 
 **Steps:**
-1. Wire Windows signing and macOS notarization secrets into `tauri-action`; sign all three binaries (app, `clock-in-hook`, `clock-in-browser-host`); publish updater artifacts beside installers.
+1. Wire Windows signing and macOS notarization secrets into `tauri-action`; sign all three binaries (app, `siqshift-hook`, `siqshift-browser-host`); publish updater artifacts beside installers.
 2. CI builds the extension package and uploads the store zip as an artifact; DEPLOY.md gains the Web Store (unlisted) and Edge Add-ons submission steps and their review-latency caveat.
 
 ### Task 9: End-to-end verification

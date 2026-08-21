@@ -11,11 +11,11 @@ export interface DisposableTestDatabase {
   cleanup(): Promise<void>;
 }
 
-const disposableCapabilityParameter = "clock_in_disposable_test_capability";
+const disposableCapabilityParameter = "siqshift_disposable_test_capability";
 
 export function verifyDisposableTestDatabaseUrl(
   configuredUrl: string,
-  capability = process.env.CLOCK_IN_DISPOSABLE_TEST_CAPABILITY,
+  capability = process.env.SIQSHIFT_DISPOSABLE_TEST_CAPABILITY,
 ): string {
   const url = new URL(configuredUrl);
   if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
@@ -31,7 +31,7 @@ export function verifyDisposableTestDatabaseUrl(
 
 function databaseName(label: string): string {
   const safeLabel = label.replace(/[^a-z0-9]/gi, "_").toLowerCase().slice(0, 12) || "run";
-  return `clock_in_test_${safeLabel}_${randomUUID().replaceAll("-", "")}`;
+  return `siqshift_test_${safeLabel}_${randomUUID().replaceAll("-", "")}`;
 }
 
 function controlUrl(configuredUrl: string): string {

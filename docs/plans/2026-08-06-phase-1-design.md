@@ -1,4 +1,4 @@
-# Clock-In Phase 1 Design
+# SIQshift Phase 1 Design
 
 ## Scope
 

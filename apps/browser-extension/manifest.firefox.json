@@ -1,15 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "Clock-In",
+  "name": "SIQshift",
   "version": "0.1.0",
-  "description": "Attributes focused time on your approved work sites to Clock-In projects. Only rule verdicts ever leave the browser: never URLs, titles, or history.",
+  "description": "Attributes focused time on your approved work sites to SIQshift projects. Only rule verdicts ever leave the browser: never URLs, titles, or history.",
   "permissions": ["tabs", "idle", "storage", "nativeMessaging", "alarms"],
   "background": {
     "scripts": ["background.js"]
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "browser-extension@clock-in.app",
+      "id": "browser-extension@siqshift.app",
       "strict_min_version": "128.0"
     }
   }

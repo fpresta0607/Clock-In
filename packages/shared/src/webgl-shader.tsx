@@ -98,7 +98,7 @@ export function WebGLShader({ className }: WebGLShaderProps) {
       // wider than it is tall. Normalising both axes by min(resolution.x,
       // resolution.y) - the usual fullscreen-shader idiom - picks the height
       // there, so the sine's period and its amplitude were both a share of the
-      // height. Clock-In's window is portrait (520x920 by default, never
+      // height. SIQshift's window is portrait (520x920 by default, never
       // narrower than 400x600), so that same expression picks the *width*: the
       // period becomes 2*PI*width, under a third of one fits across the
       // window, and every band reads as a straight streak running off both

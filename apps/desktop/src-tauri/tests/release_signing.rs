@@ -58,7 +58,7 @@ fn macos_signing_environment(identity: &str, name: &str) -> Option<String> {
 #[test]
 fn helper_overrides_merge_with_the_base_release_configuration() {
     let base = serde_json::json!({
-        "bundle": { "active": true, "externalBin": ["clock-in-hook"] },
+        "bundle": { "active": true, "externalBin": ["siqshift-hook"] },
         "plugins": { "updater": { "pubkey": "configured-key" } }
     });
     let helper_override = serde_json::json!({ "bundle": { "active": false, "externalBin": [] } });
@@ -147,7 +147,7 @@ fn direct_release_builds_accept_raw_and_path_updater_keys() {
     .expect("a documented raw updater key is accepted");
 
     let path = std::env::temp_dir().join(format!(
-        "clock-in-release-signing-key-{}",
+        "siqshift-release-signing-key-{}",
         std::process::id()
     ));
     std::fs::write(&path, raw_key).expect("updater key file writes");
@@ -213,7 +213,7 @@ fn macos_release_rejects_adhoc_signing_identity() {
 
 #[test]
 fn macos_release_requires_a_verified_developer_id_identity() {
-    let identity = "Developer ID Application: Clock-In, Inc. (ABCDEFG123)";
+    let identity = "Developer ID Application: SIQshift, Inc. (ABCDEFG123)";
     release_signing::validate_macos_signing_with_verifier(
         |name| macos_signing_environment(identity, name),
         |verified_identity| {

@@ -59,7 +59,7 @@ shift are captured at its end and verified later on the same machine
 ## The agent-runtime roster is data, not code
 
 `packages/shared/src/agent-runtimes.json` is the single declaration of every runtime
-Clock-In knows by name. The TypeScript side imports it; the Rust host embeds the same
+SIQshift knows by name. The TypeScript side imports it; the Rust host embeds the same
 file (`apps/desktop/src-tauri/src/agent_runtimes.rs`), so the two cannot drift. Add a
 runtime there, not in six places.
 
@@ -139,7 +139,7 @@ timer once said RECORDING above a card reading "Turn on recording in settings".
   a replica built from production's journal before migrating it; see "Production's
   migration journal has entries this repo no longer carries" in `DEPLOY.md`. Nothing
   migrates on deploy, so this is always a deliberate, separate step.
-- `clock-in-hook` and the desktop uploader must resolve the spool through the same
+- `siqshift-hook` and the desktop uploader must resolve the spool through the same
   `spool::agent_spool_path()`. When they disagreed, the hook exited 0, wrote nothing
   the uploader could see, and every agent event vanished silently. The browser host
   and the app share the same rule for `spool::browser_dir()`, so the two cannot
@@ -180,8 +180,8 @@ timer once said RECORDING above a card reading "Turn on recording in settings".
   names its own model, so the desktop's transcript reader backfills it.
 - The desktop force-installs the browser extension via the HKCU
   `ExtensionInstallForcelist` policy (`browser::sync_extension_policies`), but only
-  when the store ids are compiled in (`CLOCK_IN_CHROME_EXTENSION_ID` /
-  `CLOCK_IN_EDGE_EXTENSION_ID` repo vars), so nothing happens until the extension is
+  when the store ids are compiled in (`SIQSHIFT_CHROME_EXTENSION_ID` /
+  `SIQSHIFT_EDGE_EXTENSION_ID` repo vars), so nothing happens until the extension is
   published and the vars are set. `MonitorSettings.browser_auto_install` (default on)
   is the opt-out: removing the policy entry is what uninstalls the extension. Firefox
   has no force-install path until an AMO listing exists and keeps the manual flow.

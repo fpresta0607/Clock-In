@@ -1,4 +1,4 @@
-import { viewPreferencesSchema, viewPreferencesUpdateSchema } from "@clock-in/shared";
+import { viewPreferencesSchema, viewPreferencesUpdateSchema } from "@siqshift/shared";
 import { Hono } from "hono";
 
 import { getAuthenticatedSubject, type ApiEnvironment } from "../app.js";

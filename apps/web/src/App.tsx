@@ -16,12 +16,12 @@ import {
   type ProjectUsageResponse,
   type ReportRow,
   type ViewPreferences,
-} from "@clock-in/shared";
+} from "@siqshift/shared";
 
 import { ClientError, type Client } from "./client.js";
 import { DownloadInstaller } from "./DownloadInstaller.js";
 import { HelpModal } from "./HelpModal.js";
-import { WebGLShader } from "@clock-in/shared/webgl-shader";
+import { WebGLShader } from "@siqshift/shared/webgl-shader";
 
 type AppProps = { client: Client };
 
@@ -897,7 +897,7 @@ export const App = ({ client }: AppProps) => {
       <main className="shell auth-shell">
         <WebGLShader />
         <section className="card glass" aria-labelledby="auth-title">
-          <p className="eyebrow">Clock-In</p>
+          <p className="eyebrow">SIQshift</p>
           <h1 id="auth-title">{isSignUp ? "Create your account" : "Sign in"}</h1>
           <p className="subtle">
             {isSignUp
@@ -950,7 +950,7 @@ export const App = ({ client }: AppProps) => {
           <p className="eyebrow">You're in</p>
           <h1 id="welcome-title" className="hero-title">One last thing — the app.</h1>
           <p className="hero-sub">
-            Clock-In tracks time from your desktop. Download the app, sign in with this account,
+            SIQshift tracks time from your desktop. Download the app, sign in with this account,
             and your hours show up on the dashboard.
           </p>
           <DownloadInstaller placement="hero" />
@@ -978,7 +978,7 @@ export const App = ({ client }: AppProps) => {
       <WebGLShader />
       <header className="masthead">
         <div>
-          <p className="eyebrow">Clock-In</p>
+          <p className="eyebrow">SIQshift</p>
           <h1>{organization?.name ?? "Your workspace"}</h1>
         </div>
         <div className="masthead-actions">
@@ -987,8 +987,8 @@ export const App = ({ client }: AppProps) => {
           <button
             className="ghost help-button"
             type="button"
-            aria-label="How Clock-In works"
-            title="How Clock-In works"
+            aria-label="How SIQshift works"
+            title="How SIQshift works"
             onClick={() => setHelpOpen(true)}
           >
             ?

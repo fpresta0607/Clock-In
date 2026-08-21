@@ -9,7 +9,7 @@ export default defineConfig({
     lib: {
       entry: "src/background.ts",
       formats: ["iife"],
-      name: "clockInBackground",
+      name: "siqshiftBackground",
       fileName: () => "background.js",
     },
     rollupOptions: {

@@ -14,11 +14,11 @@ import registry from "./agent-runtimes.json" with { type: "json" };
  * The roster is *not* an allowlist. `agentSourceSchema` accepts any id of the
  * canonical shape, so a runtime nobody has declared yet is still recorded under
  * its own name rather than collapsed into `other` or dropped. The roster only
- * decides what Clock-In can say *about* a runtime: its display name, its
+ * decides what SIQshift can say *about* a runtime: its display name, its
  * executables, where its hooks live, and which quota dial it backs.
  */
 
-/** How Clock-In can switch a runtime's hooks on. */
+/** How SIQshift can switch a runtime's hooks on. */
 export const agentRuntimeRegistrationValues = ["claude_json", "cursor_json", "manual"] as const;
 export type AgentRuntimeRegistration = (typeof agentRuntimeRegistrationValues)[number];
 

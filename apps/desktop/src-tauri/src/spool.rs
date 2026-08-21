@@ -1,5 +1,5 @@
-//! The append-only spool that `clock-in-hook` writes and the desktop drains.
-//! `clock-in-browser-host` shares the same machinery for its own spool file.
+//! The append-only spool that `siqshift-hook` writes and the desktop drains.
+//! `siqshift-browser-host` shares the same machinery for its own spool file.
 //!
 //! Several agent CLIs can fire hooks at the same moment, so every append runs
 //! under an interprocess lock: an OS advisory lock (`File::try_lock`) on a
@@ -32,7 +32,7 @@ pub const MAX_PENDING_SPOOL_BYTES: u64 = 5 * MAX_SPOOL_BYTES;
 pub const MAX_SPOOL_RECORD_BYTES: usize = 256 * 1024;
 
 /// Overrides the spool location; tests and support setups use this.
-pub const SPOOL_ENV_VAR: &str = "CLOCK_IN_SPOOL";
+pub const SPOOL_ENV_VAR: &str = "SIQSHIFT_SPOOL";
 
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
 const LOCK_WAIT_LIMIT: Duration = Duration::from_secs(5);
@@ -509,7 +509,7 @@ pub fn active_browser_dir() -> Option<PathBuf> {
 }
 
 /// The browser directory both sides of the handoff use: the app writes the
-/// rules file and drains the browser spool here, and `clock-in-browser-host`
+/// rules file and drains the browser spool here, and `siqshift-browser-host`
 /// reads rules and appends span verdicts here. Same identity-namespaced
 /// resolution as `agent_spool_path`, so the host and the app cannot disagree
 /// about where a browser span lives — exactly the class of bug where the host
@@ -569,7 +569,7 @@ pub fn default_agent_usage_path() -> PathBuf {
 /// Which agent runtime produced an event.
 ///
 /// Deliberately not an enum. The roster in `agent_runtimes` decides what
-/// Clock-In can *say* about a runtime — its name, its hooks, its quota dial —
+/// SIQshift can *say* about a runtime — its name, its hooks, its quota dial —
 /// never whether it may be recorded. Any id of the canonical shape is spooled
 /// and uploaded under its own name, so a runtime nobody has declared yet is
 /// still attributed instead of being dropped or collapsed into `other`.
@@ -604,7 +604,7 @@ impl AgentSource {
         Ok(Self(canonical))
     }
 
-    /// Browser-extension span verdicts, written by `clock-in-browser-host`.
+    /// Browser-extension span verdicts, written by `siqshift-browser-host`.
     pub fn browser() -> Self {
         Self("browser".to_string())
     }
@@ -788,7 +788,7 @@ fn non_empty(value: Option<&str>) -> Option<String> {
 
 /// Claude Code's native hook payload: its own snake_case field names, no
 /// `version`, no timestamp. Extra fields (`source`, `reason`, …) are
-/// tolerated; only the fields Clock-In needs are read. `transcript_path`
+/// tolerated; only the fields SIQshift needs are read. `transcript_path`
 /// points at the session's own log, which the usage reader tails for token
 /// counters; it never leaves the machine.
 #[derive(Debug, Deserialize)]
@@ -805,7 +805,7 @@ struct ClaudeHookInput {
 }
 
 /// The outcome of reading hook stdin: either one event to spool, or a payload
-/// that was understood but carries an event Clock-In does not track.
+/// that was understood but carries an event SIQshift does not track.
 // Built once per hook invocation and consumed immediately, so boxing the large
 // variant would buy indirection and nothing else.
 #[allow(clippy::large_enum_variant)]
@@ -834,7 +834,7 @@ pub struct ArgvContext {
     pub tokens: Option<TokenCounters>,
 }
 
-/// Parses hook stdin, accepting the Clock-In contract first and falling back
+/// Parses hook stdin, accepting the SIQshift contract first and falling back
 /// to Claude Code's native payload. Claude pipes its own JSON to whatever
 /// binary its hooks register, so the same binary serves both: known Claude
 /// events are translated (`SessionStart` → started, `SessionEnd` → ended,
@@ -884,7 +884,7 @@ pub fn parse_stdin_with_context(
 /// (`SessionStart` → started, `SessionEnd` → ended, `PostToolUse` → heartbeat;
 /// any other event is accepted and ignored so future hook types never spam
 /// errors). The runtime comes from the registration's argv when there is one,
-/// and only falls back to Claude Code for registrations written before Clock-In
+/// and only falls back to Claude Code for registrations written before SIQshift
 /// passed `--source`. The payload has no timestamp, so now is stamped here.
 fn translate_claude(
     input: ClaudeHookInput,
@@ -1125,20 +1125,20 @@ pub fn discard_locked(path: &Path) -> SpoolResult<()> {
     Ok(())
 }
 
-/// Where the spool lives unless `CLOCK_IN_SPOOL` says otherwise:
-/// `%APPDATA%/clock-in/agent-spool.jsonl` on Windows, the XDG data dir
+/// Where the spool lives unless `SIQSHIFT_SPOOL` says otherwise:
+/// `%APPDATA%/siqshift/agent-spool.jsonl` on Windows, the XDG data dir
 /// elsewhere.
 pub fn default_spool_path() -> PathBuf {
     if let Some(override_path) = std::env::var_os(SPOOL_ENV_VAR).filter(|value| !value.is_empty()) {
         return PathBuf::from(override_path);
     }
     default_data_dir()
-        .join("clock-in")
+        .join("siqshift")
         .join("agent-spool.jsonl")
 }
 
 /// The directory the browser spool, rules file, tally, and handshake marker
-/// live in: beside the agent spool, so the `CLOCK_IN_SPOOL` override relocates
+/// live in: beside the agent spool, so the `SIQSHIFT_SPOOL` override relocates
 /// the whole set for tests and support setups.
 pub fn default_browser_dir() -> PathBuf {
     default_spool_path()
@@ -1328,7 +1328,7 @@ fn reserve_namespace_slot_at_locked(
 
 fn namespace_capacity_error() -> io::Error {
     io::Error::other(
-        "We saved unsynced work for another workspace. Sign back into that workspace and let Clock-In finish syncing before adding a new account.",
+        "We saved unsynced work for another workspace. Sign back into that workspace and let SIQshift finish syncing before adding a new account.",
     )
 }
 
@@ -1531,7 +1531,7 @@ fn append_line_locked(
         .ok_or_else(|| io::Error::other("spool pending evidence exceeds capacity"))?;
     if pending_after_append > pending_limit {
         return Err(io::Error::other(
-            "Clock-In saved existing offline evidence and paused new capture until it syncs.",
+            "SIQshift saved existing offline evidence and paused new capture until it syncs.",
         ));
     }
     if size > 0 && size + line.len() as u64 > max_bytes {
@@ -1955,7 +1955,7 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("clock-in-spool-test-{}-{tag}", std::process::id()));
+            std::env::temp_dir().join(format!("siqshift-spool-test-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir is created");
         dir
@@ -1967,7 +1967,7 @@ mod tests {
             external_session_id: session.to_string(),
             event: AgentEventKind::Started,
             occurred_at: "2026-08-07T12:00:00Z".to_string(),
-            cwd: Some("C:/dev/Clock-In".to_string()),
+            cwd: Some("C:/dev/SIQshift".to_string()),
             start_head: None,
             repo_root: None,
             model: None,
@@ -1988,7 +1988,7 @@ mod tests {
     #[test]
     fn a_valid_hook_payload_maps_to_the_canonical_event() {
         let input = HookInput::parse(
-            r#"{"version":1,"source":"claude-code","event":"session-start","sessionId":"s1","cwd":"C:/dev/Clock-In","occurredAt":"2026-08-07T12:00:00Z"}"#,
+            r#"{"version":1,"source":"claude-code","event":"session-start","sessionId":"s1","cwd":"C:/dev/SIQshift","occurredAt":"2026-08-07T12:00:00Z"}"#,
         )
         .expect("payload parses");
 
@@ -2005,17 +2005,17 @@ mod tests {
     #[test]
     fn claude_session_start_and_end_translate_to_lifecycle_events() {
         let started = claude_event(
-            r#"{"session_id":"s1","transcript_path":"/tmp/t.jsonl","cwd":"C:/dev/Clock-In","hook_event_name":"SessionStart","source":"startup"}"#,
+            r#"{"session_id":"s1","transcript_path":"/tmp/t.jsonl","cwd":"C:/dev/SIQshift","hook_event_name":"SessionStart","source":"startup"}"#,
         );
         assert_eq!(started.source, source("claude_code"));
         assert_eq!(started.event, AgentEventKind::Started);
         assert_eq!(started.external_session_id, "s1");
-        assert_eq!(started.cwd.as_deref(), Some("C:/dev/Clock-In"));
+        assert_eq!(started.cwd.as_deref(), Some("C:/dev/SIQshift"));
         // Claude's payload has no timestamp; the hook stamps the current time.
         assert!(started.occurred_at.ends_with('Z'));
 
         let ended = claude_event(
-            r#"{"session_id":"s1","transcript_path":"/tmp/t.jsonl","cwd":"C:/dev/Clock-In","hook_event_name":"SessionEnd","reason":"clear"}"#,
+            r#"{"session_id":"s1","transcript_path":"/tmp/t.jsonl","cwd":"C:/dev/SIQshift","hook_event_name":"SessionEnd","reason":"clear"}"#,
         );
         assert_eq!(ended.event, AgentEventKind::Ended);
         assert_eq!(ended.source, source("claude_code"));
@@ -2034,7 +2034,7 @@ mod tests {
     #[test]
     fn claude_transcript_path_lands_on_the_event_for_the_usage_reader() {
         let started = claude_event(
-            r#"{"session_id":"s1","transcript_path":"/tmp/t.jsonl","cwd":"C:/dev/Clock-In","hook_event_name":"SessionStart","source":"startup"}"#,
+            r#"{"session_id":"s1","transcript_path":"/tmp/t.jsonl","cwd":"C:/dev/SIQshift","hook_event_name":"SessionStart","source":"startup"}"#,
         );
         assert_eq!(started.transcript_path.as_deref(), Some("/tmp/t.jsonl"));
 
@@ -2294,18 +2294,18 @@ mod tests {
         let HookStdin::Event(event) = parse_stdin_with_context(payload, Some(context))
             .expect("a Claude-shaped payload parses")
         else {
-            panic!("the payload names an event Clock-In tracks");
+            panic!("the payload names an event SIQshift tracks");
         };
         assert_eq!(event.source.as_str(), "codex");
         assert_eq!(event.event, AgentEventKind::Started);
         assert_eq!(event.model.as_deref(), Some("gpt-5.3-codex"));
 
-        // A registration written before Clock-In passed --source still means
+        // A registration written before SIQshift passed --source still means
         // Claude Code, which is the only CLI that ever registered that way.
         let HookStdin::Event(legacy) =
             parse_stdin(payload).expect("a Claude-shaped payload parses")
         else {
-            panic!("the payload names an event Clock-In tracks");
+            panic!("the payload names an event SIQshift tracks");
         };
         assert_eq!(legacy.source.as_str(), "claude_code");
     }
@@ -2441,7 +2441,7 @@ mod tests {
         let agent = serde_json::to_string(&event("s1")).expect("event serializes");
         let agent_value: serde_json::Value = serde_json::from_str(&agent).expect("line parses");
         assert!(agent_value.get("ruleId").is_none());
-        assert_eq!(agent_value["cwd"], "C:/dev/Clock-In");
+        assert_eq!(agent_value["cwd"], "C:/dev/SIQshift");
     }
 
     #[test]
@@ -2842,8 +2842,8 @@ mod tests {
 
     #[test]
     fn namespace_reservation_blocks_cross_process_admission_until_rollback() {
-        let child_root = std::env::var_os("CLOCK_IN_SPOOL_RESERVATION_TEST_ROOT");
-        let child_result = std::env::var_os("CLOCK_IN_SPOOL_RESERVATION_TEST_RESULT");
+        let child_root = std::env::var_os("SIQSHIFT_SPOOL_RESERVATION_TEST_ROOT");
+        let child_result = std::env::var_os("SIQSHIFT_SPOOL_RESERVATION_TEST_RESULT");
         if let (Some(root), Some(result_path)) = (child_root, child_result) {
             let root = PathBuf::from(root);
             let source = EvidenceIdentity::new("account-source", "organization-source")
@@ -2893,8 +2893,8 @@ mod tests {
         let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
             .arg("namespace_reservation_blocks_cross_process_admission_until_rollback")
             .arg("--nocapture")
-            .env("CLOCK_IN_SPOOL_RESERVATION_TEST_ROOT", &root)
-            .env("CLOCK_IN_SPOOL_RESERVATION_TEST_RESULT", &result_path)
+            .env("SIQSHIFT_SPOOL_RESERVATION_TEST_ROOT", &root)
+            .env("SIQSHIFT_SPOOL_RESERVATION_TEST_RESULT", &result_path)
             .output()
             .expect("child process starts");
 

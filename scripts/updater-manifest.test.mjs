@@ -5,9 +5,9 @@ import { buildUpdaterManifest } from "./updater-manifest.mjs";
 
 const valid = {
   version: "0.1.4-test.12",
-  baseUrl: "https://github.com/fpresta0607/Clock-In/releases/download/unsigned-latest",
+  baseUrl: "https://github.com/fpresta0607/SIQshift/releases/download/unsigned-latest",
   signature: "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZQo=\n",
-  installerName: "Clock-In-UNSIGNED-TEST-windows-x64-setup.exe",
+  installerName: "SIQshift-UNSIGNED-TEST-windows-x64-setup.exe",
   pubDate: "2026-08-12T00:00:00.000Z",
 };
 
@@ -17,7 +17,7 @@ test("points the updater at the published installer under the stable tag", () =>
   assert.equal(manifest.version, "0.1.4-test.12");
   assert.equal(
     manifest.platforms["windows-x86_64"].url,
-    "https://github.com/fpresta0607/Clock-In/releases/download/unsigned-latest/Clock-In-UNSIGNED-TEST-windows-x64-setup.exe",
+    "https://github.com/fpresta0607/SIQshift/releases/download/unsigned-latest/SIQshift-UNSIGNED-TEST-windows-x64-setup.exe",
   );
   // The trailing newline a signature file carries would fail verification.
   assert.equal(manifest.platforms["windows-x86_64"].signature, "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZQo=");
@@ -32,7 +32,7 @@ test("lists no macOS platform, which the updater could not install from a dmg", 
 test("survives a base URL that already ends in a slash", () => {
   const manifest = buildUpdaterManifest({ ...valid, baseUrl: `${valid.baseUrl}/` });
 
-  assert.ok(!manifest.platforms["windows-x86_64"].url.includes("//Clock-In"));
+  assert.ok(!manifest.platforms["windows-x86_64"].url.includes("//SIQshift"));
 });
 
 test("refuses a version that is not semver, which would strand every install", () => {

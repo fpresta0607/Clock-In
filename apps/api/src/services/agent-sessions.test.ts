@@ -199,7 +199,7 @@ function event(overrides: Partial<AgentSessionEventInput> = {}): AgentSessionEve
     externalSessionId: "session-1",
     event: "started",
     occurredAt: new Date("2026-08-06T13:30:00.000Z"),
-    cwd: "C:/dev/clock-in",
+    cwd: "C:/dev/siqshift",
     // A desktop old enough to have no repo probe is the default here, so the
     // suite keeps exercising the degradation path as well as the v2 one.
     repoRoot: null,
@@ -228,7 +228,7 @@ function createService(options: {
   return { agentSessions, service };
 }
 
-const mapped: PathMappingRecord = { id: "f1c7e513-b094-4d4c-ae55-21790ae019a4", organizationId: ids.organization, userId: ids.user, kind: "path_prefix", pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project };
+const mapped: PathMappingRecord = { id: "f1c7e513-b094-4d4c-ae55-21790ae019a4", organizationId: ids.organization, userId: ids.user, kind: "path_prefix", pathPrefix: "C:/dev/siqshift", repoUrl: null, projectId: ids.project };
 
 describe("agent-session service", () => {
   it("starts a running row attributed by cwd and linked to a matching running timer", async () => {
@@ -483,13 +483,13 @@ describe("roster minting", () => {
     const { agentSessions, service } = createService({ mappings: [mapped], agents });
 
     await service.ingest(subject, [
-      event({ externalSessionId: "one", repoRoot: "C:/dev/clock-in" }),
-      event({ externalSessionId: "two", repoRoot: "C:/dev/clock-in" }),
+      event({ externalSessionId: "one", repoRoot: "C:/dev/siqshift" }),
+      event({ externalSessionId: "two", repoRoot: "C:/dev/siqshift" }),
       event({ externalSessionId: "three", repoRoot: "C:/dev/pocket-piggies" }),
     ]);
 
     expect(agents.upserts.map((upsert) => upsert.repoRoot))
-      .toEqual(["C:/dev/clock-in", "C:/dev/pocket-piggies"]);
+      .toEqual(["C:/dev/siqshift", "C:/dev/pocket-piggies"]);
     expect(agentSessions.records[1]!.agentId).toBe(agentSessions.records[0]!.agentId);
     // Two repos inside one project used to collapse onto one identity.
     expect(agentSessions.records[2]!.agentId).not.toBe(agentSessions.records[0]!.agentId);
@@ -512,7 +512,7 @@ describe("roster minting", () => {
     const { service } = createService({ agents });
     const other: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.otherUser, role: "member" };
 
-    await service.ingest(other, [event({ source: "kimi_code", repoRoot: "C:/dev/clock-in" })]);
+    await service.ingest(other, [event({ source: "kimi_code", repoRoot: "C:/dev/siqshift" })]);
 
     // No per-runtime work: the day kimi's hooks are wired, its shifts mint
     // under the account whose desktop uploaded them.
@@ -525,9 +525,9 @@ describe("roster minting", () => {
 
     await service.ingest(subject, [
       // The repo is mapped; a deeper cwd inside it resolves the same project.
-      event({ externalSessionId: "one", repoRoot: "C:/dev/clock-in", cwd: "C:/dev/clock-in/apps/web" }),
+      event({ externalSessionId: "one", repoRoot: "C:/dev/siqshift", cwd: "C:/dev/siqshift/apps/web" }),
       // No repo reported, so the working directory answers exactly as before.
-      event({ externalSessionId: "two", repoRoot: null, cwd: "C:/dev/clock-in/apps/api" }),
+      event({ externalSessionId: "two", repoRoot: null, cwd: "C:/dev/siqshift/apps/api" }),
       // Neither is mapped: null, never a fallback project.
       event({ externalSessionId: "three", repoRoot: "C:/dev/elsewhere", cwd: "C:/dev/elsewhere" }),
     ]);

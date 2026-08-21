@@ -1,4 +1,4 @@
-import type { ShiftCommitBatchResponse, ShiftCommitUpload } from "@clock-in/shared";
+import type { ShiftCommitBatchResponse, ShiftCommitUpload } from "@siqshift/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import type {

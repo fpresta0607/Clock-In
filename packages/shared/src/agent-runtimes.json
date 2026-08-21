@@ -71,7 +71,7 @@
       "icon": "pi",
       "manualSnippet": [
         "// Pi has no hook-command config: it fires session_start/session_shutdown",
-        "// at JS extensions. Save this as ~/.pi/agent/extensions/clock-in.js, which",
+        "// at JS extensions. Save this as ~/.pi/agent/extensions/siqshift.js, which",
         "// Pi auto-discovers. ctx.model names the model, recorded beside the",
         "// runtime without either one inferring the other.",
         "import { spawn } from \"node:child_process\";",
@@ -84,7 +84,7 @@
         "  ], { stdio: \"ignore\", detached: true });",
         "  child.unref();",
         "};",
-        "export default function clockIn(pi) {",
+        "export default function siqshift(pi) {",
         "  pi.on(\"session_start\", (_event, ctx) => fire(\"session-start\", ctx));",
         "  pi.on(\"session_shutdown\", (_event, ctx) => fire(\"session-end\", ctx));",
         "}"
@@ -104,7 +104,7 @@
       "manualSnippet": [
         "// pi-signed shares Pi's extension mechanism and its config directory, so",
         "// it needs its own --source to stay told apart from plain Pi. Save this",
-        "// as ~/.pi/agent/extensions/clock-in-signed.js.",
+        "// as ~/.pi/agent/extensions/siqshift-signed.js.",
         "import { spawn } from \"node:child_process\";",
         "const fire = (event, ctx) => {",
         "  const child = spawn(\"{command}\", [",
@@ -115,7 +115,7 @@
         "  ], { stdio: \"ignore\", detached: true });",
         "  child.unref();",
         "};",
-        "export default function clockInSigned(pi) {",
+        "export default function siqshiftSigned(pi) {",
         "  pi.on(\"session_start\", (_event, ctx) => fire(\"session-start\", ctx));",
         "  pi.on(\"session_shutdown\", (_event, ctx) => fire(\"session-end\", ctx));",
         "}"
@@ -134,8 +134,8 @@
       "icon": "opencode",
       "manualSnippet": [
         "// opencode loads plugins from ~/.config/opencode/plugins/*.js. Save this",
-        "// as clock-in.js there; opencode picks it up on its next start. It has no",
-        "// session-end event, so session.idle reports a heartbeat and Clock-In",
+        "// as siqshift.js there; opencode picks it up on its next start. It has no",
+        "// session-end event, so session.idle reports a heartbeat and SIQshift",
         "// infers the boundary from the gaps, exactly as it does for Codex.",
         "// Neither event names the model, and reading the configured one back is",
         "// unconfirmed, so this reports none.",
@@ -147,7 +147,7 @@
         "  ], { stdio: \"ignore\", detached: true });",
         "  child.unref();",
         "};",
-        "export const ClockIn = async ({ directory }) => ({",
+        "export const SIQshift = async ({ directory }) => ({",
         "  event: async ({ event }) => {",
         "    if (event.type === \"session.created\") {",
         "      fire(\"session-start\", event.properties.info.id, directory);",

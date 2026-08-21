@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 
-import { generateInviteCode, type AgentSource } from "@clock-in/shared";
+import { generateInviteCode, type AgentSource } from "@siqshift/shared";
 import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lt, ne, or, sql, sum } from "drizzle-orm";
 import {
   activitySegments,
@@ -18,7 +18,7 @@ import {
   users,
   userViewPreferences,
   type DatabaseConnection,
-} from "@clock-in/database";
+} from "@siqshift/database";
 
 import type {
   AccountStore,

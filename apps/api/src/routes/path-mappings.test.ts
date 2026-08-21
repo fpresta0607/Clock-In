@@ -21,8 +21,8 @@ const ids = {
   archivedProject: "b1c7e513-b094-4d4c-ae55-21790ae019a4",
 };
 const config = parseEnv({
-  DATABASE_URL: "postgres://clock_in:password@localhost:5432/clock_in",
-  AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
+  DATABASE_URL: "postgres://siqshift:password@localhost:5432/siqshift",
+  AUTH_BASE_URL: "https://auth.siqshift.test/neondb/auth",
   NODE_ENV: "test",
 });
 const users = {
@@ -120,20 +120,20 @@ describe("path-mapping routes", () => {
     await expect(empty.json()).resolves.toEqual({ mappings: [] });
 
     const created = await app.request("http://api.test/path-mappings", {
-      method: "POST", headers, body: JSON.stringify({ pathPrefix: "C:/dev/clock-in", projectId: ids.project }),
+      method: "POST", headers, body: JSON.stringify({ pathPrefix: "C:/dev/siqshift", projectId: ids.project }),
     });
     expect(created.status).toBe(200);
     const mapping = await created.json();
-    expect(mapping).toEqual({ id: expect.any(String), kind: "path_prefix", pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project });
+    expect(mapping).toEqual({ id: expect.any(String), kind: "path_prefix", pathPrefix: "C:/dev/siqshift", repoUrl: null, projectId: ids.project });
 
     const listed = await app.request("http://api.test/path-mappings", { headers });
     await expect(listed.json()).resolves.toEqual({ mappings: [mapping] });
 
     const updated = await app.request(`http://api.test/path-mappings/${mapping.id}`, {
-      method: "PATCH", headers, body: JSON.stringify({ repoUrl: "https://github.com/acme/clock-in" }),
+      method: "PATCH", headers, body: JSON.stringify({ repoUrl: "https://github.com/acme/siqshift" }),
     });
     expect(updated.status).toBe(200);
-    await expect(updated.json()).resolves.toEqual({ ...mapping, repoUrl: "https://github.com/acme/clock-in" });
+    await expect(updated.json()).resolves.toEqual({ ...mapping, repoUrl: "https://github.com/acme/siqshift" });
 
     const removed = await app.request(`http://api.test/path-mappings/${mapping.id}`, { method: "DELETE", headers });
     expect(removed.status).toBe(204);
@@ -182,10 +182,10 @@ describe("path-mapping routes", () => {
     await expect(archived.json()).resolves.toEqual({ error: { code: "project_archived", message: "Archived projects cannot be used for path mappings." } });
 
     await app.request("http://api.test/path-mappings", {
-      method: "POST", headers, body: JSON.stringify({ pathPrefix: "C:/dev/clock-in", projectId: ids.project }),
+      method: "POST", headers, body: JSON.stringify({ pathPrefix: "C:/dev/siqshift", projectId: ids.project }),
     });
     const duplicate = await app.request("http://api.test/path-mappings", {
-      method: "POST", headers, body: JSON.stringify({ pathPrefix: "C:/dev/clock-in", projectId: ids.project }),
+      method: "POST", headers, body: JSON.stringify({ pathPrefix: "C:/dev/siqshift", projectId: ids.project }),
     });
     expect(duplicate.status).toBe(409);
     await expect(duplicate.json()).resolves.toEqual({ error: { code: "conflict", message: "A path mapping already exists for this prefix." } });
@@ -224,7 +224,7 @@ describe("path-mapping routes", () => {
     const app = createTestApp();
 
     const created = await app.request("http://api.test/path-mappings", {
-      method: "POST", headers, body: JSON.stringify({ pathPrefix: "C:/dev/clock-in", projectId: ids.project }),
+      method: "POST", headers, body: JSON.stringify({ pathPrefix: "C:/dev/siqshift", projectId: ids.project }),
     });
     const mapping = await created.json();
 
@@ -241,7 +241,7 @@ describe("path-mapping routes", () => {
     const app = createTestApp();
 
     const created = await app.request("http://api.test/path-mappings", {
-      method: "POST", headers, body: JSON.stringify({ pathPrefix: "C:/dev/clock-in", projectId: ids.project }),
+      method: "POST", headers, body: JSON.stringify({ pathPrefix: "C:/dev/siqshift", projectId: ids.project }),
     });
     const mapping = await created.json();
 
@@ -252,7 +252,7 @@ describe("path-mapping routes", () => {
     expect(otherDelete.status).toBe(404);
 
     const otherDuplicate = await app.request("http://api.test/path-mappings", {
-      method: "POST", headers: otherHeaders, body: JSON.stringify({ pathPrefix: "C:/dev/clock-in", projectId: ids.project }),
+      method: "POST", headers: otherHeaders, body: JSON.stringify({ pathPrefix: "C:/dev/siqshift", projectId: ids.project }),
     });
     // The other org cannot see the project, so it gets not_found — never a conflict leak.
     expect(otherDuplicate.status).toBe(404);

@@ -347,7 +347,7 @@ mod tests {
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "clock-in-git-evidence-{name}-{}-{}",
+            "siqshift-git-evidence-{name}-{}-{}",
             std::process::id(),
             unique_suffix()
         ));
@@ -466,7 +466,7 @@ mod tests {
         // probe; the spawn fails and collapses to None rather than failing
         // the hook.
         assert_eq!(
-            probe_repo_root("clock-in-git-that-is-not-installed", &dir),
+            probe_repo_root("siqshift-git-that-is-not-installed", &dir),
             None
         );
 

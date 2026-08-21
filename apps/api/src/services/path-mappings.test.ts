@@ -96,7 +96,7 @@ function existingMapping(overrides: Partial<PathMappingRecord> = {}): PathMappin
     organizationId: ids.organization,
     userId: ids.user,
     kind: "path_prefix",
-    pathPrefix: "C:/dev/clock-in",
+    pathPrefix: "C:/dev/siqshift",
     repoUrl: null,
     projectId: ids.project,
     ...overrides,
@@ -115,9 +115,9 @@ describe("path-mapping service", () => {
   it("creates a mapping for an active membership project", async () => {
     const { pathMappings, service } = createService();
 
-    const created = await service.create(subject, { kind: "path_prefix", pathPrefix: "C:/dev/clock-in", projectId: ids.project });
+    const created = await service.create(subject, { kind: "path_prefix", pathPrefix: "C:/dev/siqshift", projectId: ids.project });
 
-    expect(created).toMatchObject({ kind: "path_prefix", pathPrefix: "C:/dev/clock-in", repoUrl: null, projectId: ids.project, userId: ids.user });
+    expect(created).toMatchObject({ kind: "path_prefix", pathPrefix: "C:/dev/siqshift", repoUrl: null, projectId: ids.project, userId: ids.user });
     expect(pathMappings.records).toHaveLength(1);
   });
 
@@ -150,7 +150,7 @@ describe("path-mapping service", () => {
   it("rejects a duplicate prefix, including a unique-constraint race", async () => {
     const { pathMappings, service } = createService([existingMapping()]);
 
-    await expect(service.create(subject, { kind: "path_prefix", pathPrefix: "C:/dev/clock-in", projectId: ids.project }))
+    await expect(service.create(subject, { kind: "path_prefix", pathPrefix: "C:/dev/siqshift", projectId: ids.project }))
       .rejects.toMatchObject({ code: "conflict", status: 409 });
 
     pathMappings.nextCreateError = new PathMappingRepositoryError("path_prefix");
@@ -172,8 +172,8 @@ describe("path-mapping service", () => {
   it("updates prefix, repo url, and project with the same validations as create", async () => {
     const { pathMappings, service } = createService([existingMapping(), existingMapping({ id: "e2c7e513-b094-4d4c-ae55-21790ae019a4", pathPrefix: "C:/dev/taken" })]);
 
-    const updated = await service.update(subject, ids.mapping, { repoUrl: "https://github.com/acme/clock-in" });
-    expect(updated).toMatchObject({ repoUrl: "https://github.com/acme/clock-in", pathPrefix: "C:/dev/clock-in" });
+    const updated = await service.update(subject, ids.mapping, { repoUrl: "https://github.com/acme/siqshift" });
+    expect(updated).toMatchObject({ repoUrl: "https://github.com/acme/siqshift", pathPrefix: "C:/dev/siqshift" });
 
     await expect(service.update(subject, ids.mapping, { pathPrefix: "C:/dev/taken" }))
       .rejects.toMatchObject({ code: "conflict" });
@@ -183,7 +183,7 @@ describe("path-mapping service", () => {
       .rejects.toMatchObject({ code: "not_found" });
     await expect(service.update(subject, "f1c7e513-b094-4d4c-ae55-21790ae019a4", { repoUrl: null }))
       .rejects.toMatchObject({ code: "not_found" });
-    expect(pathMappings.records[0]).toMatchObject({ pathPrefix: "C:/dev/clock-in" });
+    expect(pathMappings.records[0]).toMatchObject({ pathPrefix: "C:/dev/siqshift" });
   });
 
   it("validates the merged record on updates, exactly like the create path", async () => {

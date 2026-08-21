@@ -24,7 +24,7 @@ const migrationsFolder = fileURLToPath(new URL("../migrations", import.meta.url)
  * migration, against a populated database", whatever the newest one is.
  */
 async function migrationsBeforeTheNewest(): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "clock-in-migrations-"));
+  const directory = await mkdtemp(join(tmpdir(), "siqshift-migrations-"));
   const metadata = JSON.parse(await readFile(join(migrationsFolder, "meta", "_journal.json"), "utf8")) as {
     entries: Array<{ idx: number; tag: string }>;
   };

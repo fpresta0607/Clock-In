@@ -6,7 +6,7 @@ import {
   type AgentPaystubResponse,
   type Interval,
   type TokenTotals,
-} from "@clock-in/shared";
+} from "@siqshift/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import { AppError } from "../errors.js";

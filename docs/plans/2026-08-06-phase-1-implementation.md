@@ -1,4 +1,4 @@
-# Clock-In Phase 1 Implementation Plan
+# SIQshift Phase 1 Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
@@ -26,10 +26,10 @@
 
 **Steps:**
 1. Add tests for login, project, session, report-filter, and stable API-error schemas; add time-format tests for zero, minute, and hour boundaries.
-2. Run `pnpm --filter @clock-in/shared test` and confirm it fails because the package or exports do not exist.
+2. Run `pnpm --filter @siqshift/shared test` and confirm it fails because the package or exports do not exist.
 3. Add the minimal workspace configuration, named schema/type exports, and pure duration formatter needed by the tests.
-4. Run `pnpm install` and `pnpm --filter @clock-in/shared test`; confirm all shared tests pass.
-5. Run `pnpm --filter @clock-in/shared typecheck` and commit as `feat(shared): add api contracts`.
+4. Run `pnpm install` and `pnpm --filter @siqshift/shared test`; confirm all shared tests pass.
+5. Run `pnpm --filter @siqshift/shared typecheck` and commit as `feat(shared): add api contracts`.
 
 ### Task 2: PostgreSQL schema, migrations, and seed
 
@@ -51,8 +51,8 @@
 2. Run the schema test and confirm it fails because no database package exists.
 3. Implement Drizzle tables with UUID primary keys, foreign keys, organization scoping, numeric idle/duration seconds, and a partial unique index allowing one `running` session per user.
 4. Add migration, migration runner, and an idempotent development seed using parameterized Drizzle operations.
-5. Run `pnpm --filter @clock-in/database test`; confirm static schema tests pass and the integration suite skips with a clear reason when `TEST_DATABASE_URL` is absent.
-6. With Neon active, set `TEST_DATABASE_URL` from a disposable branch, run `pnpm --filter @clock-in/database test:integration`, and confirm migrations plus the partial unique index pass.
+5. Run `pnpm --filter @siqshift/database test`; confirm static schema tests pass and the integration suite skips with a clear reason when `TEST_DATABASE_URL` is absent.
+6. With Neon active, set `TEST_DATABASE_URL` from a disposable branch, run `pnpm --filter @siqshift/database test:integration`, and confirm migrations plus the partial unique index pass.
 7. Commit as `feat(database): add initial postgres schema`.
 
 ### Task 3: API composition, security, and authentication
@@ -73,7 +73,7 @@
 2. Run the focused tests and confirm they fail because the app/auth modules are missing.
 3. Implement strict environment parsing, stable JSON errors, Argon2id password verification, JWT signing/verification, request IDs, body limits, security headers, CORS, and login rate limiting.
 4. Keep handlers thin and inject authentication/user lookup dependencies for deterministic tests.
-5. Run `pnpm --filter @clock-in/api test -- app.test.ts auth.test.ts`, then the package typecheck.
+5. Run `pnpm --filter @siqshift/api test -- app.test.ts auth.test.ts`, then the package typecheck.
 6. Commit as `feat(api): add secure authentication boundary`.
 
 ### Task 4: Timer and project services
@@ -169,7 +169,7 @@
 2. Run the smoke test once before its last missing wiring change and confirm the expected failure, then implement the minimal wiring and rerun it to green.
 3. Run `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test`, and `pnpm build`.
 4. Run database integration and API smoke tests against a disposable Neon branch; never write its connection string to tracked files or logs.
-5. Run Rust formatting, tests, checks, and `pnpm --filter @clock-in/desktop tauri build` when the Rust/MSVC toolchain is available.
+5. Run Rust formatting, tests, checks, and `pnpm --filter @siqshift/desktop tauri build` when the Rust/MSVC toolchain is available.
 6. Review the diff for scope, security, secret exposure, dead code, and generated artifacts.
 7. Fetch and rebase onto `origin/main`, rerun the full verification commands, then invoke `/finalize` to open the PR.
 8. Remove the session worktree only after the PR succeeds.
