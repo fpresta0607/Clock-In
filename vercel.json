@@ -1,6 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "pnpm --filter @clock-in/web build",
+  "buildCommand": "pnpm --filter @siqshift/web build",
   "outputDirectory": "apps/web/dist",
   "headers": [
     {
@@ -13,7 +13,7 @@
         { "key": "Strict-Transport-Security", "value": "max-age=31536000; includeSubDomains" },
         {
           "key": "Content-Security-Policy",
-          "value": "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://api.clock.siqstack.com https://ep-tiny-mountain-ay0l41z3.neonauth.c-5.us-east-2.aws.neon.tech"
+          "value": "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https://api.siqshift.siqstack.com https://ep-tiny-mountain-ay0l41z3.neonauth.c-5.us-east-2.aws.neon.tech"
         }
       ]
     },

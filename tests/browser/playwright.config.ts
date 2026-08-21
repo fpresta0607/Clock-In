@@ -25,7 +25,7 @@ export default defineConfig({
   // one. `reuseExistingServer` stays off in both directions: a preview server
   // left over from a previous run would be serving a previous build.
   webServer: {
-    command: "pnpm --filter @clock-in/web build && pnpm --filter @clock-in/web exec vite preview --port 5195 --strictPort",
+    command: "pnpm --filter @siqshift/web build && pnpm --filter @siqshift/web exec vite preview --port 5195 --strictPort",
     cwd: "../..",
     url: "http://localhost:5195/",
     reuseExistingServer: false,

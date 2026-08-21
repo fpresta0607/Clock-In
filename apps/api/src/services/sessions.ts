@@ -1,4 +1,4 @@
-import type { SessionAttribution } from "@clock-in/shared";
+import type { SessionAttribution } from "@siqshift/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import { AppError } from "../errors.js";

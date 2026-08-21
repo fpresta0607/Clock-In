@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { projectMemberships, projects, type DatabaseConnection } from "@clock-in/database";
+import { projectMemberships, projects, type DatabaseConnection } from "@siqshift/database";
 
 import { AppError } from "./errors.js";
 
@@ -364,7 +364,7 @@ describe("Drizzle path-mapping repository", () => {
       organizationId: input.organizationId,
       userId: input.userId,
       kind: "path_prefix",
-      pathPrefix: "C:/dev/clock-in",
+      pathPrefix: "C:/dev/siqshift",
       repoUrl: null,
       projectId: input.projectId,
     })).rejects.toMatchObject({ conflict: "path_prefix" });

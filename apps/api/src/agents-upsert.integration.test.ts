@@ -5,7 +5,7 @@ import {
   runMigrations,
   type DatabaseConnection,
   type DisposableTestDatabase,
-} from "@clock-in/database";
+} from "@siqshift/database";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { AuthenticatedSubject } from "./auth.js";
@@ -34,7 +34,7 @@ integration("agents operator-and-repo identity upsert", () => {
   const otherUserId = randomUUID();
   const projectId = randomUUID();
   const subject: AuthenticatedSubject = { organizationId, userId: ownerUserId, role: "member" };
-  const clockIn = "C:/dev/clock-in";
+  const siqshift = "C:/dev/siqshift";
   const piggies = "C:/dev/pocket-piggies";
   let repository: DrizzleAgentRepository;
 
@@ -49,8 +49,8 @@ integration("agents operator-and-repo identity upsert", () => {
     `;
     await database.client`
       insert into users (id, organization_id, email, name, role)
-      values (${ownerUserId}, ${organizationId}, 'roster@clock-in.test', 'Roster User', 'member'),
-             (${otherUserId}, ${organizationId}, 'other@clock-in.test', 'Other User', 'member')
+      values (${ownerUserId}, ${organizationId}, 'roster@siqshift.test', 'Roster User', 'member'),
+             (${otherUserId}, ${organizationId}, 'other@siqshift.test', 'Other User', 'member')
     `;
     await database.client`
       insert into projects (id, organization_id, name)
@@ -100,21 +100,21 @@ integration("agents operator-and-repo identity upsert", () => {
     const now = new Date();
     const base = { organizationId, ownerUserId, source: "claude_code", repoRemote: null, projectId, name: "Claude Code", now } as const;
     const unassigned = await repository.upsertForKey({ ...base, repoRoot: null, repoRemote: null, projectId: null });
-    const scoped = await repository.upsertForKey({ ...base, repoRoot: clockIn });
+    const scoped = await repository.upsertForKey({ ...base, repoRoot: siqshift });
     const sibling = await repository.upsertForKey({ ...base, repoRoot: piggies });
 
     // Two repos inside one project are two agents; before v2 they collapsed.
     expect(new Set([unassigned.id, scoped.id, sibling.id]).size).toBe(3);
     const record = await repository.findById(subject, scoped.id);
-    expect(record?.name).toBe("Claude Code @ clock-in");
-    expect(record?.repoRoot).toBe(clockIn);
+    expect(record?.name).toBe("Claude Code @ siqshift");
+    expect(record?.repoRoot).toBe(siqshift);
     // The project rides along as a re-derivable attribute, not as identity.
     expect(record?.project).toEqual({ id: projectId, name: "Field work" });
   });
 
   it("gives each operator their own identity for the same runtime and repo", async () => {
     const now = new Date();
-    const base = { organizationId, source: "codex", repoRoot: clockIn, repoRemote: null, projectId: null, name: "Codex", now } as const;
+    const base = { organizationId, source: "codex", repoRoot: siqshift, repoRemote: null, projectId: null, name: "Codex", now } as const;
     const mine = await repository.upsertForKey({ ...base, ownerUserId });
     const theirs = await repository.upsertForKey({ ...base, ownerUserId: otherUserId });
 
@@ -139,7 +139,7 @@ integration("agents operator-and-repo identity upsert", () => {
   // on the pay run - which also undid every merge on the following shift.
   it("mints a fresh identity once a retired one has released the key", async () => {
     const now = new Date();
-    const key = { organizationId, ownerUserId, source: "cursor", repoRoot: clockIn, repoRemote: null, projectId, name: "Cursor", now } as const;
+    const key = { organizationId, ownerUserId, source: "cursor", repoRoot: siqshift, repoRemote: null, projectId, name: "Cursor", now } as const;
     const first = await repository.upsertForKey(key);
     await database.client`update agents set status = 'retired' where id = ${first.id}`;
 
@@ -167,7 +167,7 @@ integration("agents operator-and-repo identity upsert", () => {
   // retired row back is a conflict the caller can act on rather than a 500.
   it("refuses to un-retire an identity another agent now holds", async () => {
     const now = new Date();
-    const key = { organizationId, ownerUserId, source: "copilot", repoRoot: clockIn, repoRemote: null, projectId, name: "Copilot", now } as const;
+    const key = { organizationId, ownerUserId, source: "copilot", repoRoot: siqshift, repoRemote: null, projectId, name: "Copilot", now } as const;
     const retired = await repository.upsertForKey(key);
     await database.client`update agents set status = 'retired' where id = ${retired.id}`;
     await repository.upsertForKey(key);

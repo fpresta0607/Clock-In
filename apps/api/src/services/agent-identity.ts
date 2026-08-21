@@ -1,4 +1,4 @@
-import { agentRuntimeLabel, type AgentSource } from "@clock-in/shared";
+import { agentRuntimeLabel, type AgentSource } from "@siqshift/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import type { AgentRepository, AgentSessionRecord, AgentSessionRepository } from "../repositories.js";

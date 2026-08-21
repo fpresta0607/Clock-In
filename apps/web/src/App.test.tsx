@@ -2,13 +2,13 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { agentRuntimeLabel, type MeStatsResponse } from "@clock-in/shared";
+import { agentRuntimeLabel, type MeStatsResponse } from "@siqshift/shared";
 import { App, buildAppRows, rangeQuery } from "./App.js";
 import { ClientError, type Client } from "./client.js";
 import { windowsInstallerUrl } from "./DownloadInstaller.js";
 
 // jsdom has no WebGL context; the shader is decorative.
-vi.mock("@clock-in/shared/webgl-shader", () => ({ WebGLShader: () => null }));
+vi.mock("@siqshift/shared/webgl-shader", () => ({ WebGLShader: () => null }));
 
 const organization = { id: "00000000-0000-4000-8000-000000000001", name: "SIQstack", inviteCode: "ACDEF-GHJKM" };
 
@@ -56,8 +56,8 @@ const rosterAgent = {
   status: "anonymous" as const,
   owner: { id: "u2", name: "Alex" },
   project: { id: "p1", name: "General" },
-  repoName: "clock-in",
-  repoRoot: "C:/dev/clock-in",
+  repoName: "siqshift",
+  repoRoot: "C:/dev/siqshift",
   createdAt: "2026-08-01T00:00:00.000Z",
 };
 
@@ -67,7 +67,7 @@ const agentShiftsResponse = {
   totalAgentSeconds: 7_200,
   groups: [
     {
-      repo: "clock-in",
+      repo: "siqshift",
       agentSeconds: 5_400,
       shiftCount: 2,
       heldRate: 0.5,
@@ -195,34 +195,34 @@ describe("dashboard", () => {
     const person = await signIn(clientFor());
     await screen.findByRole("heading", { name: "SIQstack" });
 
-    await person.click(screen.getByRole("button", { name: "How Clock-In works" }));
+    await person.click(screen.getByRole("button", { name: "How SIQshift works" }));
 
-    const dialog = screen.getByRole("dialog", { name: "How Clock-In works" });
+    const dialog = screen.getByRole("dialog", { name: "How SIQshift works" });
     expect(dialog).toHaveTextContent("Install the desktop app");
     expect(within(dialog).getByRole("link", { name: /download/i })).toBeInTheDocument();
 
     // The same story the desktop app's "what's recorded" panel tells.
     expect(dialog).toHaveTextContent("There is no timer to start and none to forget.");
     expect(dialog).toHaveTextContent("Hours are filed under a project.");
-    const kept = within(dialog).getByRole("heading", { name: "Clock-In writes down" }).nextElementSibling;
+    const kept = within(dialog).getByRole("heading", { name: "SIQshift writes down" }).nextElementSibling;
     expect(kept).toHaveTextContent("The name only.");
     // Identity is keyed on the repository and the repository is named by its
     // remote, so the remote leaves the machine too and the sentence says so.
     expect(kept).toHaveTextContent("origin remote URL with any embedded credentials removed");
-    const never = within(dialog).getByRole("heading", { name: "Clock-In never writes down" }).nextElementSibling;
+    const never = within(dialog).getByRole("heading", { name: "SIQshift never writes down" }).nextElementSibling;
     expect(never).toHaveTextContent("Not one keystroke.");
     // The remote is a repository name, not browsing, and the never-list says so
     // rather than claiming a category the code no longer honours.
     expect(never).toHaveTextContent("Browsing addresses, history, or page content.");
     expect(never).toHaveTextContent("is not browsing");
     expect(never).toHaveTextContent("Anything you type into a form, chat, or document.");
-    expect(never).toHaveTextContent("Clock-In never reaches inside or controls your other apps.");
+    expect(never).toHaveTextContent("SIQshift never reaches inside or controls your other apps.");
     expect(dialog).toHaveTextContent("Everyone sees the same numbers.");
 
     await person.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
-    await person.click(screen.getByRole("button", { name: "How Clock-In works" }));
+    await person.click(screen.getByRole("button", { name: "How SIQshift works" }));
     await person.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Close" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
@@ -710,9 +710,9 @@ describe("getting the desktop app", () => {
   it("hands out one installer everywhere, including from the help dialog", async () => {
     const person = await signIn(clientFor());
     await screen.findByRole("heading", { name: "SIQstack" });
-    await person.click(screen.getByRole("button", { name: "How Clock-In works" }));
+    await person.click(screen.getByRole("button", { name: "How SIQshift works" }));
 
-    const dialog = screen.getByRole("dialog", { name: "How Clock-In works" });
+    const dialog = screen.getByRole("dialog", { name: "How SIQshift works" });
     expect(within(dialog).getByRole("link", { name: "Download for Windows" }))
       .toHaveAttribute("href", windowsInstallerUrl);
   });
@@ -815,7 +815,7 @@ describe("the agents tab", () => {
     expect(panel.getByText("2h 00m")).toBeInTheDocument();
     const groups = panel.getAllByTestId("shift-group");
     expect(groups).toHaveLength(2);
-    expect(groups[0]).toHaveTextContent("clock-in");
+    expect(groups[0]).toHaveTextContent("siqshift");
     expect(groups[0]).toHaveTextContent("50% held");
     // The label-less group's commits are all pending: it says nothing rather
     // than "pending", because a rate with no decided commits is not a fact.

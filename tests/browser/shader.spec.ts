@@ -121,7 +121,7 @@ test.describe("the WebGL background", () => {
   test("keeps no per-app copy of the shader", () => {
     // The wave used to be byte-identical hand-synced copies in each app, and a
     // background fix landed in one and not the other twice. It lives in
-    // `@clock-in/shared/webgl-shader` now, and a copy coming back to either
+    // `@siqshift/shared/webgl-shader` now, and a copy coming back to either
     // app's own src is the regression this catches.
     //
     // What this suite covers, plainly: the web app's shader is covered

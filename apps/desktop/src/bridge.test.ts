@@ -112,7 +112,7 @@ describe("defaultBridge", () => {
     invoke.mockResolvedValueOnce({
       status: "manual",
       configPath: "C:/Users/dev/.codex/config.toml",
-      snippet: "notify = [\"clock-in-hook\"]",
+      snippet: "notify = [\"siqshift-hook\"]",
     });
     await expect(defaultBridge.hookRegister("codex")).resolves.toMatchObject({ status: "manual" });
 
@@ -292,7 +292,7 @@ describe("defaultBridge", () => {
     invoke.mockResolvedValueOnce({
       totalAgentSeconds: 5_400,
       groups: [{
-        repo: "clock-in",
+        repo: "siqshift",
         agentSeconds: 5_400,
         shiftCount: 1,
         heldRate: 0.5,
@@ -310,7 +310,7 @@ describe("defaultBridge", () => {
     });
     await expect(defaultBridge.agentShifts("2026-08-01T00:00:00.000Z", "2026-08-08T00:00:00.000Z")).resolves.toMatchObject({
       totalAgentSeconds: 5_400,
-      groups: [{ repo: "clock-in", heldRate: 0.5, shifts: [{ model: "claude-opus-5", commitCount: 3 }] }],
+      groups: [{ repo: "siqshift", heldRate: 0.5, shifts: [{ model: "claude-opus-5", commitCount: 3 }] }],
     });
     // The command name and argument keys are the seam between this bundle and
     // the Rust command Tauri registers: a typo on either side compiles fine

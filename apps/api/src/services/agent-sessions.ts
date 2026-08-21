@@ -1,4 +1,4 @@
-import { agentRuntimeLabel, type AgentSessionEventBatchResponse, type AgentSource } from "@clock-in/shared";
+import { agentRuntimeLabel, type AgentSessionEventBatchResponse, type AgentSource } from "@siqshift/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import type {

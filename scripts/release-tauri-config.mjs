@@ -32,9 +32,9 @@ if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLTo
     throw new Error("GITHUB_OUTPUT is required to publish the Tauri configuration.");
   }
   const config = buildTauriConfig({
-    updaterEnabled: enabled(process.env.CLOCK_IN_UPDATER_ENABLED),
-    windowsSigningEnabled: enabled(process.env.CLOCK_IN_WINDOWS_SIGNING),
-    certificateThumbprint: process.env.CLOCK_IN_WINDOWS_CERTIFICATE_THUMBPRINT,
+    updaterEnabled: enabled(process.env.SIQSHIFT_UPDATER_ENABLED),
+    windowsSigningEnabled: enabled(process.env.SIQSHIFT_WINDOWS_SIGNING),
+    certificateThumbprint: process.env.SIQSHIFT_WINDOWS_CERTIFICATE_THUMBPRINT,
     timestampUrl: process.env.WINDOWS_TIMESTAMP_URL,
   });
   appendFileSync(process.env.GITHUB_OUTPUT, `config=${JSON.stringify(config)}\n`);

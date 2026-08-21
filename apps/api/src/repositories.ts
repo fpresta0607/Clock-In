@@ -1,4 +1,4 @@
-import type { ActivitySegmentKind, AgentSource, SessionAttribution } from "@clock-in/shared";
+import type { ActivitySegmentKind, AgentSource, SessionAttribution } from "@siqshift/shared";
 
 import type { AuthenticatedSubject } from "./auth.js";
 

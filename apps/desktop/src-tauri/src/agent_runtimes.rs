@@ -1,14 +1,14 @@
 //! The agent-runtime roster.
 //!
 //! `packages/shared/src/agent-runtimes.json` is the single declaration of every
-//! runtime Clock-In knows by name, and this module embeds that exact file so
+//! runtime SIQshift knows by name, and this module embeds that exact file so
 //! the host and the TypeScript side cannot drift. Adding a runtime is an entry
 //! in that JSON: the hook probes, the registration snippets, the display names,
 //! the process folding, and the quota dials all read it.
 //!
 //! The roster is not an allowlist. `AgentSource` accepts any id of the
 //! canonical shape, so a runtime nobody has declared yet is still spooled and
-//! uploaded under its own name. The roster only decides what Clock-In can *say*
+//! uploaded under its own name. The roster only decides what SIQshift can *say*
 //! about a runtime.
 
 use std::sync::OnceLock;
@@ -18,7 +18,7 @@ use serde::Deserialize;
 /// Compiled in, so a build always ships a roster that matches its contracts.
 const REGISTRY_JSON: &str = include_str!("../../../../packages/shared/src/agent-runtimes.json");
 
-/// How Clock-In can switch a runtime's hooks on.
+/// How SIQshift can switch a runtime's hooks on.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Registration {
@@ -179,18 +179,18 @@ mod tests {
     #[test]
     fn an_undeclared_runtime_resolves_to_nothing_rather_than_to_a_neighbour() {
         assert!(find("some_new_agent").is_none());
-        assert!(manual_snippet("some_new_agent", "/opt/clock-in-hook").is_none());
+        assert!(manual_snippet("some_new_agent", "/opt/siqshift-hook").is_none());
     }
 
     #[test]
     fn every_manual_runtime_carries_a_snippet_and_no_merged_one_does() {
         for runtime in runtimes() {
-            let snippet = manual_snippet(&runtime.id, "/opt/clock-in-hook");
+            let snippet = manual_snippet(&runtime.id, "/opt/siqshift-hook");
             match runtime.registration {
                 Registration::Manual => {
                     let snippet = snippet.expect("a manual runtime explains itself");
                     assert!(
-                        snippet.contains("/opt/clock-in-hook"),
+                        snippet.contains("/opt/siqshift-hook"),
                         "{} drops the command",
                         runtime.id
                     );

@@ -24,7 +24,7 @@ const migrationsFolder = fileURLToPath(new URL("../migrations", import.meta.url)
  * migration, against a populated database", whatever the newest one is.
  */
 async function migrationsBeforeTheNewest(): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "clock-in-migrations-"));
+  const directory = await mkdtemp(join(tmpdir(), "siqshift-migrations-"));
   const metadata = JSON.parse(await readFile(join(migrationsFolder, "meta", "_journal.json"), "utf8")) as {
     entries: Array<{ idx: number; tag: string }>;
   };
@@ -47,7 +47,7 @@ async function migrationsBeforeTheNewest(): Promise<string> {
  * migration's backfill, not about whichever migration happens to be newest.
  */
 async function migrationsThrough(tag: string): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "clock-in-migrations-through-"));
+  const directory = await mkdtemp(join(tmpdir(), "siqshift-migrations-through-"));
   const metadata = JSON.parse(await readFile(join(migrationsFolder, "meta", "_journal.json"), "utf8")) as {
     entries: Array<{ idx: number; tag: string }>;
   };
@@ -365,7 +365,7 @@ integration(
     const organizationId = randomUUID();
     const ownerId = randomUUID();
     const otherOwnerId = randomUUID();
-    const clockIn = "C:/dev/clock-in";
+    const siqshift = "C:/dev/siqshift";
     const worktree = "C:/Users/fpres/.treehouse/precisiondocs-fdd5f2/2/precisiondocs";
 
     beforeAll(async () => {
@@ -388,12 +388,12 @@ integration(
       await database.client`
         insert into agents (organization_id, owner_user_id, source, repo_root, name, status)
         values
-          (${organizationId}, ${ownerId}, 'claude_code', ${clockIn}, 'Claude Code @ clock-in', 'anonymous'),
+          (${organizationId}, ${ownerId}, 'claude_code', ${siqshift}, 'Claude Code @ siqshift', 'anonymous'),
           (${organizationId}, ${ownerId}, 'claude_code', ${worktree}, 'Claude Code @ precisiondocs', 'anonymous'),
           (${organizationId}, ${ownerId}, 'claude_code', null, 'Claude Code @ unassigned', 'anonymous'),
-          (${organizationId}, ${otherOwnerId}, 'claude_code', ${clockIn}, 'Claude Code @ clock-in', 'anonymous'),
+          (${organizationId}, ${otherOwnerId}, 'claude_code', ${siqshift}, 'Claude Code @ siqshift', 'anonymous'),
           (${organizationId}, ${otherOwnerId}, 'claude_code', null, 'Claude Code @ unassigned', 'anonymous'),
-          (${organizationId}, ${ownerId}, 'codex', ${clockIn}, 'Codex @ clock-in', 'retired')
+          (${organizationId}, ${ownerId}, 'codex', ${siqshift}, 'Codex @ siqshift', 'retired')
       `;
     }, 60_000);
 

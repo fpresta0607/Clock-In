@@ -29,8 +29,8 @@ const ids = {
   session: "c1c7e513-b094-4d4c-ae55-21790ae019a4",
 };
 const config = parseEnv({
-  DATABASE_URL: "postgres://clock_in:password@localhost:5432/clock_in",
-  AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
+  DATABASE_URL: "postgres://siqshift:password@localhost:5432/siqshift",
+  AUTH_BASE_URL: "https://auth.siqshift.test/neondb/auth",
   NODE_ENV: "test",
 });
 const users = {
@@ -56,7 +56,7 @@ function sessionRecord(overrides: Partial<AgentSessionRecord> = {}): AgentSessio
     model: null,
     externalSessionId: "ext-1",
     projectId: null,
-    cwd: "C:/dev/clock-in",
+    cwd: "C:/dev/siqshift",
     ruleId: null,
     agentId: ids.agent,
     status: "ended",
@@ -96,12 +96,12 @@ const inertAgents: AgentRepository = {
     return {
       id: agentId,
       organizationId: ids.organization,
-      name: "Claude Code @ clock-in",
+      name: "Claude Code @ siqshift",
       source: "claude_code",
       status: "anonymous",
       owner: { id: ids.user, name: "Alex" },
       project: null,
-      repoRoot: "C:/dev/clock-in",
+      repoRoot: "C:/dev/siqshift",
       createdAt: new Date("2026-08-01T00:00:00.000Z"),
     };
   },
@@ -204,7 +204,7 @@ function commitUpload(overrides: Record<string, unknown> = {}) {
     clientId: crypto.randomUUID(),
     source: "claude_code",
     externalSessionId: "ext-1",
-    repoRoot: "C:/dev/clock-in",
+    repoRoot: "C:/dev/siqshift",
     sha: "a".repeat(40),
     subject: "feat(api): shift commits",
     authoredAt: "2026-08-06T10:30:00.000Z",

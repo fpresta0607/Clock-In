@@ -4,5 +4,5 @@
 # shell variable overrides them, which is how CI builds against production —
 # and build.rs refuses any release build that still reaches these values.
 [env]
-CLOCK_IN_AUTH_URL = "https://ep-tiny-mountain-ay0l41z3.neonauth.c-5.us-east-2.aws.neon.tech/neondb/auth"
-CLOCK_IN_API_URL = "http://localhost:3977"
+SIQSHIFT_AUTH_URL = "https://ep-tiny-mountain-ay0l41z3.neonauth.c-5.us-east-2.aws.neon.tech/neondb/auth"
+SIQSHIFT_API_URL = "http://localhost:3977"

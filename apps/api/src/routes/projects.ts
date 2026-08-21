@@ -5,7 +5,7 @@ import {
   projectListResponseSchema,
   projectUpdateRequestSchema,
   projectUsageResponseSchema,
-} from "@clock-in/shared";
+} from "@siqshift/shared";
 import { Hono } from "hono";
 
 import { getAuthenticatedSubject, type ApiEnvironment } from "../app.js";

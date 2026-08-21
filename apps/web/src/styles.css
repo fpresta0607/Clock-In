@@ -1,8 +1,8 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
-@import "@clock-in/shared/brand.css";
+@import "@siqshift/shared/brand.css";
 
 /* Web-only layout. Brand tokens, primitives, and shared components live in
-   @clock-in/shared/brand.css. */
+   @siqshift/shared/brand.css. */
 
 /* No width cap: the six-column Agent-sessions table, the leaderboard and the
    roster rows take whatever width the window has, and the 20px side padding is

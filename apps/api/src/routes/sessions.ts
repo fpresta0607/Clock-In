@@ -8,7 +8,7 @@ import {
   sessionStopRequestSchema,
   sessionStopResponseSchema,
   type Session,
-} from "@clock-in/shared";
+} from "@siqshift/shared";
 import { Hono } from "hono";
 import { z } from "zod";
 

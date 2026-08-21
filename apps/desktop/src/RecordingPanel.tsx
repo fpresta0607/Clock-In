@@ -27,14 +27,14 @@ const HEADLINE: Record<RecordingState, string> = {
   stalled: "Recording has stopped responding",
   paused: "Recording is on, but not running right now",
   off: "Recording is off",
-  unknown: "Clock-In can't check this computer",
+  unknown: "SIQshift can't check this computer",
 };
 
 const SUMMARY: Record<RecordingState, string> = {
-  on: "Clock-In is writing your hours down for you, for as long as this app is open. There is nothing to start and nothing to stop.",
-  stalled: "Clock-In has not looked at this computer for a while, so hours are not being written down right now. Restarting the app fixes it.",
+  on: "SIQshift is writing your hours down for you, for as long as this app is open. There is nothing to start and nothing to stop.",
+  stalled: "SIQshift has not looked at this computer for a while, so hours are not being written down right now. Restarting the app fixes it.",
   paused: "It starts again on its own.",
-  off: "Clock-In is writing nothing down and no hours are being recorded on this computer.",
+  off: "SIQshift is writing nothing down and no hours are being recorded on this computer.",
   unknown: "It can't say what it is doing at the moment.",
 };
 
@@ -65,7 +65,7 @@ const NEVER = [
   "Browsing addresses, history, or page content. A repository's origin remote URL is not browsing: it names which repository an agent worked, and is listed above.",
   "Anything inside your files, messages, or email. Token counts and model names from an AI tool's own session log are the one exception, listed above.",
   "Anything you type into a form, chat, or document.",
-  "Clock-In never reaches inside or controls your other apps.",
+  "SIQshift never reaches inside or controls your other apps.",
 ];
 
 const clockTime = (iso: string): string =>
@@ -94,7 +94,7 @@ type RecordingPanelProps = {
 };
 
 /**
- * "What Clock-In is recording": the transparency surface. It answers, in this
+ * "What SIQshift is recording": the transparency surface. It answers, in this
  * order, what is happening right now, which sources are switched on, what is
  * and is not written down, and how the whole thing works. Every failing state
  * carries the one button that fixes it rather than instructions to follow.
@@ -142,7 +142,7 @@ export const RecordingPanel = ({
         onClick={(event) => event.stopPropagation()}
       >
         <div className="panel-head">
-          <h2 id="recording-title">What Clock-In is recording</h2>
+          <h2 id="recording-title">What SIQshift is recording</h2>
           <button
             className="outline-button modal-close"
             type="button"
@@ -179,7 +179,7 @@ export const RecordingPanel = ({
 
         <h3>What&apos;s switched on</h3>
         {status === undefined ? (
-          <p className="subtle">Clock-In will show this as soon as it can reach the recorder on this computer.</p>
+          <p className="subtle">SIQshift will show this as soon as it can reach the recorder on this computer.</p>
         ) : (
           <>
             <ul className="source-list">
@@ -187,7 +187,7 @@ export const RecordingPanel = ({
                 <span className="source-name">This computer</span>
                 <span className={`source-state ${state === "on" ? "is-on" : "is-off"}`}>{COMPUTER_STATE[state]}</span>
               </li>
-              {/* State, not a to-do list. Clock-In connects what it can on
+              {/* State, not a to-do list. SIQshift connects what it can on
                   startup, so a row only carries a button when a person really
                   is the only one who can finish it. */}
               {status.hooks.map((hook) => (
@@ -218,7 +218,7 @@ export const RecordingPanel = ({
                   {hookSnippets[hook.source] !== undefined && (
                     <>
                       <p className="source-note">
-                        Clock-In can&apos;t switch this one on by itself. Copy the lines below into that tool&apos;s own
+                        SIQshift can&apos;t switch this one on by itself. Copy the lines below into that tool&apos;s own
                         settings file.
                       </p>
                       <pre className="hook-snippet">{hookSnippets[hook.source]}</pre>
@@ -228,7 +228,7 @@ export const RecordingPanel = ({
               ))}
             </ul>
             {visibleBrowsers.length === 0 ? (
-              <p className="subtle">Nothing else is connected. Clock-In does not watch your web browser.</p>
+              <p className="subtle">Nothing else is connected. SIQshift does not watch your web browser.</p>
             ) : (
               <ul className="source-list">
                 {visibleBrowsers.map((browser) => (
@@ -266,7 +266,7 @@ export const RecordingPanel = ({
           </>
         )}
 
-        <h3>Clock-In writes down</h3>
+        <h3>SIQshift writes down</h3>
         <ul className="record-list is-kept">
           {KEPT.map((line) => <li key={line}>{line}</li>)}
         </ul>
@@ -283,15 +283,15 @@ export const RecordingPanel = ({
           <li>The leaderboard ranks by your hours. Agent time and leverage sit beside them, answering a different question: how much work you got out of the tools.</li>
       </ul>
 
-      <h3>Clock-In never writes down</h3>
+      <h3>SIQshift never writes down</h3>
         <ul className="record-list is-never">
           {NEVER.map((line) => <li key={line}>{line}</li>)}
         </ul>
 
-        <h3>How Clock-In works</h3>
+        <h3>How SIQshift works</h3>
         <ol className="help-steps">
           <li>
-            <strong>You do nothing.</strong> While this app is open and recording is on, Clock-In writes down the
+            <strong>You do nothing.</strong> While this app is open and recording is on, SIQshift writes down the
             hours you spend at this computer. There is no button to press and no timer to forget.
           </li>
           <li>
@@ -305,7 +305,7 @@ export const RecordingPanel = ({
             whenever you like.
           </li>
           <li>
-            <strong>You see what your team sees.</strong> The same hours, added up the same way, on the Clock-In
+            <strong>You see what your team sees.</strong> The same hours, added up the same way, on the SIQshift
             website. Hours filed under a project on purpose are counted separately from hours that just fell to the
             default, so nobody has to guess.
           </li>

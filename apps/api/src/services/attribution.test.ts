@@ -24,13 +24,13 @@ function mapping(pathPrefix: string, projectId: string, kind: "path_prefix" | "u
 
 describe("repoLabel", () => {
   it("names the last segment of a path, whatever separators it uses", () => {
-    expect(repoLabel("C:\\dev\\clock-in")).toBe("clock-in");
-    expect(repoLabel("C:/dev/clock-in/")).toBe("clock-in");
+    expect(repoLabel("C:\\dev\\siqshift")).toBe("siqshift");
+    expect(repoLabel("C:/dev/siqshift/")).toBe("siqshift");
     expect(repoLabel("/home/alex/src/Pocket-Piggies")).toBe("Pocket-Piggies");
   });
 
   it("keeps the label's own case, unlike the matching path normalizer", () => {
-    expect(repoLabel("C:\\Dev\\Clock-In")).toBe("Clock-In");
+    expect(repoLabel("C:\\Dev\\SIQshift")).toBe("SIQshift");
   });
 
   it("returns null when there is no segment left to name", () => {
@@ -58,7 +58,7 @@ describe("repoLabel", () => {
     expect(repoLabel("/src/deadbeefcafe")).toBe("deadbeefcafe");
     expect(repoLabel("/src/deadbeefcafedeadbeef")).toBe("deadbeefcafedeadbeef");
     expect(repoLabel("/src/2024-migrations")).toBe("2024-migrations");
-    expect(repoLabel("/src/clock-in-desktop-ui")).toBe("clock-in-desktop-ui");
+    expect(repoLabel("/src/siqshift-desktop-ui")).toBe("siqshift-desktop-ui");
     expect(repoLabel("/src/v2")).toBe("v2");
   });
 
@@ -75,7 +75,7 @@ describe("repoLabel", () => {
 
   describe("identityRepoRoot", () => {
     it("keeps a root that names a codebase", () => {
-      expect(identityRepoRoot("C:/dev/clock-in")).toBe("C:/dev/clock-in");
+      expect(identityRepoRoot("C:/dev/siqshift")).toBe("C:/dev/siqshift");
       expect(identityRepoRoot(null)).toBeNull();
     });
 
@@ -231,7 +231,7 @@ describe("identityRepoKey", () => {
 describe("repoKeyLabel", () => {
   it("names the repository from a remote key and the directory from a path key", () => {
     expect(repoKeyLabel("github.com/fpresta0607/precisiondocs")).toBe("precisiondocs");
-    expect(repoKeyLabel("path:C:/dev/Clock-In")).toBe("Clock-In");
+    expect(repoKeyLabel("path:C:/dev/SIQshift")).toBe("SIQshift");
   });
 
   it("has nothing to say about a path key that names only a run", () => {
@@ -249,8 +249,8 @@ describe("agentCodebaseLabel", () => {
   });
 
   it("reads a path key as its own directory, and falls back to the root only without a key", () => {
-    expect(agentCodebaseLabel("C:/dev/Clock-In", "path:C:/dev/Clock-In")).toBe("Clock-In");
-    expect(agentCodebaseLabel("C:/dev/Clock-In", null)).toBe("Clock-In");
+    expect(agentCodebaseLabel("C:/dev/SIQshift", "path:C:/dev/SIQshift")).toBe("SIQshift");
+    expect(agentCodebaseLabel("C:/dev/SIQshift", null)).toBe("SIQshift");
   });
 
   it("has no name for the unassigned bucket, or for a key and a root that both name only a run", () => {
@@ -261,82 +261,82 @@ describe("agentCodebaseLabel", () => {
 
 describe("normalizePath", () => {
   it("unifies case and separators and strips trailing separators", () => {
-    expect(normalizePath("C:\\Dev\\Clock-In\\")).toBe("c:/dev/clock-in");
-    expect(normalizePath("C:/Dev/Clock-In/")).toBe("c:/dev/clock-in");
-    expect(normalizePath("C:\\dev\\clock-in/src")).toBe("c:/dev/clock-in/src");
+    expect(normalizePath("C:\\Dev\\SIQshift\\")).toBe("c:/dev/siqshift");
+    expect(normalizePath("C:/Dev/SIQshift/")).toBe("c:/dev/siqshift");
+    expect(normalizePath("C:\\dev\\siqshift/src")).toBe("c:/dev/siqshift/src");
     expect(normalizePath("c:/")).toBe("c:");
   });
 });
 
 describe("resolveProjectForCwd", () => {
   it("returns null with no mappings or no match", () => {
-    expect(resolveProjectForCwd("C:/dev/clock-in", [])).toBeNull();
+    expect(resolveProjectForCwd("C:/dev/siqshift", [])).toBeNull();
     expect(resolveProjectForCwd("C:/other/place", [mapping("C:/dev", projectA)])).toBeNull();
   });
 
   it("matches exactly, case-insensitively and across slash styles", () => {
-    const mappings = [mapping("C:\\Dev\\Clock-In", projectA)];
-    expect(resolveProjectForCwd("c:/dev/clock-in", mappings)).toBe(projectA);
-    expect(resolveProjectForCwd("C:/DEV/CLOCK-IN/", mappings)).toBe(projectA);
+    const mappings = [mapping("C:\\Dev\\SIQshift", projectA)];
+    expect(resolveProjectForCwd("c:/dev/siqshift", mappings)).toBe(projectA);
+    expect(resolveProjectForCwd("C:/DEV/SIQSHIFT/", mappings)).toBe(projectA);
   });
 
   it("matches subdirectories but only on path-segment boundaries", () => {
-    const mappings = [mapping("C:/dev/clock", projectA)];
-    expect(resolveProjectForCwd("c:/dev/clock/packages/shared", mappings)).toBe(projectA);
-    expect(resolveProjectForCwd("C:/dev/clock-in-extra", mappings)).toBeNull();
-    expect(resolveProjectForCwd("C:/dev/clocks", mappings)).toBeNull();
+    const mappings = [mapping("C:/dev/siqshift", projectA)];
+    expect(resolveProjectForCwd("c:/dev/siqshift/packages/shared", mappings)).toBe(projectA);
+    expect(resolveProjectForCwd("C:/dev/siqshift-extra", mappings)).toBeNull();
+    expect(resolveProjectForCwd("C:/dev/siqshifts", mappings)).toBeNull();
   });
 
   it("ignores a trailing separator on the stored prefix", () => {
-    const mappings = [mapping("C:/dev/clock-in/", projectA)];
-    expect(resolveProjectForCwd("c:/dev/clock-in", mappings)).toBe(projectA);
-    expect(resolveProjectForCwd("c:/dev/clock-in/apps", mappings)).toBe(projectA);
+    const mappings = [mapping("C:/dev/siqshift/", projectA)];
+    expect(resolveProjectForCwd("c:/dev/siqshift", mappings)).toBe(projectA);
+    expect(resolveProjectForCwd("c:/dev/siqshift/apps", mappings)).toBe(projectA);
   });
 
   it("picks the longest matching prefix", () => {
     const mappings = [
       mapping("C:/dev", projectA),
-      mapping("C:/dev/clock-in", projectB),
+      mapping("C:/dev/siqshift", projectB),
     ];
-    expect(resolveProjectForCwd("c:/dev/clock-in/apps/api", mappings)).toBe(projectB);
+    expect(resolveProjectForCwd("c:/dev/siqshift/apps/api", mappings)).toBe(projectB);
     expect(resolveProjectForCwd("c:/dev/other", mappings)).toBe(projectA);
   });
 
   it("rejects equal-length ties as ambiguous, unless they name the same project", () => {
     const ambiguous = [
-      mapping("C:/dev/clock-in", projectA),
-      mapping("c:\\dev\\clock-in\\", projectB),
+      mapping("C:/dev/siqshift", projectA),
+      mapping("c:\\dev\\siqshift\\", projectB),
     ];
-    expect(resolveProjectForCwd("c:/dev/clock-in", ambiguous)).toBeNull();
+    expect(resolveProjectForCwd("c:/dev/siqshift", ambiguous)).toBeNull();
 
     const agreeing = [
-      mapping("C:/dev/clock-in", projectA),
-      mapping("c:\\dev\\clock-in\\", projectA),
+      mapping("C:/dev/siqshift", projectA),
+      mapping("c:\\dev\\siqshift\\", projectA),
     ];
-    expect(resolveProjectForCwd("c:/dev/clock-in", agreeing)).toBe(projectA);
+    expect(resolveProjectForCwd("c:/dev/siqshift", agreeing)).toBe(projectA);
   });
 
   it("prefers an unambiguous longer match over an ambiguous shorter one", () => {
     const mappings = [
       mapping("C:/dev", projectA),
       mapping("c:\\dev", projectB),
-      mapping("C:/dev/clock-in", projectB),
+      mapping("C:/dev/siqshift", projectB),
     ];
-    expect(resolveProjectForCwd("c:/dev/clock-in", mappings)).toBe(projectB);
+    expect(resolveProjectForCwd("c:/dev/siqshift", mappings)).toBe(projectB);
   });
 
   it("ignores shorter matches that arrive after the longest one, in any input order", () => {
     const longestFirst = [
-      mapping("C:/dev/clock-in", projectB),
+      mapping("C:/dev/siqshift", projectB),
       mapping("C:/dev", projectA),
     ];
-    expect(resolveProjectForCwd("C:/dev/clock-in/apps", longestFirst)).toBe(projectB);
-    expect(resolveProjectForCwd("C:/dev/clock-in/apps", [...longestFirst].reverse())).toBe(projectB);
+    expect(resolveProjectForCwd("C:/dev/siqshift/apps", longestFirst)).toBe(projectB);
+    expect(resolveProjectForCwd("C:/dev/siqshift/apps", [...longestFirst].reverse())).toBe(projectB);
   });
 
   it("never matches a url_rule pattern against a working directory", () => {
-    const mappings = [mapping("C:/dev/clock-in", projectA, "url_rule")];
-    expect(resolveProjectForCwd("c:/dev/clock-in", mappings)).toBeNull();
+    const mappings = [mapping("C:/dev/siqshift", projectA, "url_rule")];
+    expect(resolveProjectForCwd("c:/dev/siqshift", mappings)).toBeNull();
   });
 });
 

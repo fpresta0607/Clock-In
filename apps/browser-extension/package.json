@@ -1,5 +1,5 @@
 {
-  "name": "@clock-in/browser-extension",
+  "name": "@siqshift/browser-extension",
   "version": "0.0.0",
   "private": true,
   "type": "module",

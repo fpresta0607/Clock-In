@@ -5,7 +5,7 @@ import {
   agentPaystubResponseSchema,
   agentSchema,
   agentsListResponseSchema,
-} from "@clock-in/shared";
+} from "@siqshift/shared";
 import { Hono } from "hono";
 import { z } from "zod";
 

@@ -13,8 +13,8 @@ const ids = {
   device: "9b1c7e51-3b09-44d4-ae55-21790ae019a4",
 };
 const config = parseEnv({
-  DATABASE_URL: "postgres://clock_in:password@localhost:5432/clock_in",
-  AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
+  DATABASE_URL: "postgres://siqshift:password@localhost:5432/siqshift",
+  AUTH_BASE_URL: "https://auth.siqshift.test/neondb/auth",
   NODE_ENV: "test",
 });
 const users = {

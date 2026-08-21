@@ -1,4 +1,4 @@
-import { shiftCommitBatchRequestSchema, shiftCommitBatchResponseSchema } from "@clock-in/shared";
+import { shiftCommitBatchRequestSchema, shiftCommitBatchResponseSchema } from "@siqshift/shared";
 import { Hono } from "hono";
 
 import { getAuthenticatedSubject, type ApiEnvironment } from "../app.js";

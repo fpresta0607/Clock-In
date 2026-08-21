@@ -8,7 +8,7 @@ repository that has none - and AGENTS.md owns that rule.
 
 ## Scope
 
-Agent identity v2 fixes the two ways the roster lies today: it has no operator dimension, and it is keyed on the Clock-In project rather than the codebase the agent actually works on.
+Agent identity v2 fixes the two ways the roster lies today: it has no operator dimension, and it is keyed on the SIQshift project rather than the codebase the agent actually works on.
 This document is the implementation plan; it changes no application code.
 
 The design stays inside the shipped product model: agents are durable identities (one row per harness at a workplace), a model is an attribute of a shift and never an identity, and browser spans stay off the roster (`rosterEligibleSource`, `apps/api/src/services/agent-sessions.ts:20`, unchanged).
@@ -91,7 +91,7 @@ One assumption is stated plainly: the operator of a shift is the member whose de
 ### Repo at mint
 
 `agentSessionEventSchema` (`packages/shared/src/contracts.ts:463-494`) gains one optional field, `repoRoot` (string 1..1000).
-The desktop already shells out to git at session start to capture `start_head` (`spool.rs` `SpoolEvent.start_head`, :672-694), so `clock-in-hook` learns the repo root from the same probe (`bin/clock-in-hook.rs:45-49`) and the spool carries it beside `cwd`.
+The desktop already shells out to git at session start to capture `start_head` (`spool.rs` `SpoolEvent.start_head`, :672-694), so `siqshift-hook` learns the repo root from the same probe (`bin/siqshift-hook.rs:45-49`) and the spool carries it beside `cwd`.
 
 **The obvious reuse does not compile, so do not plan on it.** `git_evidence::discover_repo` (`git_evidence.rs:61-67`) runs exactly the wanted `git rev-parse --show-toplevel`, but it is `async` over `tokio::process::Command` (`:13`, `:29-49`) and the hook is a synchronous binary with no runtime.
 `head_sha` states the reason in its own doc comment (`git_evidence.rs:73-75`): synchronous on purpose, because the hook must never block the agent CLI that invoked it.

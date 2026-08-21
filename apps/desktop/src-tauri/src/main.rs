@@ -11,5 +11,5 @@
 #![windows_subsystem = "windows"]
 
 fn main() {
-    clock_in_desktop_lib::run()
+    siqshift_desktop_lib::run()
 }

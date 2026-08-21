@@ -1,14 +1,14 @@
 <div align="center">
   <img src="apps/desktop/src-tauri/icons/128x128@2x.png" alt="" width="88" height="88">
 
-  <h1>Clock-In</h1>
+  <h1>SIQshift</h1>
 
   <p><strong>A time tracker with no timer.</strong><br>
-  Keep working. Clock-In records the hours from what your machine and your AI coding agents
+  Keep working. SIQshift records the hours from what your machine and your AI coding agents
   are actually doing, files them under a project, and shows you exactly what it recorded.</p>
 
   <p>
-    <a href="https://github.com/fpresta0607/Clock-In/actions/workflows/ci.yml"><img src="https://github.com/fpresta0607/Clock-In/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="https://github.com/fpresta0607/SIQshift/actions/workflows/ci.yml"><img src="https://github.com/fpresta0607/SIQshift/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <img src="https://img.shields.io/badge/node-%E2%89%A522.18-3c873a" alt="Node 22.18+">
     <img src="https://img.shields.io/badge/rust-1.89%2B-b7410e" alt="Rust 1.89+">
     <img src="https://img.shields.io/badge/desktop-Tauri%202-24c8db" alt="Tauri 2">
@@ -23,7 +23,7 @@ Most timers record a claim: *"I worked four hours on Project X."* Nothing behind
 numbers get padded, everyone quietly knows it, and the report stops meaning anything. Timers
 also have to be remembered, which is the other half of why their numbers are wrong.
 
-Clock-In has no timer to remember. Turn recording on once, and the machine's own activity
+SIQshift has no timer to remember. Turn recording on once, and the machine's own activity
 decides the hours:
 
 - **OS activity.** A slow, read-only monitor folds the machine's state into coarse segments
@@ -33,7 +33,7 @@ decides the hours:
   spool; Pi and opencode fire theirs from a small extension. A session's working directory
   resolves to a project, so an hour on the leaderboard can name *what* produced it, and the
   runtime is recorded beside the model it was driving without either being read off the other.
-  Which runtimes Clock-In knows by name is a roster, not a schema: see
+  Which runtimes SIQshift knows by name is a roster, not a schema: see
   [**Agent hooks**](#agent-hooks).
 - **Browser spans.** A small browser extension matches the active tab against the user's own
   URL rules locally and reports only the verdict — which rule matched, for how long — to a
@@ -60,13 +60,13 @@ tracking you can't is surveillance.
 ```mermaid
 flowchart LR
     subgraph WS["Your workstation"]
-        CLI["Agent CLIs<br/>Claude Code · Codex · Cursor<br/>Pi · opencode · Kimi Code · …"] -->|"JSON on stdin"| HOOK["clock-in-hook"]
+        CLI["Agent CLIs<br/>Claude Code · Codex · Cursor<br/>Pi · opencode · Kimi Code · …"] -->|"JSON on stdin"| HOOK["siqshift-hook"]
         OS["OS signals<br/>idle · foreground process<br/>lock · suspend"] --> MON["Activity monitor<br/>30s poll"]
-        EXT["Browser extension<br/>Chrome · Edge · Firefox"] -->|"native messaging"| HOST["clock-in-browser-host"]
+        EXT["Browser extension<br/>Chrome · Edge · Firefox"] -->|"native messaging"| HOST["siqshift-browser-host"]
         HOOK --> SPOOL[("Local spool<br/>append-only")]
         MON --> SPOOL
         HOST --> SPOOL
-        SPOOL --> APP["Clock-In desktop<br/>Tauri 2 + React"]
+        SPOOL --> APP["SIQshift desktop<br/>Tauri 2 + React"]
     end
 
     APP -->|"finished sessions<br/>evidence batches"| API["API<br/>Hono on Node"]
@@ -77,7 +77,7 @@ flowchart LR
 ```
 
 The spool is the load-bearing idea, and there are four of them: activity segments, agent
-events, browser spans, and finished sessions. `clock-in-hook` holds no credentials and opens
+events, browser spans, and finished sessions. `siqshift-hook` holds no credentials and opens
 no sockets — it
 appends one line under an interprocess lock and exits, so a hook can never slow down or block
 the agent CLI, and events recorded while the desktop app is closed survive until it next runs.
@@ -87,7 +87,7 @@ losing or duplicating evidence.
 ## How session tracking works
 
 Nobody starts anything. While the desktop app is running and recording is on,
-Clock-In writes down the hours you spend at the machine and files them under a
+SIQshift writes down the hours you spend at the machine and files them under a
 project. The consent toggle is the only on/off the product has.
 
 The desktop app is tray-resident by default: closing the window hides it to the
@@ -124,7 +124,7 @@ a gap nothing can vouch for.
 Every session belongs to exactly one project, resolved in this order:
 
 1. **The project the person pinned.** The desktop app's picker is an override, not a start button.
-2. **The folder an agent is working in.** Agent CLIs report their working directory; `resolveProjectForCwd` matches it against the user's path mappings by normalized longest prefix on path-segment boundaries, so `c:/dev/clock` matches `c:/dev/clock/src` but never `c:/dev/clock-in-extra`.
+2. **The folder an agent is working in.** Agent CLIs report their working directory; `resolveProjectForCwd` matches it against the user's path mappings by normalized longest prefix on path-segment boundaries, so `c:/dev/siqshift` matches `c:/dev/siqshift/src` but never `c:/dev/siqshift-extra`.
 3. **The default project**, which is the oldest project on the account. Every new workspace
    already starts with `General`, so there is always somewhere for the time to go.
 
@@ -176,7 +176,7 @@ no person line beside it.
 The board lists every member of the workspace, not just the people with recorded time: a
 teammate whose range has no evidence reads as `0s`, never as missing.
 
-The desktop app's **What's recorded** panel and the web dashboard's **How Clock-In works**
+The desktop app's **What's recorded** panel and the web dashboard's **How SIQshift works**
 dialog state these rules word for word.
 
 ### Attributed and unattributed
@@ -225,16 +225,16 @@ duplicating anything.
 | Spool | Written by | Uploaded to |
 |---|---|---|
 | activity segments | the 30-second monitor tick | `POST /activity/segments` |
-| agent events | `clock-in-hook`, one line per lifecycle event | `POST /agent-sessions` |
-| browser spans | `clock-in-browser-host`, one line per span verdict | `POST /agent-sessions` |
+| agent events | `siqshift-hook`, one line per lifecycle event | `POST /agent-sessions` |
+| browser spans | `siqshift-browser-host`, one line per span verdict | `POST /agent-sessions` |
 | finished sessions | the session tracker, as each one closes | `POST /sessions/observed` |
 
-`clock-in-hook` is the reason agent evidence survives everything: agent CLIs run
+`siqshift-hook` is the reason agent evidence survives everything: agent CLIs run
 it from their lifecycle hooks, it appends one line under an interprocess lock (an
 advisory `File::try_lock` on a sibling `.lock` sentinel, so a holder that dies
 mid-append releases it) and exits. It holds no credentials and opens no sockets,
 so a hook can never slow down or block the CLI, and events recorded while the
-desktop app is closed wait on disk until it next runs. `clock-in-browser-host`
+desktop app is closed wait on disk until it next runs. `siqshift-browser-host`
 keeps the same posture — the browser launches it, it holds no credentials and
 opens no sockets, and browser spans recorded while the desktop app is closed
 wait on disk until it next runs.
@@ -252,7 +252,7 @@ Each `agent_sessions` row is that identity's shift.
 The operator is whoever's desktop uploaded the shift, so every runtime gets the distinction the day its hooks are wired.
 A shift with no repository at all - it is not in one, or the desktop predates the probe and its directory names no codebase either - lands in that person's **unassigned** bucket, a real roster row several shifts share.
 The bucket itself never becomes a codebase: when a shift's own commit names one, that shift alone moves onto that codebase's identity and leaves the rest of the bucket behind; nothing is stranded and no default codebase is invented.
-The Clock-In project stays on the roster row as a label
+The SIQshift project stays on the roster row as a label
 that follows the path mappings, not as part of the identity, so re-mapping a
 directory never splits or merges a worker. For a shift in a git repo, the desktop app captures the
 branch, and the title, commit id and repository path of the commits the shift
@@ -298,10 +298,10 @@ that never fires `PBT_APMSUSPEND` reads as idle rather than suspended.
 
 `GET /me/stats` runs the same attribution math over the same completed-session set
 as the organization report. The desktop app's **What
-Clock-In is recording** panel (the recording line on the main screen, or *See
+SIQshift is recording** panel (the recording line on the main screen, or *See
 exactly what's recorded* in settings) shows live recording state, which evidence
 sources are switched on, and the collected and never-collected lists below, in the
-same words the dashboard's **How Clock-In works** dialog uses. The person being
+same words the dashboard's **How SIQshift works** dialog uses. The person being
 tracked sees the same math, and the same explanation, as the person reading the
 report.
 
@@ -313,7 +313,7 @@ Not by policy, but because the code never reads it:
   was. There are no input hooks anywhere in the codebase.
 - **Screenshots**, of any kind.
 - **Window titles.** The foreground query returns a process name and stops there.
-- **Input content.** Clock-In never records anything typed into a form, chat, or document.
+- **Input content.** SIQshift never records anything typed into a form, chat, or document.
 - **Browsing URLs, history, or page content.** The browser extension matches the active tab
   against the user's own URL rules inside the browser and reports only which rule matched;
   the URL, page title, and browsing history never leave the browser. A repository's `origin`
@@ -322,8 +322,8 @@ Not by policy, but because the code never reads it:
 - **Document names, file contents, message or email bodies.** Token counts and model
   names read from an AI tool's own session log are the one exception, described in *What is
   collected* below.
-- **Injection.** Clock-In never reaches inside or controls another app. The monitor is read-only
-  Win32 queries plus broadcasts delivered to Clock-In's own hidden window.
+- **Injection.** SIQshift never reaches inside or controls another app. The monitor is read-only
+  Win32 queries plus broadcasts delivered to SIQshift's own hidden window.
 
 What *is* collected: coarse activity segments with timestamps, the foreground process name, agent
 session boundaries with their working directory and - when that directory is in a git repository -
@@ -332,7 +332,7 @@ what names the repository an agent works, browser spans naming which URL rule ma
 for how long, the start and end of each session the monitor observed, and — for an AI coding shift
 in a git repo — the branch name, and the title, commit id and repository path of each commit
 captured once the shift ends (see *Roster: agents as identities*). When an AI coding tool keeps a
-session log on this computer, Clock-In reads the token counters and the model name from that log —
+session log on this computer, SIQshift reads the token counters and the model name from that log —
 the numbers and names only, never the prompt or response text — and reports them with the shift.
 A working directory can contain a user name, so both it and a repository path are shown only to
 the owning user and org admins, and are redacted from logs.
@@ -346,7 +346,7 @@ A pnpm workspace. Contracts flow down; nothing flows back up.
 | **`packages/shared`** | Zod contracts shared by every client and the API, the interval/time model (`intervals.ts`), invite-code and duration helpers, the SIQstack brand stylesheet both frontends import, and the WebGL background behind the `./webgl-shader` entry (react and three are that entry's optional peers, so the API pulls neither). |
 | **`packages/database`** | Drizzle schema, SQL migrations, the connection factory, and the migration runner. |
 | **`apps/api`** | Hono API: env validation, Neon Auth JWT verification, services (sessions, activity, agent sessions, attribution, reports), Drizzle repositories, CSV export. |
-| **`apps/desktop`** | The tray app. React UI over a Tauri 2 Rust host: `monitor.rs` (activity), `spool.rs` (shared with the helper binaries), `uploader.rs`, `recovery.rs`, the All stats overlay, and the `clock-in-hook` and `clock-in-browser-host` bin targets. |
+| **`apps/desktop`** | The tray app. React UI over a Tauri 2 Rust host: `monitor.rs` (activity), `spool.rs` (shared with the helper binaries), `uploader.rs`, `recovery.rs`, the All stats overlay, and the `siqshift-hook` and `siqshift-browser-host` bin targets. |
 | **`apps/web`** | The dashboard: sign-up/sign-in, clickable team leaderboard with per-member breakdowns, project management, installer downloads. |
 | **`apps/browser-extension`** | The Manifest V3 browser extension: matches the active tab against the user's URL rules locally and reports only the verdict to the desktop's native-messaging host. |
 
@@ -370,20 +370,20 @@ pnpm install
 cp .env.example .env          # fill in DATABASE_URL and AUTH_BASE_URL
 
 # The migration runner reads the environment directly rather than loading .env:
-DATABASE_URL='postgresql://…' pnpm --filter @clock-in/database migrate
+DATABASE_URL='postgresql://…' pnpm --filter @siqshift/database migrate
 ```
 
 **Run**
 
 ```bash
-PORT=3977 pnpm --filter @clock-in/api dev      # API      → http://localhost:3977
-pnpm --filter @clock-in/web dev                # dashboard → http://localhost:5180
-pnpm --filter @clock-in/desktop tauri dev      # desktop app (Vite on :1420 in the Tauri shell)
+PORT=3977 pnpm --filter @siqshift/api dev      # API      → http://localhost:3977
+pnpm --filter @siqshift/web dev                # dashboard → http://localhost:5180
+pnpm --filter @siqshift/desktop tauri dev      # desktop app (Vite on :1420 in the Tauri shell)
 ```
 
 > **On ports.** The API defaults to `PORT=3000`, but both clients default to
 > `http://localhost:3977` in development — the desktop's fallback is compiled in. Run the API
-> on `3977` (as above) or point `VITE_API_BASE_URL` and `CLOCK_IN_API_URL` at `3000`.
+> on `3977` (as above) or point `VITE_API_BASE_URL` and `SIQSHIFT_API_URL` at `3000`.
 
 **When environment variables are read** — this trips people up:
 
@@ -391,7 +391,7 @@ pnpm --filter @clock-in/desktop tauri dev      # desktop app (Vite on :1420 in t
 |---|---|---|
 | `DATABASE_URL`, `AUTH_BASE_URL`, `PORT`, `CORS_ORIGINS`, `NODE_ENV` | API | **runtime** |
 | `VITE_AUTH_BASE_URL`, `VITE_API_BASE_URL` | web | **build** time, baked into the bundle |
-| `CLOCK_IN_AUTH_URL`, `CLOCK_IN_API_URL` | desktop | **compile** time (`option_env!`) |
+| `SIQSHIFT_AUTH_URL`, `SIQSHIFT_API_URL` | desktop | **compile** time (`option_env!`) |
 
 A release desktop build without the last two **fails the build** rather than shipping an
 installer that quietly points at localhost (`src-tauri/build.rs`).
@@ -406,9 +406,9 @@ Run from the repository root.
 | `pnpm test` | the full Vitest suite (services, routes, contracts, React), the `scripts/` suites under `node --test`, then the layout suite |
 | `pnpm test:browser` | the layout suite alone; needs `pnpm exec playwright install chromium` once |
 | `pnpm build` | production build of every package |
-| `DATABASE_URL=… pnpm --filter @clock-in/database migrate` | apply migrations |
-| `pnpm --filter @clock-in/database test:integration` | PostgreSQL migration tests; needs `TEST_DATABASE_URL` |
-| `pnpm --filter @clock-in/desktop tauri build` | build desktop installers |
+| `DATABASE_URL=… pnpm --filter @siqshift/database migrate` | apply migrations |
+| `pnpm --filter @siqshift/database test:integration` | PostgreSQL migration tests; needs `TEST_DATABASE_URL` |
+| `pnpm --filter @siqshift/desktop tauri build` | build desktop installers |
 | `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` | the Rust suite |
 | `cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings` | Rust lints, as CI runs them |
 
@@ -477,7 +477,7 @@ silently ignored.
 
 ## Agent hooks
 
-At startup, Clock-In auto-discovers which agent CLIs are installed (by checking for their
+At startup, SIQshift auto-discovers which agent CLIs are installed (by checking for their
 config directories) and silently wires up every one whose hook shape it knows how to merge:
 today Claude Code, Codex, and Cursor. Where a config can be merged safely it is, with a
 backup and an atomic write; where it can't (Kimi Code, Pi, opencode, Grok, Muse, GitHub
@@ -488,7 +488,7 @@ work.
 ### The roster is not an allowlist
 
 `packages/shared/src/agent-runtimes.json` is the one place a runtime is declared, and both the
-TypeScript side and the Rust host read that same file. It decides what Clock-In can *say* about
+TypeScript side and the Rust host read that same file. It decides what SIQshift can *say* about
 a runtime — its display name, its executables, where its hooks live, the snippet to paste — and
 never whether a runtime may be recorded. `agent_sessions.source` is text with a shape check
 rather than an enum, so a CLI nobody has declared yet is stored under its own id instead of
@@ -507,7 +507,7 @@ hook that names no model records none rather than a guess.
 | **Pi** / **pi-signed** | `~/.pi/agent/extensions/` | true boundaries (`session_start`/`session_shutdown`); reports its model | always | extension to paste |
 | **opencode** | `~/.config/opencode/plugins/` | start is a true boundary; no end event, so `session.idle` heartbeats and gaps close it | sometimes | plugin to paste |
 | **Kimi Code**, **Grok**, **Muse**, **GitHub Copilot** | per the roster | hook mechanism unconfirmed against any installed version | sometimes | snippet to paste |
-| anything else | — | call `clock-in-hook --source <runtime> --event …` yourself; see [Wiring up your own orchestrator](#wiring-up-your-own-orchestrator) | up to you | manual |
+| anything else | — | call `siqshift-hook --source <runtime> --event …` yourself; see [Wiring up your own orchestrator](#wiring-up-your-own-orchestrator) | up to you | manual |
 
 **Reports model** says whether the runtime's own hook mechanism can name the model it is
 driving: `always` by design on every event, `sometimes` when that depends on your wiring or
@@ -516,8 +516,8 @@ on a mechanism not yet confirmed, `never` when the mechanism cannot name one.
 Runtimes are listed whether or not they are installed, so a machine that later grows one lights
 it up without a code change. Every runtime in the roster has a mark in the UI: opencode uses
 its genuine MIT-licensed logo, and the other nine carry original monochrome glyphs drawn for
-Clock-In on one coherent grid. Those are deliberately *not* imitations of anyone's brand asset
-(which cannot be redistributed in a third-party app); they are Clock-In's own marks naming a
+SIQshift on one coherent grid. Those are deliberately *not* imitations of anyone's brand asset
+(which cannot be redistributed in a third-party app); they are SIQshift's own marks naming a
 runtime inside its own UI, and need no licence from anyone.
 
 Because `session-end` is never guaranteed (a crash, a `kill -9`), the server reaps agent
@@ -531,7 +531,7 @@ binary once at session start and once at session end.
 The full invocation:
 
 ```
-clock-in-hook --source <runtime> --event session-start --session-id <id> --cwd <dir> \
+siqshift-hook --source <runtime> --event session-start --session-id <id> --cwd <dir> \
     [--model <model>] [--occurred-at <ISO8601>]
 ```
 
@@ -541,13 +541,13 @@ cannot name its model passes nothing rather than branching its own wiring.
 
 A harness that counts tokens can report them on the same events with `--input-tokens`,
 `--output-tokens`, `--cache-creation-input-tokens`, and `--cache-read-input-tokens`.
-Each carries the cumulative total for the session so far, never a per-turn delta - Clock-In
+Each carries the cumulative total for the session so far, never a per-turn delta - SIQshift
 keeps the largest number it has seen - and an empty value reads as absent, exactly as
 `--model` does.
 
 The standing guarantee: `--source` needs no registration anywhere.
 An id the roster has never heard of is recorded under its own name, with no migration and no
-code change; declaring it in `packages/shared/src/agent-runtimes.json` only gives Clock-In
+code change; declaring it in `packages/shared/src/agent-runtimes.json` only gives SIQshift
 more to say about it.
 
 ## Privacy
@@ -562,10 +562,10 @@ them.
   nothing and no hours accrue at all.
 - Switching recording off closes the open session first, so the work already done is kept
   rather than discarded, and earlier hours stay exactly where they are.
-- The desktop app's **What Clock-In is recording** panel states, live, what is switched on and
+- The desktop app's **What SIQshift is recording** panel states, live, what is switched on and
   what is being collected, and offers the one button that changes it.
 - The browser extension is installed by default through the Chrome/Edge force-install policy, so
-  per-site project attribution works with zero clicks; the settings toggle "Add the Clock-In
+  per-site project attribution works with zero clicks; the settings toggle "Add the SIQshift
   extension to my browsers automatically" is the opt-out, and switching it off removes the policy
   entry, which uninstalls the extension. The extension still reports only which of the user's own
   URL rules matched - the URL, page title, and browsing history never leave the browser.
@@ -578,10 +578,10 @@ them.
   admins, and redacted from logs like session descriptions are. A captured commit's repository
   path is a working directory and follows the same rule: a paystub read by anyone else carries
   the commit without it. What every member does see is the codebase's **label** - a name like
-  `clock-in`, taken from the repository the agent's identity is keyed on when there is one and
+  `siqshift`, taken from the repository the agent's identity is keyed on when there is one and
   from the path's last segment otherwise - which says which codebase an agent worked in without
   saying where it lives.
-- `clock-in-hook` holds no credentials and opens no sockets. The spool file is its entire
+- `siqshift-hook` holds no credentials and opens no sockets. The spool file is its entire
   interface.
 - The desktop app never persists the session token: Rust keeps it in the OS credential store,
   and the webview never sees it.

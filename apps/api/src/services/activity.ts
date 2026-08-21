@@ -1,4 +1,4 @@
-import type { ActivitySegmentBatchResponse, ActivitySegmentKind } from "@clock-in/shared";
+import type { ActivitySegmentBatchResponse, ActivitySegmentKind } from "@siqshift/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import type { ActivitySegmentInsert, ActivitySegmentRepository } from "../repositories.js";

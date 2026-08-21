@@ -34,7 +34,7 @@ function sessionRecord(overrides: Partial<AgentSessionRecord> = {}): AgentSessio
     model: null,
     externalSessionId: "ext-1",
     projectId: null,
-    cwd: "C:/dev/clock-in",
+    cwd: "C:/dev/siqshift",
     ruleId: null,
     agentId: ids.agent,
     status: "ended",

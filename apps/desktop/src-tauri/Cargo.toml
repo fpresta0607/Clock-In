@@ -1,28 +1,28 @@
 [package]
-name = "clock-in-desktop"
+name = "siqshift-desktop"
 version = "0.0.0"
 edition = "2021"
 # 1.89 for `File::try_lock`, the spool's interprocess lock.
 rust-version = "1.89"
 publish = false
-# Two bin targets exist (the app and clock-in-hook); name the app explicitly.
-default-run = "clock-in-desktop"
+# Two bin targets exist (the app and siqshift-hook); name the app explicitly.
+default-run = "siqshift-desktop"
 
 [lib]
-name = "clock_in_desktop_lib"
+name = "siqshift_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 # The hook agent CLIs fire; deliberately separate from the Tauri app binary so
 # it starts fast and never touches the webview stack.
 [[bin]]
-name = "clock-in-hook"
-path = "src/bin/clock-in-hook.rs"
+name = "siqshift-hook"
+path = "src/bin/siqshift-hook.rs"
 
 # The native-messaging host the browser extension connects to; same separation
 # from the app binary as the hook, because the browser launches it directly.
 [[bin]]
-name = "clock-in-browser-host"
-path = "src/bin/clock-in-browser-host.rs"
+name = "siqshift-browser-host"
+path = "src/bin/siqshift-browser-host.rs"
 
 
 [build-dependencies]

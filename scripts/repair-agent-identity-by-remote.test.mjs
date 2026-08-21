@@ -274,7 +274,7 @@ test("git missing from PATH and a timed-out probe are both unreadable", () => {
 // no remote - and the refusals section, which is the operator's only signal to
 // run this elsewhere, would stay silent about it.
 test("resolveKey separates a non-repository, a remote-less repository and a remote", () => {
-  const scratch = mkdtempSync(join(tmpdir(), "clock-in-resolve-key-"));
+  const scratch = mkdtempSync(join(tmpdir(), "siqshift-resolve-key-"));
   const globalConfig = join(scratch, "gitconfig-global");
   // The hazard made deterministic: exactly the key the probe reads, set where
   // a bare `config --get` would fall through to. Handed to the probe's child

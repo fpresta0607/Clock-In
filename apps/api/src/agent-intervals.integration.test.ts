@@ -5,7 +5,7 @@ import {
   runMigrations,
   type DatabaseConnection,
   type DisposableTestDatabase,
-} from "@clock-in/database";
+} from "@siqshift/database";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createApp } from "./app.js";
@@ -44,14 +44,14 @@ integration("leaderboard agent-interval range binding", () => {
     database = disposable.database;
     const config = parseEnv({
       DATABASE_URL: disposable.databaseUrl,
-      AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
+      AUTH_BASE_URL: "https://auth.siqshift.test/neondb/auth",
       NODE_ENV: "test",
     });
     await runMigrations(database);
 
     const auth = await createTestAuth(config, new Date());
     headers = {
-      authorization: await auth.bearer(authUserId, { email: "regression@clock-in.test", name: "Regression User" }),
+      authorization: await auth.bearer(authUserId, { email: "regression@siqshift.test", name: "Regression User" }),
       "content-type": "application/json",
     };
     app = createApp({

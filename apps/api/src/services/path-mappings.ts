@@ -1,4 +1,4 @@
-import { projectPathMappingSchema } from "@clock-in/shared";
+import { projectPathMappingSchema } from "@siqshift/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import { AppError } from "../errors.js";

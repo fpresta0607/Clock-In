@@ -1,4 +1,4 @@
-import { apiErrorSchema, type ApiError, type ApiErrorCode } from "@clock-in/shared";
+import { apiErrorSchema, type ApiError, type ApiErrorCode } from "@siqshift/shared";
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 
@@ -46,6 +46,6 @@ export function handleAppError(error: Error, context: Context): Response {
     return jsonError(context, error);
   }
   // The response stays generic; the log keeps the real failure diagnosable.
-  console.error("clock-in-api: unexpected error", error);
+  console.error("siqshift-api: unexpected error", error);
   return jsonError(context, new AppError("internal_error", "An unexpected error occurred."));
 }

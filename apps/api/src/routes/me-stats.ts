@@ -1,4 +1,4 @@
-import { meStatsFiltersSchema, meStatsResponseSchema } from "@clock-in/shared";
+import { meStatsFiltersSchema, meStatsResponseSchema } from "@siqshift/shared";
 import { Hono } from "hono";
 
 import { getAuthenticatedSubject, type ApiEnvironment } from "../app.js";

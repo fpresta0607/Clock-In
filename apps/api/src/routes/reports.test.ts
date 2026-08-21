@@ -24,8 +24,8 @@ const ids = {
   outsideProject: "b1c7e513-b094-4d4c-ae55-21790ae019a4",
 };
 const config = parseEnv({
-  DATABASE_URL: "postgres://clock_in:password@localhost:5432/clock_in",
-  AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
+  DATABASE_URL: "postgres://siqshift:password@localhost:5432/siqshift",
+  AUTH_BASE_URL: "https://auth.siqshift.test/neondb/auth",
   NODE_ENV: "test",
 });
 const user = { id: ids.user, email: "alex@example.com", name: "Alex", organizationId: ids.organization, role: "member" as const };
@@ -154,7 +154,7 @@ describe("report routes", () => {
     const csv = await app().request("http://api.test/reports/export.csv?from=2026-08-06", { headers });
     expect(csv.status).toBe(200);
     expect(csv.headers.get("content-type")).toContain("text/csv; charset=utf-8");
-    expect(csv.headers.get("content-disposition")).toBe('attachment; filename="clock-in-report.csv"');
+    expect(csv.headers.get("content-disposition")).toBe('attachment; filename="siqshift-report.csv"');
     expect(csv.headers.get("x-content-type-options")).toBe("nosniff");
     await expect(csv.text()).resolves.toContain("'=formula");
   });
@@ -189,7 +189,7 @@ describe("report routes", () => {
       user: { id: ids.user, name: "Alex" },
       source: "claude_code",
       model: null,
-      cwd: "C:\\dev\\clock-in",
+      cwd: "C:\\dev\\siqshift",
       projectId: ids.project,
       agentId: "e1c7e513-b094-4d4c-ae55-21790ae019a4",
       startedAt: new Date("2026-08-06T14:00:00.000Z"),
@@ -220,7 +220,7 @@ describe("report routes", () => {
         heldRate: null,
         models: [],
         // The codebase reaches every member as a name, never as the path.
-        repos: ["clock-in"],
+        repos: ["siqshift"],
       }],
     });
   });
@@ -233,13 +233,13 @@ describe("report routes", () => {
     const theirs: AgentRecord = {
       id: "e1c7e513-b094-4d4c-ae55-21790ae019a4",
       organizationId: ids.organization,
-      name: "Claude Code @ clock-in",
+      name: "Claude Code @ siqshift",
       source: "claude_code",
       status: "anonymous",
       owner: { id: ids.outsideProject, name: "Sam" },
       project: null,
-      repoRoot: "C:/dev/clock-in",
-      repoKey: "path:C:/dev/clock-in",
+      repoRoot: "C:/dev/siqshift",
+      repoKey: "path:C:/dev/siqshift",
       createdAt: new Date("2026-08-01T00:00:00.000Z"),
     };
     const mine: AgentRecord = { ...theirs, id: ids.project, owner: { id: ids.user, name: "Alex" } };
@@ -250,10 +250,10 @@ describe("report routes", () => {
     expect(response.status).toBe(200);
     const body = await response.json() as { rows: { agent: Record<string, unknown> }[] };
     const [theirRow, myRow] = body.rows;
-    expect(theirRow!.agent).toMatchObject({ repoName: "clock-in" });
+    expect(theirRow!.agent).toMatchObject({ repoName: "siqshift" });
     expect(theirRow!.agent).not.toHaveProperty("repoRoot");
     // The caller's own agent still carries the path.
-    expect(myRow!.agent).toMatchObject({ repoName: "clock-in", repoRoot: "C:/dev/clock-in" });
+    expect(myRow!.agent).toMatchObject({ repoName: "siqshift", repoRoot: "C:/dev/siqshift" });
   });
 
   it("rejects a pay-run scope naming a project outside the workspace", async () => {
@@ -283,7 +283,7 @@ describe("report routes", () => {
       user: { id: ids.user, name: "Alex" },
       source: "claude_code",
       model: "claude-opus-5",
-      cwd: "C:\\dev\\clock-in",
+      cwd: "C:\\dev\\siqshift",
       projectId: ids.project,
       agentId: "e1c7e513-b094-4d4c-ae55-21790ae019a4",
       startedAt: new Date("2026-08-06T14:00:00.000Z"),
@@ -297,7 +297,7 @@ describe("report routes", () => {
       totalAgentSeconds: 3_600,
       groups: [{
         // The codebase reaches every member as a name, never as the path.
-        repo: "clock-in",
+        repo: "siqshift",
         agentSeconds: 3_600,
         shiftCount: 1,
         // Nothing decided, so no rate at all rather than a fake zero.

@@ -182,7 +182,7 @@ function commitRecord(overrides: Partial<ShiftCommitRecord> = {}): ShiftCommitRe
     agentId: ids.agent,
     agentSessionId: "d1c7e513-b094-4d4c-ae55-21790ae019a4",
     clientId: "f2c7e513-b094-4d4c-ae55-21790ae019a4",
-    repoRoot: "C:\\dev\\clock-in",
+    repoRoot: "C:\\dev\\siqshift",
     branch: "main",
     sha: "0".repeat(40),
     subject: "feat: ship it",
@@ -440,7 +440,7 @@ describe("agent service", () => {
     const agents = new MemoryAgents([agentRecord()]);
     agents.shifts = [
       // A commit names the repository itself; the cwd sits inside it.
-      shift({ cwd: "C:\\dev\\clock-in\\apps\\web" }),
+      shift({ cwd: "C:\\dev\\siqshift\\apps\\web" }),
       // No commit, so the working directory is the only label there is.
       shift({
         id: "d3c7e513-b094-4d4c-ae55-21790ae019a4",
@@ -458,7 +458,7 @@ describe("agent service", () => {
       }),
     ];
     const commits = new MemoryShiftCommits([
-      commitRecord({ agentSessionId: "d1c7e513-b094-4d4c-ae55-21790ae019a4", repoRoot: "C:\\dev\\clock-in" }),
+      commitRecord({ agentSessionId: "d1c7e513-b094-4d4c-ae55-21790ae019a4", repoRoot: "C:\\dev\\siqshift" }),
     ]);
     const { service } = createService(agents, undefined, undefined, [], commits);
 
@@ -467,10 +467,10 @@ describe("agent service", () => {
       toExclusiveAt: "2026-08-06T14:00:00.000Z",
     });
 
-    expect(paystub.shifts.map((row) => row.repo)).toEqual(["clock-in", "pocket-piggies", null]);
+    expect(paystub.shifts.map((row) => row.repo)).toEqual(["siqshift", "pocket-piggies", null]);
     // Heaviest first, so the codebase an agent spent its hours in leads.
     expect(paystub.codebases).toEqual([
-      { repo: "clock-in", agentSeconds: 3_600, shiftCount: 1 },
+      { repo: "siqshift", agentSeconds: 3_600, shiftCount: 1 },
       { repo: "pocket-piggies", agentSeconds: 1_800, shiftCount: 1 },
       { repo: null, agentSeconds: 900, shiftCount: 1 },
     ]);

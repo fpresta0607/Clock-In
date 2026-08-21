@@ -1,4 +1,4 @@
-import type { ReportResponse, ReportRow } from "@clock-in/shared";
+import type { ReportResponse, ReportRow } from "@siqshift/shared";
 
 const header = [
   "sessionId", "userId", "userName", "projectId", "projectName", "description",

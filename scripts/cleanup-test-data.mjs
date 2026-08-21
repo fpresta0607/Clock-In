@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * Deletes seeded/test data from the Clock-In database. Dry run by default:
+ * Deletes seeded/test data from the SIQshift database. Dry run by default:
  * prints exactly what would go and exits. Pass --confirm to perform it.
  *
  *   DATABASE_URL=postgres://... node scripts/cleanup-test-data.mjs [--confirm] [--before=YYYY-MM-DD]
  *
  * What counts as test data, explicitly:
  *  - Whole workspaces whose every member's email matches a synthetic pattern
- *    (@clock-in.test, @siqstack-test.dev, or a +digits probe address).
+ *    (@siqshift.test, @siqstack-test.dev, or a +digits probe address).
  *  - In the remaining workspaces, sessions/segments/agent sessions started
  *    before --before (default: today, local midnight), plus projects whose
  *    name starts with "E2E" once nothing references them.
@@ -36,7 +36,7 @@ if (databaseUrl === undefined || databaseUrl === "") {
 }
 
 const sql = postgres(databaseUrl, { max: 1 });
-const syntheticEmail = "%@clock-in.test";
+const syntheticEmail = "%@siqshift.test";
 
 const run = async () => {
   const testOrgs = await sql`

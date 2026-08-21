@@ -22,7 +22,7 @@ import {
   type ReportResponse,
   type ReportRow,
   type TokenTotals,
-} from "@clock-in/shared";
+} from "@siqshift/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import { AppError } from "../errors.js";

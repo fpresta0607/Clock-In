@@ -23,7 +23,7 @@ export type FirstAdminClaimResult =
   | { kind: "already_claimed" }
   | { kind: "not_member" };
 
-/** A signed-in Neon Auth identity, before it is mapped onto a Clock-In account. */
+/** A signed-in Neon Auth identity, before it is mapped onto a SIQshift account. */
 export interface AuthIdentity {
   authUserId: string;
   email: string;
@@ -32,7 +32,7 @@ export interface AuthIdentity {
 
 export interface AccountStore {
   /**
-   * Returns the Clock-In account for a Neon Auth identity. On first sign-in it
+   * Returns the SIQshift account for a Neon Auth identity. On first sign-in it
    * either joins the organization the invite code names, or creates a personal
    * one — named workspaceName when given — with a starter project. Both are
    * ignored for an existing account.

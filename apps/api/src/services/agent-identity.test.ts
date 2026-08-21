@@ -20,7 +20,7 @@ const ids = {
 };
 const subject: AuthenticatedSubject = { organizationId: ids.organization, userId: ids.user, role: "member" };
 const now = new Date("2026-08-16T14:00:00.000Z");
-const clockIn = "C:/dev/clock-in";
+const siqshift = "C:/dev/siqshift";
 const piggies = "C:/dev/pocket-piggies";
 /** What a gate run checks out: a directory named after the run, not a codebase. */
 const gateWorktree = "C:/Users/alex/.no-mistakes/repos/3245fe18a7c8.git/worktrees/01M06FSGP392MH6VJNRX8T364A";
@@ -56,7 +56,7 @@ function session(overrides: Partial<AgentSessionRecord> = {}): AgentSessionRecor
     model: null,
     externalSessionId: "ext-1",
     projectId: null,
-    cwd: clockIn,
+    cwd: siqshift,
     ruleId: null,
     agentId: ids.bucket,
     status: "ended",
@@ -152,7 +152,7 @@ describe("late repo discovery", () => {
     const agents = new MemoryAgents([agentRecord()]);
     const row = session();
 
-    const graduated = await graduate(agents, row, clockIn).result;
+    const graduated = await graduate(agents, row, siqshift).result;
 
     expect(graduated).not.toBe(ids.bucket);
     expect(agents.rows[0]!.repoRoot).toBeNull();
@@ -169,7 +169,7 @@ describe("late repo discovery", () => {
     const agents = new MemoryAgents([agentRecord({ status: "registered", name: "Alex's helper" })]);
     const row = session();
 
-    const graduated = await graduate(agents, row, clockIn).result;
+    const graduated = await graduate(agents, row, siqshift).result;
 
     expect(graduated).not.toBe(ids.bucket);
     expect(row.agentId).toBe(graduated);
@@ -181,10 +181,10 @@ describe("late repo discovery", () => {
     const second = session({ id: "s2", externalSessionId: "ext-2" });
     const agents = new MemoryAgents([agentRecord()], [first, second]);
 
-    const graduated = await graduate(agents, first, clockIn).result;
+    const graduated = await graduate(agents, first, siqshift).result;
 
     expect(first.agentId).toBe(graduated);
-    // The gate runs and un-probed shifts pooled here never touched clock-in.
+    // The gate runs and un-probed shifts pooled here never touched siqshift.
     expect(second.agentId).toBe(ids.bucket);
     expect(agents.rows[0]!.repoRoot).toBeNull();
     expect(agents.rows[0]!.status).toBe("anonymous");
@@ -193,11 +193,11 @@ describe("late repo discovery", () => {
   it("re-homes the shift when another agent already holds the codebase, and retires the emptied bucket", async () => {
     const agents = new MemoryAgents([
       agentRecord(),
-      agentRecord({ id: ids.incumbent, repoRoot: clockIn, name: "Claude Code @ clock-in" }),
+      agentRecord({ id: ids.incumbent, repoRoot: siqshift, name: "Claude Code @ siqshift" }),
     ]);
     const row = session();
 
-    await expect(graduate(agents, row, clockIn).result).resolves.toBe(ids.incumbent);
+    await expect(graduate(agents, row, siqshift).result).resolves.toBe(ids.incumbent);
 
     expect(agents.restamped).toEqual([{ agentSessionId: ids.session, agentId: ids.incumbent }]);
     // A bucket left with nothing is retired; its history is empty by
@@ -210,7 +210,7 @@ describe("late repo discovery", () => {
     const agents = new MemoryAgents([agentRecord({ repoRoot: piggies, name: "Claude Code @ pocket-piggies" })]);
     const row = session();
 
-    const graduated = await graduate(agents, row, clockIn).result;
+    const graduated = await graduate(agents, row, siqshift).result;
 
     // The already-graduated agent keeps its codebase and its other shifts;
     // this shift alone moves onto find-or-create for the one named.
@@ -222,10 +222,10 @@ describe("late repo discovery", () => {
   });
 
   it("does nothing when the evidence names the codebase the agent already carries", async () => {
-    const agents = new MemoryAgents([agentRecord({ repoRoot: clockIn })]);
+    const agents = new MemoryAgents([agentRecord({ repoRoot: siqshift })]);
     const row = session();
 
-    await expect(graduate(agents, row, clockIn).result).resolves.toBe(ids.bucket);
+    await expect(graduate(agents, row, siqshift).result).resolves.toBe(ids.bucket);
 
     expect(agents.upserts).toEqual([]);
     expect(agents.restamped).toEqual([]);
@@ -235,10 +235,10 @@ describe("late repo discovery", () => {
     const agents = new MemoryAgents();
     const row = session({ agentId: null });
 
-    const { agentSessions, result } = graduate(agents, row, clockIn);
+    const { agentSessions, result } = graduate(agents, row, siqshift);
     const minted = await result;
 
-    expect(agents.upserts[0]).toMatchObject({ repoRoot: clockIn, ownerUserId: ids.user });
+    expect(agents.upserts[0]).toMatchObject({ repoRoot: siqshift, ownerUserId: ids.user });
     expect(agentSessions.stamped).toEqual([{ sessionId: ids.session, agentId: minted }]);
     expect(row.agentId).toBe(minted);
   });
@@ -249,7 +249,7 @@ describe("late repo discovery", () => {
     const second = session({ id: "s2", externalSessionId: "ext-2" });
     const agents = new MemoryAgents([agentRecord()], [first, second]);
 
-    const firstHome = await graduate(agents, first, clockIn).result;
+    const firstHome = await graduate(agents, first, siqshift).result;
     const secondHome = await graduate(agents, second, piggies).result;
 
     expect(firstHome).not.toBe(ids.bucket);
@@ -301,7 +301,7 @@ describe("late repo discovery", () => {
   it("keeps a shift on its remote-keyed agent when a commit names another worktree", async () => {
     const agents = new MemoryAgents([agentRecord({
       id: ids.incumbent,
-      repoRoot: clockIn,
+      repoRoot: "C:/dev/clock-in",
       repoKey: "github.com/acme/clock-in",
       name: "Claude Code @ clock-in",
     })]);
@@ -324,7 +324,7 @@ describe("late repo discovery", () => {
       subject,
       session({ source: "browser", agentId: null }),
       "browser",
-      clockIn,
+      siqshift,
       now,
     )).resolves.toBeNull();
     expect(agents.upserts).toEqual([]);

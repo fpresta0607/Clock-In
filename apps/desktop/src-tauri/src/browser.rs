@@ -5,12 +5,12 @@
 //! Registration is silent and idempotent: for every detected browser with a
 //! configured released extension id, the app writes a host manifest beside the
 //! spools (its `allowed_origins` pins the extension id) and points the
-//! browser's HKCU `NativeMessagingHosts` key at it. The keys are Clock-In's
+//! browser's HKCU `NativeMessagingHosts` key at it. The keys are SIQshift's
 //! own and need no elevation.
 //!
-//! The manifest's `path` is the `clock-in-browser-host` binary installed next
+//! The manifest's `path` is the `siqshift-browser-host` binary installed next
 //! to the app executable (both ship as `externalBin` siblings, exactly like
-//! `clock-in-hook`), so registration resolves it with the same
+//! `siqshift-hook`), so registration resolves it with the same
 //! "beside the running app" rule the hook registration uses.
 //!
 //! The other half is getting the extension onto the machine: for Chrome and
@@ -34,13 +34,13 @@ use crate::spool;
 
 /// The native-messaging host name the extension connects to. Changing it is a
 /// breaking change for every registered browser and the extension build.
-pub const HOST_NAME: &str = "com.clock_in.browser_host";
+pub const HOST_NAME: &str = "com.siqshift.browser_host";
 
 const CHROME_STORE_URL: &str = "https://chromewebstore.google.com/";
 const EDGE_STORE_URL: &str = "https://microsoftedge.microsoft.com/addons/";
 const FIREFOX_STORE_URL: &str = "https://addons.mozilla.org/";
 
-/// A browser Clock-In can register the native host for.
+/// A browser SIQshift can register the native host for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Browser {
     Chrome,
@@ -167,9 +167,9 @@ impl Browser {
 
 fn extension_id(browser: Browser) -> Option<&'static str> {
     let value = match browser {
-        Browser::Chrome => option_env!("CLOCK_IN_CHROME_EXTENSION_ID"),
-        Browser::Edge => option_env!("CLOCK_IN_EDGE_EXTENSION_ID"),
-        Browser::Firefox => option_env!("CLOCK_IN_FIREFOX_EXTENSION_ID"),
+        Browser::Chrome => option_env!("SIQSHIFT_CHROME_EXTENSION_ID"),
+        Browser::Edge => option_env!("SIQSHIFT_EDGE_EXTENSION_ID"),
+        Browser::Firefox => option_env!("SIQSHIFT_FIREFOX_EXTENSION_ID"),
     }?;
     let value = value.trim();
     valid_extension_id(browser, value).then_some(value)
@@ -232,14 +232,14 @@ pub fn detected_browsers() -> Vec<Browser> {
 }
 
 /// The host binary registration points at: installed beside the app
-/// executable, as `externalBin` places it. Same rule as `clock-in-hook`.
+/// executable, as `externalBin` places it. Same rule as `siqshift-hook`.
 fn host_binary_path() -> ApiResult<PathBuf> {
     let exe = std::env::current_exe()
-        .map_err(|_| BridgeError::unknown("Could not locate the Clock-In app."))?;
+        .map_err(|_| BridgeError::unknown("Could not locate the SIQshift app."))?;
     let file_name = if cfg!(windows) {
-        "clock-in-browser-host.exe"
+        "siqshift-browser-host.exe"
     } else {
-        "clock-in-browser-host"
+        "siqshift-browser-host"
     };
     Ok(exe
         .parent()
@@ -248,7 +248,7 @@ fn host_binary_path() -> ApiResult<PathBuf> {
 }
 
 /// The manifest one browser's registry key points at. Kept beside the spools
-/// so the `CLOCK_IN_SPOOL` override relocates it for tests and support setups.
+/// so the `SIQSHIFT_SPOOL` override relocates it for tests and support setups.
 fn manifest_path(dir: &Path, browser: Browser) -> PathBuf {
     dir.join(format!("browser-host-manifest-{}.json", browser.id()))
 }
@@ -268,7 +268,7 @@ fn host_manifest(browser: Browser, host_binary: &Path, extension_id: &str) -> St
         Browser::Firefox => format!(r#""allowed_extensions": ["{extension_id}"]"#),
     };
     format!(
-        "{{\n  \"name\": \"{HOST_NAME}\",\n  \"description\": \"Clock-In browser attribution host\",\n  \"path\": \"{path}\",\n  \"type\": \"stdio\",\n  {pinned}\n}}\n"
+        "{{\n  \"name\": \"{HOST_NAME}\",\n  \"description\": \"SIQshift browser attribution host\",\n  \"path\": \"{path}\",\n  \"type\": \"stdio\",\n  {pinned}\n}}\n"
     )
 }
 
@@ -419,7 +419,7 @@ fn capacity_snapshot_is_valid(
 fn extension_capacity_error() -> BridgeError {
     BridgeError::new(
         crate::api::ErrorKind::Conflict,
-        "We saved unsynced work for another workspace. Sign back into that workspace and let Clock-In finish syncing before adding a new account.",
+        "We saved unsynced work for another workspace. Sign back into that workspace and let SIQshift finish syncing before adding a new account.",
     )
 }
 
@@ -945,7 +945,7 @@ pub fn record_capture_paused(dir: &Path, collection_id: &str) -> io::Result<()> 
 }
 
 /// Writes the extension's unmatched-origin tally so the desktop can surface it
-/// as URL-rule suggestions. Called by `clock-in-browser-host` on the
+/// as URL-rule suggestions. Called by `siqshift-browser-host` on the
 /// extension's `tally` message; the desktop reads it back through
 /// `read_suggestions`. Guarded by the admitted collection like every other
 /// host write, so a stale extension process cannot scribble over a newer one's
@@ -1047,7 +1047,7 @@ pub fn ensure_registered(dir: &Path) {
         };
         if let Err(error) = result {
             eprintln!(
-                "clock-in: could not register the browser host for {}: {error}",
+                "siqshift: could not register the browser host for {}: {error}",
                 browser.id()
             );
         }
@@ -1130,7 +1130,7 @@ fn renumber_forcelist(values: Vec<String>) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Adds or strips Clock-In's force-install policy entry for every detected
+/// Adds or strips SIQshift's force-install policy entry for every detected
 /// browser with a released extension id compiled in. Enabled merges our entry
 /// into the browser's ExtensionInstallForcelist so the extension installs on
 /// next launch; disabled strips it, which uninstalls the extension. Silent
@@ -1144,7 +1144,7 @@ pub fn sync_extension_policies(enabled: bool) {
         };
         if let Err(error) = sync_extension_policy(browser, &key, extension_id, enabled) {
             eprintln!(
-                "clock-in: could not sync the extension install policy for {}: {error}",
+                "siqshift: could not sync the extension install policy for {}: {error}",
                 browser.id()
             );
         }
@@ -1257,7 +1257,7 @@ fn handshake_path(dir: &Path, browser: Browser) -> PathBuf {
     dir.join(format!("browser-handshake-{}.json", browser.id()))
 }
 
-/// Called by `clock-in-browser-host` at startup: the browser launched it, so
+/// Called by `siqshift-browser-host` at startup: the browser launched it, so
 /// the extension is connected. Best-effort - the marker feeds a UI badge and
 /// nothing else.
 pub fn record_handshake(dir: &Path) {
@@ -1938,7 +1938,7 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "clock-in-browser-test-{}-{tag}",
+            "siqshift-browser-test-{}-{tag}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1958,10 +1958,10 @@ mod tests {
 
     #[test]
     fn native_messaging_requires_valid_released_extension_ids() {
-        let binary = PathBuf::from(r"C:\Program Files\Clock-In\clock-in-browser-host.exe");
+        let binary = PathBuf::from(r"C:\Program Files\SIQshift\siqshift-browser-host.exe");
         let chrome_id = "abcdefghijklmnopabcdefghijklmnop";
         let edge_id = "ponmlkjihgfedcbaponmlkjihgfedcba";
-        let firefox_id = "browser-extension@clock-in.app";
+        let firefox_id = "browser-extension@siqshift.app";
 
         assert!(valid_extension_id(Browser::Chrome, chrome_id));
         assert!(valid_extension_id(Browser::Edge, edge_id));
@@ -1980,7 +1980,7 @@ mod tests {
         assert_eq!(chrome["type"], "stdio");
         assert_eq!(
             chrome["path"],
-            r"C:\Program Files\Clock-In\clock-in-browser-host.exe"
+            r"C:\Program Files\SIQshift\siqshift-browser-host.exe"
         );
         assert_eq!(
             chrome["allowed_origins"][0],
@@ -2006,15 +2006,15 @@ mod tests {
     fn registry_keys_live_under_each_browsers_native_messaging_hosts() {
         assert_eq!(
             Browser::Chrome.registry_key_path(),
-            r"Software\Google\Chrome\NativeMessagingHosts\com.clock_in.browser_host"
+            r"Software\Google\Chrome\NativeMessagingHosts\com.siqshift.browser_host"
         );
         assert_eq!(
             Browser::Edge.registry_key_path(),
-            r"Software\Microsoft\Edge\NativeMessagingHosts\com.clock_in.browser_host"
+            r"Software\Microsoft\Edge\NativeMessagingHosts\com.siqshift.browser_host"
         );
         assert_eq!(
             Browser::Firefox.registry_key_path(),
-            r"Software\Mozilla\NativeMessagingHosts\com.clock_in.browser_host"
+            r"Software\Mozilla\NativeMessagingHosts\com.siqshift.browser_host"
         );
     }
 
@@ -2193,7 +2193,7 @@ mod tests {
         let dir = temp_dir("rules");
         let mappings = vec![
             mapping("r1", MappingKind::UrlRule, "github.com/acme/*"),
-            mapping("m1", MappingKind::PathPrefix, "C:/dev/clock-in"),
+            mapping("m1", MappingKind::PathPrefix, "C:/dev/siqshift"),
             mapping("r2", MappingKind::UrlRule, "*.figma.com/files/*"),
         ];
 
@@ -2841,7 +2841,7 @@ mod tests {
         // The typical order: the parent enumerates before its child.
         let parent_first = vec![
             entry(100, 4, "chrome.exe"),
-            entry(200, 100, "clock-in-browser-host.exe"),
+            entry(200, 100, "siqshift-browser-host.exe"),
         ];
         assert_eq!(
             parent_name_from_entries(&parent_first, 200).as_deref(),
@@ -2850,7 +2850,7 @@ mod tests {
 
         // The order the old single-pass code depended on.
         let parent_last = vec![
-            entry(200, 100, "clock-in-browser-host.exe"),
+            entry(200, 100, "siqshift-browser-host.exe"),
             entry(100, 4, "msedge.exe"),
         ];
         assert_eq!(

@@ -1,9 +1,9 @@
-//! `clock-in-hook`: appends one agent-session event to the local spool and exits.
+//! `siqshift-hook`: appends one agent-session event to the local spool and exits.
 //!
 //! Agent CLIs invoke this from their lifecycle hooks. Following the Claude Code
 //! convention the event arrives as JSON on stdin; equivalent `--flags` are the
 //! fallback for CLIs that cannot pipe. Claude Code pipes its own native payload
-//! rather than the Clock-In contract, so stdin is translated when it carries
+//! rather than the SIQshift contract, so stdin is translated when it carries
 //! `hook_event_name` (`SessionStart`/`SessionEnd`/`PostToolUse`; any other
 //! Claude event is accepted and ignored). Cursor's registration passes only
 //! `--source cursor --event …`, and its stdin payload is then mined
@@ -16,8 +16,8 @@ use std::io::Read;
 use std::path::Path;
 use std::process::ExitCode;
 
-use clock_in_desktop_lib::git_evidence;
-use clock_in_desktop_lib::spool::{
+use siqshift_desktop_lib::git_evidence;
+use siqshift_desktop_lib::spool::{
     self, AgentEventKind, ArgvContext, HookInput, HookStdin, TokenCounters,
 };
 
@@ -25,7 +25,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("clock-in-hook: {message}");
+            eprintln!("siqshift-hook: {message}");
             ExitCode::FAILURE
         }
     }
@@ -37,7 +37,7 @@ fn run() -> Result<(), String> {
         ArgvInput::Event(input) => input.into_event(),
         ArgvInput::Stdin(context) => match input_from_stdin(context)? {
             HookStdin::Event(event) => event,
-            // An event Clock-In does not track (or a Cursor payload without a
+            // An event SIQshift does not track (or a Cursor payload without a
             // session id): accepted, not spooled.
             HookStdin::Ignored => return Ok(()),
         },
@@ -123,7 +123,7 @@ fn input_from_args(args: &[String]) -> Result<ArgvInput, String> {
             "--cache-read-input-tokens" => cache_read_input_tokens = parse_token_count(value)?,
             _ => {
                 return Err(format!(
-                    "unknown flag {flag}; usage: clock-in-hook --source SOURCE --event EVENT [--session-id ID --cwd DIR [--model MODEL] [--occurred-at ISO8601] [--input-tokens N --output-tokens N --cache-creation-input-tokens N --cache-read-input-tokens N]]"
+                    "unknown flag {flag}; usage: siqshift-hook --source SOURCE --event EVENT [--session-id ID --cwd DIR [--model MODEL] [--occurred-at ISO8601] [--input-tokens N --output-tokens N --cache-creation-input-tokens N --cache-read-input-tokens N]]"
                 ))
             }
         }

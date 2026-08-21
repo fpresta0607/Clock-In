@@ -13,9 +13,9 @@ const ids = {
 };
 
 const config: AppConfig = parseEnv({
-  DATABASE_URL: "postgres://clock_in:password@localhost:5432/clock_in",
-  AUTH_BASE_URL: "https://auth.clock-in.test/neondb/auth",
-  CORS_ORIGINS: "https://desktop.clock-in.test,https://admin.clock-in.test",
+  DATABASE_URL: "postgres://siqshift:password@localhost:5432/siqshift",
+  AUTH_BASE_URL: "https://auth.siqshift.test/neondb/auth",
+  CORS_ORIGINS: "https://desktop.siqshift.test,https://admin.siqshift.test",
   NODE_ENV: "test",
 });
 
@@ -112,11 +112,11 @@ describe("API composition", () => {
 
     const response = await app.request("http://api.test/me", {
       method: "OPTIONS",
-      headers: { origin: "https://desktop.clock-in.test", "access-control-request-method": "GET" },
+      headers: { origin: "https://desktop.siqshift.test", "access-control-request-method": "GET" },
     });
 
     expect(response.status).toBe(204);
-    expect(response.headers.get("access-control-allow-origin")).toBe("https://desktop.clock-in.test");
+    expect(response.headers.get("access-control-allow-origin")).toBe("https://desktop.siqshift.test");
     expect(response.headers.get("access-control-allow-credentials")).toBe("true");
   });
 

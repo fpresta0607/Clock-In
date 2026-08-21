@@ -11,10 +11,10 @@ import type {
   ReportResponse,
   ViewPreferences,
   ViewPreferencesUpdate,
-} from "@clock-in/shared";
+} from "@siqshift/shared";
 
 /**
- * Talks to Neon Auth and the Clock-In API from the browser.
+ * Talks to Neon Auth and the SIQshift API from the browser.
  *
  * Neon Auth keeps its session in a cookie on its own host, so every auth call
  * sends credentials cross-origin. The short-lived JWT it hands back is what the

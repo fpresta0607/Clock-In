@@ -38,7 +38,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// and every refresh spawns a process — this is the honest middle.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(120);
 
-/// A provider Clock-In can show a dial for, and the agent-session sources that
+/// A provider SIQshift can show a dial for, and the agent-session sources that
 /// resolve to it. `sources` are the `source` values the hook contract and
 /// `monitor_status` use, so the UI can look a dial up straight from a row's
 /// attribution.
@@ -255,7 +255,7 @@ fn binary_names() -> &'static [&'static str] {
 /// Where to look for the binary: an explicit override, then whatever `PATH`
 /// resolves, then the directories the tool installs into.
 fn default_candidates() -> Vec<PathBuf> {
-    if let Some(explicit) = std::env::var_os("CLOCK_IN_QUOTA_AXI").filter(|v| !v.is_empty()) {
+    if let Some(explicit) = std::env::var_os("SIQSHIFT_QUOTA_AXI").filter(|v| !v.is_empty()) {
         return vec![PathBuf::from(explicit)];
     }
     let mut candidates: Vec<PathBuf> = binary_names().iter().map(PathBuf::from).collect();

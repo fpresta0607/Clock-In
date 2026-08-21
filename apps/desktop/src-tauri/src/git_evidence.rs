@@ -436,7 +436,7 @@ mod tests {
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "clock-in-git-evidence-{name}-{}-{}",
+            "siqshift-git-evidence-{name}-{}-{}",
             std::process::id(),
             unique_suffix()
         ));
@@ -555,7 +555,7 @@ mod tests {
         // probe; the spawn fails and collapses to None rather than failing
         // the hook.
         assert_eq!(
-            probe_repo_root("clock-in-git-that-is-not-installed", &dir),
+            probe_repo_root("siqshift-git-that-is-not-installed", &dir),
             None
         );
 
@@ -576,7 +576,7 @@ mod tests {
                 "remote",
                 "add",
                 "origin",
-                "git@github.com:fpresta0607/clock-in.git",
+                "git@github.com:fpresta0607/siqshift.git",
             ],
         )
         .await;
@@ -592,7 +592,7 @@ mod tests {
 
         assert_eq!(
             repo_remote(&dir).as_deref(),
-            Some("git@github.com:fpresta0607/clock-in.git")
+            Some("git@github.com:fpresta0607/siqshift.git")
         );
         assert_eq!(repo_remote(&worktree), repo_remote(&dir));
         // The roots differ, which is exactly what used to split them.

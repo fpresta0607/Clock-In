@@ -86,7 +86,7 @@ function validateCalendarAndInstantBounds(
 
 /**
  * Which agent runtime produced a session. Deliberately *not* an enum: the
- * roster in `agent-runtimes.json` decides what Clock-In can say about a
+ * roster in `agent-runtimes.json` decides what SIQshift can say about a
  * runtime, never whether it may be recorded. A runtime nobody has declared yet
  * is stored under its own id rather than collapsed into `other` or rejected,
  * so support for a new CLI is a roster entry, not a schema migration.
@@ -545,7 +545,7 @@ export const agentStatusValues = ["anonymous", "registered", "retired"] as const
 export const agentStatusSchema = z.enum(agentStatusValues);
 
 /**
- * A codebase label - a name like `clock-in`: the repository's own name when an
+ * A codebase label - a name like `siqshift`: the repository's own name when an
  * agent's identity is keyed on its remote, and the last segment of a repo root
  * or working directory otherwise - so the surfaces can say which codebase an
  * agent worked without handing anyone a path. Paths themselves stay behind

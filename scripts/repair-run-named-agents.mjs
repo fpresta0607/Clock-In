@@ -113,7 +113,7 @@ const keyedOnARepository = (agent) => agent.repo_key !== null && !agent.repo_key
  * reaches the repository's own row.
  *
  * The comparison folds case and nothing else does. `repoLabel` keeps a
- * directory's own capitalisation (`Clock-In`, `PrecisionDocs-AI`) while
+ * directory's own capitalisation (`SIQshift`, `PrecisionDocs-AI`) while
  * `normalizeRemote` lowercases a remote deliberately, because GitHub treats
  * `Owner/Repo` and `owner/repo` as one repository - so a capitalised checkout
  * would never match its own remote-keyed row, and this would mint a second row

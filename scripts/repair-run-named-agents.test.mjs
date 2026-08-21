@@ -6,8 +6,8 @@ import { findCodebaseRow, foldsIntoBucket } from "./repair-run-named-agents.mjs"
 function agent(overrides) {
   return {
     id: "8d1c2f7e-0000-4000-8000-00000000000a",
-    repo_root: "C:/dev/clock-in",
-    repo_key: "path:C:/dev/clock-in",
+    repo_root: "C:/dev/siqshift",
+    repo_key: "path:C:/dev/siqshift",
     status: "anonymous",
     ...overrides,
   };

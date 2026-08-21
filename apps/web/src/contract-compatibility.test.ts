@@ -1,4 +1,4 @@
-import { agentShiftsFiltersSchema, leaderboardFiltersSchema, meStatsFiltersSchema } from "@clock-in/shared";
+import { agentShiftsFiltersSchema, leaderboardFiltersSchema, meStatsFiltersSchema } from "@siqshift/shared";
 import { describe, expect, it } from "vitest";
 
 import { rangeQuery } from "./App.js";

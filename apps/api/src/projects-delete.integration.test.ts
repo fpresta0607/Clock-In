@@ -5,7 +5,7 @@ import {
   runMigrations,
   type DatabaseConnection,
   type DisposableTestDatabase,
-} from "@clock-in/database";
+} from "@siqshift/database";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { AuthenticatedSubject } from "./auth.js";
@@ -38,7 +38,7 @@ integration("deleting a project that hosts roster agents", () => {
     `;
     await database.client`
       insert into users (id, organization_id, email, name, role)
-      values (${ownerUserId}, ${organizationId}, 'delete@clock-in.test', 'Delete User', 'admin')
+      values (${ownerUserId}, ${organizationId}, 'delete@siqshift.test', 'Delete User', 'admin')
     `;
     projects = new DrizzleProjectRepository(database.db);
     agents = new DrizzleAgentRepository(database.db);
@@ -132,7 +132,7 @@ integration("deleting a project that hosts roster agents", () => {
     const doomed = await project("Colliding from");
     const replacement = await project("Colliding to");
     const key = { organizationId, ownerUserId, source: "cursor" as const, name: "Cursor", now: new Date() };
-    const incumbent = await agents.upsertForKey({ ...key, repoRoot: "C:/dev/clock-in", repoRemote: null, projectId: replacement });
+    const incumbent = await agents.upsertForKey({ ...key, repoRoot: "C:/dev/siqshift", repoRemote: null, projectId: replacement });
     const moved = await agents.upsertForKey({ ...key, repoRoot: "C:/dev/pocket-piggies", repoRemote: null, projectId: doomed });
     expect(moved.id).not.toBe(incumbent.id);
 

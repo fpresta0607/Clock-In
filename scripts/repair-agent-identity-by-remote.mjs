@@ -224,7 +224,7 @@ function pickWinner(group) {
 }
 
 /**
- * Refuses a database that is not Clock-In's, before anything else runs.
+ * Refuses a database that is not SIQshift's, before anything else runs.
  *
  * `DATABASE_URL` is an ambient environment variable shared with whatever else
  * the shell was doing, and a stale one points at a stranger's database. This
@@ -234,7 +234,7 @@ function pickWinner(group) {
  * carries the column this repair is about, and a database that answers no is
  * refused rather than probed further.
  */
-async function requireClockInSchema() {
+async function requireSiqshiftSchema() {
   const [found] = await sql`
     select
       to_regclass('public.agents') is not null as has_agents,
@@ -244,7 +244,7 @@ async function requireClockInSchema() {
       ) as has_repo_key
   `;
   if (!found.has_agents) {
-    console.error("This database has no `agents` table, so it is not Clock-In's. Refusing to touch it.");
+    console.error("This database has no `agents` table, so it is not SIQshift's. Refusing to touch it.");
     console.error("Check DATABASE_URL - it is an ambient variable and a stale one points somewhere else entirely.");
     await sql.end();
     process.exit(2);
@@ -410,7 +410,7 @@ async function main() {
     await sql.end();
     process.exit(2);
   }
-  await requireClockInSchema();
+  await requireSiqshiftSchema();
   const scope = ownerValue === undefined ? null : await resolveOwner(ownerValue);
   // Built per statement rather than shared: every read this run makes sees the
   // same rows the write pass may touch, and nothing else.
@@ -432,7 +432,7 @@ async function main() {
   // nothing to probe and nothing to re-key on them.
   const considered = agents.filter((agent) => agent.repo_root !== null);
 
-  console.log(`Clock-In agent identity repair, keyed on the git remote. ${confirm ? "Applying." : "Dry run."}`);
+  console.log(`SIQshift agent identity repair, keyed on the git remote. ${confirm ? "Applying." : "Dry run."}`);
   console.log(scope === null
     ? "Every operator's rows, because no --owner was given."
     : `Only ${scope.name}'s rows (${scope.email}), because --owner names them.`);

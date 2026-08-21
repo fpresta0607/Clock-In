@@ -1,5 +1,5 @@
 {
-  "name": "@clock-in/database",
+  "name": "@siqshift/database",
   "version": "0.0.0",
   "private": true,
   "type": "module",

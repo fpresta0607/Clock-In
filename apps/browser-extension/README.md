@@ -1,6 +1,6 @@
-# @clock-in/browser-extension
+# @siqshift/browser-extension
 
-The Clock-In browser extension (Manifest V3): it matches the active tab against the user's URL rules locally and reports only the verdict to the desktop app.
+The SIQshift browser extension (Manifest V3): it matches the active tab against the user's URL rules locally and reports only the verdict to the desktop app.
 Chrome and Edge ship from one build; Firefox ships as a thin manifest variant.
 
 ## What leaves the browser
@@ -18,7 +18,7 @@ Three things never leave the machine at all:
 - Each identity's queued-verdict outbox holds up to 1,000 saved verdicts in extension storage until the native host is reachable again. At capacity, capture pauses until saved activity syncs; no saved verdict is dropped. The extension retains at most eight identity namespaces and prunes only fully drained, inactive ones. If pending evidence fills that limit, the new identity is refused until capacity is safely available.
 - The span machine's in-flight state (open span, dwell candidate, session id) sits in extension storage so an MV3 service-worker eviction cannot strand an open span. A corrupt or unavailable read starts fresh; after an unobserved gap, the restored span closes at the last provable attention time before the extension rechecks browser focus and idle state.
 
-Off-the-record tabs are excluded via `tab.incognito` (Chrome's Guest windows report as off-the-record); Clock-In never asks for the browser's incognito toggle.
+Off-the-record tabs are excluded via `tab.incognito` (Chrome's Guest windows report as off-the-record); SIQshift never asks for the browser's incognito toggle.
 
 ## Permissions and why
 
@@ -26,12 +26,12 @@ Off-the-record tabs are excluded via `tab.incognito` (Chrome's Guest windows rep
   Chrome surfaces this as "read your browsing history"; the capability is real, the behavior is verdict-only, and the code is auditable in this repository.
 - `idle` - to end spans when the machine goes idle or locks (`idle.onStateChanged`).
 - `storage` - to persist the local tally and the offline outbox across service-worker restarts.
-- `nativeMessaging` - to talk to `clock-in-browser-host`, the desktop's local stdio bridge, which holds no credentials and opens no sockets.
+- `nativeMessaging` - to talk to `siqshift-browser-host`, the desktop's local stdio bridge, which holds no credentials and opens no sockets.
 - `alarms` - to schedule ticks, rule refreshes, reconnects, and pending span transitions after an MV3 service-worker eviction.
 
 ## Wire protocol
 
-The extension speaks Chrome native messaging to the host registered as `com.clock_in.browser_host` after the desktop is built with that browser's released extension ID.
+The extension speaks Chrome native messaging to the host registered as `com.siqshift.browser_host` after the desktop is built with that browser's released extension ID.
 Framing (4-byte little-endian length-prefixed JSON) is handled by `chrome.runtime.connectNative`; the JSON shapes are:
 
 - `{"type":"get-rules"}` -> `{"type":"rules","collectionEnabled","collectionId","collectionNamespace","capturePaused","rules":[{"id","pattern"}]}`; fetched on connect and every five minutes. `collectionNamespace` is the admitted `accountId:organizationId` pair. A missing or malformed namespace, or an empty rule set, matches nothing (fail closed).

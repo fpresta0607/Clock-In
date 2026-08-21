@@ -1,4 +1,4 @@
-import type { ProjectUpdateRequest } from "@clock-in/shared";
+import type { ProjectUpdateRequest } from "@siqshift/shared";
 
 import type { AuthenticatedSubject } from "../auth.js";
 import { AppError } from "../errors.js";

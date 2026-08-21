@@ -1,11 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { agentRuntimes } from "@clock-in/shared";
+import { agentRuntimes } from "@siqshift/shared";
 import { AgentRuntimeIcon } from "./agent-icons.js";
 
 describe("AgentRuntimeIcon", () => {
-  // The roster is the declaration of every runtime Clock-In knows by name, so
+  // The roster is the declaration of every runtime SIQshift knows by name, so
   // it is also the list every mark has to cover. A runtime added there without
   // a mark here falls back to a letter tile, which is what the connector list
   // looked like before.
@@ -31,7 +31,7 @@ describe("AgentRuntimeIcon", () => {
   });
 
   // An undeclared runtime is still recorded under its own id, so it still has
-  // to render as something. A monogram is honest: Clock-In has no mark for a
+  // to render as something. A monogram is honest: SIQshift has no mark for a
   // tool nobody has named yet.
   it("falls back to a monogram for a runtime the roster has never heard of", () => {
     render(<AgentRuntimeIcon source="brand_new_cli" />);

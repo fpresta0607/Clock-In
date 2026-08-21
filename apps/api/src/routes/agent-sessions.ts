@@ -1,4 +1,4 @@
-import { agentSessionEventBatchRequestSchema, agentSessionEventBatchResponseSchema } from "@clock-in/shared";
+import { agentSessionEventBatchRequestSchema, agentSessionEventBatchResponseSchema } from "@siqshift/shared";
 import { Hono } from "hono";
 
 import { getAuthenticatedSubject, type ApiEnvironment } from "../app.js";

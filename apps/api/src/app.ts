@@ -4,7 +4,7 @@ import {
   normalizeInviteCode,
   organizationResponseSchema,
   provisionAccountRequestSchema,
-} from "@clock-in/shared";
+} from "@siqshift/shared";
 import { bodyLimit } from "hono/body-limit";
 import type { JWTVerifyGetKey } from "jose";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
