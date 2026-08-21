@@ -518,11 +518,25 @@ describe("agent session contracts", () => {
     expect(() => agentSessionEventSchema.parse({ ...event, repoRoot: "x".repeat(1_001) })).toThrow();
   });
 
-  it("rejects a browser span carrying a repoRoot", () => {
+  it("takes the repository's remote, which is what the identity is keyed on", () => {
+    // Verbatim, in whatever spelling git holds: the server normalizes it, and
+    // it is the only identifier that survives a second worktree or a second
+    // checkout under another directory name.
+    const withRemote = { ...event, repoRoot: "C:/dev/Clock-In", repoRemote: "git@github.com:fpresta0607/clock-in.git" };
+    expect(agentSessionEventSchema.parse(withRemote)).toEqual(withRemote);
+    // Absent from a desktop that predates the probe, and from a repository
+    // that has no remote; both key on the repo root instead.
+    expect(agentSessionEventSchema.parse(event).repoRemote).toBeUndefined();
+    expect(() => agentSessionEventSchema.parse({ ...event, repoRemote: "" })).toThrow();
+    expect(() => agentSessionEventSchema.parse({ ...event, repoRemote: "x".repeat(1_001) })).toThrow();
+  });
+
+  it("rejects a browser span carrying a repoRoot or a repoRemote", () => {
     // A browser span has no working directory, so it has no repository
     // either; accepting one would hand a repo to a path that never resolves it.
     const span = { ...event, source: "browser", cwd: undefined, ruleId: ids.session };
     expect(() => agentSessionEventSchema.parse({ ...span, repoRoot: "C:/dev/Clock-In" })).toThrow();
+    expect(() => agentSessionEventSchema.parse({ ...span, repoRemote: "git@github.com:acme/api.git" })).toThrow();
     expect(agentSessionEventSchema.parse(span).ruleId).toBe(ids.session);
   });
 

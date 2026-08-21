@@ -26,6 +26,7 @@ export function createAgentSessionRoutes(service: AgentSessionService): Hono<Api
       occurredAt: new Date(event.occurredAt),
       cwd: event.cwd ?? null,
       repoRoot: event.repoRoot ?? null,
+      repoRemote: event.repoRemote ?? null,
       ruleId: event.ruleId ?? null,
     })));
     return context.json(agentSessionEventBatchResponseSchema.parse(result));

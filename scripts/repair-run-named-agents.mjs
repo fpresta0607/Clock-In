@@ -19,6 +19,11 @@
  * an identity key (`identityRepoRoot`), so no new row can be minted this way.
  * This repairs the rows already stored.
  *
+ * Since `0016_agent_identity_by_remote` a row is keyed on `agents.repo_key`
+ * and its `repo_root` is only evidence of where the work happened, so a row
+ * whose key names a repository is never folded however its directory reads: a
+ * gate worktree of a real repository is correctly identified, not run-named.
+ *
  * Each run-named agent merges into the one unassigned agent for its
  * (organization, owner, source): shifts, `shift_commits` and `agent_usage`
  * follow, then the emptied row is retired. Nothing is deleted, and an agent a
@@ -33,9 +38,10 @@
  * non-repo directory is bucketed by design with that cwd stored. Each shift
  * with a commit moves onto the codebase its first commit names (first by
  * authored_at then id, the rule the paystub and graduation already follow):
- * an existing agent of the same (organization, owner, source) whose repo root
- * carries the same label when there is one, else a fresh identity keyed on
- * that commit's repo root. A root whose last segment is opaque stays put - a
+ * an existing agent of the same (organization, owner, source) rendering the
+ * same codebase label when there is one, else a fresh identity keyed on
+ * `path:<that commit's repo root>`, which is what `identityRepoKey` composes
+ * when no remote is known. A root whose last segment is opaque stays put - a
  * gate worktree's commit reports the worktree path, which names only a run.
  * A shift with no commit stays in the bucket, which is self-limiting: no date
  * cutoff is needed, and a re-run stays safe forever.
@@ -55,48 +61,86 @@ import postgres from "postgres";
 
 import registry from "../packages/shared/src/agent-runtimes.json" with { type: "json" };
 
-const confirm = process.argv.includes("--confirm");
-const databaseUrl = process.env.DATABASE_URL;
-if (databaseUrl === undefined || databaseUrl === "") {
-  console.error("DATABASE_URL is required.");
+/**
+ * The one implementation, imported rather than mirrored. This script keeps no
+ * copy of the opaque-segment rule any more: which rows get folded into a
+ * bucket and which shifts get re-homed are both decided by it, so a mirror one
+ * branch behind folds a row the API considers perfectly named. Node strips the
+ * types (22.18+, 23.6+, 24+).
+ */
+let repoLabel;
+let agentCodebaseLabel;
+try {
+  ({ repoLabel, agentCodebaseLabel } = await import("../apps/api/src/services/attribution.ts"));
+} catch (error) {
+  console.error("Could not load apps/api/src/services/attribution.ts.");
+  console.error("This script reads the API's own codebase-label rule rather than copying it, which needs a Node that strips types (22.18+, 23.6+ or 24+).");
+  console.error(String(error));
   process.exit(2);
 }
 
-const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+const confirm = process.argv.includes("--confirm");
 
-/**
- * Mirrors `OPAQUE_SEGMENT` in apps/api/src/services/attribution.ts: a ULID, a
- * UUID, or a bare hex hash names no codebase to anyone. Keep the two identical
- * - the ULID branch is uppercase-only there for the same reason it is here, so
- * a lowercase 26-character codebase name is never folded away. The hex branch
- * cannot be uppercase-only (git SHAs are lowercase), so it is keyed on length
- * instead: exactly a full SHA-1 (40) or SHA-256 (64) hex string.
- */
-const OPAQUE_SEGMENT =
-  /^(?:[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/;
+/** Opened by the entrypoint at the foot of this file, so an import connects to nothing. */
+let sql;
 
 /** The declared runtimes' display names, from the one roster both sides read. */
 const runtimeLabels = new Map(registry.runtimes.map((runtime) => [runtime.id, runtime.label]));
 
-const lastSegment = (path) => {
-  const segments = path.replace(/\\/g, "/").replace(/\/+$/, "").split("/");
-  return segments[segments.length - 1] ?? "";
-};
+const namesOnlyARun = (repoRoot) => repoRoot !== null && repoLabel(repoRoot) === null;
 
-const namesOnlyARun = (repoRoot) =>
-  repoRoot !== null && OPAQUE_SEGMENT.test(lastSegment(repoRoot));
+/**
+ * A row keyed on a real repository, whatever its directory happens to read as.
+ *
+ * `0016_agent_identity_by_remote` moved identity onto `agents.repo_key`, and
+ * the API now stores the repo root as evidence of where the work happened
+ * rather than as the key. A shift run inside a gate worktree of a real
+ * repository therefore mints a correctly keyed row - `github.com/owner/repo` -
+ * that still carries a run-named `repo_root`. Folding that into the operator's
+ * unassigned bucket would destroy the very attribution
+ * `repair-agent-identity-by-remote.mjs` exists to establish, so the directory
+ * is never the last word: a remote key outranks whatever it reads as.
+ */
+const keyedOnARepository = (agent) => agent.repo_key !== null && !agent.repo_key.startsWith("path:");
+
+/**
+ * The row that already carries this codebase, or undefined.
+ *
+ * Oldest matching label wins, deterministically; the label is what every
+ * surface renders, so which clone's row carries the shift does not change what
+ * anyone reads. A remote-keyed row is matched on the repository its key names,
+ * which is the whole point of the key: a commit authored in one worktree
+ * reaches the repository's own row.
+ *
+ * The comparison folds case and nothing else does. `repoLabel` keeps a
+ * directory's own capitalisation (`Clock-In`, `PrecisionDocs-AI`) while
+ * `normalizeRemote` lowercases a remote deliberately, because GitHub treats
+ * `Owner/Repo` and `owner/repo` as one repository - so a capitalised checkout
+ * would never match its own remote-keyed row, and this would mint a second row
+ * for it. Duplicating a row inside the script that repairs duplicated rows.
+ * Only the match folds: what is stored and displayed is untouched.
+ */
+export function findCodebaseRow(candidates, label) {
+  const wanted = label.toLowerCase();
+  return candidates.find((agent) => agentCodebaseLabel(agent.repo_root, agent.repo_key)?.toLowerCase() === wanted);
+}
+
+/** A row the fold pass may retire into its operator's unassigned bucket. */
+export function foldsIntoBucket(agent) {
+  return agent.status === "anonymous" && !keyedOnARepository(agent) && namesOnlyARun(agent.repo_root);
+}
 
 async function main() {
   // Only anonymous rows. Naming an agent registers it in the same write, so
   // `registered` means a member chose that name - not ours to revisit, even on
   // a row keyed this way.
   const candidates = await sql`
-    select id, organization_id, owner_user_id, source, repo_root, name, status
+    select id, organization_id, owner_user_id, source, repo_root, repo_key, name, status
     from agents
     where repo_root is not null and status = 'anonymous'
     order by organization_id, owner_user_id, source, id
   `;
-  const runNamed = candidates.filter((agent) => namesOnlyARun(agent.repo_root));
+  const runNamed = candidates.filter(foldsIntoBucket);
   // A name in angle brackets is a placeholder, never a model: `like '<%>'`
   // mirrors `attestedModel` in apps/api/src/services/agent-sessions.ts exactly.
   const [placeholders] = await sql`
@@ -116,13 +160,10 @@ async function main() {
       order by c.authored_at, c.id
       limit 1
     ) first_commit
-    where a.repo_root is null and a.status <> 'retired'
+    where a.repo_key is null and a.status <> 'retired'
       and s.source <> 'browser'
   `;
-  const homableCount = preview.filter((shift) => {
-    const label = lastSegment(shift.repo_root);
-    return label !== "" && !OPAQUE_SEGMENT.test(label);
-  }).length;
+  const homableCount = preview.filter((shift) => repoLabel(shift.repo_root) !== null).length;
 
   if (runNamed.length === 0) {
     console.log("No agent is named after a run.");
@@ -152,14 +193,16 @@ async function main() {
   for (const loser of runNamed) {
     await sql.begin(async (tx) => {
       // The operator's unassigned bucket for this runtime, minted if this is
-      // the first shift to need it. The partial unique excludes retired rows,
-      // so the arbiter restates that predicate exactly.
+      // the first shift to need it. Since 0016 the bucket is the row whose
+      // `repo_key` is null, not the one whose root is, and the arbiter has to
+      // restate that index's predicate exactly or postgres finds no arbiter
+      // at all and the fold aborts on its first row.
       const name = `${loser.name.split(" @ ")[0]} @ unassigned`;
       const [winner] = await tx`
-        insert into agents (organization_id, owner_user_id, source, repo_root, name)
-        values (${loser.organization_id}, ${loser.owner_user_id}, ${loser.source}, null, ${name})
+        insert into agents (organization_id, owner_user_id, source, repo_root, repo_key, name)
+        values (${loser.organization_id}, ${loser.owner_user_id}, ${loser.source}, null, null, ${name})
         on conflict (organization_id, owner_user_id, source)
-          where repo_root is null and status <> 'retired'
+          where repo_key is null and status <> 'retired'
           do update set updated_at = now()
         returning id
       `;
@@ -235,42 +278,41 @@ async function main() {
       order by c.authored_at, c.id
       limit 1
     ) first_commit
-    where a.repo_root is null and a.status <> 'retired'
+    where a.repo_key is null and a.status <> 'retired'
       and s.source <> 'browser'
     order by s.organization_id, s.user_id, s.source, s.started_at
   `;
-  const homable = bucketShifts.filter((shift) => {
-    const label = lastSegment(shift.repo_root);
-    return label !== "" && !OPAQUE_SEGMENT.test(label);
-  });
+  const homable = bucketShifts.filter((shift) => repoLabel(shift.repo_root) !== null);
   let rehomed = 0;
   let heldRehomedCommits = 0;
   for (const shift of homable) {
-    const label = lastSegment(shift.repo_root);
+    const label = repoLabel(shift.repo_root);
     await sql.begin(async (tx) => {
       const candidates = await tx`
-        select id, repo_root from agents
+        select id, repo_root, repo_key from agents
         where organization_id = ${shift.organization_id}
           and owner_user_id = ${shift.user_id}
           and source = ${shift.source}
-          and repo_root is not null and status <> 'retired'
+          and repo_key is not null and status <> 'retired'
         order by created_at, id
       `;
-      // Oldest matching label wins, deterministically; the label is what
-      // every surface renders, so which clone's row carries the shift does
-      // not change what anyone reads.
-      let target = candidates.find((agent) => lastSegment(agent.repo_root) === label);
+      let target = findCodebaseRow(candidates, label);
       if (target === undefined) {
         const runtime = runtimeLabels.get(shift.source) ?? shift.source;
         // `agents_name_length_valid` caps a name at 200 characters, and a
         // directory name is not bounded by anything: clamp rather than let a
         // long checkout abort the whole re-homing transaction.
         const name = `${runtime} @ ${label}`.slice(0, 200);
+        // A commit names a directory and nothing else, so the key this can
+        // mint is the path lane's, composed exactly as `identityRepoKey`
+        // composes it: 'path:' and the root verbatim. Leaving it null would
+        // mint a row with a codebase and no identity - one that satisfies the
+        // *unassigned* partial unique and renders "@ unassigned".
         const [minted] = await tx`
-          insert into agents (organization_id, owner_user_id, source, repo_root, name)
-          values (${shift.organization_id}, ${shift.user_id}, ${shift.source}, ${shift.repo_root}, ${name})
-          on conflict (organization_id, owner_user_id, source, repo_root)
-            where repo_root is not null and status <> 'retired'
+          insert into agents (organization_id, owner_user_id, source, repo_root, repo_key, name)
+          values (${shift.organization_id}, ${shift.user_id}, ${shift.source}, ${shift.repo_root}, ${`path:${shift.repo_root}`}, ${name})
+          on conflict (organization_id, owner_user_id, source, repo_key)
+            where repo_key is not null and status <> 'retired'
             do update set updated_at = now()
           returning id
         `;
@@ -332,9 +374,9 @@ async function main() {
   // purpose - they were never candidates - and counted separately so the
   // number is never mistaken for work left undone.
   const remaining = await sql`
-    select repo_root, status from agents where repo_root is not null and status <> 'retired'
+    select repo_root, repo_key, status from agents where repo_root is not null and status <> 'retired'
   `;
-  const stillKeyed = remaining.filter((agent) => namesOnlyARun(agent.repo_root));
+  const stillKeyed = remaining.filter((agent) => !keyedOnARepository(agent) && namesOnlyARun(agent.repo_root));
   const anonymous = stillKeyed.filter((agent) => agent.status === "anonymous").length;
   console.log(`Anonymous agents still keyed on a run directory: ${anonymous}`);
   if (stillKeyed.length > anonymous) {
@@ -343,8 +385,16 @@ async function main() {
   await sql.end();
 }
 
-main().catch(async (error) => {
-  console.error(error);
-  await sql.end({ timeout: 5 });
-  process.exit(1);
-});
+if (process.argv[1] !== undefined && process.argv[1].endsWith("repair-run-named-agents.mjs")) {
+  const databaseUrl = process.env.DATABASE_URL;
+  if (databaseUrl === undefined || databaseUrl === "") {
+    console.error("DATABASE_URL is required.");
+    process.exit(2);
+  }
+  sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+  main().catch(async (error) => {
+    console.error(error);
+    await sql.end({ timeout: 5 });
+    process.exit(1);
+  });
+}

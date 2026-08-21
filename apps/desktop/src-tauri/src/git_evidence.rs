@@ -6,6 +6,7 @@
 //! or writes — a shift's evidence must never depend on network access, and a
 //! read-only tool must never mutate the repo it is reporting on.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -124,6 +125,94 @@ fn probe_repo_root(git: &str, cwd: &Path) -> Option<PathBuf> {
         return None;
     }
     Some(PathBuf::from(root))
+}
+
+/// The repository's `origin` remote, or `None` when it has none - a
+/// repository nobody pushed anywhere is legitimate, and the server keys such
+/// an agent on its root instead.
+///
+/// This is what makes the agent roster one row per repository rather than one
+/// per directory: every worktree is its own path and every second checkout is
+/// another, but they all report the same remote, on this machine and on the
+/// next one. Sent with any embedded credentials removed and otherwise
+/// unchanged; the server normalizes the spellings (`normalizeRemote` in
+/// apps/api/src/services/attribution.ts), because the same repository is
+/// `git@github.com:owner/repo.git` here and `https://github.com/owner/repo` on
+/// a teammate's machine.
+///
+/// `config --get` rather than `remote get-url`: the configured value, with no
+/// `insteadOf` rewriting applied, is the same string in both checkouts of one
+/// repository on one machine. `--local` because a bare `config --get` is the
+/// one git subcommand that does not fail outside a repository - it falls
+/// through to global and system config, so a working directory that is not a
+/// checkout at all would report whatever `remote.origin.url` the user happens
+/// to have set globally, and `identityRepoKey` would attribute that shift to a
+/// repository it never touched. `--local` reads the repository's own config
+/// and nothing else, which a linked worktree shares with its parent, so every
+/// worktree of one repository still reports the same origin. Synchronous and
+/// non-blocking for the same reasons `repo_root` is.
+pub fn repo_remote(cwd: &Path) -> Option<String> {
+    probe_repo_remote("git", cwd, &[])
+}
+
+/// A remote URL with its `userinfo@` component removed, and every other
+/// spelling left exactly as configured.
+///
+/// A token-authenticated clone stores its credential in the remote - CI and
+/// container tooling write `x-access-token:TOKEN` into the authority of
+/// `https://github.com/owner/repo.git` - so sending the value verbatim would
+/// put a live token on the wire on every agent session start. The server
+/// discards `userinfo` anyway, but a secret discarded after transmission was
+/// still transmitted, so it never leaves the machine that owns it.
+///
+/// Identity does not move: `normalizeRemote` strips the same component, so two
+/// checkouts of one repository still key on the same value whether or not
+/// either had a token embedded. The scp-style form `git@host:owner/repo` is
+/// deliberately untouched - that `git` is a transport user name rather than a
+/// credential, and it is what makes the form parseable at all.
+fn without_embedded_credentials(remote: &str) -> String {
+    let Some(scheme) = remote.find("://") else {
+        return remote.to_string();
+    };
+    let authority_start = scheme + 3;
+    let authority_end = remote[authority_start..]
+        .find('/')
+        .map_or(remote.len(), |offset| authority_start + offset);
+    let authority = &remote[authority_start..authority_end];
+    match authority.rfind('@') {
+        None => remote.to_string(),
+        Some(at) => format!(
+            "{}{}{}",
+            &remote[..authority_start],
+            &authority[at + 1..],
+            &remote[authority_end..]
+        ),
+    }
+}
+
+fn probe_repo_remote(git: &str, cwd: &Path, env: &[(&str, &OsStr)]) -> Option<String> {
+    let mut command = std::process::Command::new(git);
+    command
+        .args(["config", "--local", "--get", "remote.origin.url"])
+        .current_dir(cwd)
+        .envs(env.iter().copied())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let configured = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    let remote = without_embedded_credentials(&configured);
+    // The contract caps it at 1000 characters and rejects an empty string, so
+    // an absurd value is dropped here rather than 400ing the whole batch.
+    if remote.is_empty() || remote.chars().count() > 1_000 {
+        return None;
+    }
+    Some(remote)
 }
 
 /// One commit authored during a shift, ready to become a `shift_commits` row.
@@ -471,6 +560,174 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two worktrees of one repository are two roots and one remote. That is
+    /// the whole reason identity keys on the remote: keyed on the root, this
+    /// repository would have minted an agent per worktree.
+    #[tokio::test]
+    async fn repo_remote_is_the_same_in_every_worktree() {
+        let dir = temp_dir("repo-remote");
+        init_repo(&dir).await;
+        commit_at(&dir, "a.txt", "first", 1_700_000_000).await;
+        run(
+            &dir,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:fpresta0607/clock-in.git",
+            ],
+        )
+        .await;
+        let worktree = dir.join("..").join(format!(
+            "{}-worktree",
+            dir.file_name().expect("a name").to_string_lossy()
+        ));
+        run(
+            &dir,
+            &["worktree", "add", "-b", "side", &worktree.to_string_lossy()],
+        )
+        .await;
+
+        assert_eq!(
+            repo_remote(&dir).as_deref(),
+            Some("git@github.com:fpresta0607/clock-in.git")
+        );
+        assert_eq!(repo_remote(&worktree), repo_remote(&dir));
+        // The roots differ, which is exactly what used to split them.
+        assert_ne!(repo_root(&worktree), repo_root(&dir));
+
+        let _ = std::fs::remove_dir_all(&worktree);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn repo_remote_of_a_repository_with_no_origin_is_an_honest_none() {
+        let dir = temp_dir("repo-remote-local-only");
+        init_repo(&dir).await;
+        commit_at(&dir, "a.txt", "first", 1_700_000_000).await;
+
+        // A local-only repository is legitimate; the server keys it on its
+        // root instead, rather than pooling every one of them together.
+        assert_eq!(repo_remote(&dir), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A working directory that is not a checkout names no repository, and
+    /// must not borrow one. `config --get` without `--local` is the one git
+    /// subcommand that does not fail outside a repository: it falls through to
+    /// global config, so on a machine where `remote.origin.url` happens to be
+    /// set globally this probe would return a repository the shift never
+    /// touched, while `repo_root` correctly returned `None` - and
+    /// `identityRepoKey` keys on the remote first, so that shift would be
+    /// attributed to someone else's codebase.
+    ///
+    /// `GIT_CONFIG_GLOBAL` makes that hazard the test's own condition rather
+    /// than a property of whoever runs it: the fixture below sets exactly the
+    /// key the probe reads, so dropping `--local` fails here every time. It is
+    /// handed to the probe's own child process rather than set on this one,
+    /// which every other test in this module shares while shelling out to git.
+    #[test]
+    fn repo_remote_of_a_non_repo_directory_is_an_honest_none() {
+        let dir = temp_dir("repo-remote-plain");
+        let global = dir.join("gitconfig-global");
+        std::fs::write(
+            &global,
+            "[remote \"origin\"]\n\turl = https://github.com/someone/unrelated.git\n",
+        )
+        .expect("global config writes");
+
+        assert_eq!(
+            probe_repo_remote("git", &dir, &[("GIT_CONFIG_GLOBAL", global.as_os_str())]),
+            None
+        );
+        // The root probe already got this right, and the two have to agree:
+        // a shift with no root must not arrive carrying a remote.
+        assert_eq!(repo_root(&dir), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repo_remote_without_git_on_path_is_an_honest_none() {
+        let dir = temp_dir("repo-remote-no-git");
+
+        assert_eq!(
+            probe_repo_remote("clock-in-git-that-is-not-installed", &dir, &[]),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A token-authenticated clone keeps its credential in the remote, and the
+    /// remote now leaves this machine on every agent session start. The server
+    /// discards `userinfo` when it normalizes, but a secret discarded after
+    /// transmission was still transmitted, so it never goes on the wire.
+    #[tokio::test]
+    async fn repo_remote_strips_embedded_credentials() {
+        // Shaped unlike any real token, and joined to the host separately, so a
+        // secret scanner reads no credential here - neither the token itself nor
+        // the `user:pass@host` spelling a Basic Auth detector looks for.
+        let fake_token = "fixture-credential";
+        let userinfo = format!("x-access-token:{fake_token}");
+        let dir = temp_dir("repo-remote-credentialed");
+        init_repo(&dir).await;
+        commit_at(&dir, "a.txt", "first", 1_700_000_000).await;
+        run(
+            &dir,
+            &[
+                "remote",
+                "add",
+                "origin",
+                &format!("https://{userinfo}@github.com/acme/clock-in.git"),
+            ],
+        )
+        .await;
+
+        let remote = repo_remote(&dir).expect("a remote");
+
+        assert_eq!(remote, "https://github.com/acme/clock-in.git");
+        assert!(!remote.contains(fake_token));
+        assert!(!remote.contains("x-access-token"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn credential_stripping_keeps_every_other_spelling_intact() {
+        // Host, port and path survive; only the credential goes. The userinfo
+        // is joined to the host separately so no `user:pass@host` literal sits
+        // in the source for a Basic Auth detector to flag.
+        let userinfo = "user:secret";
+        assert_eq!(
+            without_embedded_credentials(&format!(
+                "https://{userinfo}@dev.azure.test:8443/org/proj/_git/repo"
+            )),
+            "https://dev.azure.test:8443/org/proj/_git/repo"
+        );
+        assert_eq!(
+            without_embedded_credentials("ssh://git@github.com/acme/api.git"),
+            "ssh://github.com/acme/api.git"
+        );
+        assert_eq!(
+            without_embedded_credentials("https://github.com/acme/api.git"),
+            "https://github.com/acme/api.git"
+        );
+        // The scp-style form carries a transport user name, not a credential,
+        // and dropping it would leave a string git never wrote.
+        assert_eq!(
+            without_embedded_credentials("git@github.com:acme/api.git"),
+            "git@github.com:acme/api.git"
+        );
+        // An `@` in the path is not userinfo, so the authority is where the
+        // search stops.
+        assert_eq!(
+            without_embedded_credentials("https://github.com/acme/api@2.git"),
+            "https://github.com/acme/api@2.git"
+        );
     }
 
     #[tokio::test]

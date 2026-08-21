@@ -15,6 +15,7 @@ import type {
   UpsertStartedAgentSession,
 } from "../repositories.js";
 import { createAgentSessionReaper, createAgentSessionService, type AgentSessionEventInput } from "./agent-sessions.js";
+import { identityRepoKey } from "./attribution.js";
 
 const ids = {
   organization: "0e59dfd6-3d1f-4795-9420-3ab65f0df843",
@@ -153,7 +154,9 @@ class MemoryAgents implements AgentRepository {
 
   public async upsertForKey(input: UpsertAgentForKey): Promise<{ id: string }> {
     this.upserts.push(input);
-    const key = `${input.source}|${input.repoRoot ?? ""}`;
+    // The fake answers the way the real repository does: one id per identity,
+    // which is the remote when there is one and the root otherwise.
+    const key = `${input.source}|${identityRepoKey(input.repoRoot, input.repoRemote) ?? ""}`;
     let id = this.idsByKey.get(key);
     if (id === undefined) {
       id = crypto.randomUUID();
@@ -203,6 +206,9 @@ function event(overrides: Partial<AgentSessionEventInput> = {}): AgentSessionEve
     // A desktop old enough to have no repo probe is the default here, so the
     // suite keeps exercising the degradation path as well as the v2 one.
     repoRoot: null,
+    // The remote is likewise absent by default, so the degradation path stays
+    // the suite's baseline rather than the exception.
+    repoRemote: null,
     ruleId: null,
     ...overrides,
   };
@@ -435,6 +441,7 @@ describe("roster minting", () => {
       ownerUserId: ids.user,
       source: "claude_code",
       repoRoot: null,
+      repoRemote: null,
       projectId: ids.project,
       name: "Claude Code",
       now,
@@ -492,6 +499,26 @@ describe("roster minting", () => {
       .toEqual(["C:/dev/clock-in", "C:/dev/pocket-piggies"]);
     expect(agentSessions.records[1]!.agentId).toBe(agentSessions.records[0]!.agentId);
     // Two repos inside one project used to collapse onto one identity.
+    expect(agentSessions.records[2]!.agentId).not.toBe(agentSessions.records[0]!.agentId);
+  });
+
+  // The batch cache keys on what identity keys on. Two worktrees of one
+  // repository arrive as two roots and one remote: cached on the root alone
+  // they would race into two upserts for the one identity, and cached on the
+  // remote alone a repository with no remote would swallow every other one.
+  it("carries the remote to the identity, and shares one upsert across two worktrees", async () => {
+    const agents = new MemoryAgents();
+    const { agentSessions, service } = createService({ agents });
+    const remote = "git@github.com:fpresta0607/precisiondocs.git";
+
+    await service.ingest(subject, [
+      event({ externalSessionId: "one", repoRoot: "C:/w/precisiondocs-fdd5f2/1/precisiondocs", repoRemote: remote }),
+      event({ externalSessionId: "two", repoRoot: "C:/w/precisiondocs-fdd5f2/2/precisiondocs", repoRemote: remote }),
+      event({ externalSessionId: "three", repoRoot: "C:/dev/other", repoRemote: null }),
+    ]);
+
+    expect(agents.upserts.map((upsert) => upsert.repoRemote)).toEqual([remote, null]);
+    expect(agentSessions.records[1]!.agentId).toBe(agentSessions.records[0]!.agentId);
     expect(agentSessions.records[2]!.agentId).not.toBe(agentSessions.records[0]!.agentId);
   });
 

@@ -690,6 +690,15 @@ pub struct SpoolEvent {
     /// or a machine without git, records nothing rather than an error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_root: Option<String>,
+    /// The repository's `origin` remote, probed beside `repo_root`. Contract
+    /// data too, and the one the server keys the agent identity on: two
+    /// worktrees report two roots and one remote, so keying on the remote is
+    /// what makes them one agent instead of one per path. Any embedded
+    /// credential is stripped before it reaches here, deliberately and at the
+    /// probe (`without_embedded_credentials` in git_evidence.rs), so a
+    /// token-authenticated clone never puts its token on the spool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_remote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -769,6 +778,7 @@ impl HookInput {
             cwd: Some(self.cwd),
             start_head: None,
             repo_root: None,
+            repo_remote: None,
             model: non_empty(self.model.as_deref()),
             rule_id: None,
             transcript_path: None,
@@ -913,6 +923,7 @@ fn translate_claude(
         cwd: Some(input.cwd),
         start_head: None,
         repo_root: None,
+        repo_remote: None,
         model: non_empty(input.model.as_deref()),
         rule_id: None,
         transcript_path: non_empty(input.transcript_path.as_deref()),
@@ -980,6 +991,7 @@ fn translate_native(value: &serde_json::Value, context: &ArgvContext) -> HookStd
         cwd: Some(cwd.to_string()),
         start_head: None,
         repo_root: None,
+        repo_remote: None,
         model: non_empty(model),
         rule_id: None,
         transcript_path: None,
@@ -1970,6 +1982,7 @@ mod tests {
             cwd: Some("C:/dev/Clock-In".to_string()),
             start_head: None,
             repo_root: None,
+            repo_remote: None,
             model: None,
             rule_id: None,
             transcript_path: None,
@@ -2421,6 +2434,7 @@ mod tests {
             cwd: None,
             start_head: None,
             repo_root: None,
+            repo_remote: None,
             model: None,
             rule_id: Some("r1".to_string()),
             transcript_path: None,

@@ -26,7 +26,7 @@ const piggies = "C:/dev/pocket-piggies";
 const gateWorktree = "C:/Users/alex/.no-mistakes/repos/3245fe18a7c8.git/worktrees/01M06FSGP392MH6VJNRX8T364A";
 
 function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
-  return {
+  const record: AgentRecord = {
     id: ids.bucket,
     organizationId: ids.organization,
     name: "Claude Code @ unassigned",
@@ -35,9 +35,16 @@ function agentRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
     owner: { id: ids.user, name: "Alex" },
     project: null,
     repoRoot: null,
+    repoKey: null,
     createdAt: new Date("2026-08-01T00:00:00.000Z"),
     ...overrides,
   };
+  // A fixture that names a root carries the key that root implies, the way
+  // upsertForKey composes one - so `repoKey` is never null on a row that knows
+  // its repository, which is exactly what "is this the bucket?" reads.
+  return record.repoKey === null && record.repoRoot !== null
+    ? { ...record, repoKey: `path:${record.repoRoot}` }
+    : record;
 }
 
 function session(overrides: Partial<AgentSessionRecord> = {}): AgentSessionRecord {
@@ -284,6 +291,28 @@ describe("late repo discovery", () => {
     expect(agents.rows[0]!.repoRoot).toBeNull();
     expect(agents.upserts).toEqual([]);
     expect(agents.restamped).toEqual([]);
+  });
+
+  // A commit names a directory and nothing else, so this lane can only ever
+  // mint a path key - which is precisely the identity the remote replaced.
+  // Re-homing onto it would split one repository back across its worktrees,
+  // one commit at a time, and the roster would refill with the rows the repair
+  // script had just folded together.
+  it("keeps a shift on its remote-keyed agent when a commit names another worktree", async () => {
+    const agents = new MemoryAgents([agentRecord({
+      id: ids.incumbent,
+      repoRoot: clockIn,
+      repoKey: "github.com/acme/clock-in",
+      name: "Claude Code @ clock-in",
+    })]);
+    const row = session({ agentId: ids.incumbent });
+
+    await expect(graduate(agents, row, "C:/w/clock-in-fix-login").result).resolves.toBe(ids.incumbent);
+
+    expect(agents.upserts).toEqual([]);
+    expect(agents.restamped).toEqual([]);
+    expect(agents.rows).toHaveLength(1);
+    expect(row.agentId).toBe(ids.incumbent);
   });
 
   it("mints nothing for a source that is not on the roster", async () => {

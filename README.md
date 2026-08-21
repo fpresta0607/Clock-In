@@ -9,7 +9,7 @@
 
   <p>
     <a href="https://github.com/fpresta0607/Clock-In/actions/workflows/ci.yml"><img src="https://github.com/fpresta0607/Clock-In/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-    <img src="https://img.shields.io/badge/node-%E2%89%A522-3c873a" alt="Node 22+">
+    <img src="https://img.shields.io/badge/node-%E2%89%A522.18-3c873a" alt="Node 22.18+">
     <img src="https://img.shields.io/badge/rust-1.89%2B-b7410e" alt="Rust 1.89+">
     <img src="https://img.shields.io/badge/desktop-Tauri%202-24c8db" alt="Tauri 2">
   </p>
@@ -245,19 +245,14 @@ refusals never fail a batch.
 
 ### Roster: agents as identities
 
-An agent's identity is durable across sessions, keyed by **(operator, runtime,
-codebase)** per organization — the same person's Claude Code working the same
-repository is one roster entry, not a new row per shift, and two people running
-the same runtime on the same repository are two workers rather than one. Each
-`agent_sessions` row is that identity's shift. The operator is whoever's desktop
-uploaded the shift, so every runtime gets the distinction the day its hooks are
-wired. A shift whose working directory names no codebase — it is not in a
-repository, the desktop predates the repo probe, or the directory is a per-run
-worktree named after a run id — lands in that person's **unassigned** bucket, a
-real roster row several shifts share. The bucket itself never becomes a codebase:
-when a shift's own commit names one, that shift alone moves onto that codebase's
-identity and leaves the rest of the bucket behind; nothing is stranded and no
-default codebase is invented. The Clock-In project stays on the roster row as a label
+An agent's identity is durable across sessions, keyed by **(operator, runtime, repository)** per organization - the same person's Claude Code working the same repository is one roster entry, not a new row per shift, and two people running the same runtime on the same repository are two workers rather than one.
+The repository is named by its git remote, normalized (`github.com/owner/repo`), and never by the directory it happens to sit in: a worktree, a second worktree, and a second checkout under a different folder name are all one repository and so one roster entry, on this machine and on the next one.
+A repository with no remote is identified by its own directory, which keeps local-only work from pooling into a single row.
+Each `agent_sessions` row is that identity's shift.
+The operator is whoever's desktop uploaded the shift, so every runtime gets the distinction the day its hooks are wired.
+A shift with no repository at all - it is not in one, or the desktop predates the probe and its directory names no codebase either - lands in that person's **unassigned** bucket, a real roster row several shifts share.
+The bucket itself never becomes a codebase: when a shift's own commit names one, that shift alone moves onto that codebase's identity and leaves the rest of the bucket behind; nothing is stranded and no default codebase is invented.
+The Clock-In project stays on the roster row as a label
 that follows the path mappings, not as part of the identity, so re-mapping a
 directory never splits or merges a worker. For a shift in a git repo, the desktop app captures the
 branch, and the title, commit id and repository path of the commits the shift
@@ -319,9 +314,11 @@ Not by policy, but because the code never reads it:
 - **Screenshots**, of any kind.
 - **Window titles.** The foreground query returns a process name and stops there.
 - **Input content.** Clock-In never records anything typed into a form, chat, or document.
-- **URLs, browsing history, or page content.** The browser extension matches the active tab
+- **Browsing URLs, history, or page content.** The browser extension matches the active tab
   against the user's own URL rules inside the browser and reports only which rule matched;
-  the URL, page title, and browsing history never leave the browser.
+  the URL, page title, and browsing history never leave the browser. A repository's `origin`
+  remote URL is not browsing: it names which repository an agent worked, and is listed under
+  *What is collected* below.
 - **Document names, file contents, message or email bodies.** Token counts and model
   names read from an AI tool's own session log are the one exception, described in *What is
   collected* below.
@@ -329,7 +326,9 @@ Not by policy, but because the code never reads it:
   Win32 queries plus broadcasts delivered to Clock-In's own hidden window.
 
 What *is* collected: coarse activity segments with timestamps, the foreground process name, agent
-session boundaries with their working directory, browser spans naming which URL rule matched and
+session boundaries with their working directory and - when that directory is in a git repository -
+that repository's root and its `origin` remote URL with any embedded credentials removed, which is
+what names the repository an agent works, browser spans naming which URL rule matched and
 for how long, the start and end of each session the monitor observed, and — for an AI coding shift
 in a git repo — the branch name, and the title, commit id and repository path of each commit
 captured once the shift ends (see *Roster: agents as identities*). When an AI coding tool keeps a
@@ -358,7 +357,8 @@ against explicit fakes, so the behavior suite needs no database.
 
 **Prerequisites**
 
-- Node **22+** and pnpm **10.14+** (`corepack enable`)
+- Node **22.18+** (the `scripts/` repairs import the API's own TypeScript through Node's unflagged type stripping)
+  and pnpm **10.14+** (`corepack enable`)
 - A PostgreSQL database with **Neon Auth** configured — the API verifies JWTs against its JWKS
 - For the desktop app: Rust **1.89+** (`File::try_lock`, used by the spool) plus Tauri's system
   dependencies. On Debian/Ubuntu: `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev`
@@ -403,7 +403,7 @@ Run from the repository root.
 | Command | What it does |
 |---|---|
 | `pnpm typecheck` | `tsc --noEmit` across every package, and the layout suite |
-| `pnpm test` | the full Vitest suite (services, routes, contracts, React), then the layout suite |
+| `pnpm test` | the full Vitest suite (services, routes, contracts, React), the `scripts/` suites under `node --test`, then the layout suite |
 | `pnpm test:browser` | the layout suite alone; needs `pnpm exec playwright install chromium` once |
 | `pnpm build` | production build of every package |
 | `DATABASE_URL=… pnpm --filter @clock-in/database migrate` | apply migrations |
@@ -577,8 +577,9 @@ them.
 - A working directory can contain a user name, so it's shown only to the owning user and org
   admins, and redacted from logs like session descriptions are. A captured commit's repository
   path is a working directory and follows the same rule: a paystub read by anyone else carries
-  the commit without it. What every member does see is the codebase's **label** - the path's
-  last segment, a name like `clock-in` - which says which codebase an agent worked in without
+  the commit without it. What every member does see is the codebase's **label** - a name like
+  `clock-in`, taken from the repository the agent's identity is keyed on when there is one and
+  from the path's last segment otherwise - which says which codebase an agent worked in without
   saying where it lives.
 - `clock-in-hook` holds no credentials and opens no sockets. The spool file is its entire
   interface.

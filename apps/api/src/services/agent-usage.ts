@@ -68,6 +68,7 @@ export function createAgentUsageService(dependencies: AgentUsageServiceDependenc
             ownerUserId: session.userId,
             source: entry.source,
             repoRoot: null,
+            repoRemote: null,
             projectId: session.projectId,
             name: agentRuntimeLabel(entry.source),
             now,
