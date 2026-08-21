@@ -957,6 +957,12 @@ pub struct HookProbe {
 
 const HOOK_BINARY_NAME: &str = "siqshift-hook";
 
+/// What the hook binary was called before the SIQshift rename. Registrations
+/// written then still name it, and the binary is gone, so the agent CLI fires a
+/// command that resolves to nothing on every session event. Recognised here so
+/// such a config reads as REGISTERED (and gets repaired) rather than as absent.
+const LEGACY_HOOK_BINARY_NAME: &str = "clock-in-hook";
+
 /// Where each CLI keeps the config a hook registration lands in, straight from
 /// the runtime roster. Every declared runtime is probed whether or not it is
 /// installed: a missing config simply reads as "not connected", so a machine
@@ -999,7 +1005,7 @@ pub fn detect_hooks(probes: &[HookProbe]) -> Vec<HookRegistration> {
         .iter()
         .map(|probe| {
             let detected = std::fs::read_to_string(&probe.config_path)
-                .map(|content| content.contains(HOOK_BINARY_NAME))
+                .map(|content| mentions_any_hook_binary(&content))
                 .unwrap_or(false);
             let installed = runtime_is_installed(probe);
             HookRegistration {
@@ -1037,7 +1043,7 @@ pub fn auto_connect_hooks(probes: &[HookProbe]) -> Vec<String> {
             continue;
         }
         let already = std::fs::read_to_string(&probe.config_path)
-            .map(|content| content.contains(HOOK_BINARY_NAME))
+            .map(|content| mentions_any_hook_binary(&content))
             .unwrap_or(false);
         if already {
             continue;
@@ -1163,6 +1169,13 @@ fn register_claude_shaped(
     source: &str,
 ) -> ApiResult<HookRegisterResult> {
     let mut settings = read_json_object(config_path)?;
+    // A pre-rename registration is repaired in place, never appended beside.
+    if repoint_legacy_hooks_in_object(&mut settings, command) {
+        write_json_atomically(config_path, &settings)?;
+        return Ok(HookRegisterResult::Registered {
+            config_path: config_path.to_string_lossy().into_owned(),
+        });
+    }
     if claude_hook_present(&settings) {
         return Ok(HookRegisterResult::AlreadyRegistered {
             config_path: config_path.to_string_lossy().into_owned(),
@@ -1194,6 +1207,13 @@ fn register_claude_shaped(
 /// the binary knows the event without relying on Cursor's payload shape.
 fn register_cursor(config_path: &Path, command: &str) -> ApiResult<HookRegisterResult> {
     let mut config = read_json_object(config_path)?;
+    // A pre-rename registration is repaired in place, never appended beside.
+    if repoint_legacy_hooks_in_object(&mut config, command) {
+        write_json_atomically(config_path, &config)?;
+        return Ok(HookRegisterResult::Registered {
+            config_path: config_path.to_string_lossy().into_owned(),
+        });
+    }
     if cursor_hook_present(&config) {
         return Ok(HookRegisterResult::AlreadyRegistered {
             config_path: config_path.to_string_lossy().into_owned(),
@@ -1297,9 +1317,77 @@ fn hook_arrays_mention_hook(
 
 fn value_mentions_hook(value: &serde_json::Value) -> bool {
     match value {
-        serde_json::Value::String(text) => text.contains(HOOK_BINARY_NAME),
+        serde_json::Value::String(text) => mentions_any_hook_binary(text),
         serde_json::Value::Array(items) => items.iter().any(value_mentions_hook),
         serde_json::Value::Object(map) => map.values().any(value_mentions_hook),
+        _ => false,
+    }
+}
+
+/// True for a registration written by EITHER name. A config carrying the
+/// pre-rename binary is registered - just at a path that no longer exists - so
+/// treating it as unregistered would append a second entry and leave the agent
+/// CLI firing both on every event, one of them into nothing.
+fn mentions_any_hook_binary(text: &str) -> bool {
+    text.contains(HOOK_BINARY_NAME) || text.contains(LEGACY_HOOK_BINARY_NAME)
+}
+
+/// Re-point one stored command at the current binary, keeping its arguments.
+/// `None` when the command is not a legacy registration, so a caller can tell
+/// "nothing to do" from "rewritten".
+///
+/// The stored shape is `"<binary>" --source X --event Y`, so the binary is the
+/// first quoted segment and everything after it is the argv this registration
+/// was written with. Rewriting only the path preserves argv exactly, which
+/// matters: `--source` is how the hook knows which CLI fired it, and a Codex
+/// session filed as Claude Code would be worse than none.
+fn repoint_legacy_hook_command(command: &str, quoted_binary: &str) -> Option<String> {
+    let rest = command.strip_prefix('"')?;
+    let (path, tail) = rest.split_once('"')?;
+    if !path.contains(LEGACY_HOOK_BINARY_NAME) {
+        return None;
+    }
+    Some(format!("{quoted_binary}{tail}"))
+}
+
+/// `repoint_legacy_hooks` over a parsed top-level config object.
+fn repoint_legacy_hooks_in_object(
+    settings: &mut serde_json::Map<String, serde_json::Value>,
+    quoted_binary: &str,
+) -> bool {
+    let mut changed = false;
+    for value in settings.values_mut() {
+        changed |= repoint_legacy_hooks(value, quoted_binary);
+    }
+    changed
+}
+
+/// Walks a parsed config, re-pointing every legacy hook command. Returns
+/// whether anything changed. Visits the whole tree rather than stopping at the
+/// first hit - a config can carry one registration per event.
+fn repoint_legacy_hooks(value: &mut serde_json::Value, quoted_binary: &str) -> bool {
+    match value {
+        serde_json::Value::String(text) => match repoint_legacy_hook_command(text, quoted_binary) {
+            Some(updated) => {
+                *text = updated;
+                true
+            }
+            None => false,
+        },
+        serde_json::Value::Array(items) => {
+            let mut changed = false;
+            for item in items {
+                changed |= repoint_legacy_hooks(item, quoted_binary);
+            }
+            changed
+        }
+        serde_json::Value::Object(map) => {
+            let mut changed = false;
+            for item in map.values_mut() {
+                changed |= repoint_legacy_hooks(item, quoted_binary);
+            }
+            changed
+        }
         _ => false,
     }
 }
@@ -3966,5 +4054,116 @@ mod tests {
         assert_eq!(manual["status"], "manual");
         assert_eq!(manual["configPath"], "C:/Users/dev/.codex/config.toml");
         assert_eq!(manual["snippet"], "notify = [...]");
+    }
+
+    // --- Upgrading from Clock-In ------------------------------------------
+    //
+    // The rename moved the hook binary. A config written before it names
+    // `clock-in-hook`, which no longer exists, so the agent CLI fires a command
+    // that resolves to nothing on every session event. Worse, the old detection
+    // matched only the new name: the panel called it "not connected" and
+    // auto-connect appended a SECOND entry, leaving the user firing both.
+
+    #[test]
+    fn a_pre_rename_registration_reads_as_registered() {
+        let settings: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"\"C:/old/clock-in-hook.exe\" --source claude_code --event session-start"}]}]}}"#,
+        )
+        .expect("fixture parses");
+        assert!(
+            claude_hook_present(&settings),
+            "a legacy registration is a registration, just a stale one"
+        );
+    }
+
+    #[test]
+    fn repointing_keeps_the_argv_the_registration_was_written_with() {
+        // --source is how the hook knows which CLI fired it; a Codex session
+        // filed as Claude Code would be worse than none.
+        let repointed = repoint_legacy_hook_command(
+            "\"C:/old/clock-in-hook.exe\" --source codex --event session-end",
+            "\"C:/new/siqshift-hook.exe\"",
+        )
+        .expect("a legacy command is repointed");
+        assert_eq!(
+            repointed,
+            "\"C:/new/siqshift-hook.exe\" --source codex --event session-end"
+        );
+    }
+
+    #[test]
+    fn a_current_registration_is_left_alone() {
+        assert!(
+            repoint_legacy_hook_command(
+                "\"C:/new/siqshift-hook.exe\" --source claude_code --event session-start",
+                "\"C:/other/siqshift-hook.exe\"",
+            )
+            .is_none(),
+            "nothing to repoint means None, so the caller does not rewrite the file"
+        );
+    }
+
+    #[test]
+    fn a_command_that_is_not_ours_is_never_rewritten() {
+        for command in [
+            "echo hi",
+            "\"C:/bin/some-other-tool.exe\" --source claude_code",
+            "clock-in-hook",
+        ] {
+            assert!(
+                repoint_legacy_hook_command(command, "\"C:/new/siqshift-hook.exe\"").is_none(),
+                "{command:?} is not a quoted legacy registration"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_registration_repairs_a_pre_rename_config_in_place() {
+        let dir =
+            std::env::temp_dir().join(format!("siqshift-hook-repoint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir is created");
+        let config = dir.join("settings.json");
+        std::fs::write(
+            &config,
+            r#"{"model":"opus","hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"\"C:/old/clock-in-hook.exe\" --source claude_code --event session-start"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"\"C:/old/clock-in-hook.exe\" --source claude_code --event session-end"}]}]}}"#,
+        )
+        .expect("config writes");
+
+        let result = register_claude_shaped(&config, "\"C:/new/siqshift-hook.exe\"", "claude_code")
+            .expect("registration succeeds");
+        assert!(matches!(result, HookRegisterResult::Registered { .. }));
+
+        let merged: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config).expect("config reads"))
+                .expect("merged config parses");
+        assert_eq!(merged["model"], "opus", "unrelated settings survive");
+        for (key, event) in [
+            ("SessionStart", "session-start"),
+            ("SessionEnd", "session-end"),
+        ] {
+            let entries = merged["hooks"][key].as_array().expect("array");
+            assert_eq!(entries.len(), 1, "{key} is repaired, not duplicated");
+            assert_eq!(
+                entries[0]["hooks"][0]["command"],
+                format!("\"C:/new/siqshift-hook.exe\" --source claude_code --event {event}"),
+            );
+        }
+
+        // Running again is a no-op: the repair already landed.
+        let before = std::fs::read_to_string(&config).expect("config reads");
+        let result = register_claude_shaped(&config, "\"C:/new/siqshift-hook.exe\"", "claude_code")
+            .expect("re-registration succeeds");
+        assert!(matches!(
+            result,
+            HookRegisterResult::AlreadyRegistered { .. }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&config).expect("config reads"),
+            before,
+            "a repaired config is not rewritten again"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
