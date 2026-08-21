@@ -11,6 +11,8 @@ import {
   agentsReportResponseSchema,
   agentsReportRowSchema,
   agentSchema,
+  agentShiftsFiltersSchema,
+  agentShiftsResponseSchema,
   agentsListResponseSchema,
   agentStatusValues,
   agentUsageBatchRequestSchema,
@@ -1091,5 +1093,64 @@ describe("agent usage upload contracts", () => {
       // unknown_session is the one retryable reason; the client keeps the row unsynced.
       rejected: [{ clientId: ids.client, reason: "unknown_session" }],
     })).not.toThrow();
+  });
+});
+
+describe("agent shifts contracts", () => {
+  const shiftsResponse = {
+    filters: {},
+    totalAgentSeconds: 5_400,
+    people: [
+      { owner: { id: ids.user, name: "Alex" }, agentSeconds: 3_600, shiftCount: 2 },
+      { owner: { id: ids.session, name: "Sam" }, agentSeconds: 1_800, shiftCount: 1 },
+    ],
+    groups: [{
+      repo: "siqshift",
+      agentSeconds: 5_400,
+      shiftCount: 3,
+      heldRate: 0.5,
+      shifts: [{
+        id: ids.session,
+        source: "claude_code",
+        owner: { id: ids.user, name: "Alex" },
+        model: "claude-opus-5",
+        startedAt,
+        endedAt: "2026-08-06T15:00:00.000Z",
+        agentSeconds: 3_600,
+        commitCount: 2,
+      }],
+    }],
+  };
+
+  it("takes the range, the scope and the person the tab is narrowed to, and nothing else", () => {
+    expect(() => agentShiftsFiltersSchema.parse({})).not.toThrow();
+    expect(agentShiftsFiltersSchema.parse({ userId: ids.user }).userId).toBe(ids.user);
+    expect(() => agentShiftsFiltersSchema.parse({
+      fromAt: startedAt,
+      toExclusiveAt: "2026-08-07T00:00:00.000Z",
+      scope: "unassigned",
+      userId: ids.user,
+    })).not.toThrow();
+    // Strict against the live query string: a parameter one side invents is a
+    // 400 rather than a harmlessly ignored key.
+    expect(() => agentShiftsFiltersSchema.parse({ sort: "hours" })).toThrow();
+    expect(() => agentShiftsFiltersSchema.parse({ userId: "alex" })).toThrow();
+  });
+
+  it("carries a board of people beside the codebase groups", () => {
+    expect(() => agentShiftsResponseSchema.parse(shiftsResponse)).not.toThrow();
+    // A range nobody worked still ships the field, so the client parses one shape.
+    expect(() => agentShiftsResponseSchema.parse({ ...shiftsResponse, people: [], groups: [] })).not.toThrow();
+  });
+
+  it("refuses a person row that is not whole seconds, not a count, or carries a field nothing renders", () => {
+    const withPeople = (people: unknown) => () => agentShiftsResponseSchema.parse({ ...shiftsResponse, people });
+
+    expect(withPeople([{ owner: { id: ids.user, name: "Alex" }, agentSeconds: 3_600.5, shiftCount: 2 }])).toThrow();
+    expect(withPeople([{ owner: { id: ids.user, name: "Alex" }, agentSeconds: -1, shiftCount: 2 }])).toThrow();
+    expect(withPeople([{ owner: { id: ids.user, name: "Alex" }, agentSeconds: 3_600 }])).toThrow();
+    // The nested strictness, which is what keeps a speculative field off the wire.
+    expect(withPeople([{ owner: { id: ids.user, name: "Alex" }, agentSeconds: 3_600, shiftCount: 2, rank: 1 }])).toThrow();
+    expect(withPeople([{ owner: { id: ids.user, name: "Alex", email: "a@b.c" }, agentSeconds: 3_600, shiftCount: 2 }])).toThrow();
   });
 });

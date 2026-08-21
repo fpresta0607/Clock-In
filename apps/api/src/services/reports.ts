@@ -94,6 +94,18 @@ function utcStart(date: string): Date {
 
 type ReportRangeFilters = Pick<ReportFilters, "from" | "to" | "fromAt" | "toExclusiveAt">;
 
+/**
+ * A uuid the way PostgreSQL stores and returns one. `idSchema` accepts either
+ * case, and a `uuid` column compares either case, so an id only ever differs
+ * from the rows it selects once a predicate moves out of SQL and into
+ * JavaScript - where `!==` is a plain string compare. Canonicalizing here, at
+ * the single point every `ReportQuery.userId` is built, keeps the two kinds of
+ * consumer agreeing instead of patching whichever one moved.
+ */
+function canonicalId(id: string): string {
+  return id.toLowerCase();
+}
+
 /** Shared range normalization; the agents paystub and pay-run reuse the exact reporting rules. */
 export function normalizedQuery(filters: ReportRangeFilters & Partial<Pick<ReportFilters, "projectId" | "userId">>): ReportQuery {
   const hasInstantBoundary = filters.fromAt !== undefined || filters.toExclusiveAt !== undefined;
@@ -111,7 +123,7 @@ export function normalizedQuery(filters: ReportRangeFilters & Partial<Pick<Repor
       from,
       toExclusive,
       ...(filters.projectId === undefined ? {} : { projectId: filters.projectId }),
-      ...(filters.userId === undefined ? {} : { userId: filters.userId }),
+      ...(filters.userId === undefined ? {} : { userId: canonicalId(filters.userId) }),
     };
   }
   const from = filters.from === undefined ? undefined : utcStart(filters.from);
@@ -126,7 +138,7 @@ export function normalizedQuery(filters: ReportRangeFilters & Partial<Pick<Repor
     ...(from === undefined ? {} : { from }),
     ...(inclusiveTo === undefined ? {} : { toExclusive: new Date(inclusiveTo.getTime() + millisecondsPerDay) }),
     ...(filters.projectId === undefined ? {} : { projectId: filters.projectId }),
-    ...(filters.userId === undefined ? {} : { userId: filters.userId }),
+    ...(filters.userId === undefined ? {} : { userId: canonicalId(filters.userId) }),
   };
 }
 
@@ -808,11 +820,18 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       const query: ReportQuery = { ...normalizedQuery(filters), ...scopeQuery(filters.scope) };
       await authorizeFilters(dependencies.reports, subject, query);
       await dependencies.reaper.reapStale(subject);
+      // Authorize the selection, then read without it. `normalizedQuery`
+      // forwards `userId` into the query and `readAgentIntervals` turns it
+      // into a predicate, so reading with it would narrow the rows `people`
+      // is rolled up from - the board would collapse to the one person who
+      // was picked, leaving no control to clear the selection with. The
+      // filter is applied in memory below instead, after the roll-up.
+      const { userId: selectedUserId, ...boardQuery } = query;
       const [intervals, commits] = await Promise.all([
-        dependencies.reports.readAgentIntervals(subject, query),
+        dependencies.reports.readAgentIntervals(subject, boardQuery),
         dependencies.shiftCommits === undefined
           ? Promise.resolve([] as ShiftCommitRecord[])
-          : dependencies.shiftCommits.listForOrganization(subject, query),
+          : dependencies.shiftCommits.listForOrganization(subject, boardQuery),
       ]);
       const range = queryRange(query);
       const commitsBySession = new Map<string, ShiftCommitRecord[]>();
@@ -828,17 +847,33 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       // paystub's way - its first commit's repo root, else its working
       // directory - and a shift that recorded neither groups under null.
       type ShiftView = AgentShiftsResponse["groups"][number]["shifts"][number];
+      type PersonView = AgentShiftsResponse["people"][number];
       const groups = new Map<string | null, { agentSeconds: number; commits: ShiftCommitRecord[]; shifts: ShiftView[] }>();
+      const people = new Map<string, PersonView>();
       for (const interval of intervals) {
         // Browser spans are attention, not shifts, the roster's own rule.
         if (!rosterEligibleSource(interval.source)) continue;
         const clipped = clipInterval({ start: interval.startedAt.getTime(), end: interval.endedAt.getTime() }, range);
         if (clipped === null) continue;
+        // Rounded once, then spent on the person, the group and the shift, so
+        // the three totals reconcile exactly rather than drifting a second
+        // per shift across the hundreds of rows this tab exists to hold.
+        const shiftSeconds = Math.round((clipped.end - clipped.start) / 1_000);
+        // Every shift has exactly one owner, so the board is a partition of
+        // the same seconds the groups spend: summing it back reaches the
+        // total. This runs before the selection so the board keeps every
+        // person on it whoever is picked.
+        const person = people.get(interval.user.id)
+          ?? { owner: { id: interval.user.id, name: interval.user.name }, agentSeconds: 0, shiftCount: 0 };
+        person.agentSeconds += shiftSeconds;
+        person.shiftCount += 1;
+        people.set(interval.user.id, person);
+        if (selectedUserId !== undefined && interval.user.id !== selectedUserId) continue;
         const shiftCommitList = commitsBySession.get(interval.sessionId) ?? [];
         const root = shiftCommitList[0]?.repoRoot ?? interval.cwd;
         const repo = root === null || root === undefined ? null : repoLabel(root);
         const group = groups.get(repo) ?? { agentSeconds: 0, commits: [], shifts: [] };
-        group.agentSeconds += Math.round((clipped.end - clipped.start) / 1_000);
+        group.agentSeconds += shiftSeconds;
         group.commits.push(...shiftCommitList);
         group.shifts.push({
           id: interval.sessionId,
@@ -847,7 +882,7 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
           model: interval.model,
           startedAt: interval.startedAt.toISOString(),
           endedAt: interval.endedAt.toISOString(),
-          agentSeconds: Math.round((clipped.end - clipped.start) / 1_000),
+          agentSeconds: shiftSeconds,
           commitCount: shiftCommitList.length,
         });
         groups.set(repo, group);
@@ -868,6 +903,10 @@ export function createReportService(dependencies: ReportServiceDependencies): Re
       return {
         filters,
         totalAgentSeconds: groupViews.reduce((sum, group) => sum + group.agentSeconds, 0),
+        // Heaviest first, with the id breaking ties so an equal pair keeps
+        // one order between two reads of the same range.
+        people: [...people.values()]
+          .sort((a, b) => b.agentSeconds - a.agentSeconds || a.owner.id.localeCompare(b.owner.id)),
         groups: groupViews,
       };
     },

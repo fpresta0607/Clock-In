@@ -65,6 +65,11 @@ const rosterAgent = {
 const agentShiftsResponse = {
   filters: {},
   totalAgentSeconds: 7_200,
+  /// Heaviest first, summing back to the total the way the server builds it.
+  people: [
+    { owner: { id: "u2", name: "Alex" }, agentSeconds: 5_400, shiftCount: 2 },
+    { owner: { id: "u3", name: "Sam" }, agentSeconds: 1_800, shiftCount: 1 },
+  ],
   groups: [
     {
       repo: "siqshift",
@@ -838,7 +843,127 @@ describe("the agents tab", () => {
       expect(head).not.toBeNull();
       expect(head!).toHaveClass("meter-row");
       expect(head!.children).toHaveLength(4);
+      // The drawer's own contract, and the reason the count above must stay
+      // four: the head is the `summary` and it is the `details`' first child.
+      // jsdom only treats the first `summary` as the toggle, so a wrapper
+      // would silently disable opening in tests while still working in
+      // Chromium, and a fifth cell would wrap the four-track grid.
+      expect(head!.tagName).toBe("SUMMARY");
+      expect(head!.parentElement!.tagName).toBe("DETAILS");
+      expect(head!.parentElement!.firstElementChild).toBe(head);
     }
+  });
+
+  it("opens on a board of the people whose agents ran, heaviest first", async () => {
+    const person = await signIn(clientFor());
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+    const board = within(await screen.findByTestId("agent-people"));
+
+    const rows = board.getAllByRole("button");
+    expect(rows.map((row) => row.textContent)).toEqual([
+      expect.stringContaining("Alex"),
+      expect.stringContaining("Sam"),
+    ]);
+    // Two measures, and the shift count is the one that says a row can be
+    // several agents at once rather than one worker's long day.
+    expect(rows[0]).toHaveTextContent("1h 30m");
+    expect(rows[0]).toHaveTextContent("2 shifts");
+    expect(rows[1]).toHaveTextContent("1 shift");
+    expect(rows.every((row) => row.getAttribute("aria-pressed") === "false")).toBe(true);
+    // No bar, deliberately: the board is computed before the filter, so a
+    // person's seconds over the filtered total would read past 100%. This
+    // asserts the omission, because adding one back would otherwise pass
+    // every suite silently.
+    expect(rows.every((row) => row.querySelector(".meter-bar") === null)).toBe(true);
+  });
+
+  it("keeps the way out of a filter even when the filtered request fails", async () => {
+    const agentShifts = vi.fn()
+      .mockResolvedValueOnce(agentShiftsResponse)
+      .mockRejectedValue(new Error("nope"));
+    const person = await signIn(clientFor({ agentShifts }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+    await person.click(within(await screen.findByTestId("agent-people")).getByRole("button", { name: /Sam/ }));
+
+    // The failure is reported, but "All people" outlives it: without it a
+    // deterministically failing filter would strand the tab with no control
+    // to clear the filter that is causing the failure.
+    expect(await screen.findByText("Could not load the shifts for this range.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "All people" })).toBeInTheDocument();
+  });
+
+  it("narrows the tab to whoever is picked on the board, and offers a way back", async () => {
+    // Echoes the filter the way the API does, so the heading and the numbers
+    // under it are read from the same response rather than from the click.
+    const agentShifts = vi.fn().mockImplementation((query: string = "") => {
+      const userId = new URLSearchParams(query.replace(/^\?/, "")).get("userId");
+      return Promise.resolve(userId === null ? agentShiftsResponse : {
+        ...agentShiftsResponse,
+        filters: { userId },
+        totalAgentSeconds: 1_800,
+        groups: [agentShiftsResponse.groups[1]!],
+      });
+    });
+    const person = await signIn(clientFor({ agentShifts }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+    await screen.findByTestId("agent-people");
+    const before = agentShifts.mock.calls.length;
+
+    await person.click(within(screen.getByTestId("agent-people")).getByRole("button", { name: /Sam/ }));
+
+    await waitFor(() => expect(agentShifts.mock.calls.length).toBeGreaterThan(before));
+    const query = new URLSearchParams((agentShifts.mock.calls.at(-1)?.[0] as string).replace(/^\?/, ""));
+    expect(query.get("userId")).toBe("u3");
+    // The heading names who the tab is narrowed to, and the board that picked
+    // them is still there to unpick them with.
+    expect(await screen.findByRole("heading", { level: 3, name: /^Sam ·/ })).toBeInTheDocument();
+    expect(within(screen.getByTestId("agent-people")).getAllByRole("button")).toHaveLength(2);
+
+    await person.click(screen.getByRole("button", { name: "All people" }));
+
+    await waitFor(() => {
+      const latest = new URLSearchParams((agentShifts.mock.calls.at(-1)?.[0] as string).replace(/^\?/, ""));
+      expect(latest.has("userId")).toBe(false);
+    });
+    expect(await screen.findByRole("heading", { level: 3, name: /^Agents ·/ })).toBeInTheDocument();
+  });
+
+  it("shows no board when one person's agents did all the work", async () => {
+    const soloResponse = { ...agentShiftsResponse, people: [agentShiftsResponse.people[0]!] };
+    const person = await signIn(clientFor({ agentShifts: vi.fn().mockResolvedValue(soloResponse) }));
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+    await screen.findByTestId("agent-shifts");
+
+    // A board of one ranks nothing and filters nothing.
+    expect(screen.queryByTestId("agent-people")).not.toBeInTheDocument();
+  });
+
+  it("keeps each codebase's shifts in a drawer that starts closed", async () => {
+    const person = await signIn(clientFor());
+    await screen.findByRole("heading", { name: "SIQstack" });
+
+    await person.click(screen.getByRole("button", { name: "Agents" }));
+    const group = within(await screen.findByTestId("agent-shifts")).getAllByTestId("shift-group")[0]!;
+
+    // Never a visibility assertion here: jsdom has no rule hiding a closed
+    // `details`, so the rows are in the document either way. The browser
+    // suite is where the hiding itself is checked.
+    expect(group).not.toHaveAttribute("open");
+    // The head carries the count, so a closed drawer still says how much is
+    // inside it.
+    expect(group).toHaveTextContent("2 shifts");
+
+    await person.click(group.querySelector("summary")!);
+
+    expect(group).toHaveAttribute("open");
   });
 
   it("gives each codebase a Today row: a mark, the name, its share, its duration", async () => {

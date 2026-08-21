@@ -152,5 +152,21 @@ for (const app of ["desktop", "web"] as const) {
       // has a decided commit carries one.
       expect(heads.map((head) => head.name.includes("· 50% held"))).toEqual([true, false]);
     });
+
+    // The whole point of the drawer: a busy range runs to hundreds of shift
+    // rows, and a closed group must actually hide its own. jsdom cannot check
+    // this - it has no rule hiding a closed `details` - so this is the only
+    // place in the repo where the claim is testable at all.
+    test("keeps a closed codebase's shifts hidden and an open one's readable", async ({ page }) => {
+      await page.setViewportSize({ width: 900, height: 700 });
+      await openAgentsGroup(page, app);
+
+      await expect(page.locator(".shift-group:not([open]) .shift-row")).toBeHidden();
+      await expect(page.locator(".shift-group[open] .shift-row")).toBeVisible();
+
+      // Both heads stay measured whatever the drawer is doing, so the scan
+      // line the test above pins is not a property of being open.
+      expect(await rowBoxes(page)).toHaveLength(2);
+    });
   });
 }

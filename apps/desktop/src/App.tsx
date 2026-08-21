@@ -1944,13 +1944,18 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                        codebases scans the way a column of apps does. The held
                        share appears only once a commit is decided: a rate
                        with no decided commits is not a fact, so the head says
-                       nothing instead. */
-                    <div className="shift-group" key={group.repo ?? ""} data-testid="shift-group">
-                      <div className="meter-row shift-group-head">
+                       nothing instead. A drawer, because a busy week runs to
+                       hundreds of shifts in a 520px window; the head stays
+                       exactly four cells, since a disclosure glyph added as a
+                       fifth child of the four-track grid would wrap onto an
+                       implicit second row and double its height. */
+                    <details className="shift-group" key={group.repo ?? ""} data-testid="shift-group">
+                      <summary className="meter-row shift-group-head">
                         <span className="project-dot" aria-hidden="true" />
                         <span className="meter-name">
                           {group.repo ?? "No codebase recorded"}
                           {group.heldRate !== null && <span className="meter-detail held-tag"> · {Math.round(group.heldRate * 100)}% held</span>}
+                          <span className="meter-detail"> · {group.shiftCount} shift{group.shiftCount === 1 ? "" : "s"}</span>
                         </span>
                         <span
                           className="meter-bar"
@@ -1958,7 +1963,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                           style={{ "--share": `${agentShifts.totalAgentSeconds === 0 ? 0 : Math.round((group.agentSeconds / agentShifts.totalAgentSeconds) * 100)}%` } as React.CSSProperties}
                         />
                         <span className="meter-duration">{formatHuman(group.agentSeconds)}</span>
-                      </div>
+                      </summary>
                       <ul className="shift-list">
                         {group.shifts.map((shift) => (
                           <li key={shift.id} className="shift-row">
@@ -1973,7 +1978,7 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
                           </li>
                         ))}
                       </ul>
-                    </div>
+                    </details>
                   ))}
                 </section>
               )}

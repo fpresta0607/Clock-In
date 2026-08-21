@@ -127,13 +127,13 @@ export async function openAgentsGroup(page: Page, app: "desktop" | "web"): Promi
   await page.setContent(`
     ${open}
         <section class="member-stats" data-testid="agent-shifts">
-          <div class="shift-group" data-testid="shift-group">
-            <div class="meter-row shift-group-head">
+          <details class="shift-group" data-testid="shift-group">
+            <summary class="meter-row shift-group-head">
               <span class="project-dot" aria-hidden="true"></span>
-              <span class="meter-name">siqshift<span class="meter-detail held-tag"> · 50% held</span></span>
+              <span class="meter-name">siqshift<span class="meter-detail held-tag"> · 50% held</span><span class="meter-detail"> · 1 shift</span></span>
               <span class="meter-bar" aria-hidden="true" style="--share: 75%"></span>
               <span class="meter-duration">1h 30m</span>
-            </div>
+            </summary>
             <ul class="shift-list">
               <li class="shift-row">
                 <span class="shift-when">15:00</span>
@@ -141,14 +141,14 @@ export async function openAgentsGroup(page: Page, app: "desktop" | "web"): Promi
                 <span class="shift-duration">1h 00m</span>
               </li>
             </ul>
-          </div>
-          <div class="shift-group" data-testid="shift-group">
-            <div class="meter-row shift-group-head">
+          </details>
+          <details class="shift-group" data-testid="shift-group" open>
+            <summary class="meter-row shift-group-head">
               <span class="project-dot" aria-hidden="true"></span>
-              <span class="meter-name">No codebase recorded</span>
+              <span class="meter-name">No codebase recorded<span class="meter-detail"> · 1 shift</span></span>
               <span class="meter-bar" aria-hidden="true" style="--share: 25%"></span>
               <span class="meter-duration">30m</span>
-            </div>
+            </summary>
             <ul class="shift-list">
               <li class="shift-row">
                 <span class="shift-when">09:30</span>
@@ -156,7 +156,7 @@ export async function openAgentsGroup(page: Page, app: "desktop" | "web"): Promi
                 <span class="shift-duration">30m</span>
               </li>
             </ul>
-          </div>
+          </details>
         </section>
     ${close}`);
   await applyStylesheet(page, app, app === "desktop" ? ".modal-overlay" : ".shell");
