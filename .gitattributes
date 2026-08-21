@@ -1,0 +1,7 @@
+# drizzle journals every migration by sha256 of the file's raw bytes, so a
+# checkout whose line endings differ makes an already-applied migration look
+# pending - and `migrate` then re-applies it and fails. With core.autocrlf=true
+# a Windows checkout gets CRLF while CI and Railway get LF, which is how this
+# repo ended up with 8 migrations journaled under CRLF hashes and 9 under LF.
+# Pin SQL so every checkout agrees.
+*.sql text eol=lf
