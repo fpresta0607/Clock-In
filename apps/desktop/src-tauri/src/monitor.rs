@@ -2204,7 +2204,9 @@ mod platform {
     //! thread that turns session lock and suspend broadcasts into signals.
     //! Tests never touch this module; everything above it is pure logic.
 
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
 
     use windows_sys::Win32::Foundation::{CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -2269,12 +2271,52 @@ mod platform {
         }
     }
 
+    /// Longest the media probe may wait on the media broker before it reads
+    /// as "no answer"; well under the 30-second poll interval.
+    const MEDIA_PROBE_TIMEOUT_SECONDS: u64 = 5;
+
     /// Rescue probe: is any app playing media right now, per the system's
     /// media transport controls. `None` when the OS will not say (no session
-    /// manager, a WinRT error), which never rescues. Runs at most once per
-    /// poll and only past the idle threshold, so the blocking WinRT call
-    /// never touches an active-work tick.
+    /// manager, a WinRT error, or a broker that does not answer in time),
+    /// which never rescues. Runs at most once per poll and only past the
+    /// idle threshold, so it never touches an active-work tick; it still
+    /// shares the single capture poll task, so the blocking WinRT call waits
+    /// on a worker thread with a bounded timeout rather than on the poll
+    /// itself.
     fn media_playing() -> Option<bool> {
+        if MEDIA_PROBE_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+            return None;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _slot = MediaProbeSlot;
+            let _ = tx.send(media_playing_inner());
+        });
+        rx.recv_timeout(Duration::from_secs(MEDIA_PROBE_TIMEOUT_SECONDS))
+            .ok()
+            .flatten()
+    }
+
+    /// Set while a media probe thread is alive. A broker that never answers
+    /// would otherwise leave one abandoned thread behind per poll; the next
+    /// poll reads `None` (no rescue) instead of stacking another.
+    static MEDIA_PROBE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+    /// Clears `MEDIA_PROBE_IN_FLIGHT` when the probe thread ends, panic
+    /// included, so one bad read cannot disable the probe for good.
+    struct MediaProbeSlot;
+
+    impl Drop for MediaProbeSlot {
+        fn drop(&mut self) {
+            MEDIA_PROBE_IN_FLIGHT.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// The WinRT half of `media_playing`, run on its own thread so a hung
+    /// media broker cannot stall the poll task. One broken session (it can
+    /// die between `GetSessions` and here) skips that session alone; the
+    /// probe still answers from the sessions that read fine.
+    fn media_playing_inner() -> Option<bool> {
         use windows::Media::Control::{
             GlobalSystemMediaTransportControlsSessionManager as SessionManager,
             GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
@@ -2290,10 +2332,12 @@ mod platform {
         let manager = SessionManager::RequestAsync().ok()?.get().ok()?;
         let sessions = manager.GetSessions().ok()?;
         for session in &sessions {
-            let status = session
+            let Ok(status) = session
                 .GetPlaybackInfo()
                 .and_then(|info| info.PlaybackStatus())
-                .ok()?;
+            else {
+                continue;
+            };
             if status == PlaybackStatus::Playing {
                 return Some(true);
             }
