@@ -521,7 +521,8 @@ SIQshift on one coherent grid. Those are deliberately *not* imitations of anyone
 runtime inside its own UI, and need no licence from anyone.
 
 Because `session-end` is never guaranteed (a crash, a `kill -9`), the server reaps agent
-sessions with no event for 6 hours and closes them at their last-seen timestamp. An `end` that
+sessions with no event for 30 minutes and closes them at their last-seen timestamp - a working
+agent heartbeats on every tool call, so half an hour of silence means it is gone. An `end` that
 arrives before its `start` is tolerated by upsert, not rejected.
 
 ### Wiring up your own orchestrator

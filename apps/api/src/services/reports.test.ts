@@ -585,6 +585,34 @@ describe("leaderboard", () => {
     expect(result.medianSessionSeconds).toBe(5_400);
   });
 
+  // The audit's regression: a browser span held open across a person's
+  // presence reclassified every one of those hours as agent-assisted. A tab
+  // is attention, not an agent, so the split must read exactly as if the span
+  // were not there.
+  it("keeps browser spans out of the concurrency split, the roster's own rule", async () => {
+    const hour = (h: number): Date => new Date(Date.UTC(2026, 7, 5, h));
+    const reports = new Reports();
+    reports.leaderboardRows = [entry(ids.user, "Alex", 7_200, 1, 7_200)];
+    reports.presenceIntervals = [
+      { user: { id: ids.user, name: "Alex" }, startedAt: hour(9), endedAt: hour(11) },
+    ];
+    reports.sessionIntervals = [
+      { user: { id: ids.user, name: "Alex" }, projectId: ids.project, attribution: "selected", startedAt: hour(9), stoppedAt: hour(11) },
+    ];
+    reports.agentIntervals = [
+      { sessionId: "s1", user: { id: ids.user, name: "Alex" }, source: "browser", model: null, cwd: null, projectId: ids.project, agentId: null, startedAt: hour(9), endedAt: hour(11) },
+    ];
+    const service = createReportService({ reports, reaper: silentReaper, agents });
+
+    const result = await service.leaderboard(subject, {});
+
+    const [alex] = result.entries;
+    expect(alex?.activeSeconds).toBe(7_200);
+    expect(alex?.agentSeconds).toBe(0);
+    expect(alex?.concurrency).toEqual({ t0Seconds: 7_200, t1Seconds: 0, t2Seconds: 0, t3PlusSeconds: 0, awaySeconds: 0 });
+    expect(alex?.byAgent).toEqual([]);
+  });
+
   it("shares a rank between members with identical totals", async () => {
     const reports = new Reports();
     reports.leaderboardRows = [

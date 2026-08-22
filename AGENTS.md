@@ -83,7 +83,9 @@ A working directory named after a run rather than a codebase - a per-run worktre
 Both partial uniques exclude retired rows, and `upsertForKey`'s ON CONFLICT `targetWhere` must restate each index's predicate exactly - postgres matches an arbiter to a partial index by that predicate, and a mismatch passes every mocked repository and then fails every insert.
 A model is an attribute of a shift, never an identity: `agent_sessions.model` says what the runtime
 was driving, and neither it nor `source` is ever derived from the other. Browser spans are attention
-rather than payroll, so `rosterEligibleSource` keeps them off the roster. Commits made during a
+rather than payroll, so `rosterEligibleSource` keeps them off the roster, and `collectMembers`
+applies the same predicate to the member measurement, so a tab held open never reclassifies a
+person's presence as agent-assisted in the concurrency split. Commits made during a
 shift are captured at its end and verified later on the same machine
 (`pending -> merged|reverted|orphaned`, terminal, never regressing).
 

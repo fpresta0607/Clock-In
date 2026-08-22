@@ -408,7 +408,7 @@ describe("agent-session routes", () => {
     expect(agentSessions.records[1]).toMatchObject({ organizationId: ids.otherOrganization, status: "ended" });
   });
 
-  it("reaps sessions stale beyond six hours when a batch arrives", async () => {
+  it("reaps sessions stale beyond thirty minutes when a batch arrives", async () => {
     const headers = { authorization: bearerHeader, "content-type": "application/json" };
     const agentSessions = new MemoryAgentSessions();
     const app = createTestApp(agentSessions);

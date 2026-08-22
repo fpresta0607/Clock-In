@@ -10,7 +10,17 @@ import type {
 import { identityRepoKey, resolveProjectForCwd, resolveProjectForRule, type PathMappingCandidate } from "./attribution.js";
 
 const futureEventToleranceMs = 30_000;
-const defaultStaleThresholdMs = 6 * 60 * 60 * 1_000;
+/**
+ * No event for this long ends a running shift at its last event. The hook
+ * spools SessionStart, SessionEnd, and a PostToolUse heartbeat - a working
+ * agent heartbeats on every tool call, seconds to minutes apart, so half an
+ * hour of silence means the agent stopped, crashed, or the machine slept.
+ * The six hours this replaced let abandoned sessions hold whole evenings open
+ * and reclassify a person's own active time as agent-assisted. The desktop
+ * monitor's agent-active window (`AGENT_ACTIVE_WINDOW_SECONDS` in
+ * monitor.rs) is this constant's Rust-side pairing; tighten them together.
+ */
+const defaultStaleThresholdMs = 30 * 60 * 1_000;
 
 /**
  * Whether a source mints a roster identity. Browser spans are excluded by
