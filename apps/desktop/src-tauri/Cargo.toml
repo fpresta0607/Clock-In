@@ -56,7 +56,9 @@ tauri-plugin-single-instance = "2"
 
 # The activity monitor's read-only Win32 calls: GetLastInputInfo,
 # GetForegroundWindow process names, and session lock/suspend events. The
-# Gdi/Shell/Com/FileSystem features exist for `app_icons` icon extraction.
+# Gdi/Shell/Com/FileSystem features exist for `app_icons` icon extraction;
+# Shell also covers SHQueryUserNotificationState and Registry the
+# ConsentStore microphone read, two of the false-idle rescue probes.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
@@ -73,6 +75,13 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+] }
+# The media-playing rescue probe is WinRT (GlobalSystemMediaTransportControls),
+# which windows-sys does not carry; already in the tree through Tauri.
+windows = { version = "0.61", features = [
+    "Foundation",
+    "Media_Control",
+    "Win32_System_Com",
 ] }
 # `app_icons` PNG-encodes extracted icons into data URIs; both crates already
 # sit in the dependency tree (tauri's tray-icon links `png`, reqwest `base64`).

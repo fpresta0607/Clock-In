@@ -134,7 +134,7 @@ The manual checklist adds: register in Chrome and Edge, answer a suggestion, ver
 - **Signing logistics**: an OV/EV certificate and Apple Developer enrollment have lead time and identity-verification steps; they gate distribution to non-engineers, so they start before implementation does.
 - **Multi-profile browsers**: registration is per-user but extension install is per-profile; an unregistered profile is invisible, and the health badge cannot see profiles. Accepted; the monitor still records the browser as active.
 - **Path-bearing SPAs** that rewrite URLs without navigation events are covered by `tabs.onUpdated`, but sites that keep state out of the URL entirely (some editors) can only be matched at origin granularity.
-- **Watching a mapped site's video** with hands off the keyboard is attributed browser time on an idle machine: attributed but excluded from session duration, and correctly so. The false-idle rescue signals (mic-in-use, presentation mode, media session) remain a later phase, as does input-density sampling.
+- **Watching a mapped site's video** with hands off the keyboard is attributed browser time on an idle machine: attributed but excluded from session duration, and correctly so. The false-idle rescue signals (mic-in-use, presentation mode, media session) shipped after this was written - the Windows poll now rescues an idle read when media is playing, the user is presenting or busy, or a microphone is live - while input-density sampling remains a later phase.
 - **Rule quality is user labor**: attribution is only as good as the rules, same as path mappings. The needs-mapping tally is the mitigation.
 
 ## Deliberate limitations
