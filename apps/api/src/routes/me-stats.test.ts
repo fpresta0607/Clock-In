@@ -623,7 +623,7 @@ describe("me/stats routes", () => {
     expect(response.status).toBe(200);
     expect(agentSessions.reapCalls).toEqual([{
       subject: { organizationId: ids.organization, userId: ids.user, role: "member" },
-      cutoff: new Date(clockNow.getTime() - 6 * 60 * 60 * 1_000),
+      cutoff: new Date(clockNow.getTime() - 30 * 60 * 1_000),
       now: clockNow,
     }]);
   });

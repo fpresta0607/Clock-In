@@ -2,11 +2,14 @@
 //! away/auto-stop policy the stop flow and the UI both consume.
 //!
 //! Lightweight by construction: one Tokio task wakes every 30 seconds and asks
-//! the OS two read-only questions (`GetLastInputInfo`, the foreground process
-//! name — the name only, never a window title). Lock and suspend arrive as
-//! broadcasts on a hidden window owned by a dedicated thread, so between
-//! events the monitor costs nothing. There are no hooks, no injection, and no
-//! per-keystroke cost.
+//! the OS read-only questions (`GetLastInputInfo`, the foreground process
+//! name - the name only, never a window title). When the input answer says
+//! idle, three more read-only checks can still rescue the tick as hands-off
+//! work (media playing, presentation or busy state, microphone in use), each
+//! fail-closed: a check that cannot answer never rescues. Lock and suspend
+//! arrive as broadcasts on a hidden window owned by a dedicated thread, so
+//! between events the monitor costs nothing. There are no hooks, no injection,
+//! and no per-keystroke cost.
 //!
 //! The signal stream folds into transition-based segments (`active`, `idle`,
 //! `locked`, `suspended`), so a workday produces dozens of rows, not ticks.
@@ -51,8 +54,9 @@ pub const POLL_INTERVAL_SECONDS: u64 = 30;
 const IDLE_THRESHOLD_SECONDS: u32 = POLL_INTERVAL_SECONDS as u32;
 
 /// How long an open agent session without a fresh event still counts as
-/// active for the away override. Matches the server's staleness window.
-pub const AGENT_ACTIVE_WINDOW_SECONDS: u64 = 6 * 3_600;
+/// active for the away override. Matches the server's staleness window
+/// (`defaultStaleThresholdMs` in `agent-sessions.ts`); tighten them together.
+pub const AGENT_ACTIVE_WINDOW_SECONDS: u64 = 30 * 60;
 
 /// How stale the last poll may be before the monitor stops claiming it is
 /// watching this machine. Three intervals, so one late tick is not an alarm.
@@ -142,6 +146,21 @@ fn signal_process_name(signal: &ActivitySignal) -> Option<String> {
         ActivitySignal::Active { process_name } => process_name.clone(),
         _ => None,
     }
+}
+
+/// Whether any probe reports the person still engaged despite the idle read.
+/// A probe is one hands-off-work signal (media playing, presenting or on a
+/// call, microphone live); only `Some(true)` rescues - `Some(false)` says the
+/// signal is definitely absent and `None` says the probe could not answer
+/// (API missing, access denied, an error), and both fail toward idle, the
+/// behavior the monitor had before rescue existed. Probes run in order and
+/// the first engaged answer wins, so a positive media check skips the
+/// registry read entirely.
+// Only the Windows poll source consults this; non-Windows builds keep it for
+// tests and documentation.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn rescued(probes: &[&dyn Fn() -> Option<bool>]) -> bool {
+    probes.iter().any(|probe| probe() == Some(true))
 }
 
 /// Whether the open span keeps running for this signal, given the signal does
@@ -2185,10 +2204,16 @@ mod platform {
     //! thread that turns session lock and suspend broadcasts into signals.
     //! Tests never touch this module; everything above it is pure logic.
 
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
 
     use windows_sys::Win32::Foundation::{CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER,
+        KEY_READ, REG_QWORD,
+    };
     use windows_sys::Win32::System::RemoteDesktop::{
         WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
     };
@@ -2197,6 +2222,10 @@ mod platform {
         OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    use windows_sys::Win32::UI::Shell::{
+        SHQueryUserNotificationState, QUERY_USER_NOTIFICATION_STATE, QUNS_BUSY,
+        QUNS_PRESENTATION_MODE,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DispatchMessageW, GetForegroundWindow, GetMessageW,
         GetWindowLongPtrW, GetWindowThreadProcessId, RegisterClassW, SetWindowLongPtrW,
@@ -2204,7 +2233,9 @@ mod platform {
         WM_WTSSESSION_CHANGE, WNDCLASSW, WS_POPUP, WTS_SESSION_LOCK,
     };
 
-    use super::{unix_now, ActivitySignal, ActivitySource, PlatformEvents, IDLE_THRESHOLD_SECONDS};
+    use super::{
+        rescued, unix_now, ActivitySignal, ActivitySource, PlatformEvents, IDLE_THRESHOLD_SECONDS,
+    };
 
     pub struct Poller;
 
@@ -2218,13 +2249,213 @@ mod platform {
         fn poll(&self) -> ActivitySignal {
             match idle_seconds() {
                 Some(idle_seconds) if idle_seconds >= IDLE_THRESHOLD_SECONDS => {
-                    ActivitySignal::Idle { idle_seconds }
+                    // Hands off is not always away: media playing, a
+                    // presentation or call, or a live microphone all mean the
+                    // person is still engaged. The probes run only here, once
+                    // per poll and only when the input answer says idle; a
+                    // probe that fails never rescues.
+                    if rescued(&[&media_playing, &user_busy_or_presenting, &microphone_in_use]) {
+                        ActivitySignal::Active {
+                            process_name: foreground_process_name(),
+                        }
+                    } else {
+                        ActivitySignal::Idle { idle_seconds }
+                    }
                 }
                 // A failed read fails toward "active": a guessed idle span
                 // would trim time that was actually worked.
                 _ => ActivitySignal::Active {
                     process_name: foreground_process_name(),
                 },
+            }
+        }
+    }
+
+    /// Longest the media probe may wait on the media broker before it reads
+    /// as "no answer"; well under the 30-second poll interval.
+    const MEDIA_PROBE_TIMEOUT_SECONDS: u64 = 5;
+
+    /// Rescue probe: is any app playing media right now, per the system's
+    /// media transport controls. `None` when the OS will not say (no session
+    /// manager, a WinRT error, or a broker that does not answer in time),
+    /// which never rescues. Runs at most once per poll and only past the
+    /// idle threshold, so it never touches an active-work tick; it still
+    /// shares the single capture poll task, so the blocking WinRT call waits
+    /// on a worker thread with a bounded timeout rather than on the poll
+    /// itself.
+    fn media_playing() -> Option<bool> {
+        if MEDIA_PROBE_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+            return None;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _slot = MediaProbeSlot;
+            let _ = tx.send(media_playing_inner());
+        });
+        rx.recv_timeout(Duration::from_secs(MEDIA_PROBE_TIMEOUT_SECONDS))
+            .ok()
+            .flatten()
+    }
+
+    /// Set while a media probe thread is alive. A broker that never answers
+    /// would otherwise leave one abandoned thread behind per poll; the next
+    /// poll reads `None` (no rescue) instead of stacking another.
+    static MEDIA_PROBE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+    /// Clears `MEDIA_PROBE_IN_FLIGHT` when the probe thread ends, panic
+    /// included, so one bad read cannot disable the probe for good.
+    struct MediaProbeSlot;
+
+    impl Drop for MediaProbeSlot {
+        fn drop(&mut self) {
+            MEDIA_PROBE_IN_FLIGHT.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// The WinRT half of `media_playing`, run on its own thread so a hung
+    /// media broker cannot stall the poll task. One broken session (it can
+    /// die between `GetSessions` and here) skips that session alone; the
+    /// probe still answers from the sessions that read fine.
+    fn media_playing_inner() -> Option<bool> {
+        use windows::Media::Control::{
+            GlobalSystemMediaTransportControlsSessionManager as SessionManager,
+            GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
+        };
+        // WinRT activation needs a COM apartment; on an already-initialized
+        // thread this is a cheap no-op (or a benign changed-mode error).
+        let _ = unsafe {
+            windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_MULTITHREADED,
+            )
+        };
+        let manager = SessionManager::RequestAsync().ok()?.get().ok()?;
+        let sessions = manager.GetSessions().ok()?;
+        for session in &sessions {
+            let Ok(status) = session
+                .GetPlaybackInfo()
+                .and_then(|info| info.PlaybackStatus())
+            else {
+                continue;
+            };
+            if status == PlaybackStatus::Playing {
+                return Some(true);
+            }
+        }
+        Some(false)
+    }
+
+    /// Rescue probe: is the user presenting or in do-not-disturb, per
+    /// `SHQueryUserNotificationState`. Presentation mode and busy cover
+    /// slideshows and most call apps. `None` when the query itself fails,
+    /// which never rescues.
+    fn user_busy_or_presenting() -> Option<bool> {
+        unsafe {
+            let mut state: QUERY_USER_NOTIFICATION_STATE = 0;
+            if SHQueryUserNotificationState(&mut state) != 0 {
+                return None;
+            }
+            Some(matches!(state, QUNS_BUSY | QUNS_PRESENTATION_MODE))
+        }
+    }
+
+    /// Rescue probe: is a microphone capturing right now, per the ConsentStore
+    /// registry (`LastUsedTimeStop` stays 0 while capture is live). `None`
+    /// when the key cannot be opened, which never rescues.
+    fn microphone_in_use() -> Option<bool> {
+        let path: Vec<u16> = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone\0"
+            .encode_utf16()
+            .collect();
+        unsafe {
+            let mut root: HKEY = std::ptr::null_mut();
+            if RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_READ, &mut root) != 0 {
+                return None;
+            }
+            // The capability key itself tracks the most recent access, and
+            // each subkey one app; unpackaged apps nest one level deeper
+            // under `NonPackaged`.
+            let active = capture_active(root)
+                || any_child_capturing(root)
+                || child_capture_below(root, "NonPackaged");
+            RegCloseKey(root);
+            Some(active)
+        }
+    }
+
+    /// Whether this ConsentStore key reports capture in progress: its
+    /// `LastUsedTimeStop` exists, is a QWORD, and is 0.
+    fn capture_active(key: HKEY) -> bool {
+        let name: Vec<u16> = "LastUsedTimeStop\0".encode_utf16().collect();
+        let mut value: u64 = 0;
+        let mut value_type = 0u32;
+        let mut value_len = std::mem::size_of::<u64>() as u32;
+        unsafe {
+            RegQueryValueExW(
+                key,
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut value_type,
+                &mut value as *mut u64 as *mut u8,
+                &mut value_len,
+            ) == 0
+                && value_type == REG_QWORD
+                && value_len == std::mem::size_of::<u64>() as u32
+                && value == 0
+        }
+    }
+
+    /// Whether any immediate subkey of `key` reports capture in progress.
+    fn any_child_capturing(key: HKEY) -> bool {
+        each_child(key, capture_active)
+    }
+
+    /// Whether any subkey one level below the named child reports capture in
+    /// progress (the `NonPackaged` layout: one subkey per unpackaged exe).
+    fn child_capture_below(key: HKEY, child: &str) -> bool {
+        let name: Vec<u16> = child.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+            let mut nested: HKEY = std::ptr::null_mut();
+            if RegOpenKeyExW(key, name.as_ptr(), 0, KEY_READ, &mut nested) != 0 {
+                return false;
+            }
+            let active = any_child_capturing(nested);
+            RegCloseKey(nested);
+            active
+        }
+    }
+
+    /// Runs `check` over each immediate subkey of `key`, stopping at the
+    /// first true. Enumeration or open failures skip that subkey rather than
+    /// fail the probe: a partial answer is still fail-closed toward idle.
+    fn each_child(key: HKEY, check: fn(HKEY) -> bool) -> bool {
+        let mut index = 0u32;
+        loop {
+            let mut name = [0u16; 256];
+            let mut name_len = name.len() as u32;
+            let status = unsafe {
+                RegEnumKeyExW(
+                    key,
+                    index,
+                    name.as_mut_ptr(),
+                    &mut name_len,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            if status != 0 {
+                return false;
+            }
+            index += 1;
+            let mut child: HKEY = std::ptr::null_mut();
+            let opened = unsafe { RegOpenKeyExW(key, name.as_ptr(), 0, KEY_READ, &mut child) } == 0;
+            if opened {
+                let active = check(child);
+                unsafe { RegCloseKey(child) };
+                if active {
+                    return true;
+                }
             }
         }
     }
@@ -2400,6 +2631,38 @@ mod tests {
         ActivitySignal::Idle {
             idle_seconds: seconds,
         }
+    }
+
+    /// The rescue decision: only a definite "engaged" answer rescues, and
+    /// probes run in order.
+    #[test]
+    fn an_engaged_probe_rescues_the_idle_read() {
+        assert!(rescued(&[&|| Some(false), &|| Some(true)]));
+        assert!(rescued(&[&|| Some(true)]));
+    }
+
+    #[test]
+    fn an_engaged_probe_short_circuits_the_rest() {
+        let called = std::cell::Cell::new(false);
+        let later = || {
+            called.set(true);
+            Some(true)
+        };
+        assert!(rescued(&[&|| Some(true), &later]));
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn a_probe_that_cannot_answer_never_rescues() {
+        // A failed signal fails toward idle, the pre-rescue behavior.
+        assert!(!rescued(&[&|| None]));
+        assert!(!rescued(&[&|| None, &|| Some(false)]));
+        assert!(!rescued(&[]));
+    }
+
+    #[test]
+    fn a_failed_probe_does_not_mask_a_working_one() {
+        assert!(rescued(&[&|| None, &|| Some(true)]));
     }
 
     fn segment(kind: SegmentKind, start: u64, end: u64) -> Segment {

@@ -107,6 +107,10 @@ first active span, and closes when:
 - the attributed project changes, or
 - the app quits.
 
+Quiet means disengaged, not just hands off: an idle input read is still rescued
+as active while media is playing, the user is presenting or busy, or a
+microphone is live (see *The OS monitor, in detail*).
+
 It always closes at the **last active moment**, never at "now", so an unattended
 tail is never recorded. Quiet gaps shorter than the limit stay inside the session
 and are reported as trimmed idle, which the server subtracts from the duration:
@@ -282,6 +286,15 @@ foreground window (`GetForegroundWindow` then `QueryFullProcessImageNameW`). The
 window (`WM_WTSSESSION_CHANGE`/`WTS_SESSION_LOCK`,
 `WM_POWERBROADCAST`/`PBT_APMSUSPEND`); unlock and resume raise no event, because
 the next poll closes the span down the same code path.
+
+Hands off is not always away. When the input answer says idle, three more
+read-only checks can still rescue the tick as hands-off work: media playing
+(`GlobalSystemMediaTransportControlsSessionManager`), presentation or
+do-not-disturb busy state (`SHQueryUserNotificationState`), and a live
+microphone (the ConsentStore registry's `LastUsedTimeStop`). Each fails closed:
+a check that cannot answer never rescues, so a broken signal reads idle exactly
+as before, and the checks run only past the idle threshold, never on an
+active-work tick.
 
 There are no input hooks, no injection, and no per-keystroke cost. Everything
 above the `platform` module is pure logic over an injected clock, so the Win32
@@ -521,7 +534,8 @@ SIQshift on one coherent grid. Those are deliberately *not* imitations of anyone
 runtime inside its own UI, and need no licence from anyone.
 
 Because `session-end` is never guaranteed (a crash, a `kill -9`), the server reaps agent
-sessions with no event for 6 hours and closes them at their last-seen timestamp. An `end` that
+sessions with no event for 30 minutes and closes them at their last-seen timestamp - a working
+agent heartbeats on every tool call, so half an hour of silence means it is gone. An `end` that
 arrives before its `start` is tolerated by upsert, not rejected.
 
 ### Wiring up your own orchestrator

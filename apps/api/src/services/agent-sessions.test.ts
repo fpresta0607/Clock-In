@@ -375,7 +375,7 @@ describe("agent-session service", () => {
     expect(agentSessions.records[0]).toMatchObject({ model: "claude-opus-4-8" });
   });
 
-  it("reaps running sessions stale beyond six hours at their lastEventAt before a batch", async () => {
+  it("reaps running sessions stale beyond thirty minutes at their lastEventAt before a batch", async () => {
     const { agentSessions, service } = createService();
     await service.ingest(subject, [event({ occurredAt: new Date("2026-08-06T07:00:00.000Z") })]);
 

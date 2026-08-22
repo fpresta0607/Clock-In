@@ -1168,6 +1168,14 @@ export const App = ({ client }: AppProps) => {
             ) : (
               <>
                 <MemberBreakdown stats={memberStats} self={viewingSelf} />
+                {/* Recorded sessions run past active time when agents keep
+                    working unattended; say so where the two totals meet. */}
+                {memberStats.totalDurationSeconds > memberStats.activeSeconds && (
+                  <p className="member-foot">
+                    Sessions recorded {formatHumanDuration(memberStats.totalDurationSeconds)} in all - time agents
+                    kept working unattended sits inside that, never inside the active hours above.
+                  </p>
+                )}
                 <HourlyGraph
                   buckets={memberStats.hourly ?? []}
                   personLabel={viewingSelf ? "You" : (member?.name ?? "Person")}

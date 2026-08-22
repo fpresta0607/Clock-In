@@ -296,7 +296,8 @@ export const RecordingPanel = ({
           </li>
           <li>
             <strong>A stretch of work ends when you stop.</strong> Go quiet for a while, lock the screen, or shut
-            the computer down, and that stretch is closed at the moment you stopped. Quiet time is never counted.
+            the computer down, and that stretch is closed at the moment you stopped. Quiet time is never counted -
+            but hands-off work is: a video playing, a call, or a presentation keeps the stretch open.
           </li>
           <li>
             <strong>Your hours are filed under a project.</strong> If an AI tool is working in a folder you have

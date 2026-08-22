@@ -2037,7 +2037,14 @@ export const App = ({ bridge = defaultBridge }: AppProps) => {
               !boardError && <p className="subtle">Loading…</p>
             ) : (
               <>
-                <p className="today-total"><strong>{formatHuman(boardTotalSeconds)}</strong> recorded</p>
+                {/* Recorded is whole sessions, so unattended agent stretches sit
+                    inside it; the active-time split below is the person's own. */}
+                <p className="today-total">
+                  <strong>{formatHuman(boardTotalSeconds)}</strong> recorded
+                  {boardMeasurement !== undefined && boardTotalSeconds > boardMeasurement.activeSeconds && (
+                    <span className="metric-hint"> · unattended agent time included</span>
+                  )}
+                </p>
                 {boardMeasurement !== undefined && (
                   <>
                     <MemberBreakdown stats={boardMeasurement} self={viewingSelf} />

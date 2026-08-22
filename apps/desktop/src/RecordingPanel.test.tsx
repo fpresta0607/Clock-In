@@ -240,7 +240,7 @@ describe("RecordingPanel", () => {
     const steps = within(panel).getByRole("heading", { name: "How SIQshift works" }).nextElementSibling;
     expect(steps).toHaveTextContent("You do nothing.");
     expect(steps).toHaveTextContent("no button to press and no timer to forget");
-    expect(steps).toHaveTextContent("Quiet time is never counted.");
+    expect(steps).toHaveTextContent("Quiet time is never counted - but hands-off work is");
     expect(steps).toHaveTextContent("You see what your team sees.");
   });
 

@@ -179,6 +179,10 @@ function collectMembers(
   for (const row of presence) memberFor(row.user).presence.push(asInterval(row.startedAt, row.endedAt));
   for (const row of sessions) memberFor(row.user).sessions.push(asInterval(row.startedAt, row.stoppedAt));
   for (const row of agents) {
+    // Browser spans are attention, not agent runtime - the roster's own rule.
+    // One left in here would reclassify the person's own presence as
+    // agent-assisted in the concurrency split.
+    if (!rosterEligibleSource(row.source)) continue;
     memberFor(row.user).agents.push({ source: row.source, model: row.model, interval: asInterval(row.startedAt, row.endedAt) });
   }
   return members;
