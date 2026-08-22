@@ -213,26 +213,16 @@ fn append_span_event(event: Option<&serde_json::Value>, paths: &HostPaths) -> Re
 /// The unmatched-origin tally is pass-through: the extension keeps the
 /// authoritative tally in its own storage and sends snapshots, the desktop
 /// reads this file on demand, and nobody uploads it. A snapshot replaces the
-/// file rather than merging — the extension's copy wins.
+/// file rather than merging — the extension's copy wins. The shared
+/// temp-and-rename writer keeps concurrent host processes from interleaving
+/// a fixed temp name.
 fn store_tally(entries: Option<&serde_json::Value>, paths: &HostPaths) -> io::Result<()> {
     let Some(entries) = entries.filter(|value| value.is_array()) else {
         return Ok(());
     };
-    if let Some(parent) = paths.tally.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "entries": entries }))
         .map_err(io::Error::other)?;
-    // A temp file plus rename, so the desktop never reads a half-written tally.
-    let tmp = paths.tally.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
-    // Windows cannot rename over an existing file.
-    match std::fs::remove_file(&paths.tally) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    std::fs::rename(&tmp, &paths.tally)
+    browser::write_if_changed(&paths.tally, &bytes)
 }
 
 #[cfg(test)]

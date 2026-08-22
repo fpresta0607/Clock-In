@@ -46,11 +46,14 @@ jobs:
         shell: bash
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           {
-            echo "windows=$([ -n "$WINDOWS_CERTIFICATE" ] && echo true || echo false)"
+            # Signing-capable with either the .pfx pair or a certificate
+            # already in the runner's store (thumbprint flow).
+            echo "windows=$([ -n "$WINDOWS_CERTIFICATE$WINDOWS_CERTIFICATE_THUMBPRINT" ] && echo true || echo false)"
             echo "macos=$([ -n "$APPLE_CERTIFICATE" ] && echo true || echo false)"
             echo "updater=$([ -n "$TAURI_SIGNING_PRIVATE_KEY" ] && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
@@ -62,10 +65,14 @@ jobs:
       # so the signed binaries are what end up in the installer. The build is
       # unconditional: both helpers ship inside the installer as externalBin
       # siblings of the app, signed or not.
+      # TAURI_CONFIG neutralizes bundle.externalBin for this step only:
+      # tauri-build would otherwise try to copy binaries/<name>-<triple>,
+      # which does not exist until the staging steps below run.
       - name: Build helper binaries
         env:
           CLOCK_IN_AUTH_URL: ${{ vars.CLOCK_IN_AUTH_URL }}
           CLOCK_IN_API_URL: ${{ vars.CLOCK_IN_API_URL }}
+          TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
         run: cargo build --release --manifest-path apps/desktop/src-tauri/Cargo.toml
 
       - name: Sign helper binaries (Authenticode)
@@ -74,21 +81,29 @@ jobs:
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
           WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $pfx = Join-Path $env:RUNNER_TEMP 'clock-in-codesign.pfx'
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
             Sort-Object { $_.VersionInfo.ProductVersion } -Descending |
             Select-Object -First 1 -ExpandProperty FullName
           $ts = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
+          $certArgs = @()
+          if ($env:WINDOWS_CERTIFICATE) {
+            $pfx = Join-Path $env:RUNNER_TEMP 'clock-in-codesign.pfx'
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $certArgs = @('/f', $pfx, '/p', $env:WINDOWS_CERTIFICATE_PASSWORD)
+          } else {
+            # Thumbprint flow: the certificate is already in the runner's store.
+            $certArgs = @('/sha1', $env:WINDOWS_CERTIFICATE_THUMBPRINT)
+          }
           foreach ($bin in 'clock-in-hook.exe', 'clock-in-browser-host.exe') {
             $path = Join-Path 'apps/desktop/src-tauri/target/release' $bin
-            & $signtool sign /fd sha256 /td sha256 /tr $ts /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD $path
+            & $signtool sign /fd sha256 /td sha256 /tr $ts @certArgs $path
             if ($LASTEXITCODE -ne 0) { throw "signtool failed for $bin" }
           }
-          Remove-Item $pfx -Force
+          if ($pfx) { Remove-Item $pfx -Force }
 
       # externalBin resolves `binaries/<name>-<target-triple>`; stage the
       # (signed, on Windows) helpers under those names for the bundler.
@@ -118,6 +133,10 @@ jobs:
           CLOCK_IN_AUTH_URL: ${{ vars.CLOCK_IN_AUTH_URL }}
           CLOCK_IN_API_URL: ${{ vars.CLOCK_IN_API_URL }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # createUpdaterArtifacts requires the signing key, and tauri build
+          # FAILS without it, so enable updater artifacts only when the key
+          # exists; the unsigned fallback keeps producing plain installers.
+          TAURI_CONFIG: ${{ steps.signing.outputs.updater == 'true' && '{"bundle":{"createUpdaterArtifacts":true}}' || '{}' }}
           # Windows Authenticode. Empty values mean an unsigned build.
           # The .pfx pair or, for a certificate already in the runner's store
           # (Azure Key Vault / SafeNet flow), the thumbprint alone.
@@ -133,9 +152,9 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Updater signing. When set, tauri-action also publishes the .sig
-          # files and latest.json beside the installers, which the in-app
-          # updater verifies against.
+          # Updater signing. Together with the createUpdaterArtifacts override
+          # above, tauri-action publishes the .sig files and latest.json
+          # beside the installers, which the in-app updater verifies against.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
@@ -144,7 +163,9 @@ jobs:
           releaseName: Clock-In ${{ github.ref_name }}
           # Published (not draft) so the web app's download links work immediately.
           releaseDraft: false
-          prerelease: false
+          # A hyphen in the tag (v0.2.0-rc.1) marks a prerelease, so the
+          # updater's latest-release endpoint never ships an RC to installs.
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
       # Ship the helper binaries beside the installers as well, for anyone
       # who needs them outside the installer (managed fleets, debugging).
@@ -164,7 +185,7 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.target }}" = windows ] && [ "${{ steps.signing.outputs.windows }}" != true ]; then
-            echo "::warning::WINDOWS_CERTIFICATE is not set; shipping an UNSIGNED installer. Fine for internal testing, blocked for non-engineer distribution (SmartScreen). See DEPLOY.md."
+            echo "::warning::Neither WINDOWS_CERTIFICATE nor WINDOWS_CERTIFICATE_THUMBPRINT is set; shipping an UNSIGNED installer. Fine for internal testing, blocked for non-engineer distribution (SmartScreen). See DEPLOY.md."
           fi
           if [ "${{ matrix.target }}" = macos ] && [ "${{ steps.signing.outputs.macos }}" != true ]; then
             echo "::warning::APPLE_CERTIFICATE is not set; shipping an UNSIGNED, unnotarized app. Gatekeeper will refuse to open it normally. See DEPLOY.md."

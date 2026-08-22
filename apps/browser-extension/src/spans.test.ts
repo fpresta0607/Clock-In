@@ -6,6 +6,7 @@ import {
   handleInput,
   restoreMachine,
   snapshotMachine,
+  type RestoreResult,
   type SpanEvent,
   type SpanMachine,
 } from "./spans.js";
@@ -238,86 +239,100 @@ describe("unmatched browsing", () => {
 
 describe("durability across service-worker restarts", () => {
   /** Simulates an MV3 eviction: JSON storage round-trip into a fresh machine. */
-  function restart(machine: SpanMachine, at: number): SpanMachine {
+  function restart(machine: SpanMachine, at: number): RestoreResult {
     const stored = JSON.parse(JSON.stringify(snapshotMachine(machine))) as unknown;
     return restoreMachine(stored, at, { newSessionId: () => "span-restored" });
   }
 
-  it("a restored open span keeps its session id and ends on a later switch", () => {
+  it("a restored span ends at its last provable timestamp; the dead period is never credited", () => {
     const machine = makeMachine();
     focusTab(machine, "rule-a", T0);
     advance(machine, T0 + 15_000); // span-1 opens
+    advance(machine, T0 + 61_000); // heartbeat: +61 s is the last provable attention
 
-    const restored = restart(machine, T0 + 20_000);
-    // The user switched away while the worker was dead; the switch is the
-    // first event the new worker sees.
-    const emitted: SpanEvent[] = [];
-    emitted.push(...focusTab(restored, null, T0 + 21_000));
-    emitted.push(...advance(restored, T0 + 34_999));
-    expect(emitted).toEqual([]);
-    emitted.push(...advance(restored, T0 + 35_000));
+    const eightHours = 8 * 60 * 60 * 1000;
+    const { machine: restored, emitted } = restart(machine, T0 + eightHours);
+    // The prior span is ended at its last heartbeat, not at restore time:
+    // the eight unprovable hours are credited to nobody.
     expect(emitted).toEqual([
       {
         event: "ended",
         externalSessionId: "span-1",
         ruleId: "rule-a",
-        // Conservative: the gap is stamped at restore time, the earliest
-        // provable moment attention was unverified.
-        occurredAt: iso(T0 + 20_000),
-      },
-    ]);
-  });
-
-  it("a restored span resumes when the same tab still holds focus", () => {
-    const machine = makeMachine();
-    focusTab(machine, "rule-a", T0);
-    advance(machine, T0 + 15_000); // span-1 opens, heartbeat anchored at T0
-
-    const restored = restart(machine, T0 + 20_000);
-    // Startup re-derivation finds the same tab focused: the span continues.
-    const emitted: SpanEvent[] = [];
-    emitted.push(...focusTab(restored, "rule-a", T0 + 21_000));
-    emitted.push(...advance(restored, T0 + 61_000));
-    expect(emitted).toEqual([
-      {
-        event: "heartbeat",
-        externalSessionId: "span-1",
-        ruleId: "rule-a",
         occurredAt: iso(T0 + 61_000),
       },
     ]);
-  });
+    expect(restored.active).toBeNull();
+    expect(restored.suspended).toEqual([]);
 
-  it("a restored dwell candidate still opens, anchored at the original focus", () => {
-    const machine = makeMachine();
-    focusTab(machine, "rule-a", T0);
-    advance(machine, T0 + 10_000); // 10 s into the dwell, nothing emitted
-
-    const restored = restart(machine, T0 + 11_000);
-    const emitted: SpanEvent[] = [];
-    emitted.push(...focusTab(restored, "rule-a", T0 + 12_000)); // re-derivation
-    emitted.push(...advance(restored, T0 + 15_000));
-    expect(emitted).toEqual([
+    // The same tab is still focused: a FRESH span dwells from re-derivation.
+    const after: SpanEvent[] = [];
+    after.push(...focusTab(restored, "rule-a", T0 + eightHours));
+    after.push(...advance(restored, T0 + eightHours + 15_000));
+    expect(after).toEqual([
       {
         event: "started",
         externalSessionId: "span-restored",
+        ruleId: "rule-a",
+        occurredAt: iso(T0 + eightHours),
+      },
+    ]);
+  });
+
+  it("an eviction without any shutdown event truncates the span the same way", () => {
+    // No shutdown input, no final persist: only the last snapshot survives.
+    const machine = makeMachine();
+    focusTab(machine, "rule-a", T0);
+    advance(machine, T0 + 15_000); // span-1, no heartbeat yet: provable = span start
+
+    const { emitted } = restart(machine, T0 + 3_600_000);
+    expect(emitted).toEqual([
+      {
+        event: "ended",
+        externalSessionId: "span-1",
         ruleId: "rule-a",
         occurredAt: iso(T0),
       },
     ]);
   });
 
-  it("a restored suspended span ends at its original gap start", () => {
+  it("a restored dwell candidate is dropped and re-dwells from restore time", () => {
+    const machine = makeMachine();
+    focusTab(machine, "rule-a", T0);
+    advance(machine, T0 + 10_000); // 10 s into the dwell, nothing emitted
+
+    const { machine: restored, emitted } = restart(machine, T0 + 300_000);
+    // A candidate never emitted `started`, so nothing needs ending; the dead
+    // period must not count toward the fresh dwell either.
+    expect(emitted).toEqual([]);
+    expect(restored.active).toBeNull();
+
+    const after: SpanEvent[] = [];
+    after.push(...focusTab(restored, "rule-a", T0 + 300_000));
+    after.push(...advance(restored, T0 + 314_999));
+    expect(after).toEqual([]);
+    after.push(...advance(restored, T0 + 315_000));
+    expect(after).toEqual([
+      {
+        event: "started",
+        externalSessionId: "span-restored",
+        ruleId: "rule-a",
+        occurredAt: iso(T0 + 300_000),
+      },
+    ]);
+  });
+
+  it("a restored suspended span still ends at its original gap start", () => {
     const machine = makeMachine();
     focusTab(machine, "rule-a", T0);
     advance(machine, T0 + 15_000); // span-1 opens
-    focusTab(machine, "rule-b", T0 + 30_000); // A suspends, B dwells
+    focusTab(machine, "rule-b", T0 + 30_000); // A suspends at +30 s, B dwells
 
-    const restored = restart(machine, T0 + 35_000);
-    const emitted: SpanEvent[] = [];
-    // A's gap was already running before the restart and now expires.
-    emitted.push(...advance(restored, T0 + 45_000));
-    expect(emitted).toEqual([
+    // The gap was already provably running before the eviction, so it stays
+    // and expires at its original start; B (a candidate) is dropped.
+    const { machine: restored, emitted } = restart(machine, T0 + 3_600_000);
+    expect(emitted).toEqual([]);
+    expect(advance(restored, T0 + 3_600_000)).toEqual([
       {
         event: "ended",
         externalSessionId: "span-1",
@@ -325,19 +340,22 @@ describe("durability across service-worker restarts", () => {
         occurredAt: iso(T0 + 30_000),
       },
     ]);
-    // B, re-confirmed focused after the restart, opens on its original anchor.
-    emitted.push(...focusTab(restored, "rule-b", T0 + 46_000));
-    emitted.push(...advance(restored, T0 + 46_000));
-    expect(emitted.map((e) => e.event)).toEqual(["ended", "started"]);
-    expect(emitted[1]).toMatchObject({
-      ruleId: "rule-b",
-      occurredAt: iso(T0 + 30_000),
-    });
   });
 
   it("a corrupt snapshot restores to a fresh, silent machine", () => {
-    for (const stored of [null, 42, "junk", { version: 99 }, { version: 1, active: {} }]) {
-      const restored = restoreMachine(stored, T0, { newSessionId: () => "span-x" });
+    const corrupt: unknown[] = [
+      null,
+      42,
+      "junk",
+      { version: 99 },
+      { version: 1, suspended: "nope" },
+      { version: 1, active: {}, suspended: [] },
+    ];
+    for (const stored of corrupt) {
+      const { machine: restored, emitted } = restoreMachine(stored, T0, {
+        newSessionId: () => "span-x",
+      });
+      expect(emitted).toEqual([]);
       expect(restored.active).toBeNull();
       expect(restored.suspended).toEqual([]);
       expect(advance(restored, T0 + 120_000)).toEqual([]);

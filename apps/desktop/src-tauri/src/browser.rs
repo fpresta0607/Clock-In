@@ -418,23 +418,41 @@ pub fn write_rules_file(dir: &Path, mappings: &[PathMapping]) -> io::Result<()> 
 }
 
 /// Writes `content` to `path` via a temp file and rename, unless the file
-/// already holds exactly those bytes.
-fn write_if_changed(path: &Path, content: &[u8]) -> io::Result<()> {
+/// already holds exactly those bytes. The temp name is unique per writer
+/// (process id plus a counter): the browser files have real concurrent
+/// writers - the uploader and the mapping commands both write the rules
+/// file, and two host processes both write the tally and the handshake
+/// marker - so a fixed `<file>.tmp` would let one writer clobber the other's
+/// temp or rename target.
+pub fn write_if_changed(path: &Path, content: &[u8]) -> io::Result<()> {
     if std::fs::read(path).is_ok_and(|existing| existing == content) {
         return Ok(());
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, content)?;
-    // Windows cannot rename over an existing file.
-    match std::fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    let tmp = unique_temp(path);
+    let outcome = std::fs::write(&tmp, content).and_then(|()| {
+        // Windows cannot rename over an existing file.
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        std::fs::rename(&tmp, path)
+    });
+    if outcome.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    std::fs::rename(&tmp, path)
+    outcome
+}
+
+/// The per-writer temp name for `path`: same directory, unique to this
+/// process and this call.
+fn unique_temp(path: &Path) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let serial = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    path.with_extension(format!("tmp-{}-{serial}", std::process::id()))
 }
 
 /// One suggestion the tally earns: an unmatched origin and its focused seconds.
@@ -999,6 +1017,51 @@ mod tests {
             parent_name_from_entries(&[entry(200, 100, "host.exe")], 200),
             None
         );
+    }
+
+    #[test]
+    fn concurrent_writers_leave_one_whole_file_and_no_temp_litter() {
+        let dir = temp_dir("concurrent-write");
+        let path = std::sync::Arc::new(dir.join("browser-rules.json"));
+        let expected: Vec<String> = (0..4)
+            .map(|writer| format!("{{\"writer\":{writer}}}{}", "\n".repeat(200)))
+            .collect();
+
+        let handles: Vec<_> = expected
+            .iter()
+            .enumerate()
+            .map(|(writer, content)| {
+                let path = std::sync::Arc::clone(&path);
+                let content = content.clone();
+                std::thread::spawn(move || {
+                    for round in 0..20 {
+                        // Vary content per round so the unchanged-skip cannot
+                        // mask an interleave: the file must always end as one
+                        // writer's complete payload.
+                        write_if_changed(&path, format!("{content}//{writer}-{round}").as_bytes())
+                            .expect("writes succeed");
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("writer thread finishes");
+        }
+
+        let final_bytes = std::fs::read(&*path).expect("the file reads");
+        let final_text = String::from_utf8(final_bytes).expect("the file is utf-8");
+        let whole = expected.iter().enumerate().any(|(writer, content)| {
+            (0..20).any(|round| final_text == format!("{content}//{writer}-{round}"))
+        });
+        assert!(whole, "the file is one writer's complete payload, got: {final_text:.80}");
+        let litter = std::fs::read_dir(&dir)
+            .expect("dir reads")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains("tmp-"))
+            .count();
+        assert_eq!(litter, 0, "no temp files survive");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
